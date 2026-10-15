@@ -55,6 +55,6 @@ desire to recreate an older object model.
 
 ## Related Plans
 
-- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
-- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- retired: 2026-04-13-spec-corpus-current-vs-planned-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-runner-extension-point-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-runtime-endpoint-registry-boundary-plan — source 396c3b85; see docs/plans/README.md

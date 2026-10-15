@@ -180,4 +180,4 @@ The curated index of all plans, with status and supersession pointers, lives at
 [`docs/plans/README.md`](../plans/README.md). Individual specs carry plan
 backlinks next to the sections those plans implemented.
 
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md

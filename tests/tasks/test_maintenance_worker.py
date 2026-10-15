@@ -783,7 +783,13 @@ DIAGNOSTIC_FIELDS = {
         "last_maintenance_runtime_prune_partial_batches",
         "last_maintenance_error",
     ),
-    "control_reconciliation": ("after_tid", "scans", "pending_tids"),
+    "control_reconciliation": (
+        "after_tid",
+        "terminal_cleanup_after",
+        "dead_tid_after_tid",
+        "scans",
+        "pending_tids",
+    ),
 }
 
 DIAGNOSTIC_STATE_ATTRIBUTES = {
@@ -801,6 +807,8 @@ def _prior_diagnostic(field: str, previous: Any) -> Any:
 
     control_hint_values = {
         "after_tid": "1778089999999999705",
+        "terminal_cleanup_after": (1778089999999999705, "1778089999999999705"),
+        "dead_tid_after_tid": "1778089999999999705",
         "scans": (
             task_monitor_mod.TerminalControlScan(
                 tid="1778089999999999704",

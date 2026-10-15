@@ -328,21 +328,21 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
-- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md)
+- retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 
-- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+- retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
-- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
-- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
-- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
-- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
-- [`docs/plans/2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md)
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-02-runtime-correctness-and-retention-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-17-microsandbox-runner-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-reliability-and-doc-fixes-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-agent-session-and-task-startup-observability-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-spec-corpus-current-vs-planned-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-runner-extension-point-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-task-reactor-and-evidence-worker-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 

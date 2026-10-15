@@ -82,6 +82,7 @@ from weft._constants import (
 from weft._runner_plugins import require_runner_plugin
 from weft.context import WeftContext, build_context
 from weft.core.control_messages import ControlRequest, parse_control_request
+from weft.core.deferred import get_task_evidence
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     validate_endpoint_claim_name,
@@ -365,6 +366,21 @@ class BaseTask(MultiQueueWatcher, ABC):
         # publication retries across terminal reports until one write
         # succeeds.
         self._terminal_tid_state_published = False
+        self._tid_state_publication_failed = False
+        self._display_event = "task_initialized"
+        self._observation_payload: dict[str, Any] | None = None
+        try:
+            self._observation_payload = (
+                get_task_evidence()
+                .observation_config_from_taskspec(
+                    self.taskspec, routes=self._queue_names
+                )
+                .to_payload()
+            )
+        except ValueError:
+            logger.warning(
+                "Observation configuration unavailable for task %s", self.tid
+            )
 
         self.enable_process_title = bool(
             getattr(self.taskspec.spec, "enable_process_title", True)
@@ -2047,17 +2063,29 @@ class BaseTask(MultiQueueWatcher, ABC):
             log_context="state change event",
             payload_for_log=payload,
         )
-        if (
-            not self._terminal_tid_state_published
-            and self.taskspec.state.status in TERMINAL_TASK_STATUSES
-        ):
-            # Publish completion first: control clients may terminate the
-            # wrapper once its mapping is terminal. A failed mapping append
-            # retries on the next report ([OBS.6a]).
-            self._terminal_tid_state_published = self._register_tid_state()
+        self._publish_projection_edge(
+            event, terminal=terminal, child_report="child_tid" in extra
+        )
 
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status = self.taskspec.state.status
+
+    def _publish_projection_edge(
+        self, event: str, *, terminal: bool, child_report: bool
+    ) -> None:
+        """Publish lifecycle edges after local completion, with a success latch [MF-5]."""
+        refresh_projection = (
+            event not in {"poll_report", "task_initialized"} and not child_report
+        )
+        if refresh_projection:
+            self._display_event = event
+        if not self._terminal_tid_state_published and (terminal or refresh_projection):
+            # Publish completion first: control clients may terminate the
+            # wrapper once its mapping is terminal. A failed mapping append
+            # retries on the next report ([OBS.6a]).
+            published = self._register_tid_state()
+            if terminal:
+                self._terminal_tid_state_published = published
 
     def _control_response_payload(
         self,
@@ -2430,8 +2458,13 @@ class BaseTask(MultiQueueWatcher, ABC):
         try:
             self._queue(task_state_queue_name(self.tid)).write(json.dumps(mapping))
         except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to register TID mapping %s", mapping, exc_info=True)
+            if not self._tid_state_publication_failed:
+                logger.warning(
+                    "Failed to publish task state for task %s", self.tid, exc_info=True
+                )
+            self._tid_state_publication_failed = True
             return False
+        self._tid_state_publication_failed = False
         return True
 
     def register_managed_pid(self, pid: int | None) -> None:
@@ -2515,6 +2548,27 @@ class BaseTask(MultiQueueWatcher, ABC):
             "started": time.time_ns(),
             "hostname": socket.gethostname(),
         }
+        redacted = redact_taskspec_dump(
+            self.taskspec.model_dump(mode="json", include={"metadata"}),
+            self._taskspec_redaction_paths,
+        )
+        metadata = redacted.get("metadata")
+        projection: dict[str, Any] = {
+            "version": 1,
+            "status": self.taskspec.state.status,
+            "event": self._display_event,
+            "started_at": self.taskspec.state.started_at,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+        if payload["terminal"]:
+            for key in ("completed_at", "return_code", "error"):
+                value = getattr(self.taskspec.state, key)
+                if value is not None and (
+                    key != "error" or (isinstance(value, str) and value.strip())
+                ):
+                    projection[key] = value
+        payload["projection"] = projection
+        payload["observation"] = self._observation_payload
         identity = get_runtime_identity()
         if identity is not None and identity.tid == self.tid:
             payload["context"] = identity.context
@@ -2575,6 +2629,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             # Clearing a live activity hint must not expose an earlier verdict.
             return
         self._emit_activity_event()
+        self._display_event = "task_activity"
         self._register_tid_state()
         self._update_process_title(self.taskspec.state.status)
 

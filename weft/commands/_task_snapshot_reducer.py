@@ -29,7 +29,7 @@ from weft._constants import (
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
 )
-from weft.core.task_evidence import TaskEvidenceSnapshot
+from weft.core.task_evidence import TaskEvidenceSnapshot, parse_task_projection
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
 
@@ -488,6 +488,66 @@ def _resolve_snapshot_fields(
         return_code=return_code,
         error=error,
         last_timestamp=last_timestamp,
+    )
+
+
+def reduce_task_state_snapshot(
+    tid: str,
+    payload: Mapping[str, Any],
+    *,
+    now_ns: int,
+) -> CollectedTaskSnapshot:
+    """Project one newest liveness-valid row without runtime or queue I/O [MF-5]."""
+    projection = parse_task_projection(
+        payload.get("projection"), terminal=payload.get("terminal") is True
+    )
+    diagnostic = None
+    if projection is None:
+        diagnostic = {
+            "classification": (
+                "task_state_projection_invalid"
+                if "projection" in payload
+                else "task_state_projection_unavailable"
+            )
+        }
+        projection = {"status": "unknown", "event": "unknown", "metadata": {}}
+    started_at = projection.get("started_at")
+    completed_at = projection.get("completed_at")
+    runtime_handle = payload.get("runtime_handle")
+    return CollectedTaskSnapshot(
+        snapshot=TaskSnapshot(
+            tid=tid,
+            tid_short=tid_short_form(tid),
+            name=_normalized_text(payload.get("name")) or tid,
+            status=projection["status"],
+            event=projection["event"],
+            activity=(
+                _normalized_text(payload.get("activity"))
+                if projection["status"] not in TERMINAL_TASK_STATUSES
+                else None
+            ),
+            waiting_on=(
+                _normalized_text(payload.get("waiting_on"))
+                if projection["status"] not in TERMINAL_TASK_STATUSES
+                else None
+            ),
+            started_at=started_at,
+            completed_at=completed_at,
+            last_timestamp=int(payload.get("timestamp", 0)),
+            duration_seconds=_duration_seconds(
+                started_at=started_at, completed_at=completed_at, now_ns=now_ns
+            ),
+            runner=_normalized_text(payload.get("runner")),
+            runtime_handle=dict(runtime_handle)
+            if isinstance(runtime_handle, Mapping)
+            else None,
+            runtime=None,
+            metadata=dict(projection["metadata"]),
+            reconciliation=diagnostic,
+            return_code=projection.get("return_code"),
+            error=projection.get("error"),
+        ),
+        taskspec_payload=None,
     )
 
 

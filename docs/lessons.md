@@ -85,6 +85,75 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
     only what gets checked; agents comply uniformly with gates and unevenly
     with everything else. (See engineering-principles §9, testing-patterns
     Pattern 9, and `docs/agent-context/runbooks/adversarial-acceptance-probes.md`.)
+14. **Ground control and liveness in scoped runtime handles and forward-only
+    terminal facts.** Terminate full process trees rather than bare root PIDs,
+    and act on a host PID only when a persisted `runtime_handle` declares
+    `control.authority == "host-pid"` with scoped `(pid, create_time)` identity
+    (`observations.host_pids`), rejecting `STATUS_ZOMBIE` and treating
+    cross-namespace or missing supervisor probe evidence as `unknown` rather
+    than dead (`weft/core/runtime_identity.py`, `weft/core/tasks/runner.py`).
+    Keep active STOP/KILL polling and terminal publication on the main task
+    thread (`weft/core/tasks/base.py`), check authoritative completion and
+    private channel seals before classifying a runner timeout or exit
+    (`weft/core/terminal_handoff.py`,
+    `weft/core/runners/subprocess_runner.py`), and never let runtime liveness
+    reanimate a task after durable terminal proof is published
+    (`weft/commands/_task_snapshot_reducer.py`). (distilled from 11 entries,
+    2026-04-06..2026-08-04, source 396c3b85)
+15. **Converge manager bootstrap and dispatch through one registry reducer and
+    a final launch fence.** Route `weft run` and `weft manager
+    start|serve|list|status|stop` through the shared bootstrap and
+    `weft.state.services` registry replay path (`weft/commands/manager.py`,
+    `weft/core/service_convergence.py`), electing the lowest live claimant
+    bound to `weft.spawn.requests` while letting concurrent starters observe
+    their own registration and detached readiness proof
+    (`weft/core/launcher.py`). Enforce one final leadership and reservation
+    fence immediately before child launch after durably seeding the child inbox
+    (`weft/core/manager.py`), strip internal runtime selectors from public
+    submissions (`weft/core/spawn_requests.py`), refresh uncached broker
+    timestamps before idle shutdown, and clear ephemeral `weft.state.streaming`
+    markers before returning persistent tasks to `waiting`. (distilled from 6
+    entries, 2026-04-07..2026-04-17, source 396c3b85)
+16. **Preserve terminal observations and drain final output across completion
+    and follow boundaries.** Wait for resolved TaskSpec metadata or real
+    outbox/`ctrl_out` activity before binding result queues so `task_activity`
+    or empty default probes never lock a waiter onto the wrong surface
+    (`weft/commands/result.py`, `weft/commands/_result_wait.py`). Carry
+    terminal events discovered during materialization forward into
+    `Task.follow()` and event iterators (`weft/commands/events.py`), perform
+    one final non-blocking outbox drain after completion grace so an
+    already-readable result wins over a caller timeout, keep interactive
+    session completion on task-local `T{tid}.outbox` and `T{tid}.ctrl_out`, and
+    keep manager wrapper-lost and stop observation budgets wider than child
+    teardown under load. (distilled from 5 entries, 2026-04-08..2026-05-27,
+    source 396c3b85)
+17. **Keep destructive cleanup in one policy seam and write deletion markers
+    only after verified removal.** Centralize candidate selection in
+    `weft/core/monitor/policies/` and `weft/core/pruning/`, run terminal,
+    reserved, and dead-TID maintenance as discrete `MaintenanceWorker` slices
+    with batch `MonitorStore` hydration (`weft/core/monitor/runtime.py`,
+    `weft/core/monitor/store.py`), and keep exact deletes and checkpoint
+    commits on the `TaskMonitor` reactor
+    (`weft/core/monitor/task_monitor.py`). Distinguish `first_*_too_young`
+    age-scan stops from pending catch-up (`weft/core/monitor/progress.py`), and
+    record deletion markers (`task_control_deleted_at_ns`, `raw_deleted_at_ns`)
+    only after post-delete queue or row verification confirms the rows are
+    gone. (distilled from 5 entries, 2026-05-09..2026-05-30, source 396c3b85)
+18. **Run verification and lint probes against the real project configuration
+    and straddle every repaired boundary.** Load `.envrc` and invoke
+    `./.venv/bin/python -m pytest`, `./.venv/bin/mypy`, and `./.venv/bin/ruff`
+    against the repository's full `pyproject.toml` (never `--isolated` or
+    single-rule `--select RUF100` when evaluating policy changes or updating
+    `bin/ruff_suppression_index.py` and
+    `tests/specs/test_ruff_suppression_index.py`). Build schema-migration
+    fixtures from prior-release DDL and real `ALTER TABLE` steps, straddle
+    repaired guards with nearest-valid and nearest-invalid cases, pair negative
+    or exact-count assertions with reachable positive setup and producer
+    closure (`tests/helpers/reactor_driver.py`), and keep `WeftTestHarness`
+    cleanup, stubbed synthetic PIDs, and external runner teardown scoped so
+    tests never signal unrelated processes or leak containers
+    (`tests/helpers/weft_harness.py`). (distilled from 11 entries,
+    2026-04-12..2026-09-11, source 396c3b85)
 
 ## Fold Records
 
@@ -98,7 +167,88 @@ index is not a dated section and does not count toward the coalescing trigger.
   Tests Assert the Wrong Boundary Under Load"): "Interactive TTY Tests"
   (2026-04-07), "CLI Harness Timeouts" (2026-04-08), "Spawn-Heavy Timeout
   Tests" (2026-04-09), "Cancelled Task Teardown" (2026-04-09). Raw entries:
-  `git show 1c997978:docs/lessons.md`.
+  `git show 52e74599:docs/lessons.md`.
+- 2026-10-15 — folded 8 cold context, queue-seam, TaskSpec, and config-custody
+  sections already covered by Golden Rules 1, 3, 4,
+  `docs/agent-context/engineering-principles.md` (§1.5, §3, §8, Secondary
+  Rules), and `docs/agent-context/runbooks/runtime-and-context-patterns.md`
+  (§1, §2, §4, §5): "Audit Seeds" (2026-04-03), "Explicit Preflight Boundaries"
+  (2026-04-14), "Structural Start Payloads" (2026-04-15), "Runner Environment
+  Profile Boundaries" (2026-04-15), "Command Queue Seam" (2026-04-16),
+  "Constants Boundary" (2026-04-16), "Preserve Resolved Context Through Client
+  Adapters" (2026-09-07), "Configuration custody includes process imports"
+  (2026-09-14). Raw entries: `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — folded 6 cold planning, review-gate, release-guard, and cohesion
+  sections already covered by Golden Rules 7, 8, 13,
+  `docs/agent-context/engineering-principles.md` (§7, §7.5, §11),
+  `docs/agent-context/runbooks/writing-plans.md` (§4c, §8, §10), and
+  `docs/specifications/08-Testing_Strategy.md` `[TS-4]`: "Plan Hardening"
+  (2026-04-07), "Release Publication Guards" (2026-04-09), "Plan Review Gates"
+  (2026-05-13), "Cohesion Over File Size" (2026-07-06), "Review State Is a
+  Property of the Artifact" (2026-08-11), "Review Deltas Include Observable
+  Side Effects" (2026-09-08). Raw entries: `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — folded 3 cold reactor-waiting, broker-finalizer, and exception
+  boundary sections already covered by `docs/program-theory.md` (`[WT-2]`,
+  `[WT-4.3]`, `[ALT-WT-002]`), `docs/agent-context/runbooks/testing-patterns.md`
+  ("Coverage Policy"), and `docs/specifications/01-Core_Components.md`
+  `[CC-2.1]`, `[CC-2.2.1]`: "Poll Floors And Grace Windows" (2026-04-16),
+  "Exception Boundaries In Manager And BaseTask" (2026-04-16), "Broker
+  Finalizers" (2026-05-31). Raw entries: `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — folded 3 cold Docker builtin, optional SDK adapter, and
+  PostgreSQL test-wrapper sections already covered by
+  `docs/agent-context/engineering-principles.md` (§4, §4.1),
+  `docs/agent-context/runbooks/testing-patterns.md` (Rules 2, 3, 7; Pattern 1),
+  `docs/specifications/08-Testing_Strategy.md` `[TS-4]`, and
+  `docs/specifications/10B-Builtin_TaskSpecs.md`: "Docker Builtin Boundaries"
+  (2026-04-16), "Optional Runner SDK Boundaries" (2026-06-17), "The PostgreSQL
+  Test Wrapper Owns DSN Provisioning" (2026-08-26). Raw entries:
+  `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — distilled 11 cold runtime-handle, process-identity, and liveness
+  authority sections into Golden Rule 14 (and `01-Core_Components.md`
+  `[CC-2.4]`, `[CC-3.2]`, `[CC-3.5]`; `07-System_Invariants.md`
+  `[LIVENESS.R3]`–`[LIVENESS.R7]`): "Process Trees" (2026-04-06), "STOP
+  Pollers" (2026-04-07), "Zombie PID Liveness" (2026-04-08), "Manager Role
+  Identity" (2026-04-08), "Runtime Handle Authority" (2026-04-24),
+  "Runtime-Less Status Snapshots" (2026-04-27), "External Supervisor Manager
+  Liveness" (2026-05-04), "Status Reanimation Boundary" (2026-05-06), "Host PID
+  Namespace Visibility" (2026-05-20), "Runner Timeout Boundary" (2026-05-27),
+  "Producer And Channel Evidence Are Independent" (2026-08-04). Raw entries:
+  `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — distilled 6 cold manager bootstrap, singleton convergence, and
+  ownership-fence sections into Golden Rule 15 (and `03-Manager_Architecture.md`
+  `[MA-1]`, `[MA-3]`; `05-Message_Flow_and_State.md` `[MF-6]`, `[MF-7]`):
+  "Manager Startup Races" (2026-04-07), "Manager Bootstrap Unification"
+  (2026-04-09), "Manager Lifecycle Command Consolidation" (2026-04-09),
+  "Detached Bootstrap Proof" (2026-04-13), "Review-Finding Boundary Fixes"
+  (2026-04-16), "Canonical Ownership Fences" (2026-04-17). Raw entries:
+  `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — distilled 5 cold result-materialization, completion-grace, and
+  client-follow sections into Golden Rule 16 (and `05-Message_Flow_and_State.md`
+  `[MF-3]`, `[MF-5]`; `runtime-and-context-patterns.md` §8): "Interactive
+  Contract" (2026-04-08), "Completion Grace" (2026-04-09), "Drain And Streaming
+  Timing Boundaries" (2026-04-19), "Client Follow Boundaries" (2026-04-21),
+  "Terminal Proof Grace" (2026-05-27). Raw entries:
+  `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — distilled 5 cold TaskMonitor cleanup-policy, batch-hydration,
+  and verified-deletion sections into Golden Rule 17 (and
+  `05-Message_Flow_and_State.md` `[MF-5]`; `07-System_Invariants.md`
+  `[OBS.13]`): "Prune Path Ownership" (2026-05-09), "Cleanup Markers"
+  (2026-05-20), "Dead-TID Cleanup Policy" (2026-05-22), "Runtime Cleanup
+  Slices" (2026-05-23), "Cleanup Progress Boundaries" (2026-05-30). Raw
+  entries: `git show 396c3b85:docs/lessons.md`.
+- 2026-10-15 — distilled 11 cold test-tooling, Ruff policy, boundary-straddling,
+  migration-fixture, and harness-isolation sections into Golden Rule 18 (and
+  `engineering-principles.md` §4, §4.1; `testing-patterns.md` Rules 7–9,
+  Patterns 1, 10, 12): "Local Test Tooling" (2026-04-12), "Result
+  Materialization And Synthetic PIDs" (2026-04-20), "Exact Policy Fixtures Are
+  Part Of The Atomic Registry" (2026-08-05), "Ruff Selection Probes Must
+  Preserve The Rest Of The Config" (2026-08-06), "RUF100 Must See The Full
+  Candidate Rule Set" (2026-08-06), "Postgres Test Isolation Does Not Eliminate
+  Host Contention" (2026-08-10), "Manual Reactor Test Driver Boundary"
+  (2026-08-11), "Boundary Tests Must Straddle The Repaired Guard" (2026-08-13),
+  "Migration Fixtures Must Come From Release Lineage" (2026-08-25),
+  "Load-Sensitive Harness Ownership" (2026-09-09), "Test Typing and Oracle
+  Audit" (2026-09-11). Raw entries: `git show 396c3b85:docs/lessons.md`.
 
 ## 2026-07-02 Verification-Lessons Fold
 
@@ -118,26 +268,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   `superseded` owner row must start a non-stopping drain when children exist;
   reusing the normal STOP drain can cancel user tasks during concurrent
   bootstrap.
-
-## 2026-04-03 Audit Seeds
-
-- Use `build_context()` and `WeftContext` for project resolution and broker
-  wiring. Do not re-implement `.weft` discovery or infer Weft artifact paths
-  from broker DB naming.
-- For append-only queues such as `weft.log.tasks`, `weft.state.tid_mappings`,
-  and `weft.state.managers`, use generator-based history reads or the helper
-  iterators. Fixed `peek_many(limit=N)` reads are not reliable for
-  correctness-critical history scans.
-- Keep the TaskSpec boundary clean: templates stay partial, resolved TaskSpecs
-  go through shared resolution before construction, and resolved `tid`, `spec`,
-  and `io` are not mutated afterward.
-- Reuse task/watch queue helpers on live runtime paths. Inside task code,
-  opening fresh queue handles instead of using `_queue()` risks bypassing shared
-  connection and stop-event behavior.
-- Completion and final result visibility are close but not strictly
-  simultaneous. Tests and command flows should use the existing wait/result
-  helpers instead of assuming an immediate outbox read after a terminal log
-  event.
 
 ## 2026-04-04 PG Parity
 
@@ -160,198 +290,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   `weft run` or `weft manager start`. Using nested `uv` for one-shot commands
   like `init`, `queue`, `status`, or `spec validate` adds material test
   runtime without buying correctness.
-
-## 2026-04-06 Process Trees
-
-- When cancelling, timing out, or limit-killing a task, terminate the full
-  process tree, not just the immediate worker PID. Command targets can spawn
-  grandchildren, and root-only termination leaves orphaned subprocesses behind
-  even though the task itself appears to have stopped cleanly.
-- When adding pluggable execution backends, make the persisted runtime handle
-  the canonical control surface. Stop/kill paths cannot safely reconstruct
-  runner-specific control details later from the original TaskSpec alone;
-  persist the runner name plus any control-critical metadata with the live task.
-- For non-host runners, translate native runtime terminal state back into
-  Weft's task lifecycle instead of trusting only the transport process exit
-  code. Docker OOM kills, for example, should surface as `limit`/`killed`
-  semantics with runner-native metrics, not as a generic command failure.
-
-## 2026-04-07 Manager Startup Races
-
-- When a CLI launcher is waiting for manager startup in `weft.state.managers`,
-  do not reduce the registry to only the latest active manager if the caller
-  still needs to recognize its own just-started process. Concurrent starters can
-  all register successfully while older entries become invisible to their own
-  launchers, causing false "no registry entry appeared" failures.
-- If Weft needs one manager per broker context, enforce a deterministic leader
-  election rule from the registry inside the manager process itself, not only in
-  the launcher. A lowest-live-TID rule lets concurrent starters converge without
-  backend-specific locks, provided stale `active` records are pruned by PID
-  liveness first.
-
-## 2026-04-07 STOP Pollers
-
-- When a task spins up a background control-poller thread during active work,
-  fully join that thread before task teardown continues. A short timed join plus
-  lingering broker activity can corrupt the SQLite broker under load, especially
-  around STOP/cancel handling.
-- For active STOP/KILL handling, keep the poller thread's broker work minimal.
-  The poller may notice control promptly, delete the control message, and set
-  in-memory stop/kill intent, but terminal state publication, control ACKs, and
-  reserved-queue policy must stay on the main task thread after the active work
-  has unwound. Publishing `cancelled`/`killed` from the poller can leave the
-  task process alive after a terminal snapshot, which is the precursor to the
-  SQLite corruption race.
-- The safer design is stronger than "minimal poller work": do not use a
-  background broker poller for active STOP/KILL at all when the main task
-  thread can poll cooperatively inside the runner/session loop. Main-thread
-  polling keeps control acknowledgement, terminal state publication, reserved
-  policy, and runtime unwind on one execution context and avoids teardown hangs
-  around non-interruptible broker reads.
-- Public task status must reconcile liveness differently by runner type. For
-  the host runner, a terminal log entry is not yet public if the consumer task
-  PID is still alive; for external runners such as Docker or macOS sandbox, the
-  external runtime description is authoritative and should not be masked by a
-  still-exiting consumer wrapper process.
-- CLI stop/kill fallbacks should target the consumer task process while it is
-  still alive, even for external runners. The persisted external runtime handle
-  is the fallback only after the consumer is gone; otherwise the CLI can bypass
-  the consumer's terminal-state publication and either strand the task in
-  `running` or corrupt SQLite by killing teardown mid-write.
-- Active STOP/KILL polling must be decoupled from monitor/report intervals for
-  every runner loop, not just the host runner. Subprocess-backed runners that
-  only poll cancellation when they collect metrics can miss the CLI control
-  deadline and get their consumer wrapper killed before `cancelled`/`killed`
-  is published.
-- Tests that assert spawned task teardown should use real PID liveness
-  (`psutil`/`os.kill`) instead of `multiprocessing.Process.exitcode` as the
-  primary oracle. Under `spawn`, the OS process can disappear while the parent
-  `Process` object still reports `exitcode is None`, which creates false
-  regressions in Linux CI.
-
-## 2026-04-07 Plan Hardening
-
-- Risky Weft plans usually fail at the boundary, not in the middle. Name what
-  must not change around the durable spine, queue contracts, TaskSpec boundary,
-  and rollback/rollout behavior before decomposing the tasks.
-- If a document is human-clear but agent-ambiguous, tighten it immediately with
-  clearer ownership, boundary, verification, and required-action language
-  rather than trusting the next implementer to infer the right path.
-
-## 2026-04-08 Interactive Contract
-
-- Treat `spec.interactive` as a line-oriented, queue-mediated IO mode, not as
-  a terminal-emulation feature. Task-local correctness should come from
-  `T{tid}.outbox` and `T{tid}.ctrl_out`, with `ctrl_out` carrying terminal
-  completion for interactive sessions.
-- Do not make interactive clients depend on `weft.log.tasks` for their own
-  completion semantics. The global task log is for status, audit, and recovery;
-  a task-facing interactive client should only care about its local channels.
-- Interpreter-specific argument tweaks such as `python -u -i` or `bash -i`
-  are still useful in the line-oriented model. They improve behavior of known
-  interactive programs without requiring PTY/TTY transport support.
-
-## 2026-04-09 Completion Grace
-
-- `work_completed` can become visible before the last public outbox messages
-  are readable. Completion waiters in `run` and `result` must do one final
-  non-blocking outbox drain after the grace window before returning a completed
-  result, or they will intermittently drop late-arriving outputs on slower
-  platforms.
-- Foreground manager SIGTERM drain needs one overall deadline in addition to
-  per-child STOP retries. Release-load PG runs can leave a child slow enough
-  that the supervisor-facing `weft manager serve` process gets force-killed by
-  the test harness unless the manager itself escalates and exits cleanly.
-- Result materialization must not treat empty default result queues as proof
-  that the default surface is the right surface. Probing can create queues on
-  some backends; wait for TaskSpec metadata or real outbox/control activity
-  before choosing a result queue for an unknown TID.
-- Manager stop callers need an observation budget larger than the Manager's
-  internal child-drain budget. If both clocks are the same length, PG-backed
-  xdist runs can time out exactly as the Manager finishes force-reaping
-  children and publishing its stopped registry record.
-- The observation margin must be large enough for release-load backend and
-  scheduler pressure, not just barely larger than the internal drain window.
-  A 5-second caller margin was still narrow enough for PG CLI release gates to
-  report a false manager-stop failure after successful service convergence.
-- Broker timestamps are ordering evidence, not scheduling clocks. Manager-owned
-  service restart backoff should use the manager's observation time; otherwise
-  backend clock skew or future broker timestamps can make an ensure-mode
-  service wait far longer than its configured backoff.
-
-## 2026-05-09 Prune Path Ownership
-
-- Background cleanup must not turn retained lifecycle evidence into broad
-  task-local queue probes. If cleanup needs task-local recovery-sensitive
-  queues such as `T{tid}.reserved`, make that path explicit and bounded rather
-  than coupling it to ordinary `weft.log.tasks` retention. Terminal-looking
-  status fields on diagnostic events such as `task_activity` are not enough to
-  close a lifecycle family; prefer explicit terminal events.
-
-- Destructive cleanup must have one canonical candidate-selection and exact
-  delete path. Foreground CLI wrappers and background monitor services may pass
-  different policy arguments, but they must not reimplement pruning semantics.
-  The TaskMonitor checkpoint-window cleanup bug showed that duplicate paths can
-  both look reasonable while answering different evidence questions under load.
-- Manager-owned convergence paths must treat pending work as a correctness
-  signal, not as a best-effort wake hint. If a wait/precheck path observes
-  pending messages or a manager writes service work to its own queue, the next
-  scheduler drain must probe inactive queues immediately so singleton services
-  advance by state-machine rules instead of incidental polling cadence. For
-  internal singleton services, advance that internal spawn work in the same
-  manager turn without draining unrelated public spawn requests.
-- Manager-owned service launch has two visibility phases: the manager knows a
-  child process was spawned before the child has imported Weft and written its
-  own lifecycle row. Durable convergence and tests must be able to use the
-  manager's `task_spawned` child PID as live-owner evidence, or load-heavy
-  Python process startup can look like "no replacement" even after launch
-  succeeded.
-- Public spawn backlog needs the same progress discipline as internal
-  convergence under release-load backends. `has_pending()` and activity waiters
-  are scheduling hints, not correctness boundaries; a live manager should make a
-  bounded direct reservation attempt so a missed pending hint cannot leave an
-  accepted `weft run --no-wait` request unclaimed.
-- CLI control waiters should treat task-local typed terminal `ctrl_out`
-  envelopes as first-class terminal proof. Replaying the global task log after
-  a terminal control envelope is already visible adds avoidable SQLite
-  contention in long mixed-workload release gates.
-
-## 2026-05-31 Broker Finalizers
-
-- Do not perform broker I/O from object finalizers. `__del__` can run during
-  pytest or process teardown while SimpleBroker watcher and cleanup threads are
-  already inside backend locking, turning best-effort cleanup into opaque xdist
-  worker deaths. Broker mutations belong in explicit `stop()` / `cleanup()`
-  ownership paths.
-
-## 2026-05-27 Terminal Proof Grace
-
-- A cleanly exited child wrapper is not proof that task-owned terminal evidence
-  is absent. Under release-load PG and Windows runs, process exit can beat the
-  durable `ctrl_out` or task-log terminal write by more than a local smoke-test
-  interval. Keep the manager's wrapper-lost grace window large enough for CI
-  backend pressure, and keep worker-completion tests from using narrow local
-  timing as a correctness oracle.
-
-## 2026-05-30 Cleanup Progress Boundaries
-
-- Cleanup progress must distinguish "selected work this pass" from "more work
-  is eligible now." When a FIFO age scan selects old rows and then stops at
-  `first_*_too_young`, the remaining rows are future-eligible only, so the
-  policy is base-for-now even though candidates were selected earlier in the
-  same pass. Consolidating private cleanup phases into top-level policy rows
-  must preserve that stop-reason meaning instead of adding a blanket
-  `not candidates` gate.
-
-## 2026-05-13 Plan Review Gates
-
-- Metadata-valid plans are not necessarily implementation-ready. Every plan
-  needs a distinct fresh-eyes self-review after drafting, focused on latent
-  ambiguity, bad ideas, and whether a zero-context engineer could implement it
-  correctly.
-- High-stakes or complicated plans need an external reviewer when one is
-  available. Different-agent reviews may take 5-10 minutes; that wait is part
-  of the review cost, not a reason to skip the gate.
 
 ## 2026-05-15 Manager Hot Loops
 
@@ -400,349 +338,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   memory without limit; without the drain budget, the reactor can process local
   worker progress indefinitely before task-local control gets a turn.
 
-## 2026-04-08 Zombie PID Liveness
-
-- `psutil.Process(pid).is_running()` is not a sufficient liveness check for
-  manager registries. Zombie processes still report `True`, so any
-  PID-backed registry or status surface must also reject `STATUS_ZOMBIE`.
-- When a manager can register before it is fully ready, treating zombies as
-  live lets launchers and leader-election code select a dead manager and route
-  spawn requests into an inbox that no process will ever service. The fix
-  belongs in the shared PID-liveness helper, not in one caller.
-
-## 2026-05-20 Cleanup Markers
-
-- Cleanup completion markers must be based on verified cleanup facts, not only
-  absence of exceptions. For task-local control cleanup, `Queue.delete()`
-  returning `False` can no longer be treated as success when rows remain; check
-  post-delete queue stats before writing `task_control_deleted_at_ns`.
-- TaskMonitor catch-up state can have more than one owner in the same turn.
-  A runtime cleanup worker result must not clear task-log catch-up that was set
-  by the built-in cycle, and a control slice that spends the full family budget
-  must preserve reserved-cleanup pending state so the next catch-up turn runs.
-
-## 2026-05-22 Dead-TID Cleanup Policy
-
-- When a user specifies a concrete cleanup API, do not replace it with a nearby
-  indexed or cached path during planning. If the API is expensive, bound it in
-  the worker policy and report the cost; do not silently change the semantics.
-- Cleanup policy selection belongs in `weft/core/monitor/policies/`, not in the
-  TaskMonitor reactor. The reactor schedules and commits results; the worker
-  performs broker/store work; the policy module decides which queues and
-  task-log rows are eligible.
-
-## 2026-05-20 Host PID Namespace Visibility
-
-- A host-scoped PID that is not visible from a container is ambiguous evidence,
-  not process-death proof. Status/runtime descriptions should report unknown
-  namespace visibility rather than `missing`; only same-namespace host liveness
-  checks can prove a host process is gone.
-
-## 2026-04-09 Release Publication Guards
-
-- First-party package publish workflows must wait for a successful `Test`
-  workflow on the exact release commit before they upload to PyPI. Tag-specific
-  release gates are not a substitute for the broader cross-platform CI matrix
-  when that matrix covers additional platforms or jobs.
-- For cross-platform log and dry-run output that is asserted in tests, do not
-  interpolate `Path` objects directly into strings. Normalize display paths at
-  the output boundary with `.as_posix()` or a shared helper.
-
-## 2026-04-09 Manager Bootstrap Unification
-
-## 2026-04-17 Canonical Ownership Fences
-
-- When more than one runtime surface needs "lowest live claimant wins,"
-  keep the shared helper pure and narrow. The shared helper should reduce
-  already-eligible claimant TIDs to one canonical owner; queue replay,
-  registry decoding, liveness, and `unknown` versus `none` semantics belong in
-  the caller that owns that runtime state.
-- Late duplicate-dispatch hardening belongs at the last side-effect boundary,
-  not only in startup or outer-loop leadership checks. For manager spawn
-  requests, that means one final ownership fence immediately before child
-  launch, with exact-message durability preserved on every non-launch path.
-- If an internal runtime capability must stay manager-owned, do not trust
-  stored TaskSpec metadata alone. Carry the selector on a manager-owned spawn
-  envelope and strip reserved internal keys from ordinary public submission
-  helpers so user-authored TaskSpecs cannot spoof internal runtime classes or
-  reserved endpoint claims.
-
-## 2026-04-16 Docker Builtin Boundaries
-
-- Docker-dependent builtins must declare their supported platforms in builtin
-  metadata and reject unsupported platforms at the builtin-owned entry point.
-  Do not rely on the Docker runner plugin alone to make that boundary obvious;
-  otherwise Windows users get a generic runner failure instead of an explicit
-  builtin contract error.
-
-- Operator-facing manager startup must wrap the same canonical bootstrap helper
-  as `weft run`. Allowing `weft manager start` to launch arbitrary manager
-  TaskSpecs creates a second execution path and lets registry selection adopt a
-  live manager that is not bound to `weft.spawn.requests`.
-- Canonical manager election should use the request-queue contract already
-  present in the registry (`requests == weft.spawn.requests`) instead of
-  treating every live `role="manager"` record as equivalent.
-
-## 2026-04-19 Drain And Streaming Timing Boundaries
-
-- Tests that assert `weft result --stream --timeout N` must establish a real
-  running-task readiness boundary first. `weft run --no-wait` still pays
-  manager bootstrap before returning the TID, so submission-to-timeout wall
-  clock assumptions flake under slower Windows or xdist-heavy runners.
-- A visible one-shot outbox result must win over the caller timeout if the
-  timeout expires during the quiet-result grace window. The grace window is for
-  collecting near-simultaneous output, not for converting an already-readable
-  result into a timeout on slower CI.
-- Normal `WeftTestHarness.cleanup()` needs the same Windows database
-  releasability gate as `preserve_database=True`. Removing files and then
-  relying on tempdir cleanup is not deterministic when recently exited broker
-  users still hold SQLite handles.
-- Manager shutdown must snapshot the children it intends to terminate before
-  graceful waits can reap them from `_child_processes`. Otherwise an exited
-  task process can disappear from the in-memory map before manager-owned
-  managed-PID cleanup runs, leaving a descendant visible on slower Windows
-  process tables.
-- Manager recovery state-machine tests should patch the manager-owned recovery
-  seam directly. Keep one integration test for the exact queue move failure,
-  but do not make every recovery/yield assertion depend on monkeypatching a
-  specific `Queue` instance across multiple scheduling turns.
-
-## 2026-04-21 Client Follow Boundaries
-
-- Tests that drain client follow/watch iterators with `list(...)` must pass an
-  explicit timeout or cancellation boundary. Follow-style APIs are allowed to be
-  long-lived by default for UI streams; CI tests need a caller-local deadline so
-  a missed terminal observation becomes a useful failure instead of a stuck
-  runner.
-- If a materialization helper observes a terminal task-log event while deriving
-  queue names or result surfaces, downstream iterators must carry that terminal
-  observation forward. Advancing the log cursor without preserving the terminal
-  payload can skip the only completion signal and leave a completed task
-  looking live forever.
-- `Task.follow()` has two observable surfaces: lifecycle events and the
-  synthetic final result event. If a bounded event wait expires, make a bounded
-  result-surface check before raising the event timeout. A missed terminal log
-  observation should not hide an already-visible final result.
-
-## 2026-04-27 Runtime-Less Status Snapshots
-
-- Public status must not treat old non-terminal task-log entries as live solely
-  because runtime-only queues no longer contain a PID or runner handle. If the
-  live proof surface is absent, status needs an explicit staleness rule and a
-  separate live-manager registry exception so old manager task rows do not
-  survive after their registry records have been pruned.
-
-## 2026-04-20 Result Materialization And Synthetic PIDs
-
-- `weft result` must not treat non-terminal task-log activity without a logged
-  TaskSpec as enough to choose default `T{tid}` result queues. For persistent
-  tasks with custom queue names, returning early on `task_activity` can bind the
-  waiter to the wrong surface and turn a live task into a false timeout.
-- Control-command tests that use synthetic mapping PIDs must stub PID liveness
-  explicitly. A fake integer PID can belong to a real process on CI, which
-  turns "runner handle vs PID fallback" assertions into machine-dependent
-  flakes and can accidentally signal unrelated processes.
-- External runner parity tests should wait for the runtime description to
-  report a live state, not merely for `runtime` to become non-null. Runner
-  handles can materialize before Docker or other external runtime probes stop
-  returning transient `missing`.
-- External runner cleanup must live in a `finally`, not only on the success
-  path. Docker-backed tests can fail after the container is created but before
-  the monitored subprocess returns, and without unconditional removal that
-  leaves stranded `weft-*` containers behind.
-- Manager drain loops must honor an existing `_draining` state before
-  reevaluating leadership. If a draining non-leader re-enters leadership
-  yield after the leader-check interval and after children are gone, it can
-  emit a second `manager_leadership_yielded` and skip
-  `manager_leadership_drained`.
-
-## 2026-04-15 Structural Start Payloads
-
-- The synthetic start envelope for non-persistent tasks must stay structural all
-  the way through function-target argument preparation. If the decoded
-  no-payload marker becomes a positional `{}` argument, kwargs-only callables
-  fail immediately even though the task was launched without stdin. Keep empty
-  work items from being promoted into callable payloads unless the caller
-  explicitly supplied envelope keys or a non-empty plain object.
-
-## 2026-04-16 Command Queue Seam
-
-- In command and helper code that already has a `WeftContext`, construct broker
-  queues through `WeftContext.queue()` instead of retyping `Queue(...)` with
-  `broker_target` and `broker_config`. Repeated open-coded queue construction
-  in command paths turns backend changes into grep work and weakens the single
-  queue-construction seam Weft already has.
-
-## 2026-04-09 Manager Lifecycle Command Consolidation
-
-- Manager control-plane commands must share one registry replay and liveness
-  path. If `weft run`, `weft manager list|status|stop`, and `weft status` each
-  interpret `weft.state.managers` separately, dead active records persist on one
-  surface and disappear on another.
-- Shared registry readers should normalize record shape at the boundary
-  (`timestamp`, `requests` backfill, canonical `T{tid}.ctrl_in` fallback) and
-  keep presentation differences local to the CLI wrapper.
-- Force-stop should trust a manager PID only when that PID is corroborated by
-  the TID-mapping queue or an owned `Popen` handle. A registry-only PID can be
-  a stale or synthetic record, and treating it as kill-authoritative can signal
-  the current pytest worker or another unrelated process during cleanup.
-
-## 2026-04-12 Local Test Tooling
-
-- Developer-facing docs must say plainly that local `pytest`, `mypy`, and
-  `ruff` must come from the repo-managed environment, not from the global
-  `PATH`. If that rule is left implicit, zero-context engineers and external
-  agents infer that the repo is missing basic tooling instead of using an
-  isolated project environment by design.
-- In this repo, that guidance is incomplete unless it also says to load
-  `.envrc` first. `.envrc` is part of the local-dev contract because it points
-  `uv` at `.venv`, prepends the repo `bin/`, and may wire a sibling
-  `../simplebroker` checkout into `PYTHONPATH`.
-- When the goal is deterministic local verification, docs should prefer the
-  explicit in-repo virtualenv binaries such as `./.venv/bin/python -m pytest`,
-  `./.venv/bin/mypy`, and `./.venv/bin/ruff` over ambient `uv run ...`
-  invocations. That removes ambiguity about which `uv` binary or shell wrapper
-  is active.
-
-## 2026-04-13 Detached Bootstrap Proof
-
-- For background control-plane bootstrap, "registry entry appeared once" is not
-  a sufficient success criterion. Detached startup has to prove an independent
-  lifecycle boundary and then prove that the expected pid and canonical registry
-  record are live at the same time the detached launcher still accepts success
-  acknowledgement. Fixed startup sleep windows are a poor substitute because
-  they make repeated manager-start stress tests pay latency that is not tied to
-  real readiness.
-- If a detached child can fail before steady-state logging is durable, startup
-  stderr or exit status must be captured in the bootstrap path itself. Otherwise
-  later status reconciliation can only infer failure after the fact.
-- Tests for detached bootstrap should prove structural separation, not only
-  happy-path liveness. On POSIX, a strong proof is that the live manager is no
-  longer in the caller CLI process group after `manager start` returns.
-
-## 2026-04-14 Explicit Preflight Boundaries
-
-- Do not move "can this binary run here" checks into `weft run`, manager
-  submission, or other ordinary execution paths. If operators want ahead-of-time
-  validation, give them an explicit validation or diagnostic surface such as
-  `weft spec validate --preflight`.
-- On the normal run path, attempt the real execution and report the concrete
-  startup failure from the real runner or agent path. Hidden preflight gates
-  drift from real execution and create a second policy surface to maintain.
-
-## 2026-04-15 Runner Environment Profile Boundaries
-
-- Runner environment profiles are materialized during validation as well as at
-  real task startup. Any side-effectful profile logic such as Keychain reads,
-  host probes, or filesystem mutation must explicitly defer until the real
-  execution path instead of assuming the profile hook is runtime-only.
-
-## 2026-04-16 Constants Boundary
-
-- If the repo says `_constants.py` is the single source of truth for constants,
-  enforce that structurally. A style note without a guard test degrades into a
-  suggestion, and cross-module drift comes back one local “just this one value”
-  at a time.
-- Keep only true runtime objects local: sentinels created with `object()`,
-  mutable registries, compiled regexes, and singleton plugin instances. Plain
-  immutable policy values, message names, timeouts, queue/status sets, import
-  refs, and backend hints should live in `weft/_constants.py`.
-
-## 2026-04-16 Poll Floors And Grace Windows
-
-- Short poll floors and grace windows are still behavior, not implementation
-  noise. Values like `0.05`, `0.1`, `0.2`, and `0.25` should not be repeated
-  inline across result waits, spawn reconciliation, status watch, and
-  subprocess cleanup paths.
-- Reuse one named constant when multiple surfaces are waiting on the same
-  durable control boundary. Add a new constant only when the semantic reason
-  for waiting is different.
-- When the boundary is already queue-backed, use SimpleBroker's queue-native
-  waiting path instead of adding more `sleep()` loops in Weft. The command-side
-  result waits, task control waits, spawn reconciliation, and manager lifecycle
-  waits now block on queue activity through SimpleBroker watchers, and the
-  command-owned `status watch` and limited `queue watch` paths do too. Keep
-  only bounded timeout/process checks in Weft.
-- Do not oversell this as a broader event system. SimpleBroker owns optimized
-  queue waiting; Weft still needs explicit semantic checks after wake-up and
-  still needs bounded polling or `process.wait(timeout=...)` for non-queue
-  boundaries like PID liveness and detached child exit.
-- The main remaining "wrong tool" cases are the ones that still alternate queue
-  reads with bespoke sleep logic outside the watcher-owned path, plus any
-  future lifecycle surfaces that try to invent a second event plane instead of
-  reusing the broker queues they already have.
-
-## 2026-04-16 Exception Boundaries In Manager And BaseTask
-
-- Narrow the catch to the boundary, not the function. Queue writes, deletes,
-  moves, `has_pending()`, and queue-close cleanup should catch broker-side
-  failures like `simplebroker.ext.BrokerError` plus local runtime wrappers such
-  as `OSError` or `RuntimeError` only when that operation is truly best effort.
-- Do not keep `json.dumps(...)` or spec/pipeline validation inside a broker
-  catch. Serialization and validation bugs are internal defects. They should
-  surface instead of disappearing behind a debug log that says a queue write
-  failed.
-- In `Manager`, malformed spawn/autostart payloads are ordinary local failures
-  and should be caught as `ValueError`, `TypeError`, `ValidationError`,
-  `FileNotFoundError`, or JSON/file read errors, depending on the real input
-  boundary. Unexpected internal exceptions in `_build_child_spec()` and
-  autostart resolution should propagate.
-- A small number of broad catches are still acceptable, but only at explicit
-  extension or interpreter-shutdown seams: optional resource-monitor callbacks,
-  runner-plugin stop/kill hooks, and `atexit`/destructor cleanup. If a broad
-  catch survives, the code should say why that boundary is best effort.
-
-## 2026-04-16 Review-Finding Boundary Fixes
-
-- Do not reuse reserved-queue cleanup helpers as if every execution path came
-  from a reserved inbox message. Direct `run_work_item()` execution has no
-  active reserved timestamp, so STOP/KILL finalization must not clear or
-  requeue unrelated reserved backlog.
-- On correctness-critical broker freshness checks, do not trust a cached
-  `Queue.last_ts` read. Force-refresh the broker timestamp at the boundary that
-  decides manager idle shutdown; ordinary throttled reads can stay cached.
-- Runtime-only streaming markers such as `weft.state.streaming` must clear on
-  the successful persistent path before the task returns to `waiting`. If a
-  runtime marker can outlive the live work it describes, operator surfaces will
-  start treating stale runtime hints as durable truth.
-- Append-only control and registry queues need their public truth boundary
-  stated explicitly. Raw `ctrl_in` deletion during active STOP/KILL is not the
-  public ACK, and raw registry history is not a mutable snapshot. Public truth
-  comes from post-unwind `ctrl_out` plus terminal task-log state, and from
-  reducing manager registry history to the latest relevant live record.
-
-## 2026-04-24 Runtime Handle Authority
-
-- Runtime identity must carry its control authority with it. A host PID is only
-  actionable when a `runtime_handle` says `control.authority == "host-pid"` and
-  scopes that PID under `observations.host_pids`; container-local PID values
-  must not be treated as host process handles.
-- Manager registry records and task TID mappings should use the same
-  runtime-handle shape. If a supervised manager cannot expose a host-process
-  handle, publish an explicit external-supervisor handle instead of making
-  generic manager code inspect the supervisor.
-- Durable task logs can still replay old lifecycle facts, but runtime control
-  and liveness checks should reject invalid handle shapes. This keeps history
-  readable without reviving ambiguous control authority.
-
-## 2026-04-08 Manager Role Identity
-
-- Manager identity has to stay consistent across every observability surface,
-  especially the manager registry and `weft.state.tid_mappings`. If the registry
-  says a TID is a manager but the tid-mapping payload omits `role="manager"`,
-  cleanup code can misclassify that manager as a task and send task-kill
-  signals to the wrong process.
-- For manager tasks, `role="manager"` is structural and must be emitted
-  unconditionally by the manager itself rather than inherited from mutable
-  TaskSpec metadata.
-- Test harness cleanup should treat active manager records as authoritative
-  manager tids before it fans out task STOP/KILL calls. That keeps teardown safe
-  even if a future regression drops manager role metadata from one surface.
-- Test harness cleanup must also treat tasks whose owner PID is the current
-  pytest process as local-only, not as external task-control targets. In-process
-  `task_factory` Consumers still publish `tid_mappings`; if cleanup fans out
-  STOP/KILL for those TIDs, teardown can signal the test runner itself.
-
 ## 2026-04-27 Test Sleep Hygiene
 
 - SimpleBroker has no blocking read-with-timeout API. `Queue.read_one()` and
@@ -785,52 +380,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   deleting the harness DB, close live SimpleBroker queues bound to that DB. If a
   bounded cleanup still cannot release the file, preserve the tempdir instead of
   turning cleanup lag into a behavioral test failure.
-
-## 2026-05-04 External Supervisor Manager Liveness
-
-- `control.authority="external-supervisor"` must not mean "live forever."
-  Generic Weft code still must not inspect Docker, podman, Kubernetes, or
-  supervisor APIs, but it needs a generic liveness boundary. Use scoped
-  `observations.host_pids` when the supervisor can provide them; otherwise use
-  the manager registry heartbeat age.
-- `weft manager stop --force` must not claim success for a fresh externally
-  supervised manager when no host PID or process handle is available. Either
-  the manager must publish a stopped record, the supervisor must stop it, or
-  the heartbeat must expire and be pruned.
-- A host-pid manager record must prove host-process identity, not just PID
-  existence. Docker makes the failure obvious because every replacement
-  container can have a live PID `1`, so manager liveness readers must compare
-  recorded process creation time when it is present before accepting the PID as
-  the same runtime.
-- If a manager process detects that it is running inside a container and no
-  explicit `WEFT_MANAGER_RUNTIME_HANDLE_JSON` was supplied, it is safer to
-  publish an `external-supervisor` handle than to publish an in-namespace
-  `host-pid` handle. Auto-detection is only a conservative fallback; production
-  supervisors should still inject explicit runtime identity when they can.
-- Runtime-specific external-supervisor liveness belongs behind an extension
-  probe registry, not in core manager code. A probe may return immediate stale
-  proof when it can prove the named runtime is gone; missing or inconclusive
-  probes fall back to heartbeat age.
-- Treating scoped host PIDs on an `external-supervisor` handle as direct task or
-  manager identity recreates the container PID bug in another form. Core code
-  should use host PID identity only for `control.authority="host-pid"` handles;
-  supervised runtimes need their registered liveness probe, with unknown
-  remaining unknown until the heartbeat age rule resolves it.
-- A manager child launch must be atomic with respect to the first work item:
-  seed the child inbox durably before starting the process, and do not launch
-  the child if seeding fails. Logging and continuing creates live children that
-  can only report `waiting_on=T...inbox`, which turns into result/run/pipeline
-  hangs under backend load.
-
-## 2026-05-06 Status Reanimation Boundary
-
-- Public status reconstruction must not use runtime liveness to move terminal
-  lifecycle state back to `running`. A live or apparently live runtime handle
-  can explain a conflict through `reconciliation` metadata, but
-  `weft.log.tasks` terminal proof remains the public lifecycle status.
-- Weak host PID evidence (`observations.host_pids` without process creation
-  identity) is especially unsafe for old task rows. PID reuse or namespace
-  changes can make an unrelated host process look like the original task.
 
 ## 2026-05-10 Control And Service Convergence
 
@@ -951,35 +500,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   must re-check for concurrent supersede before pruning self history, or it can
   erase the operator's replacement evidence and resurrect itself as active.
 
-## 2026-05-23 Runtime Cleanup Slices
-
-- TaskMonitor runtime cleanup policies should live in one policy module, while
-  `TaskMonitor` owns only reactor scheduling, worker launch, broker effects,
-  and worker-result commits. Mixing terminal, reserved, and dead-TID cleanup in
-  one executor result lets a slow dead-TID recovery path hold terminal cleanup
-  hostage and makes PONG counters ambiguous. Run each cleanup class as a
-  discrete worker-thread slice launched by the reactor.
-- Queue-name fallback cleanup must hydrate Monitor state in batches before
-  entering selection loops. A per-TID `MonitorStore.get_task()` call inside a
-  queue-derived scan opens broker resources per candidate, so a large stale
-  `T*.outbox` backlog can hit every slice deadline, report perpetual catch-up,
-  and burn CPU without draining anything.
-- `weft_monitor_task_messages` is a pending exact-delete reference table, not
-  terminal history. If a valid raw task-log row has already been folded into the
-  Monitor parent, retry sweeps must be allowed to delete that raw row and child
-  ref even when the family is still open; terminal summary gates only compact
-  summary/disposition and family retirement.
-
-## 2026-05-27 Runner Timeout Boundary
-
-- Runner timeout loops must check authoritative runtime completion before
-  enforcing an elapsed-time timeout. A polling loop can wake after the timeout
-  boundary even when the child exited successfully inside the budget, so
-  timeout classification must be gated on the runtime still being alive. See
-  [weft/core/runners/subprocess_runner.py](../weft/core/runners/subprocess_runner.py)
-  and
-  [tests/core/test_subprocess_runner.py](../tests/core/test_subprocess_runner.py).
-
 ## 2026-05-31 Monitor Checkpoints And Status
 
 - A forward Monitor checkpoint is not a proof that every older raw broker row
@@ -1007,7 +527,7 @@ index is not a dated section and does not count toward the coalescing trigger.
   (ID domain against ID domain); wall-clock cutoffs are only correct for
   observed-staleness windows over a fixed ID. See
   docs/specifications/05-Message_Flow_and_State.md [MF-5] and
-  docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md.
+  `2026-06-10-self-healing-runtime-maintenance-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 - A completion marker whose writer can be satisfied vacuously will eventually
   lie. Deletion markers such as `raw_deleted_at_ns` must be coupled to
   verified per-row deletion in the same pass (the exact-row apply layer
@@ -1035,202 +555,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   `weft.log.tasks` — service event bodies embed other tasks' TIDs and
   produce false positives. Join through the Monitor store refs
   (`weft_monitor_task_messages`) or parse the JSON `tid` field exactly.
-
-## 2026-06-17 Optional Runner SDK Boundaries
-
-- Adapter tests for optional runner SDKs must use the installed SDK surface for
-  contract checks. A hand-written fake that mirrors the adapter's assumptions
-  proves only that the adapter is self-consistent, and can miss real SDK drift
-  such as attribute-vs-method differences.
-- Runner tests for guest execution must preserve the host/guest filesystem
-  distinction when the behavior depends on staged files. A test runtime that
-  treats host temp paths as already present in the guest will miss bounded-agent
-  failures such as generated MCP config files not being copied before exec.
-- Real Docker runner tests share one daemon, even when every Weft broker
-  context is isolated. Under release-load xdist, container create/start calls
-  can saturate that daemon and leave otherwise valid tests timing out against
-  containers stuck in `Created`. Serialize tests that execute real Docker
-  containers with a narrow cross-process lock; do not hide Docker lifecycle
-  coverage behind mocks or broader suite serialization.
-
-## 2026-07-06 Cohesion Over File Size
-
-- File size alone is not a review finding and not grounds for a split. Agents
-  navigate by grep and read by offset, so a big well-named file is a
-  pre-joined index, while every module boundary is a place an agent must
-  correctly guess that relevant code lives elsewhere. Splitting genuinely
-  coupled code manufactures false seams, and false seams breed
-  parallel-implementation drift.
-- The real gates are two floors, and violating a floor is a finding at any
-  file size: (1) every implicit coupling gets an explicit marker at the edit
-  point; (2) every state machine gets a name and a contract test. Structural
-  coupling (a wide method surface over one schema, e.g.
-  `weft/core/manager.py`) is safe large under floor 1; behavioral coupling
-  (live state, e.g. the task status machine extracted into
-  `weft/core/task_lifecycle.py` / `weft/core/state_machines.py`) is what
-  justifies extraction — to create a testable boundary, not to shrink a file.
-- Full doctrine, including the parallel-write-slice cost of hot god files:
-  `docs/agent-context/engineering-principles.md` §11 ("Cohesion Over File
-  Size (Floors, Not Line Counts)").
-
-## 2026-08-04 Producer And Channel Evidence Are Independent
-
-- Producer liveness and result-channel completion are independent evidence.
-  Observing process exit while a private result channel is empty now cannot
-  prove that no result exists; the adapter must observe a valid payload, a
-  receiver-visible seal, an explicit transport failure, or a bounded drain
-  deadline. Tests must fire both `outcome -> exit` and `exit -> outcome`.
-- Race policy belongs in a named reducer, not in branch order. Every state and
-  event cell, including invalid and no-op cells, needs a literal table-driven
-  expectation. Same-turn precedence needs its own exhaustive selector oracle,
-  and persistent level signals must be consumed as edges so they cannot starve
-  later payload, seal, or expiry evidence.
-- A no-result symptom can hide a pre-entry spawn failure as well as a handoff
-  race. Nested immutable TaskSpec containers failed while the spawn bootstrap
-  unpickled them, before the target ran. Process-boundary inputs must therefore
-  be normalized to spawn-safe built-ins, and acceptance tests must traverse the
-  real installed manager and child-process path rather than only call the
-  runner in-process.
-
-## 2026-08-05 Exact Policy Fixtures Are Part Of The Atomic Registry
-
-- A suppression registry can reconcile its live spec, source directives, raw
-  diagnostics, and generated index while a committed exact-ID test fixture is
-  still stale. Treat that fixture as reviewed registry state: removing an
-  approved directive must update the human row, global inventory, generated
-  index, and exact expected group/directive fixture in the same slice.
-- Run the focused policy suite after every accepted registry-count change.
-  The suppression tool proves live reconciliation, but it cannot prove that a
-  separate CI fixture no longer encodes the prior inventory.
-
-## 2026-08-06 Ruff Selection Probes Must Preserve The Rest Of The Config
-
-- `ruff check --isolated` is suitable for inspecting Ruff's bare defaults, but
-  it is not a faithful activation probe for changing only `lint.select` to
-  `lint.extend-select`: it also discards project settings such as
-  `isort.known-first-party`, discovery, target, ignores, and plugin options.
-  In the stable-default expansion preflight, that produced 75 false `I001`
-  findings and overstated the cleanup from 599 to 674 diagnostics.
-- When reviewing a single configuration-key change, create a temporary copy of
-  the real project config and mutate only that key. Compare effective settings
-  and diagnostics from the mutated full config; keep tracked-file discovery as
-  a separate firing test. An isolated probe may remain supporting evidence for
-  what Ruff itself defaults, never the repository activation forecast.
-
-## 2026-08-06 RUF100 Must See The Full Candidate Rule Set
-
-- `ruff check --select RUF100 --fix` does not mean "fix the RUF100 findings
-  reported by the repository policy." It replaces the enabled rule set with
-  `RUF100`, so every directive for any other rule appears unused. In this repo,
-  that would remove approved C901/E402/F401 suppressions along with genuinely
-  stale directives.
-- Run RUF100 cleanup with the complete candidate configuration active, then
-  restrict only the fix operation to RUF100. Reconcile the suppression index
-  immediately. If the changed-directive count differs from the measured
-  candidate-policy inventory, reject the batch before review.
-
-## 2026-08-10 Postgres Test Isolation Does Not Eliminate Host Contention
-
-- A readiness probe inside the official Postgres container can accept the
-  entrypoint's temporary Unix-socket bootstrap server before database creation
-  and its planned restart finish. Test wrappers must prove the published host
-  TCP path is accepting connections and run a query against the target database
-  before launching clients.
-- Unique container names, random host ports, and separate database names prevent
-  cross-project schema interference. They do not isolate CPU, Docker daemon, or
-  scheduler load. When a concurrent suite changes only fixed-deadline outcomes,
-  distinguish shared-host contention from shared-database state with direct
-  container/port/database evidence before changing production behavior.
-
-## 2026-08-11 Manual Reactor Test Driver Boundary
-
-- The April 27 Test Sleep Hygiene rule still protects domain-specific evidence,
-  actor ordering, and useful failure shape. Keep those concerns in local,
-  domain-named wrappers even when they delegate common timing mechanics.
-- The shared boundary is the tested monotonic
-  `step -> observe -> wait -> final settlement` engine. The August 11 deadline
-  races proved that wait clipping, the turn paired with a completed wait, and
-  pending-result settlement at the deadline belong in that one engine.
-- Liveness, producer closure, and safety are three separate test obligations.
-  Evidence appearing proves liveness only. Exact-count or absence assertions
-  also need proof that the relevant producer can no longer emit, followed by a
-  safety assertion over the closed history. See
-  [Spec 08 [TS-0]](specifications/08-Testing_Strategy.md#why-this-shape-exists-ts-0)
-  and the
-  [shared reactor driver adoption plan](plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md).
-
-## 2026-08-11 Review State Is a Property of the Artifact
-
-- A Class 5 plan was authored, indexed, and gate-checked, then delivered as a
-  finished draft with no independent review run. No literal gate was violated:
-  every review obligation in the guidance attaches to a lifecycle transition
-  (spec promotion, implementation, completion claims) that sits downstream of
-  authoring, so an unreviewed draft and a reviewed draft are indistinguishable
-  to every mechanical check. The author's own "Independent Review Protocol"
-  section pattern-matched as review coverage while deferring the act.
-- The reviews, once run, returned BLOCKED twice with convergent findings from
-  two model families — including facts the author had personally verified
-  earlier in the same session and failed to carry into the plan. Self-review
-  does not substitute for fresh-context review even when the author has the
-  relevant evidence in context.
-- Corrective pattern: make review state explicit on the artifact, not implicit
-  in the lifecycle. A plan handoff must either carry independent-review rows
-  in its Execution Log or declare review as not yet run; the plan-metadata
-  gate is the natural mechanical owner for that requirement, and
-  `writing-plans.md`'s authoring flow should end with the instruction to run
-  the review-loops Planning Review Prompt for Class 3+ drafts rather than
-  leaving the trigger in a sibling runbook's read order. See
-  [plans/2026-08-11-python-api-surfaces-sb-contract.md](plans/2026-08-11-python-api-surfaces-sb-contract.md)
-  Execution Log for the full record.
-
-## 2026-08-13 Boundary Tests Must Straddle The Repaired Guard
-
-- Three consecutive remediation waves failed just outside the exact regression
-  each new test named. An unknown-task guard also rejected known terminal
-  cleanup; a partial-only outbox test missed a completed prefix followed by a
-  partial suffix; ordinary adapter-error tests missed deliberately typed domain
-  errors. This is not a reason to weaken exact tests. It is a reason to add the
-  nearest valid case and nearest invalid case before changing a boundary.
-- For evidence guards, test absent evidence, terminal-known evidence, and live
-  evidence separately. For stream consumption, test incomplete-only,
-  complete-only, and complete-plus-incomplete suffixes. For exception seams,
-  test raw implementation failures and already-typed public failures. A guard
-  is not closed until both sides of its predicate fire.
-
-## 2026-08-25 Migration Fixtures Must Come From Release Lineage
-
-- A Monitor v5-to-v6 migration test created the current v6 schema first and
-  changed only its version metadata to 5. It therefore could not reproduce the
-  physical order created by the real sequence of v5 `ALTER TABLE` additions.
-  Build migration fixtures from the prior release's base DDL and actual
-  migration steps. Assert the historical shape before invoking current code.
-- Every strict catalog assertion needs a named runtime or migration consumer.
-  Monitor SQL names its selected and inserted columns, so physical column order
-  was not a contract. Primary-key and query-backed index order still are.
-  Validate semantic dependencies; do not turn incidental DDL text or catalog
-  order into product behavior.
-- Apply the same test to non-database compatibility boundaries. SDK checks
-  should bind the call Weft makes, capability collections should compare the
-  members Weft consumes, and diagnostics must not infer semantics from English
-  help or error prose. Add a type only when it protects a demonstrated
-  machine-readable contract; self-owned internal wording alone does not justify
-  an exception taxonomy.
-
-## 2026-08-26 The PostgreSQL Test Wrapper Owns DSN Provisioning
-
-- An unset ambient `WEFT_PG_TEST_DSN` does not mean live PostgreSQL evidence is
-  unavailable. Inspect and use `bin/pytest-pg` before reporting a gap. When
-  Docker and uv are available, the wrapper starts a temporary PostgreSQL
-  container, discovers its published port, builds and injects the test DSN,
-  initializes the broker schema, runs pytest, and removes the container.
-- Backend selection is part of that child-process environment boundary. A
-  one-off probe that merely passes the generated target string without the
-  wrapper's backend environment can resolve as SQLite and prove only the
-  non-PostgreSQL rejection path. Prefer running the real test through
-  `bin/pytest-pg`; if a direct probe is necessary, reproduce `_build_test_env()`
-  rather than inventing a second DSN/config path.
-- Report live PostgreSQL as unpassed only when the canonical wrapper cannot run
-  or provision its database, and state that concrete failure.
 
 ## 2026-08-26 Admission Belongs Before Reservation
 
@@ -1264,46 +588,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   `tests/system/test_family_recovery.py` and the
   [family scheduling plan](plans/2026-10-14-measured-admission-family-scheduling.md).
 
-## 2026-09-07 Preserve Resolved Context Through Client Adapters
-
-- Command/client consolidation owns both behavior and context custody. A
-  `WeftContext` carries a resolved broker target and explicit configuration;
-  passing only its root path can rebuild different settings. Keep one concrete
-  context-accepting owner when the public command takes a path but the client
-  already owns a context. A shorter wrapper is not equivalent if it discards
-  those values.
-- Verify the public client boundary with a non-default config and the exact
-  supplied broker target. The serve regression changed interval137 to default5
-  while preserving the same path, so default-only tests missed it. Require
-  context/broker identity and the non-default setting to survive before
-  retiring the prior adapter.
-- 2026-09-08 correction: dump repeated the same root-only reconstruction,
-  changing both default output location and the supplied broker. The regression
-  now exports distinct rows from two real targets and checks the configured
-  directory through the public client. A shared materializer must also retain
-  the old error boundary around relative-path resolution. See the
-  [complexity review corrections](plans/2026-09-08-complexity-review-corrections-plan.md).
-
-## 2026-09-08 Review Deltas Include Observable Side Effects
-
-- Registry custody's ban on reader deletion did not require dropping foreground
-  supersession appends. Tightening shared selection changed which rows reached
-  that separate takeover owner, including their TID order. The correction tests
-  the retained history and both lower/higher incumbent orderings.
-- The later stop-confirmation paragraph was documented in implementation notes
-  but lay outside the original reviewed spec delta. Later review is not evidence
-  of earlier approval. The correction explicitly includes that retained text in
-  its review baseline. Source and tests are recorded in the
-  [correction plan](plans/2026-09-08-complexity-review-corrections-plan.md).
-
-
-## 2026-09-09 Load-Sensitive Harness Ownership
-
-- A parent harness did not own the broker of a nested CLI context; a real manager survived parent cleanup after an assertion failure. The repaired manager tests use the harness-owned root and register each CLI invocation before its assertions.
-- `BaseTask.cleanup()` can return while an active reactor turn still owns resources. The harness now retains the live driver and storage, reports the failed stop, and allows retry; teardown failure does not replace an existing test exception.
-- A detached launcher that has not delivered its first event may already own a child. Killing only that launcher orphaned the child on malformed output. The repaired protocol requests abort before escalating against the owned process tree. Real first-event/EOF/cancellation regressions and 24-worker stress are recorded in the [lifecycle fix plan](plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md).
-
-
 ## 2026-09-11 Cleanup Audit Boundary Corrections
 
 - The realtime late-output fix retained only startup metadata. A subscription
@@ -1320,26 +604,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   current supported exception.
 - Reproductions, review and verification are recorded in the
   [audit regression fixes plan](plans/2026-09-11-audit-regression-fixes-plan.md).
-
-
-## 2026-09-11 Test Typing and Oracle Audit
-
-- Negative assertions need reachable setup. Several tests patched an obsolete loader or allowed empty output to bypass assertions. Establish the positive mapping/output path first, then assert its suppression or failure; close the producer before asserting exact absence.
-- Typing can change the path being tested: adding an optional keyword to a fake changed runtime signature dispatch, and pre-normalizing a fixture skipped constructor normalization. Preserve intentional boundary shapes with narrow documented casts and check before/after coverage. Likewise, a targeted SQL reconciliation test did not cover the similarly named global reconciliation query.
-- Findings, replacement coverage and mutation evidence are recorded in the [test typing and correctness audit](plans/2026-09-11-test-typing-and-correctness-audit.md).
-
-## 2026-09-14: Configuration custody includes process imports
-
-A data-only Config decoder did not prevent a spawned task from reading ambient
-configuration: the receiver imported helpers that eagerly called load_config
-before decoding. A separate broker setup snippet in bin/pytest-pg also retained
-the removed dict input API. For configuration migrations, the integration owner
-must check the complete receiver import path and generated subprocess code, not
-only direct call sites. Keep receiving imports free of environment reads, bind
-process helper policy from the restored snapshot before loading task classes,
-and prove custody with a real spawn under invalid child environment values and
-a sender-local validator that cannot be pickled. See the [migration plan](plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
-and `tests/system/test_config_transport.py`.
 
 ## 2026-09-14 Inline Fixtures Must Not Own the Test Worker Process
 
@@ -1403,7 +667,6 @@ and `tests/system/test_config_transport.py`.
   logging cleanup failure. See the
   [explicit broker session lifetime plan](plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
-
 ## 2026-09-17 Reactor Waiting and Polling Policy
 
 - The manager latency investigation found that BaseTask started SimpleBroker's
@@ -1440,7 +703,6 @@ and `tests/system/test_config_transport.py`.
   and test quiet exit and inherited-descriptor cases through the production
   driver. The rule is recorded in
   [CC-2.2.1](specifications/01-Core_Components.md).
-
 
 ## 2026-10-06 Test Clocks Have Their Own Boundary
 
@@ -1481,7 +743,6 @@ and `tests/system/test_config_transport.py`.
   later retrieval of the exact retained value. See [MF-5](specifications/05-Message_Flow_and_State.md)
   and the [implementation repair](plans/2026-10-09-direct-result-observation-implementation-plan.md).
 
-
 ## 2026-10-12 Completion Routing Requires Every Observer to Preserve Proof
 
 - Moving ordinary result observation to task-local completion makes control
@@ -1497,7 +758,6 @@ and `tests/system/test_config_transport.py`.
   parent loss must share the existing finalizer. Testing only queued STOP/KILL
   missed early signal publication. See [MF-3](specifications/05-Message_Flow_and_State.md)
   and the [burst plan](plans/2026-10-12-burst-submission-complexity-plan.md).
-
 
 ## 2026-10-14 Reducing Contention Is a Theory-Possession Stop Condition
 

@@ -48,54 +48,54 @@ always be rolled back from the public request queue.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the Manager to the shared watcher reactor, publishes the remaining service clocks as deadlines, and routes child exit through one local sentinel adapter.
 
-- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
+- retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
-- [Liveness Reaper And TID-Mapping Custody Split Plan](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md) - adds LivenessMonitor as a third built-in persistent service and moves tid-mapping cleanup custody to it.
+- retired: `2026-08-29-liveness-reaper-and-custody-split-plan` (source 396c3b85; see `docs/plans/README.md`) - adds LivenessMonitor as a third built-in persistent service and moves tid-mapping cleanup custody to it.
 - [Manager Admission Control Plan](../plans/2026-08-25-manager-admission-control-plan.md) - adds a lane-aware pre-reservation admission gate over one backend-specific observed usage value.
-- [Canonical Contract And Dead Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md) - establish one current service-owner schema, bounded bootstrap discard, and one mutable managed-service state owner.
-- [TaskMonitor Orphan Log And Status Reconciliation Plan](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md) - plan stale internal-service status reconciliation and bounded TaskMonitor recovery for pre-checkpoint raw task-log rows that missed Monitor-store collation.
-- [Service Task Worker API Plan](../plans/2026-05-26-service-task-worker-api-plan.md) - consolidate Manager child launch and TaskMonitor maintenance lanes onto the shared internal `ServiceTask` service-worker API.
-- [Stale Service Owner Runtime Cleanup Plan](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md) - plan stale manager/service Monitor disposition, task-local control cleanup, and internal probe residue cleanup without weakening active manager protection.
-- [Config Precedence and Parsing Alignment Plan](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md) – align broker target precedence, Weft env parsing, and manager-timeout config semantics with the documented contract.
-- [Spawn Request Reconciliation Plan](../plans/2026-04-14-spawn-request-reconciliation-plan.md) – tighten queue-first submission error handling so post-enqueue failures reconcile by TID instead of assuming rollback, and keep late bootstrap acknowledgement failures from downgrading successful startup.
-- [Manager Bootstrap Unification Plan](../plans/2026-04-09-manager-bootstrap-unification-plan.md) – Collapse `weft manager start` onto the canonical manager bootstrap path used by `weft run`.
-- [Manager Lifecycle Command Consolidation Plan](../plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md) – Collapse remaining `manager list|status|stop` and `weft status` manager lifecycle reads onto the same shared control-plane helper as bootstrap.
-- [Weft Serve Supervised Manager Plan](../plans/2026-04-09-weft-serve-supervised-manager-plan.md) – Add a minimal foreground `weft manager serve` command for supervisor-managed persistent managers and align manager TERM/INT with graceful drain.
-- [Detached Manager Bootstrap Hardening Plan](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md) – Replace parent-dependent detached bootstrap with a real detached-launch wrapper, stronger startup proof, and actionable early-failure diagnostics.
-- [Manager Bootstrap Readiness And Cleanup Test Plan](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md) – Replace the fixed startup delay with event-based readiness proof and split cleanup-vs-startup stress coverage.
-- [Autostart Hardening And Contract Alignment Plan](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md) – Make project-level autostart intent durable, fix manager-side enqueue bookkeeping, and align manifest policy docs with enforced behavior.
-- [Pipeline Autostart Extension Plan](../plans/2026-04-16-pipeline-autostart-extension-plan.md) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
-- [Canonical Owner Fence Plan](../plans/2026-04-17-canonical-owner-fence-plan.md) – Add a shared canonical-owner reduction helper and harden manager child dispatch with a final ownership fence before launch.
-- [Heartbeat Service Plan](../plans/2026-04-17-heartbeat-service-plan.md) – Add the built-in runtime heartbeat service, reserve its internal endpoint namespace, and reuse the canonical-owner fence in a long-lived interval emitter.
-- [Result Evidence And Superseded Manager Reconciliation Plan](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md) – Keep task-list/status read models aligned with selected active-manager registry truth.
-- [Manager Selection PING/PONG Liveness Plan](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md) – Use keyed manager PONGs as bounded positive liveness evidence when startup or selection encounters stale-looking manager registry rows.
-- [Persistent Agent Runtime Implementation Plan](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md) – references Manager Architecture for long-lived agent sessions.
-- [TaskSpec Clean Design Plan](../plans/2026-04-06-taskspec-clean-design-plan.md) – references Manager Architecture for TaskSpec schema alignment.
-- [Phase 7 Task Monitor Supervision And Cleanup Plan](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md) – proposes manager-supervised `TaskMonitor` lifecycle and safe autonomous cleanup slices.
-- [Manager-Owned Internal Service Supervision Plan](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md) – unify manager-owned `once`/`ensure` reconciliation for heartbeat, TaskMonitor, and autostarts.
-- [Phase 7 Manager Service Reconciler Cleanup Plan](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md) – closes the single-reconciler implementation gaps for heartbeat, TaskMonitor, and autostart lifecycle handling.
-- [Reactive Task Loop Hot-Probe Plan](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md) – restore the manager/task reactive wait contract so PG-backed idle managers wake from NOTIFY or bounded timers rather than empty queue probes.
-- [Deterministic Manager Service Reconciler Plan](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
-- [Manager Stop Timeout Hardening Plan](../plans/2026-05-09-manager-stop-timeout-hardening-plan.md) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
-- [Internal Spawn Priority Queue Plan](../plans/2026-05-09-internal-spawn-priority-queue-plan.md) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
-- [Runtime Liveness Probe Registry Plan](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md) – runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
-- [Prune Path Unification Plan](../plans/2026-05-09-prune-path-unification-plan.md) – CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
-- [Service Liveness And Health Convergence Plan](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md) – manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
-- [Manager Service Authority Boundary Hardening Plan](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
-- [Manager Work-Stealing Dispatch Plan](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md) – atomic spawn-request reservation is the public dispatch authority while singleton service correctness stays in the manager-owned reducer.
-- [Manager Serve Operational Log Plan](../plans/2026-05-11-manager-serve-operational-log-plan.md) – level-controlled foreground `manager serve` operational logs expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
-- [Manager Replace Start And Serve Plan](../plans/2026-05-13-manager-replace-start-serve-plan.md) – explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics use the existing STOP control path.
-- [Manager Liveness And Leadership Robustness Plan](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md) – strong live dispatch-authority proof is required before leadership yield, external-supervisor `unknown` evidence cannot act as authority, and leadership-drain recovery remains bounded without broad status scans.
-- [Manager Liveness And List Diagnostics Plan](../plans/2026-05-14-manager-list-diagnostics-plan.md) – improves cross-namespace manager liveness fallback through keyed PING/PONG and adds an explicit operator diagnostic list mode for manager registry liveness, proof source, and canonical-owner visibility without changing election behavior.
-- [Manager Hot-Loop Reduction Plan](../plans/2026-05-15-manager-hot-loop-reduction-plan.md) – identified manager supervisory hot loops before the broader reactor migration.
-- [Task Reactor And Evidence Worker Plan](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md) – phased plan that moved blocking task work behind broker-free worker lanes while keeping queue reservation, acknowledgement, lifecycle state, and control responses on the task reactor.
-- [Manager Reactor Hot-Loop Follow-Up Plan](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md) – follow-up that removed remaining manager proof churn after the reactor migration by caching process-stable context, reordering leadership proof, gating idle probes, and bounding service pending evidence.
-- [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md) – reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
-- [Internal Service Observability Plan](../plans/2026-05-11-internal-service-observability-plan.md) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
-- [Service Task Shared Reactor Extraction Plan](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md) – extracts shared long-lived service helpers for Manager, TaskMonitor, and Heartbeat while keeping Manager scheduling and dispatch authority local.
-- [Reliability And Doc Fixes Plan](../plans/2026-05-29-reliability-and-doc-fixes-plan.md) – create-time-gated shutdown reap and a shared PONG dispatch-eligibility gate (Slices 3-4).
+- retired: `2026-08-10-canonical-contract-and-dead-code-cleanup-plan` (source 396c3b85; see `docs/plans/README.md`) - establish one current service-owner schema, bounded bootstrap discard, and one mutable managed-service state owner.
+- retired: `2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan` (source 396c3b85; see `docs/plans/README.md`) - plan stale internal-service status reconciliation and bounded TaskMonitor recovery for pre-checkpoint raw task-log rows that missed Monitor-store collation.
+- retired: `2026-05-26-service-task-worker-api-plan` (source 396c3b85; see `docs/plans/README.md`) - consolidate Manager child launch and TaskMonitor maintenance lanes onto the shared internal `ServiceTask` service-worker API.
+- retired: `2026-05-28-stale-service-owner-runtime-cleanup-plan` (source 396c3b85; see `docs/plans/README.md`) - plan stale manager/service Monitor disposition, task-local control cleanup, and internal probe residue cleanup without weakening active manager protection.
+- retired: `2026-04-14-config-precedence-and-parsing-alignment-plan` (source 396c3b85; see `docs/plans/README.md`) – align broker target precedence, Weft env parsing, and manager-timeout config semantics with the documented contract.
+- retired: `2026-04-14-spawn-request-reconciliation-plan` (source 396c3b85; see `docs/plans/README.md`) – tighten queue-first submission error handling so post-enqueue failures reconcile by TID instead of assuming rollback, and keep late bootstrap acknowledgement failures from downgrading successful startup.
+- retired: `2026-04-09-manager-bootstrap-unification-plan` (source 396c3b85; see `docs/plans/README.md`) – Collapse `weft manager start` onto the canonical manager bootstrap path used by `weft run`.
+- retired: `2026-04-09-manager-lifecycle-command-consolidation-plan` (source 396c3b85; see `docs/plans/README.md`) – Collapse remaining `manager list|status|stop` and `weft status` manager lifecycle reads onto the same shared control-plane helper as bootstrap.
+- retired: `2026-04-09-weft-serve-supervised-manager-plan` (source 396c3b85; see `docs/plans/README.md`) – Add a minimal foreground `weft manager serve` command for supervisor-managed persistent managers and align manager TERM/INT with graceful drain.
+- retired: `2026-04-13-detached-manager-bootstrap-hardening-plan` (source 396c3b85; see `docs/plans/README.md`) – Replace parent-dependent detached bootstrap with a real detached-launch wrapper, stronger startup proof, and actionable early-failure diagnostics.
+- retired: `2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan` (source 396c3b85; see `docs/plans/README.md`) – Replace the fixed startup delay with event-based readiness proof and split cleanup-vs-startup stress coverage.
+- retired: `2026-04-16-autostart-hardening-and-contract-alignment-plan` (source 396c3b85; see `docs/plans/README.md`) – Make project-level autostart intent durable, fix manager-side enqueue bookkeeping, and align manifest policy docs with enforced behavior.
+- retired: `2026-04-16-pipeline-autostart-extension-plan` (source 396c3b85; see `docs/plans/README.md`) – Extend autostart manifests so stored pipeline targets compile and launch through the ordinary first-class pipeline runtime.
+- retired: `2026-04-17-canonical-owner-fence-plan` (source 396c3b85; see `docs/plans/README.md`) – Add a shared canonical-owner reduction helper and harden manager child dispatch with a final ownership fence before launch.
+- retired: `2026-04-17-heartbeat-service-plan` (source 396c3b85; see `docs/plans/README.md`) – Add the built-in runtime heartbeat service, reserve its internal endpoint namespace, and reuse the canonical-owner fence in a long-lived interval emitter.
+- retired: `2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan` (source 396c3b85; see `docs/plans/README.md`) – Keep task-list/status read models aligned with selected active-manager registry truth.
+- retired: `2026-05-07-manager-selection-ping-pong-liveness-plan` (source 396c3b85; see `docs/plans/README.md`) – Use keyed manager PONGs as bounded positive liveness evidence when startup or selection encounters stale-looking manager registry rows.
+- retired: `2026-04-06-persistent-agent-runtime-implementation-plan` (source 396c3b85; see `docs/plans/README.md`) – references Manager Architecture for long-lived agent sessions.
+- retired: `2026-04-06-taskspec-clean-design-plan` (source 396c3b85; see `docs/plans/README.md`) – references Manager Architecture for TaskSpec schema alignment.
+- retired: `2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan` (source 396c3b85; see `docs/plans/README.md`) – proposes manager-supervised `TaskMonitor` lifecycle and safe autonomous cleanup slices.
+- retired: `2026-05-08-manager-owned-internal-service-supervision-plan` (source 396c3b85; see `docs/plans/README.md`) – unify manager-owned `once`/`ensure` reconciliation for heartbeat, TaskMonitor, and autostarts.
+- retired: `2026-05-08-phase-7-manager-service-reconciler-cleanup-plan` (source 396c3b85; see `docs/plans/README.md`) – closes the single-reconciler implementation gaps for heartbeat, TaskMonitor, and autostart lifecycle handling.
+- retired: `2026-05-18-reactive-task-loop-hot-probe-plan` (source 396c3b85; see `docs/plans/README.md`) – restore the manager/task reactive wait contract so PG-backed idle managers wake from NOTIFY or bounded timers rather than empty queue probes.
+- retired: `2026-05-08-deterministic-manager-service-reconciler-plan` (source 396c3b85; see `docs/plans/README.md`) – supersedes the cleanup plan for the pure reducer, transition-table, and full test support work.
+- retired: `2026-05-09-manager-stop-timeout-hardening-plan` (source 396c3b85; see `docs/plans/README.md`) – separates the manager's internal child-drain timeout from caller-side stop confirmation defaults so slower backends have observation margin.
+- retired: `2026-05-09-internal-spawn-priority-queue-plan` (source 396c3b85; see `docs/plans/README.md`) – adds `weft.spawn.internal` as strict-priority manager-owned service spawn work while preserving the shared manager launch path.
+- retired: `2026-05-09-runtime-liveness-probe-registry-plan` (source 396c3b85; see `docs/plans/README.md`) – runtime-specific manager liveness checks behind a lightweight core registry with Docker-specific probing owned by `weft_docker`.
+- retired: `2026-05-09-prune-path-unification-plan` (source 396c3b85; see `docs/plans/README.md`) – CLI pruning and manager-supervised TaskMonitor cleanup share one core prune engine.
+- retired: `2026-05-09-service-liveness-and-health-convergence-plan` (source 396c3b85; see `docs/plans/README.md`) – manager ownership, heartbeat supersession, singleton restart timing, and status liveness diagnostics share one interpretation path.
+- retired: `2026-05-10-manager-service-authority-boundary-hardening-plan` (source 396c3b85; see `docs/plans/README.md`) – tighten manager-owned singleton evidence authority, duplicate PID force-kill authority, and service-key helper structure.
+- retired: `2026-05-11-manager-work-stealing-dispatch-plan` (source 396c3b85; see `docs/plans/README.md`) – atomic spawn-request reservation is the public dispatch authority while singleton service correctness stays in the manager-owned reducer.
+- retired: `2026-05-11-manager-serve-operational-log-plan` (source 396c3b85; see `docs/plans/README.md`) – level-controlled foreground `manager serve` operational logs expose registry, loop, service-convergence, spawn, and TaskMonitor decisions without writing lifecycle state.
+- retired: `2026-05-13-manager-replace-start-serve-plan` (source 396c3b85; see `docs/plans/README.md`) – explicit `weft manager start --replace` and `weft manager serve --replace` operator replacement semantics use the existing STOP control path.
+- retired: `2026-05-13-manager-liveness-and-leadership-robustness-plan` (source 396c3b85; see `docs/plans/README.md`) – strong live dispatch-authority proof is required before leadership yield, external-supervisor `unknown` evidence cannot act as authority, and leadership-drain recovery remains bounded without broad status scans.
+- retired: `2026-05-14-manager-list-diagnostics-plan` (source 396c3b85; see `docs/plans/README.md`) – improves cross-namespace manager liveness fallback through keyed PING/PONG and adds an explicit operator diagnostic list mode for manager registry liveness, proof source, and canonical-owner visibility without changing election behavior.
+- retired: `2026-05-15-manager-hot-loop-reduction-plan` (source 396c3b85; see `docs/plans/README.md`) – identified manager supervisory hot loops before the broader reactor migration.
+- retired: `2026-05-15-task-reactor-and-evidence-worker-plan` (source 396c3b85; see `docs/plans/README.md`) – phased plan that moved blocking task work behind broker-free worker lanes while keeping queue reservation, acknowledgement, lifecycle state, and control responses on the task reactor.
+- retired: `2026-05-15-manager-reactor-hot-loop-follow-up-plan` (source 396c3b85; see `docs/plans/README.md`) – follow-up that removed remaining manager proof churn after the reactor migration by caching process-stable context, reordering leadership proof, gating idle probes, and bounding service pending evidence.
+- retired: `2026-05-13-internal-state-machine-helper-plan` (source 396c3b85; see `docs/plans/README.md`) – reusable pure reducer helper that can express manager-service and other transition tables without moving side effects out of their current owners.
+- retired: `2026-05-11-internal-service-observability-plan` (source 396c3b85; see `docs/plans/README.md`) – adds an ops read model that reports heartbeat and TaskMonitor state from manager launch evidence, child task logs, TID mappings, and internal spawn queues.
+- retired: `2026-05-20-service-task-shared-reactor-extraction-plan` (source 396c3b85; see `docs/plans/README.md`) – extracts shared long-lived service helpers for Manager, TaskMonitor, and Heartbeat while keeping Manager scheduling and dispatch authority local.
+- retired: `2026-05-29-reliability-and-doc-fixes-plan` (source 396c3b85; see `docs/plans/README.md`) – create-time-gated shutdown reap and a shared PONG dispatch-eligibility gate (Slices 3-4).
 
 ## Conceptual Model: Everything is a Task [MA-0]
 
@@ -510,8 +510,8 @@ _Implementation mapping_:
 - [MA-1.8] Admission: `weft/core/admission.py::AdmissionController` owns pure measured decisions and drain-wait diagnostics; `weft/core/admission.py::AdmissionController.set_max_connections` updates the effective ceiling without resetting that history. `weft/core/manager.py::Manager._read_postgres_connection_stats` resolves automatic backend capacity. `weft/core/manager.py` owns exact-ID selection, frontiers, incremental pending indexes, startup feedback, checkpoint custody, bounded recovery and process probes. `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest` own the bounded notification interest and reactor handoff. `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._ensure_multi_activity_waiter`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._wait_for_activity_body`, and `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_hint_action` own subscription replacement and observation wake filtering. `weft/_constants.py` owns configuration. `weft/core/tasks/base.py` owns task snapshots; `weft/core/runtime_identity.py` owns immutable transport. LivenessMonitor and TaskMonitor retain their cleanup boundaries under [LIVENESS.R3–4], [LIVENESS.R7]. Additional verification: `weft/core/family_scheduling.py`, `tests/core/test_admission.py`, `tests/core/test_connection_admission.py`, `tests/core/test_work_conserving_admission.py`, `tests/core/test_family_scheduling.py`, `tests/core/test_manager_family_maintenance.py`, `tests/helpers/family_workload.py`, `tests/system/test_child_admission.py`, `tests/system/test_family_scheduling.py`, `tests/system/test_measured_admission_pg.py`.
 
 Implementation plan backlink for [MA-1.4]:
-[Registry Selection And Pruning Authority Refactor Plan](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
-and [Canonical Contract And Dead-Code Cleanup Plan](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md).
+`2026-08-08-registry-selection-pruning-authority-refactor-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
+and `2026-08-10-canonical-contract-and-dead-code-cleanup-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Implementation note for [MA-1.4]:
 `weft/core/service_convergence.py::discard_v1_service_registry_rows` uses its
@@ -523,17 +523,17 @@ synchronous keyed proof owns a temporary nonpersistent `MultiQueueWatcher` and
 listener, which it releases before returning. Nonpersistent mode lets the
 watcher close while an outer caller-owned broker operation remains open on the
 same thread.
-See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
+See `2026-09-17-submission-manager-check-cost-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Implementation plans for [MA-1.6a]:
-[`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md),
-[`2026-05-11-internal-service-observability-plan.md`](../plans/2026-05-11-internal-service-observability-plan.md),
-[`2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md),
-[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md),
-[`2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md),
-[`2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md),
+`2026-05-10-control-and-service-convergence-state-machine-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+`2026-05-11-internal-service-observability-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+`2026-05-15-manager-hot-loop-reduction-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+`2026-05-15-task-reactor-and-evidence-worker-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+`2026-05-15-manager-reactor-hot-loop-follow-up-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+`2026-05-18-reactive-task-loop-hot-probe-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
 and the hardening plan
-[`2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md).
+`2026-05-10-manager-service-authority-boundary-hardening-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 `weft.state.services` stores one `schema="weft.service_owner.v2"`
 service-owner object. Required keys are `schema`, `service_key`,
@@ -598,9 +598,9 @@ This does not delete peer history or classify unknown identity as dead;
 failure to append supersession blocks takeover.
 
 Implementation: `weft/core/manager_runtime.py::_foreground_serve_blocking_manager`.
-Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
-Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+Implementation plan: `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Before an existing `weft.state.services` queue is passed to manager, status,
 or Monitor logic, the shared
@@ -654,7 +654,7 @@ _Implementation mapping_:
 
 ## Bootstrap and Lifecycle [MA-3]
 
-_Implementation maintenance_: [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) bounds the detached launcher first-event read and retains child cleanup ownership before registry readiness.
+_Implementation maintenance_: `2026-09-09-load-sensitive-test-lifecycle-fixes-plan` (retired — source 396c3b85; see `docs/plans/README.md`) bounds the detached launcher first-event read and retains child cleanup ownership before registry readiness.
 
 After accepting a spawn request, `weft run` attempts to make a manager
 available by minting a manager TaskSpec and launching a short-lived detached
@@ -805,4 +805,4 @@ internal runtime envelope. Public submission surfaces do not authorize
 internal runtime class selection through stored TaskSpec metadata alone.
 Runner extensibility affects execution backends, not manager specialization.
 
-Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) retains the shared lifecycle owner behind typed manager command and client adapters.
+Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) retains the shared lifecycle owner behind typed manager command and client adapters.

@@ -39,9 +39,9 @@ See also:
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements task-local completion publication and matching retention.
 
-- [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
+- retired: `2026-09-21-watcher-sigint-lock-safety-plan` (source 396c3b85; see `docs/plans/README.md`) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
-- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
+- retired: `2026-09-19-interactive-source-integration-plan` (source 396c3b85; see `docs/plans/README.md`) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
 
@@ -49,48 +49,48 @@ See also:
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
-- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+- retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
-- [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
+- retired: 2026-09-10-deferred-macos-process-title-plan — source 396c3b85; see docs/plans/README.md
 
-- [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
-- [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
-- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
-- [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
-- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
-- [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
-- [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
-- [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
-- [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
-- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
-- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
-- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
-- [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
-- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
-- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
-- [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
-- [`docs/plans/2026-04-07-active-control-main-thread-plan.md`](../plans/2026-04-07-active-control-main-thread-plan.md)
-- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
-- [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
-- [`docs/plans/2026-04-17-heartbeat-service-plan.md`](../plans/2026-04-17-heartbeat-service-plan.md)
-- [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
-- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
-- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
-- [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
-- [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
-- [`docs/plans/2026-05-09-runtime-liveness-probe-registry-plan.md`](../plans/2026-05-09-runtime-liveness-probe-registry-plan.md)
-- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
-- [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
-- [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
-- [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
-- [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
-- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- retired: 2026-08-29-liveness-reaper-and-custody-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-25-bounded-tid-mapping-publication-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-10-postgresql-dynamic-native-waiter-rebind-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-09-reference-reactor-safety-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-26-monitor-five-cleanup-policy-consolidation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-28-docker-container-profiles-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-26-service-task-worker-api-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-24-monitor-policy-progress-contract-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-23-monitor-cleanup-policy-convergence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-23-monitor-cleanup-executor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-collation-table-retirement-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-reactor-worker-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-store-hardening-and-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-agent-session-and-task-startup-observability-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-spec-corpus-current-vs-planned-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-runner-extension-point-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-persistent-agent-runtime-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-07-active-control-main-thread-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-runtime-endpoint-registry-boundary-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-17-canonical-owner-fence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-17-heartbeat-service-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-05-simplebroker-multiqueue-waiter-integration-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-terminal-publication-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-lifecycle-monitor-archive-sink-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-manager-owned-internal-service-supervision-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-phase-7-manager-service-reconciler-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-09-runtime-liveness-probe-registry-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-09-prune-path-unification-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-13-internal-state-machine-helper-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-manager-hot-loop-reduction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-manager-reactor-hot-loop-follow-up-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-durable-collation-store-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-reactive-task-loop-hot-probe-plan — source 396c3b85; see docs/plans/README.md
 
 ## 1. TaskSpec (`weft/core/taskspec/model.py`) [CC-1]
 
@@ -179,7 +179,7 @@ _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` —
 `tests/tasks/test_multiqueue_watcher.py`; BaseTask ownership preservation is in
 `tests/tasks/test_task_execution.py`. Displaced waiter close uses the
 SimpleBroker resource's terminal, idempotent close contract in
-`MultiQueueWatcher._close_activity_waiter_once`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
+`MultiQueueWatcher._close_activity_waiter_once`; see `2026-08-31-monitor-and-task-correctness-fixes-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Current role:
 
@@ -518,8 +518,10 @@ next attempted unknown shifts the deadline forward by the full paused duration
 before checking expiry. `live` or generation change clears the record; `stale`
 clears it and authorizes immediate min-age-gated retirement. Late
 token/generation mismatches never enter the reducer. At attempted-unknown
-expiry, and for definitively stale rows past min-age, the monitor deletes the
-row by exact message ID. Probes are read-only; the monitor deletes only
+expiry, and for definitively stale rows past min-age, the monitor may retire the
+row by exact message ID. Valid terminal projections additionally wait for the
+independent observation minimum under [MF-5] and [LIVENESS.R3]; retained rows
+defer recurring probes until their deadline, then revalidate liveness/custody. Probes are read-only; the monitor deletes only
 TID-mapping rows and controls no process.
 
 All deadlines are process-local memory. Restart grants a fresh timeout;
@@ -540,6 +542,13 @@ task primitives are re-exported from `weft/core/tasks/__init__.py` where
 intended for package-level use. The internal `ServiceTask` helper is imported
 directly from `weft/core/tasks/service.py`, while the TaskMonitor runtime is
 owned by `weft/core/monitor/`.
+
+BaseTask owns the projection and immutable observation descriptor on its
+existing snapshot publication path ([OBS.6], [MF-5]). Runtime/task subclasses
+extend that path without replacing shared fields or introducing a second writer.
+Shared nested validation and configuration belong to `weft/core/task_evidence.py`.
+Monitor collations are private export and cleanup state; public observers acquire
+task-owned queue evidence without querying those tables.
 
 Current task families:
 
@@ -690,7 +699,7 @@ Current task families:
   loop or task-local queue pending probe. Queue readiness is owned by
   `MultiQueueWatcher`.
 - `Debugger`: in-process diagnostic command surface for interactive debugging
-  Implementation plan: [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md).
+  Implementation plan: `2026-08-31-collation-store-toggle-removal-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Interactive command sessions reuse the same task/runtime conventions rather
 than inventing a second terminal subsystem, and long-lived agent sessions reuse
@@ -797,7 +806,7 @@ records returned title errors; `weft/core/tasks/base.py::BaseTask.process_once` 
 `weft/core/tasks/base.py::BaseTask.wait_for_activity` own the live-turn activation and deadline-bound
 wait. `weft/core/process_title.py` owns serialized process-local native writes,
 memoization, and backend handoff; `weft/core/deferred.py` owns deferred backend
-accessors. See the [implementation plan](../plans/2026-09-10-deferred-macos-process-title-plan.md).
+accessors. See `2026-09-10-deferred-macos-process-title-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Why this boundary matters:
 
@@ -806,10 +815,10 @@ Why this boundary matters:
 - task-local streaming state should remain explicit and inspectable
 
 Implementation plan backlinks:
-[`2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md`](../plans/2026-04-21-run-boundary-dispatch-fence-control-contract-plan.md);
-[`2026-05-15-task-reactor-and-evidence-worker-plan.md`](../plans/2026-05-15-task-reactor-and-evidence-worker-plan.md);
-[`2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md);
-[`2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md).
+`2026-04-21-run-boundary-dispatch-fence-control-contract-plan` (retired — source 396c3b85; see `docs/plans/README.md`);
+`2026-05-15-task-reactor-and-evidence-worker-plan` (retired — source 396c3b85; see `docs/plans/README.md`);
+`2026-05-20-service-task-shared-reactor-extraction-plan` (retired — source 396c3b85; see `docs/plans/README.md`);
+`2026-05-26-service-task-worker-api-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### 2.4.1 Runtime Endpoint Registry [CC-2.4.1]
 
@@ -827,7 +836,7 @@ _Implementation mapping_: `weft/core/endpoints.py` — `EndpointRecord`,
 `weft.state.endpoints` — runtime queue used for the registry records.
 
 Implementation plan backlink:
-[`2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md).
+`2026-08-08-registry-selection-pruning-authority-refactor-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Current rules:
 
@@ -841,7 +850,7 @@ Current rules:
   successful or confirmed-absent exact deletion releases it, and a later
   unregister may retry the same id. Readers filter stale owners and never
   delete. The runtime pruning engine is the only other endpoint-row deleter.
-  Implementation plan: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+  Implementation plan: `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 - endpoint records point at ordinary task-local queues (`inbox`, `outbox`,
   `ctrl_in`, `ctrl_out`)
 - when duplicate live claimants exist for the same endpoint name, discovery
@@ -1017,7 +1026,7 @@ Current rule:
   Implementation: `BaseTask` identity merge and control in
   `weft/core/tasks/base.py`; `HostTaskRunner.run_with_hooks` in
   `weft/core/runners/host.py`.
-  Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+  Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 - legacy handle keys such as `runner_name`, `runtime_id`, and top-level
   `host_pids` are invalid at runtime-contract boundaries
 - manager records use the same `runtime_handle` shape. Detached host launch
@@ -1056,9 +1065,9 @@ owns same-instance host identity verification and signaling; CLI status/control 
 `weft/commands/system.py` and `weft/commands/tasks.py`.
 
 Plan backlink:
-[`docs/plans/2026-08-31-runtime-identity-custody-plan.md`](../plans/2026-08-31-runtime-identity-custody-plan.md).
-[`docs/plans/2026-04-24-runtime-handle-authority-migration-plan.md`](../plans/2026-04-24-runtime-handle-authority-migration-plan.md).
-[`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
+`2026-08-31-runtime-identity-custody-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
+`2026-04-24-runtime-handle-authority-migration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
+`2026-05-10-manager-service-authority-boundary-hardening-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 hardens manager-owned singleton force-kill authority so raw task-log PIDs are
 not treated as scoped runtime-handle proof.
 Manager singleton duplicate cleanup may force-reap scoped host PIDs from a
@@ -1219,29 +1228,29 @@ observations, apply effects, and own cleanup.
 
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
-- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
-- [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
-- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
-- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
-- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
-- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
-- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
-- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
-- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
-- [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
-- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
-- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-interactive-session-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-validation-capability-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-29-manager-task-spawned-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-17-microsandbox-runner-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-general-lifetime-reporting-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-mode-and-rotating-log-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-external-log-health-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-reliability-and-doc-fixes-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-26-monitor-five-cleanup-policy-consolidation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-collation-table-retirement-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-fair-cleanup-scheduling-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-task-log-external-logging-and-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-task-monitor-bounded-control-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-reactive-task-loop-hot-probe-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
@@ -1249,3 +1258,5 @@ observations, apply effects, and own cleanup.
 - [`04-SimpleBroker_Integration.md`](04-SimpleBroker_Integration.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

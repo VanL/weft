@@ -110,7 +110,9 @@ def test_foreign_cancel_flag_needs_a_real_queue_wake(
                 cancelled.set()
                 with harness.context.queue(spec.io.outputs["outbox"]) as outbox:
                     outbox.write(json.dumps({"wake": True}))
-                assert future.result(timeout=10) == []
+                emitted = future.result(timeout=10)
+                assert [event.event_type for event in emitted] == ["snapshot"]
+                assert emitted[0].payload["status"] == "unknown"
         assert returned.is_set()
 
 
@@ -179,6 +181,9 @@ def test_realtime_cursor_keeps_adjacent_imported_stream_ids(stream: str) -> None
             )
             iterator = task.realtime_events(timeout=0.5)
             try:
+                snapshot = next(iterator)
+                assert snapshot.event_type == "snapshot"
+                assert snapshot.payload["status"] == "unknown"
                 first = next(iterator)
                 assert first.event_type == stream and first.payload["data"] == "first"
                 broker.insert_messages(

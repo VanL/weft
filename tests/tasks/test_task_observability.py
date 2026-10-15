@@ -34,6 +34,7 @@ from weft._constants import (
 from weft.core import process_title
 from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
+from weft.core.task_evidence import parse_task_observation, parse_task_projection
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.base import BaseTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -1096,3 +1097,64 @@ def test_every_defined_title_status_fits_the_handoff_capacity(
     }
     assert max(len(title) for title in titles.values()) == PROCESS_TITLE_MAX_LENGTH
     assert PROCESS_TITLE_MAX_LENGTH < PROCESS_TITLE_HANDOFF_LENGTH
+
+
+def test_task_state_projection_tracks_owner_edges_and_redacts_metadata(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current observation publishes lifecycle/config without poll churn [MF-5]."""
+    _db_path, make_queue = broker_env
+    monkeypatch.setenv("WEFT_REDACT_TASKSPEC_FIELDS", "metadata.secret")
+    spec = build_function_spec(
+        unique_tid, metadata={"public": "visible", "secret": "private"}
+    )
+    task = task_factory(spec)
+    queue = make_queue(task_state_queue_name(unique_tid))
+    initial = [json.loads(body) for body in drain_queue(queue)]
+    assert sum(row["projection"]["event"] == "task_initialized" for row in initial) == 1
+    task.taskspec.mark_running(pid=task._task_pid)
+    task._report_state_change("work_started")
+    row = json.loads(drain_queue(queue)[-1])
+    assert row["projection"] == {
+        "version": 1,
+        "status": "running",
+        "event": "work_started",
+        "started_at": spec.state.started_at,
+        "metadata": {"public": "visible", "secret": "[REDACTED]"},
+    }
+    assert row["observation"]["routes"]["outbox"] == f"T{unique_tid}.outbox"
+    assert parse_task_projection(row["projection"], terminal=False) == row["projection"]
+    assert parse_task_observation(row["observation"]) is not None
+    task._report_state_change("poll_report")
+    task._report_state_change("task_spawned", child_tid="child")
+    assert drain_queue(queue) == []
+    task.taskspec.mark_completed(return_code=0)
+    task._report_state_change("work_completed")
+    terminal = json.loads(drain_queue(queue)[-1])
+    assert terminal["projection"]["completed_at"] == spec.state.completed_at
+    assert terminal["projection"]["return_code"] == 0
+
+
+@pytest.mark.parametrize("message", ["", "   "], ids=["empty", "whitespace"])
+def test_empty_exception_still_publishes_valid_terminal_projection(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    message: str,
+) -> None:
+    """A real empty exception message must preserve terminal lifecycle evidence [MF-5]."""
+    _target, make_queue = broker_env
+    task = task_factory(build_function_spec(unique_tid))
+    queue = make_queue(task_state_queue_name(unique_tid))
+    drain_queue(queue)
+    task.taskspec.mark_running(pid=task._task_pid)
+    with pytest.raises(ValueError):
+        task._finalize_work_exception(ValueError(message), None)
+    row = json.loads(drain_queue(queue)[-1])
+    projection = parse_task_projection(row["projection"], terminal=True)
+    assert projection is not None
+    assert projection["status"] == "failed"
+    assert "error" not in projection

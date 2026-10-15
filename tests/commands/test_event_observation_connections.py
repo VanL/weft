@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.task_observation import write_task_observation
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import events as events_cmd
 from weft.context import WeftContext, build_context
@@ -84,6 +85,15 @@ def _seed_task(
             }
         ).model_dump(mode="json")
         log.write(json.dumps({"tid": tid, "status": status, "taskspec": payload}))
+    write_task_observation(
+        ctx,
+        {
+            "tid": tid,
+            "event": "work_completed" if status == "completed" else "work_started",
+            "status": status,
+            "taskspec": {**payload, "state": {"status": status}},
+        },
+    )
     return tid, payload
 
 
@@ -159,7 +169,7 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     )
     monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
-    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
+    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))
     assert reads == 2
     assert deltas == [(0, 0)]
     assert emitted[-2].event_type == "result"
@@ -222,6 +232,15 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
                     WEFT_GLOBAL_LOG_QUEUE,
                     json.dumps({"tid": tid, "status": "running", "taskspec": payload}),
                 )
+                write_task_observation(
+                    ctx,
+                    {
+                        "tid": tid,
+                        "event": "work_started",
+                        "status": "running",
+                        "taskspec": payload,
+                    },
+                )
                 writer.write(custom_outbox, stream_body)
                 writer.write(custom_control, terminal_body)
         return True
@@ -233,7 +252,7 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
     )
     monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
-    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid))
+    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))
     assert [
         event.payload["data"] for event in emitted if event.event_type == "stdout"
     ] == ["new route"]
@@ -247,7 +266,14 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
 
 @pytest.mark.parametrize(
     "exit_kind",
-    ["snapshot-close", "stream-close", "cancel", "wait-error", "read-error"],
+    [
+        "snapshot-close",
+        "stream-close",
+        "cancel",
+        "cancel-after-snapshot",
+        "wait-error",
+        "read-error",
+    ],
 )
 def test_realtime_early_exit_closes_owned_connections(
     observed_connections: tuple[WeftContext, list[Any], list[Queue]],
@@ -286,6 +312,12 @@ def test_realtime_early_exit_closes_owned_connections(
                 list(iterator)
         else:
             assert next(iterator).event_type == "snapshot"
+            if exit_kind == "cancel-after-snapshot":
+                with ctx.broker() as broker:
+                    broker_type = type(broker)
+                monkeypatch.setattr(broker_type, "latest_pending_timestamp", fail_read)
+                cancelled.set()
+                assert list(iterator) == []
             if exit_kind == "stream-close":
                 assert next(iterator).event_type == "stdout"
     finally:
@@ -305,8 +337,8 @@ def test_realtime_replays_startup_lifecycle_with_original_timestamps(
         timestamps = [initial_rows[0][1]]
         for status in ("running", "completed"):
             timestamps.append(log.write(json.dumps({"tid": tid, "status": status})))
-    emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
-    states = [event for event in emitted if event.event_type == "state"]
+    emitted = list(events_cmd.iter_task_events(ctx, tid, follow=False))
+    states = emitted
     assert [event.timestamp for event in states] == timestamps
     assert sum(event.payload.get("status") == "completed" for event in states) == 1
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
@@ -362,10 +394,13 @@ def test_queued_realtime_observer_does_not_expand_to_pre_tid_history(
     monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
     monkeypatch.setattr(Queue, "peek_generator", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
-    assert (
-        list(events_cmd.iter_task_realtime_events(ctx, tid, cancel_event=cancelled))
-        == []
+    emitted = list(
+        events_cmd.iter_task_realtime_events(
+            ctx, tid, timeout=10, cancel_event=cancelled
+        )
     )
+    assert [event.event_type for event in emitted] == ["snapshot"]
+    assert emitted[0].payload["status"] == "unknown"
     assert waits == 2
     assert reads == 0
 

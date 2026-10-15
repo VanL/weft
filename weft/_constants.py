@@ -49,7 +49,7 @@ from simplebroker import (
 # VERSION INFORMATION
 # ==============================================================================
 
-__version__: Final[str] = "0.9.111"
+__version__: Final[str] = "0.9.112"
 """Current version of Weft."""
 
 # ==============================================================================
@@ -1109,6 +1109,9 @@ STALE_SERVICE_OWNER_DISPOSITION_REASONS: Final[frozenset[str]] = frozenset(
     {"stale_service_owner", "superseded_service_owner"}
 )
 """Monitor disposition reasons for stale service-owner runtime cleanup."""
+
+WEFT_TASK_OBSERVATION_RETENTION_SECONDS_DEFAULT: Final[float] = 172800.0
+"""Minimum terminal task-owned observation lifetime in seconds [MF-5]."""
 
 WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT: Final[float] = 172800.0
 """Default minimum age before TaskMonitor logs/deletes task-log rows."""
@@ -2335,6 +2338,18 @@ def _parse_task_monitor_control_queue_delete_limit(value: str) -> int:
     )
 
 
+def _parse_task_observation_retention_seconds(value: str) -> float:
+    """Parse the independent terminal observation floor [MF-5]."""
+    parsed = _parse_positive_float(
+        value, name="WEFT_TASK_OBSERVATION_RETENTION_SECONDS"
+    )
+    if parsed < LIVENESS_MAPPING_MIN_AGE_SECONDS:
+        raise ValueError(
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS must be at least LIVENESS_MAPPING_MIN_AGE_SECONDS"
+        )
+    return parsed
+
+
 def _parse_log_tasks_retention_period_seconds(value: str) -> float:
     """Parse the task-log external retention period environment variable."""
 
@@ -2677,6 +2692,15 @@ WEFT_CONFIG_FIELDS: Final[Mapping[str, ConfigField]] = {
             _normalize_string_override,
             "WEFT_LOG_TASKS_EXTERNAL_MODE",
             parser=_parse_log_tasks_external_mode,
+        ),
+    ),
+    "TASK_OBSERVATION_RETENTION_SECONDS": ConfigField(
+        WEFT_TASK_OBSERVATION_RETENTION_SECONDS_DEFAULT,
+        "a finite number of seconds at least LIVENESS_MAPPING_MIN_AGE_SECONDS",
+        partial(
+            _normalize_number_or_string_override,
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS",
+            parser=_parse_task_observation_retention_seconds,
         ),
     ),
     "LOG_TASKS_RETENTION_PERIOD_SECONDS": ConfigField(

@@ -1435,6 +1435,10 @@ def task_list(
         bool,
         typer.Option("--stats", help="Summarize counts by status"),
     ] = False,
+    include_log_history: Annotated[
+        bool,
+        typer.Option("--log", help="Include retained raw task history"),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Output as JSON"),
@@ -1448,6 +1452,7 @@ def task_list(
         snapshots = commands.cmd_task_list(
             status=status_filter,
             all=include_terminal,
+            include_log_history=include_log_history,
             context=context_dir,
         )
     except commands.CommandError as exc:
@@ -2110,6 +2115,10 @@ def status_command(
         str | None,
         typer.Option("--status", help="Filter tasks by status"),
     ] = None,
+    include_log_history: Annotated[
+        bool,
+        typer.Option("--log", help="Include retained raw task history"),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit status information as JSON"),
@@ -2135,6 +2144,7 @@ def status_command(
     try:
         outcome = commands.cmd_status(
             all=all_tasks,
+            include_log_history=include_log_history,
             status=status_filter,
             watch=watch,
             interval=interval,

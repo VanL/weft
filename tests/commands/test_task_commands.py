@@ -20,7 +20,6 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import CONTROL_KILL
 from weft._exceptions import (
-    CommandExecutionError,
     CommandUsageError,
     ControlRejected,
     TaskNotFound,
@@ -46,7 +45,6 @@ from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.launcher import launch_task_process
-from weft.core.monitor.store import open_monitor_store
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
@@ -285,18 +283,21 @@ def test_canonical_task_control_rejects_mixed_explicit_and_sweep_scope(
 def test_stop_task_rejects_unknown_task_before_sending_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     sent: list[str] = []
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(task_cmd, "task_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(task_cmd, "_task_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
 
-    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+    def _record_sent(_ctx: object, tids: Sequence[str], _configs: object) -> int:
         sent.extend(tids)
         return len(tids)
 
     monkeypatch.setattr(
         task_cmd,
-        "stop_tasks",
+        "_stop_resolved_tasks",
         _record_sent,
     )
 
@@ -309,25 +310,28 @@ def test_stop_task_rejects_unknown_task_before_sending_control(
 def test_stop_task_rejects_terminal_task_without_sending_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     tid = "1777000000000000999"
     sent: list[str] = []
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: replace(
             _public_task_snapshot(tid), status="completed"
         ),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
 
-    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+    def _record_sent(_ctx: object, tids: Sequence[str], _configs: object) -> int:
         sent.extend(tids)
         return len(tids)
 
     monkeypatch.setattr(
         task_cmd,
-        "stop_tasks",
+        "_stop_resolved_tasks",
         _record_sent,
     )
 
@@ -340,25 +344,28 @@ def test_stop_task_rejects_terminal_task_without_sending_control(
 def test_kill_task_allows_terminal_known_task_to_reach_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     tid = "1777000000000000999"
     sent: list[str] = []
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: replace(
             _public_task_snapshot(tid), status="completed"
         ),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
 
-    def _record_sent(tids: Sequence[str], **_kwargs: object) -> int:
+    def _record_sent(_ctx: object, tids: Sequence[str], _configs: object) -> int:
         sent.extend(tids)
         return len(tids)
 
     monkeypatch.setattr(
         task_cmd,
-        "kill_tasks",
+        "_kill_resolved_tasks",
         _record_sent,
     )
 
@@ -370,17 +377,22 @@ def test_kill_task_allows_terminal_known_task_to_reach_cleanup(
 def test_kill_task_reports_terminal_task_without_runtime_residue_honestly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     tid = "1777000000000000999"
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: replace(
             _public_task_snapshot(tid), status="completed"
         ),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(task_cmd, "kill_tasks", lambda _tids, **_kwargs: 0)
+    monkeypatch.setattr(
+        task_cmd, "_kill_resolved_tasks", lambda _ctx, _tids, _configs: 0
+    )
 
     with pytest.raises(
         ControlRejected,
@@ -395,6 +407,9 @@ def test_single_task_control_precheck_preserves_live_context(
     weft_harness: WeftTestHarness,
     operation_name: str,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     tid = "1777000000000000999"
     observed: dict[str, object] = {}
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
@@ -402,7 +417,7 @@ def test_single_task_control_precheck_preserves_live_context(
     def fake_status(*_args: object, **kwargs: object) -> None:
         observed.update(kwargs)
 
-    monkeypatch.setattr(task_cmd, "task_status", fake_status)
+    monkeypatch.setattr(task_cmd, "_task_status", fake_status)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
 
     with pytest.raises(TaskNotFound, match="not found"):
@@ -414,17 +429,22 @@ def test_single_task_control_precheck_preserves_live_context(
 def test_terminal_completion_race_in_stop_sweep_is_reported_as_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
     tid = "1777000000000000999"
     selected = replace(_public_task_snapshot(tid), status="running")
     monkeypatch.setattr(task_cmd, "list_task_snapshots", lambda **_kwargs: [selected])
     monkeypatch.setattr(task_cmd, "resolve_full_tid", lambda *_args, **_kwargs: tid)
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *_args, **_kwargs: replace(selected, status="completed"),
     )
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(task_cmd, "stop_tasks", lambda tids, **_kwargs: len(tids))
+    monkeypatch.setattr(
+        task_cmd, "_stop_resolved_tasks", lambda _ctx, tids, _configs: len(tids)
+    )
     monkeypatch.setattr(
         task_cmd,
         "task_snapshot",
@@ -441,28 +461,6 @@ def test_terminal_completion_race_in_stop_sweep_is_reported_as_rejected(
             error_type="ControlRejected",
         ),
     )
-
-
-def test_terminal_snapshot_status_fallback_preserves_live_context(
-    monkeypatch: pytest.MonkeyPatch,
-    weft_harness: WeftTestHarness,
-) -> None:
-    tid = "1777000000000000999"
-    observed: dict[str, object] = {}
-    monkeypatch.setattr(
-        task_cmd.task_evidence,
-        "known_tid_evidence",
-        lambda *_args, **_kwargs: None,
-    )
-
-    def fake_status(*_args: object, **kwargs: object) -> None:
-        observed.update(kwargs)
-
-    monkeypatch.setattr(task_cmd, "_task_status_record", fake_status)
-
-    task_cmd.task_terminal_snapshot(tid, context=weft_harness.context)
-
-    assert observed["context"] is weft_harness.context
 
 
 def test_resolve_tid_preserves_live_context(
@@ -617,164 +615,8 @@ def test_canonical_task_tid_returns_full_tid_and_rejects_ambiguous_selection(
         task_cmd.cmd_task_tid(tid="00128", pid=12)
 
 
-class MonitorStoreReadFailure(Exception):
-    """Ordinary dynamic monitor-store failure at the status fallback boundary."""
-
-
 class MonitorStoreReadSignal(BaseException):
     """Fatal monitor-store signal that the status fallback must not contain."""
-
-
-def test_monitor_store_snapshot_reports_ordinary_dynamic_store_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ordinary store failure becomes the existing bounded unknown snapshot."""
-
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    tid = "1777000000000000789"
-
-    def fail_open(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise MonitorStoreReadFailure("store detail")
-
-    monkeypatch.setattr("weft.commands._task_history.open_monitor_store", fail_open)
-
-    snapshot = task_cmd._monitor_store_task_snapshot(
-        context,
-        tid,
-        include_terminal=True,
-    )
-
-    assert snapshot is not None
-    assert snapshot.tid == tid
-    assert snapshot.status == "unknown"
-    assert snapshot.event == "monitor_store_unavailable"
-    assert snapshot.reconciliation == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-    assert snapshot.error == "monitor store unavailable: store detail"
-
-
-def test_monitor_store_snapshot_treats_all_tables_absent_as_no_evidence(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-
-    snapshot = task_cmd._monitor_store_task_snapshot(
-        context,
-        "1777000000000000791",
-        include_terminal=True,
-    )
-
-    assert snapshot is None
-
-
-def test_monitor_store_snapshot_treats_partial_schema_as_unavailable(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    with context.broker() as broker, broker.sidecar(transaction=True) as session:
-        session.run(
-            "CREATE TABLE weft_monitor_meta ("
-            "key TEXT PRIMARY KEY, value_json TEXT NOT NULL, "
-            "updated_at_ns INTEGER NOT NULL)"
-        )
-
-    snapshot = task_cmd._monitor_store_task_snapshot(
-        context,
-        "1777000000000000792",
-        include_terminal=True,
-    )
-
-    assert snapshot is not None
-    assert snapshot.event == "monitor_store_unavailable"
-    assert snapshot.reconciliation == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-
-
-def test_monitor_store_snapshot_treats_unsupported_schema_as_unavailable(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    open_monitor_store(context).ensure_schema()
-    with context.broker() as broker, broker.sidecar(transaction=True) as session:
-        session.run(
-            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
-            ('{"version":999}', "schema_version"),
-        )
-
-    snapshot = task_cmd._monitor_store_task_snapshot(
-        context,
-        "1777000000000000793",
-        include_terminal=True,
-    )
-
-    assert snapshot is not None
-    assert snapshot.event == "monitor_store_unavailable"
-    assert snapshot.reconciliation == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-
-
-def test_monitor_store_snapshot_treats_complete_unversioned_schema_as_unavailable(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    open_monitor_store(context).ensure_schema()
-    with context.broker() as broker, broker.sidecar(transaction=True) as session:
-        session.run(
-            "DELETE FROM weft_monitor_meta WHERE key = ?",
-            ("schema_version",),
-        )
-
-    snapshot = task_cmd._monitor_store_task_snapshot(
-        context,
-        "1777000000000000794",
-        include_terminal=True,
-    )
-
-    assert snapshot is not None
-    assert snapshot.event == "monitor_store_unavailable"
-    assert snapshot.reconciliation == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-
-
-def test_monitor_store_snapshot_propagates_fatal_dynamic_store_signal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The store fallback contains ordinary failures, not BaseException signals."""
-
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    signal = MonitorStoreReadSignal()
-
-    def fail_open(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise signal
-
-    monkeypatch.setattr("weft.commands._task_history.open_monitor_store", fail_open)
-
-    with pytest.raises(MonitorStoreReadSignal) as exc_info:
-        task_cmd._monitor_store_task_snapshot(
-            context,
-            "1777000000000000790",
-            include_terminal=True,
-        )
-
-    assert exc_info.value is signal
 
 
 @pytest.mark.parametrize(
@@ -920,45 +762,43 @@ def _make_taskspec(
     )
 
 
-def _write_logged_pipeline_task(ctx: WeftContext, tid: str) -> None:
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "task_started",
-                "status": "running",
-                "tid": tid,
-                "taskspec": {
-                    "tid": tid,
-                    "name": "demo-pipeline",
-                    "spec": {
-                        "type": "function",
-                        "function_target": "weft.core.tasks.pipeline:runtime",
-                    },
-                    "io": {
-                        "outputs": {"outbox": f"P{tid}.outbox"},
-                        "control": {
-                            "ctrl_in": f"P{tid}.ctrl_in",
-                            "ctrl_out": f"P{tid}.ctrl_out",
-                        },
-                    },
-                    "state": {"status": "running"},
-                    "metadata": {
-                        "role": "pipeline",
-                        "_weft_pipeline_runtime": {
-                            "queues": {"status": f"P{tid}.status"},
-                        },
-                    },
-                },
-            }
+def _observation(tid: str) -> task_evidence.TaskObservationConfig:
+    return task_evidence.observation_config_from_taskspec(_make_taskspec(tid))
+
+
+def _write_observation(ctx: WeftContext, tid: str, *, pipeline: bool = False) -> None:
+    config = _observation(tid)
+    if pipeline:
+        config = replace(
+            config,
+            mode="pipeline",
+            outbox=f"P{tid}.outbox",
+            ctrl_in=f"P{tid}.ctrl_in",
+            ctrl_out=f"P{tid}.ctrl_out",
+            pipeline_status=f"P{tid}.status",
         )
-    )
+    with ctx.queue(task_state_queue_name(tid), persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": tid_short_form(tid),
+                    "runtime_handle": None,
+                    "observation": config.to_payload(),
+                }
+            )
+        )
+
+
+def _write_logged_pipeline_task(ctx: WeftContext, tid: str) -> None:
+    _write_observation(ctx, tid, pipeline=True)
 
 
 def test_terminal_snapshot_reads_outbox_without_consuming(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
+    _write_observation(ctx, tid)
     outbox = ctx.queue(f"T{tid}.outbox", persistent=True)
     outbox.write(json.dumps({"ok": True}))
 
@@ -1147,6 +987,7 @@ def test_task_ping_returns_probe_payload(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
+    _write_observation(ctx, tid)
     calls: list[dict[str, Any]] = []
 
     def _fake_probe(
@@ -1217,6 +1058,7 @@ def test_task_ping_reports_timeout(
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
+    _write_observation(ctx, tid)
     monkeypatch.setattr(
         task_cmd,
         "send_keyed_ping_probe",
@@ -1647,7 +1489,7 @@ def test_await_control_surface_uses_queue_monitor(
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
     )
     observed_contexts: list[object] = []
 
@@ -1670,163 +1512,12 @@ def test_await_control_surface_uses_queue_monitor(
     assert Counter(created_monitors[0].queue_names) == Counter(
         [
             task_state_queue_name(tid),
-            "weft.log.tasks",
             f"T{tid}.ctrl_out",
         ]
     )
     assert created_monitors[0].wait_calls
     assert observed_contexts
     assert all(observed is ctx for observed in observed_contexts)
-
-
-def test_await_control_surface_rebinds_late_names_and_closes_each_surface_once(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Late TaskSpec endpoints replace the watched surface without leaking it."""
-
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    initial_ctrl_out = f"T{tid}.ctrl_out"
-    late_ctrl_out = f"custom.{tid}.ctrl_out"
-    late_pipeline_status = f"custom.{tid}.pipeline.status"
-    terminal_payload = {
-        "type": "terminal",
-        "source": "task",
-        "tid": tid,
-        "status": "cancelled",
-        "timestamp": time.time_ns(),
-    }
-    seed_queue = ctx.queue(late_ctrl_out, persistent=False)
-    try:
-        seed_queue.write("{malformed")
-        seed_queue.write(json.dumps(["not", "a", "mapping"]))
-        seed_queue.write(json.dumps(terminal_payload))
-        seed_queue.write(json.dumps({"command": "STATUS", "status": "late"}))
-    finally:
-        seed_queue.close()
-
-    class _TrackedQueue:
-        def __init__(self, queue: object, *, name: str, persistent: bool) -> None:
-            self._queue = queue
-            self.name = name
-            self.persistent = persistent
-            self.close_calls = 0
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._queue, name)
-
-        def close(self) -> None:
-            self.close_calls += 1
-            self._queue.close()  # type: ignore[attr-defined]
-
-    original_queue = type(ctx).queue
-    opened_queues: list[_TrackedQueue] = []
-
-    def _tracking_queue(
-        context: object,
-        name: str,
-        *,
-        persistent: bool = False,
-    ) -> _TrackedQueue:
-        queue = original_queue(context, name, persistent=persistent)  # type: ignore[arg-type]
-        tracked = _TrackedQueue(queue, name=name, persistent=persistent)
-        opened_queues.append(tracked)
-        return tracked
-
-    initial_taskspec: dict[str, Any] = {
-        "tid": tid,
-        "io": {"control": {"ctrl_out": initial_ctrl_out}},
-    }
-    late_taskspec = {
-        "tid": tid,
-        "name": "late-surface",
-        "spec": {"runner": {"name": "host"}},
-        "io": {
-            "control": {
-                "ctrl_in": f"custom.{tid}.ctrl_in",
-                "ctrl_out": late_ctrl_out,
-            }
-        },
-        "state": {"status": "running"},
-        "metadata": {
-            "role": "pipeline",
-            "_weft_pipeline_runtime": {"queues": {"status": late_pipeline_status}},
-        },
-    }
-    taskspecs = iter([initial_taskspec, late_taskspec])
-    created_monitors: list[_FakeQueueChangeMonitor] = []
-
-    def _fake_monitor(
-        queues: Sequence[Queue], *, config: Config | None = None
-    ) -> _FakeQueueChangeMonitor:
-        monitor = _FakeQueueChangeMonitor(queues, config=config)
-        created_monitors.append(monitor)
-        return monitor
-
-    monkeypatch.setattr(type(ctx), "queue", _tracking_queue)
-    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
-    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        task_cmd,
-        "load_latest_taskspec_payload",
-        lambda *_args, **_kwargs: next(taskspecs),
-    )
-    monkeypatch.setattr(
-        task_cmd,
-        "_task_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("replacement ctrl_out terminal should finish first")
-        ),
-    )
-
-    entry, snapshot = task_cmd._await_control_surface(ctx, tid)
-
-    assert entry is None
-    assert snapshot is not None
-    assert snapshot.status == "cancelled"
-    assert snapshot.name == "late-surface"
-    assert len(created_monitors) == 2
-    assert Counter(created_monitors[0].queue_names) == Counter(
-        [task_state_queue_name(tid), "weft.log.tasks", initial_ctrl_out]
-    )
-    assert Counter(created_monitors[1].queue_names) == Counter(
-        [
-            task_state_queue_name(tid),
-            "weft.log.tasks",
-            late_ctrl_out,
-            late_pipeline_status,
-        ]
-    )
-    assert Counter(created_monitors[0].queue_persistence) == Counter(
-        [
-            (task_state_queue_name(tid), True),
-            ("weft.log.tasks", True),
-            (initial_ctrl_out, True),
-        ]
-    )
-    assert Counter(created_monitors[1].queue_persistence) == Counter(
-        [
-            (task_state_queue_name(tid), True),
-            ("weft.log.tasks", True),
-            (late_ctrl_out, True),
-            (late_pipeline_status, True),
-        ]
-    )
-    assert [monitor.close_calls for monitor in created_monitors] == [1, 1]
-    assert len(opened_queues) == 7
-    assert all(queue.close_calls == 1 for queue in opened_queues)
-
-    remaining_queue = original_queue(ctx, late_ctrl_out, persistent=False)
-    try:
-        remaining = remaining_queue.peek_many(limit=10)
-    finally:
-        remaining_queue.close()
-    assert [json.loads(str(raw)) for raw in remaining] == [
-        terminal_payload,
-        {"command": "STATUS", "status": "late"},
-    ]
 
 
 def test_await_control_surface_public_grace_outlives_expired_kill_ack(
@@ -1874,7 +1565,7 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
     )
     monkeypatch.setattr(task_cmd, "_task_status", lambda *_args, **_kwargs: None)
 
@@ -1887,89 +1578,6 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
     assert snapshot is None
     assert len(created_monitors) == 1
     assert created_monitors[0].wait_calls == [0.5, 1.0]
-
-
-def test_await_control_surface_closes_partial_replacement_on_open_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A failed surface replacement closes displaced and partial resources."""
-
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    initial_ctrl_out = f"T{tid}.ctrl_out"
-    late_ctrl_out = f"custom.{tid}.ctrl_out"
-    construction_error = RuntimeError("replacement queue construction failed")
-
-    class _TrackedQueue:
-        def __init__(self, queue: object, *, name: str) -> None:
-            self._queue = queue
-            self.name = name
-            self.close_calls = 0
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._queue, name)
-
-        def close(self) -> None:
-            self.close_calls += 1
-            if self.close_calls == 1:
-                self._queue.close()  # type: ignore[attr-defined]
-
-    original_queue = type(ctx).queue
-    opened_queues: list[_TrackedQueue] = []
-    open_calls = 0
-
-    def _tracking_queue(
-        context: object,
-        name: str,
-        *,
-        persistent: bool = False,
-    ) -> _TrackedQueue:
-        nonlocal open_calls
-        open_calls += 1
-        if open_calls == 5:
-            raise construction_error
-        queue = original_queue(context, name, persistent=persistent)  # type: ignore[arg-type]
-        tracked = _TrackedQueue(queue, name=name)
-        opened_queues.append(tracked)
-        return tracked
-
-    initial_taskspec = {
-        "tid": tid,
-        "io": {"control": {"ctrl_out": initial_ctrl_out}},
-    }
-    late_taskspec = {
-        "tid": tid,
-        "io": {"control": {"ctrl_out": late_ctrl_out}},
-    }
-    taskspecs = iter([initial_taskspec, late_taskspec])
-    created_monitors: list[_FakeQueueChangeMonitor] = []
-
-    def _fake_monitor(
-        queues: Sequence[Queue], *, config: Config | None = None
-    ) -> _FakeQueueChangeMonitor:
-        monitor = _FakeQueueChangeMonitor(queues, config=config)
-        created_monitors.append(monitor)
-        return monitor
-
-    monkeypatch.setattr(type(ctx), "queue", _tracking_queue)
-    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
-    monkeypatch.setattr(
-        task_cmd,
-        "load_latest_taskspec_payload",
-        lambda *_args, **_kwargs: next(taskspecs),
-    )
-
-    with pytest.raises(CommandExecutionError) as exc_info:
-        task_cmd._await_control_surface(ctx, tid)
-
-    assert exc_info.value.__cause__ is construction_error
-    assert open_calls == 5
-    assert len(created_monitors) == 1
-    assert created_monitors[0].close_calls == 1
-    assert len(opened_queues) == 4
-    assert all(queue.close_calls == 1 for queue in opened_queues)
 
 
 def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
@@ -1985,7 +1593,7 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        task_cmd, "load_latest_taskspec_payload", lambda *_args, **_kwargs: None
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
     )
     monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 0.001)
     monkeypatch.setattr(
@@ -2075,15 +1683,7 @@ def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        task_cmd,
-        "load_latest_taskspec_payload",
-        lambda *_args, **_kwargs: {
-            "tid": tid,
-            "name": "terminal-proof",
-            "spec": {"runner": {"name": "host"}},
-            "state": {"status": "running"},
-            "metadata": {"kind": "test"},
-        },
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
     )
     monkeypatch.setattr(
         task_cmd,
@@ -2099,8 +1699,8 @@ def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(
     assert snapshot is not None
     assert snapshot.status == "cancelled"
     assert snapshot.event == "ctrl_out_terminal"
-    assert snapshot.name == "terminal-proof"
-    assert snapshot.metadata == {"kind": "test"}
+    assert snapshot.name == tid
+    assert snapshot.metadata == {}
 
 
 def test_kill_tasks_terminates_active_process_tree(tmp_path: Path) -> None:
@@ -2136,6 +1736,7 @@ def test_stop_tasks_uses_runner_handle_when_available(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "fake",
                 "runtime_handle": _runtime_handle(
                     "fake",
@@ -2200,6 +1801,7 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "fake",
                 "runtime_handle": _runtime_handle(
                     "fake",
@@ -2263,6 +1865,7 @@ def test_kill_tasks_uses_runner_handle_when_available(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "fake",
                 "runtime_handle": _runtime_handle(
                     "fake",
@@ -2323,6 +1926,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
     mapping_payload: dict[str, object] = {
         "short": tid[-6:],
         "full": tid,
+        "observation": _observation(tid).to_payload(),
         "runner": "fake",
         "runtime_handle": runtime_handle,
         "name": "task-func",
@@ -2335,7 +1939,11 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
             return True
 
     def _running_surface(
-        _ctx: WeftContext, _tid: str, *, timeout: float = 0.0
+        _ctx: WeftContext,
+        _tid: str,
+        *,
+        timeout: float = 0.0,
+        observation_config: Any = None,
     ) -> tuple[dict[str, object], task_cmd.system_cmd.TaskSnapshot]:
         del timeout
         return mapping_payload, task_cmd.system_cmd.TaskSnapshot(
@@ -2397,7 +2005,7 @@ def test_task_stop_stops_pipeline_run(
     ctrl_queue = ctx.queue(f"P{tid}.ctrl_in", persistent=False)
     _write_logged_pipeline_task(ctx, tid)
     monkeypatch.setattr(
-        task_cmd, "_await_control_surface", lambda ctx, tid: (None, None)
+        task_cmd, "_await_control_surface", lambda ctx, tid, **kwargs: (None, None)
     )
 
     stopped = task_cmd.stop_tasks([tid], context_path=root)
@@ -2415,7 +2023,7 @@ def test_task_kill_kills_pipeline_run(
     ctrl_queue = ctx.queue(f"P{tid}.ctrl_in", persistent=False)
     _write_logged_pipeline_task(ctx, tid)
     monkeypatch.setattr(
-        task_cmd, "_await_control_surface", lambda ctx, tid: (None, None)
+        task_cmd, "_await_control_surface", lambda ctx, tid, **kwargs: (None, None)
     )
     monkeypatch.setattr(task_cmd, "_kill_via_fallback", lambda _entry: True)
 
@@ -2438,6 +2046,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "docker",
                 "runtime_handle": _runtime_handle(
                     "docker",
@@ -2513,6 +2122,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "host",
                 "runtime_handle": None,
                 "name": "task-func",
@@ -2568,6 +2178,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
             {
                 "short": tid[-6:],
                 "full": tid,
+                "observation": _observation(tid).to_payload(),
                 "runner": "macos-sandbox",
                 "runtime_handle": _runtime_handle(
                     "macos-sandbox",

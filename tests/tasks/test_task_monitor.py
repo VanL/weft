@@ -5175,9 +5175,9 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
         task.stop()
 
     assert ctrl_in.stats().total == 0
-    assert ctrl_out.stats().total == 0
+    assert ctrl_out.stats().total == 1
     assert list(inbox.peek_generator()) == []
-    assert list(outbox.peek_generator()) == []
+    assert list(outbox.peek_generator()) == ["result"]
     assert list(reserved.peek_generator()) == []
 
 
@@ -6317,11 +6317,11 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     assert cleanup.dead_tid_rows_estimated_deleted == 2
 
 
-def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup(
+def test_task_monitor_terminal_mapping_holds_completion_but_allows_control_cleanup(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A terminal mapping row is not live proof for a record-less family."""
+    """Terminal row presence retains completion without holding immediate control."""
 
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -6355,7 +6355,7 @@ def test_task_monitor_recordless_terminal_mapping_does_not_block_control_cleanup
             cleanup = worker._run_dead_task_cleanup_slice(store, now_ns=time.time_ns())
 
             assert ctrl_in.stats().total == 0
-            assert ctrl_out.stats().total == 0
+            assert ctrl_out.stats().total == 1
             assert cleanup.dead_tids_processed == 1
     finally:
         task.stop()
@@ -6681,7 +6681,7 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
         task.stop()
 
     assert ctrl_in.stats().total == 0
-    assert ctrl_out.stats().total == 1
+    assert ctrl_out.stats().total == 0
     retained_task_rows = [
         json.loads(body)
         for body, _message_id in iter_queue_entries(log_queue)
@@ -7579,8 +7579,14 @@ def test_stale_service_owner_disposes_only_after_retention_window(
             def outside_family_converged() -> bool:
                 return (
                     outside_ctrl_in.stats().total == 0
-                    and outside_ctrl_out.stats().total == 0
-                    and store.get_task(outside_tid) is None
+                    and outside_ctrl_out.stats().total == 1
+                    and (
+                        (record := store.get_task(outside_tid)) is None
+                        or (
+                            record.disposition_at_ns is not None
+                            and record.task_control_deleted_at_ns is not None
+                        )
+                    )
                 )
 
             drive_task_monitor_until(task, outside_family_converged)
@@ -7593,7 +7599,7 @@ def test_stale_service_owner_disposes_only_after_retention_window(
         task.stop()
 
     assert outside_ctrl_in.stats().total == 0
-    assert outside_ctrl_out.stats().total == 0
+    assert outside_ctrl_out.stats().total == 1
     assert inside_ctrl_in.stats().total == 1
     assert inside_ctrl_out.stats().total == 1
     lines = external_path.read_text(encoding="utf-8").splitlines()
@@ -7620,10 +7626,7 @@ def test_stale_service_owner_disposes_only_after_retention_window(
         cleanup_report["lifetime"]["close_reason"]
         in STALE_SERVICE_OWNER_DISPOSITION_REASONS
     )
-    assert cleanup_report["observations"]["queue_names"] == [
-        f"T{outside_tid}.ctrl_in",
-        f"T{outside_tid}.ctrl_out",
-    ]
+    assert cleanup_report["observations"]["queue_names"] == [f"T{outside_tid}.ctrl_in"]
     inside_reports = [
         json.loads(line)
         for line in lines
@@ -8726,9 +8729,11 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
     assert ctrl_in.stats().total == 0
 
 
+@pytest.mark.parametrize("acquisition_seconds", [0.0, 5.0])
 def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
+    acquisition_seconds: float,
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -8739,14 +8744,8 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
         1.0,
     )
-    monotonic_calls = 0
-
-    def fake_monotonic() -> float:
-        nonlocal monotonic_calls
-        monotonic_calls += 1
-        return 0.0 if monotonic_calls <= 3 else 2.0
-
-    monkeypatch.setattr(task_monitor_mod, "_monitor_monotonic", fake_monotonic)
+    clock = [0.0]
+    monkeypatch.setattr(task_monitor_mod, "_monitor_monotonic", lambda: clock[0])
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -8789,6 +8788,23 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         make_queue(f"T{tid}.ctrl_in").write(f"stop-{tid}")
         make_queue(f"T{tid}.ctrl_out").write(f"pong-{tid}")
 
+    with make_queue(f"T{tids[0]}.ctrl_in").get_connection() as broker:
+        broker_type = type(broker)
+    original_delete = broker_type.delete_from_queues
+
+    def delete_with_elapsed_time(
+        broker: Any,
+        names: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        deleted = original_delete(broker, names, *args, **kwargs)
+        if any(name.startswith(f"T{tids[0]}.") for name in names):
+            clock[0] += 2.0
+        return deleted
+
+    monkeypatch.setattr(broker_type, "delete_from_queues", delete_with_elapsed_time)
+
     task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999961771"),
@@ -8806,6 +8822,14 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
             for tid in tids:
                 store.mark_summary_emitted(tid, int(tid) + 1)
 
+            original_names = worker._queue_name_snapshot
+
+            def acquire_names(*args: Any, **kwargs: Any) -> set[str]:
+                names = original_names(*args, **kwargs)
+                clock[0] += acquisition_seconds
+                return names
+
+            monkeypatch.setattr(worker, "_queue_name_snapshot", acquire_names)
             cleanup = worker._run_terminal_control_cleanup_slice(
                 store,
                 now_ns=time.time_ns(),
@@ -12387,18 +12411,7 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Terminal proof outranks an undecidable mapping row at delete time.
-
-    A family with terminal task-log proof must still get its runtime
-    queues cleaned even when its newest ``weft.state.tasks.<tid>`` row is
-    undecidable (non-host handle): the tid-mapping policy never deletes
-    undecidable newest rows, so treating them as protection against
-    terminal cleanup would block control-queue cleanup for every
-    external-runner task forever. The undecidable-means-live standard
-    applies only to destruction without terminal proof.
-
-    Spec: [OBS.13.4], [OBS.13.7]
-    """
+    """A nonterminal undecidable owner still protects its whole queue family."""
 
     db_path, make_queue = broker_env
     monkeypatch.setattr(
@@ -12463,10 +12476,10 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
 
             record = store.get_task(tid)
             assert record is not None
-            assert record.task_control_deleted_at_ns is not None
-            assert ctrl_in.stats().total == 0
-            assert ctrl_out.stats().total == 0
-            assert list(inbox.peek_generator()) == []
+            assert record.task_control_deleted_at_ns is None
+            assert ctrl_in.stats().total == 1
+            assert ctrl_out.stats().total == 1
+            assert list(inbox.peek_generator()) == ["input"]
     finally:
         task.stop()
         _drain_queue(mappings)
@@ -12658,7 +12671,7 @@ def test_task_monitor_bare_delete_preserves_ambiguous_data_queues(
                 store=store,
                 existing_queue_names={f"T{tid}.{suffix}" for suffix in queues},
                 active_tids=set(),
-                now_ns=int(tid) + 10_000_000_000,
+                now_ns=int(tid) + 200_000_000_000_000,
             )
 
             assert result.success
@@ -12757,7 +12770,7 @@ def test_task_monitor_jsonl_salvages_before_ambiguous_family_delete(
                 store=store,
                 existing_queue_names={f"T{tid}.{suffix}" for suffix in queues},
                 active_tids=set(),
-                now_ns=int(tid) + 10_000_000_000,
+                now_ns=int(tid) + 200_000_000_000_000,
             )
 
             assert result.success
@@ -12869,13 +12882,21 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
                 for row in mapping_rows
             )
 
-            drive_task_monitor_until(
-                monitor,
-                lambda: all(
-                    queue.stats().total == 0
-                    for queue in (inbox, reserved, outbox, ctrl_in, ctrl_out)
-                ),
-            )
+            def terminal_cleanup_progressed() -> bool:
+                record = store.get_task(tid)
+                return all(
+                    queue.stats().total == 0 for queue in (inbox, reserved, ctrl_in)
+                ) and (
+                    record is None
+                    or (
+                        record.terminal_seen
+                        and record.task_control_deleted_at_ns is not None
+                    )
+                )
+
+            drive_task_monitor_until(monitor, terminal_cleanup_progressed)
+            assert outbox.stats().total == 1
+            assert ctrl_out.stats().total >= 1
             record = store.get_task(tid)
             assert record is None or (
                 record.terminal_seen and record.task_control_deleted_at_ns is not None
@@ -13063,5 +13084,262 @@ def test_task_monitor_protection_reads_only_candidate_state(
                 worker._nonterminal_mapping_row_tids(task._monitor_context(), set())
                 == set()
             )
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    ("source", "claimed"), [("task", False), ("task", True), ("manager", False)]
+)
+def test_recordless_cleanup_uses_only_task_terminal_anchor(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    claimed: bool,
+) -> None:
+    """Fresh task completion renews standard results; supervisor-only evidence does not."""
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438860"
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_out.write(
+        json.dumps(
+            {
+                "type": "terminal",
+                "tid": tid,
+                "source": source,
+                "status": "completed",
+            }
+        )
+    )
+    if claimed:
+        assert ctrl_out.read_one() is not None
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999860"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            worker._run_dead_task_cleanup_slice(store, now_ns=time.time_ns())
+            assert ctrl_out.stats().total == (1 if source == "task" else 0)
+    finally:
+        task.stop()
+
+
+def test_recordless_cleanup_reaches_ready_family_after_held_prefix(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded sweep visits later work and completes a deferred-only full pass."""
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    base_tid = 1778084345905438860
+    for offset in range(5):
+        tid = str(base_tid + offset)
+        make_queue(f"T{tid}.ctrl_out").write("pong")
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": True})
+        )
+    ready = make_queue(f"T{base_tid + 5}.ctrl_in")
+    ready.write("stop")
+    config = _stale_open_test_config()
+    config["TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT"] = 2
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999999860"), config=config
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            for _ in range(3):
+                result = worker._run_dead_task_cleanup_slice(
+                    store, now_ns=time.time_ns()
+                )
+            assert ready.stats().total == 0
+            assert not result.pending
+            for _ in range(3):
+                result = worker._run_dead_task_cleanup_slice(
+                    store, now_ns=time.time_ns()
+                )
+            assert not result.pending
+            assert not result.family_limit_hit
+            assert not result.policy_progress[-1].waypoint_reached
+    finally:
+        task.stop()
+        for offset in range(5):
+            _drain_queue(make_queue(task_state_queue_name(str(base_tid + offset))))
+
+
+@pytest.mark.parametrize("terminal", [True, False])
+def test_snapshot_protection_does_not_starve_later_cleanup(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminal: bool,
+) -> None:
+    """A retained result does not pin its record ahead of later ready cleanup."""
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    base_tid = 1778084345905438860
+    held_tids = tuple(str(base_tid + offset) for offset in range(3))
+    held_tid, ready_tid = held_tids[0], str(base_tid + 3)
+    open_tids = tuple(str(base_tid - 10 + offset) for offset in range(3))
+    residue_tid = open_tids[-1]
+    report_path = tmp_path / "runtime-cleanup.jsonl"
+    config = _jsonl_lifecycle_config(report_path)
+    config["TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT"] = 1
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999999860"), config=config
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            for tid in (*held_tids, ready_tid):
+                for suffix in ("ctrl_in", "ctrl_out"):
+                    make_queue(f"T{tid}.{suffix}").write("control")
+            make_queue(f"T{residue_tid}.ctrl_out").write("retained residue")
+            for tid in (*open_tids, *held_tids, ready_tid):
+                status = "running" if tid in open_tids else "completed"
+                event = "work_started" if tid in open_tids else "work_completed"
+                update = update_from_task_log_payload(
+                    {
+                        "tid": tid,
+                        "event": event,
+                        "status": status,
+                        "taskspec": {
+                            "tid": tid,
+                            "version": "1.0",
+                            "name": "worker",
+                            "state": {"status": status},
+                            "metadata": {},
+                            "io": {
+                                "control": {
+                                    "ctrl_in": f"T{tid}.ctrl_in",
+                                    "ctrl_out": f"T{tid}.ctrl_out",
+                                }
+                            },
+                        },
+                    },
+                    message_id=int(tid),
+                )
+                assert update is not None
+                store.record_task_log_updates(
+                    WEFT_GLOBAL_LOG_QUEUE, (update,), checkpoint_message_id=None
+                )
+                store.mark_summary_emitted(tid, int(tid), suspect_reason=None)
+                if tid in open_tids:
+                    store.mark_family_disposed(
+                        tid, int(tid), disposition_reason="stale_open"
+                    )
+                    store.mark_task_control_deleted(tid, int(tid))
+            for owner in held_tids:
+                make_queue(task_state_queue_name(owner)).write(
+                    json.dumps(
+                        {
+                            "full": owner,
+                            "short": tid_short_form(owner),
+                            "terminal": terminal,
+                        }
+                    )
+                )
+            now_ns = base_tid + 200_000_000_000_000
+
+            def run_slice() -> Any:
+                # Each production invocation owns fresh scan budgets. Carry only
+                # detached hints through the real reactor diagnostics handoff.
+                with _maintenance_for(task) as invocation:
+                    current_store = invocation._ensure_monitor_store()
+                    assert current_store is not None
+                    result = invocation._run_terminal_control_cleanup_slice(
+                        current_store, now_ns=now_ns
+                    )
+                    task._apply_maintenance_diagnostics(
+                        invocation.capture_diagnostics()
+                    )
+                    return result
+
+            for _ in range(len(open_tids) + 1):
+                run_slice()
+            assert make_queue(f"T{residue_tid}.ctrl_out").stats().total == 0
+            held = store.get_task(held_tid)
+            assert held is not None
+            assert (held.task_control_deleted_at_ns is not None) is terminal
+            assert make_queue(f"T{held_tid}.ctrl_in").stats().total == (
+                0 if terminal else 1
+            )
+            assert make_queue(f"T{held_tid}.ctrl_out").stats().total == 1
+            for _ in range(len(held_tids)):
+                result = run_slice()
+            assert make_queue(f"T{ready_tid}.ctrl_out").stats().total == 0
+            assert not result.family_limit_hit
+            for _ in range(len(open_tids) + len(held_tids)):
+                result = run_slice()
+            assert not result.family_limit_hit
+            assert not result.policy_progress[-1].waypoint_reached
+            reports = [
+                json.loads(line) for line in report_path.read_text().splitlines()
+            ]
+            held_reports = [
+                report for report in reports if report["subject"]["tid"] in held_tids
+            ]
+            assert bool(held_reports) is terminal
+            assert not any(
+                report["subject"]["tid"] in open_tids[:-1] for report in reports
+            )
+            empty_record = store.get_task(open_tids[0])
+            assert empty_record is not None
+            assert empty_record.task_control_deleted_at_ns == int(open_tids[0])
+    finally:
+        task.stop()
+        _drain_queue(make_queue(task_state_queue_name(held_tid)))
+
+
+def test_cleanup_rechecks_completion_published_after_selection(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate selected before completion cannot delete its fresh envelope."""
+    db_path, make_queue = broker_env
+    monkeypatch.setattr(
+        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
+    )
+    tid = "1778084345905438860"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999860"),
+        config=_stale_open_test_config(),
+    )
+    ctrl_in, ctrl_out = make_queue(f"T{tid}.ctrl_in"), make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    try:
+        with _maintenance_for(task) as worker:
+            # These were the selected queues before the task published completion.
+            selected = (ctrl_in.name, ctrl_out.name)
+            ctrl_out.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "tid": tid,
+                        "source": "task",
+                        "status": "completed",
+                    }
+                )
+            )
+            with worker._connection() as broker:
+                worker._delete_covered_control_rows(
+                    broker, selected, tid=tid, record=None
+                )
+            assert ctrl_in.stats().total == 0
+            assert ctrl_out.stats().total == 1
     finally:
         task.stop()

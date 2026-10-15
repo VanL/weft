@@ -147,6 +147,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_public_extension_contracts.py",
         "tests/core/test_queue_wait.py",
         "tests/core/test_task_history_reader.py",
+        "tests/core/test_task_observation.py",
         "tests/core/test_runner_diagnostics.py",
         "tests/core/test_runner_plugins.py",
         "tests/core/test_runner_validation.py",

@@ -16,17 +16,18 @@ from typing import Any, cast
 
 from weft._constants import QUEUE_OUTBOX_SUFFIX, WEFT_STREAMING_SESSIONS_QUEUE
 from weft._exceptions import (
-    CommandError,
     CommandExecutionError,
     CommandUsageError,
     InvalidTID,
     TaskNotFound,
+    WeftError,
 )
 from weft.commands.types import CommandStream, TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
 from weft.core import task_evidence
 from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
+from weft.helpers.message_ids import is_task_tid
 
 from ._boundary import typed_command_errors
 from ._result_wait import (
@@ -77,12 +78,13 @@ def _iter_task_result(
     docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
     normalized = _normalize_tid(tid)
+    if not is_task_tid(normalized) and timeout is None:
+        raise TaskNotFound(f"task {normalized} not found")
     deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
     if _accepted_taskspec is not None:
         materialized = _accepted_result_materialization(_accepted_taskspec)
     else:
-        outbox, control = task_evidence.queue_names_for_tid(normalized, None)
-        materialized = ResultMaterialization(None, outbox, control)
+        materialized = ResultMaterialization(None)
     yield from _iter_consuming_result(
         context,
         normalized,
@@ -92,7 +94,6 @@ def _iter_task_result(
         show_stderr=show_stderr,
         emit_stream=emit_stream,
         include_stream_events=include_stream_events,
-        discover_history=_accepted_taskspec is None,
         follow_lifecycle=_follow_lifecycle,
     )
 
@@ -357,7 +358,7 @@ def cmd_result(
             emit_stream=False,
         )
     except Exception as exc:
-        if isinstance(exc, CommandError):
+        if isinstance(exc, WeftError):
             raise
         raise CommandExecutionError(f"failed to collect task result: {exc}") from exc
     return _require_available_result(result)

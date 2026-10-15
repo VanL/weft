@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft._exceptions import CommandTimeoutError
 from weft.commands import _result_wait as result_wait
@@ -22,6 +23,7 @@ from weft.commands import events as events_cmd
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext, build_context
 from weft.core.task_evidence import WRAPPER_LOST_ERROR
+from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared]
 
@@ -68,6 +70,7 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
         queue.write(json.dumps(payload))
     finally:
         queue.close()
+    write_task_observation(ctx, payload)
 
 
 def _write_queue(ctx: Any, name: str, payload: Any, *, persistent: bool) -> None:
@@ -133,9 +136,6 @@ def _started_iterator(
     first = next(iterator)
     assert first.event_type == "snapshot"
     assert first.payload["status"] == "running"
-    running = next(iterator)
-    assert running.event_type == "state"
-    assert running.payload["status"] == "running"
     return iterator
 
 
@@ -520,18 +520,34 @@ def test_realtime_refreshes_late_metadata_before_final_output(
     # with no TaskSpec. The caller then publishes while observation is suspended,
     # independently of whether the reactor ever enters its blocking wait.
     _write_log(ctx, {"tid": tid, "event": "task_created", "status": "created"})
+    with ctx.queue(f"weft.state.tasks.{tid}") as state:
+        state.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": tid_short_form(tid),
+                    "terminal": False,
+                    "projection": {
+                        "version": 1,
+                        "status": "created",
+                        "event": "task_created",
+                        "started_at": None,
+                        "metadata": {},
+                    },
+                }
+            )
+        )
     events: list[TaskEvent] = []
     iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=0.5)
     try:
         initial = next(iterator)
-        assert initial.event_type == "state"
+        assert initial.event_type == "snapshot"
         assert initial.payload["status"] == "created"
         events.append(initial)
         publish()
         if persistent:
             with pytest.raises(CommandTimeoutError):
                 events.extend(iterator)
-            assert any(event.payload.get("status") == "running" for event in events)
         else:
             events.extend(iterator)
     finally:
@@ -566,87 +582,35 @@ def test_realtime_unknown_metadata_requires_explicit_terminal_evidence(
             persistent=True,
         )
     events = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
-    if terminal_source is None:
-        assert not any(event.payload.get("status") == "completed" for event in events)
-        assert not any(event.event_type in {"result", "end"} for event in events)
-    else:
-        assert events[-1].event_type == "end"
-        assert events[-1].payload["status"] == "completed"
+    assert events and events[0].event_type == "snapshot"
+    assert events[0].payload["status"] == (
+        "completed" if terminal_source == "control" else "unknown"
+    )
+    assert not any(event.event_type in {"result", "end"} for event in events)
     assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 1
 
 
-@pytest.mark.parametrize("changed_route", ["outbox", "control"])
-def test_realtime_route_refresh_preserves_unchanged_queue_cursor(
-    tmp_path: Path, changed_route: str
-) -> None:
-    """Replay discovered queues, without replaying the route already observed."""
+def test_bound_realtime_routes_survive_metadata_retirement(tmp_path: Path) -> None:
+    """Once bound, an observer keeps its immutable routes after snapshot expiry."""
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
-    tid = str(time.time_ns())
-    default_outbox, default_control = f"T{tid}.outbox", f"T{tid}.ctrl_out"
-    _write_queue(
-        ctx,
-        default_outbox,
-        {"type": "stream", "stream": "stdout", "data": "old-out"},
-        persistent=True,
-    )
-    _write_queue(
-        ctx,
-        default_control,
-        {"type": "stream", "stream": "stderr", "data": "old-err"},
-        persistent=True,
-    )
-    iterator = events_cmd.iter_task_realtime_events(ctx, tid, timeout=5)
+    tid, _spec = _running_task(ctx)
+    iterator = _started_iterator(ctx, tid, timeout=5)
     try:
-        assert next(iterator).payload["data"] == "old-out"
-        assert next(iterator).payload["data"] == "old-err"
-        spec = _taskspec_payload(tid)
-        new_route = f"audit.{tid}.{changed_route}"
-        if changed_route == "outbox":
-            spec["io"]["outputs"]["outbox"] = new_route
-            # Old outbox stream evidence must not suppress the new one-shot value.
-            _write_queue(ctx, new_route, {"final": "new-out"}, persistent=True)
-        else:
-            spec["io"]["control"]["ctrl_out"] = new_route
-            _write_queue(
-                ctx,
-                new_route,
-                {"type": "stream", "stream": "stderr", "data": "new-err"},
-                persistent=True,
-            )
-            _write_queue(
-                ctx,
-                new_route,
-                {
-                    "type": "terminal",
-                    "source": "task",
-                    "tid": tid,
-                    "status": "completed",
-                },
-                persistent=True,
-            )
-        _write_log(
+        with ctx.queue(f"weft.state.tasks.{tid}") as state:
+            for _raw, stamp in list(state.peek_generator(with_timestamps=True)):
+                state.delete(message_id=stamp)
+        _write_queue(ctx, f"T{tid}.outbox", {"final": "retained"}, persistent=True)
+        _write_queue(
             ctx,
-            {
-                "tid": tid,
-                "event": "work_started",
-                "status": "running",
-                "taskspec": spec,
-            },
+            f"T{tid}.ctrl_out",
+            {"type": "terminal", "source": "task", "tid": tid, "status": "completed"},
+            persistent=True,
         )
         remaining = list(iterator)
-        streams = [
-            event.payload["data"]
-            for event in remaining
-            if event.event_type in {"stdout", "stderr"}
-        ]
-        assert streams == ([] if changed_route == "outbox" else ["new-err"])
         assert remaining[-1].event_type == "end"
-        assert remaining[-1].payload["status"] == "completed"
-        result = next(event for event in remaining if event.event_type == "result")
-        if changed_route == "outbox":
-            assert result.payload["value"] == {"final": "new-out"}
-        assert len(_peek_all(ctx, default_outbox, persistent=True)) == 1
-        assert len(_peek_all(ctx, default_control, persistent=True)) == 1
+        assert next(
+            event for event in remaining if event.event_type == "result"
+        ).payload["value"] == {"final": "retained"}
     finally:
         close = getattr(iterator, "close", None)
         assert callable(close)

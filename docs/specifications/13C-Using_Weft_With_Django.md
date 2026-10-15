@@ -731,6 +731,12 @@ The integration should also expose:
 - `weft_django.stop(tid)`
 - `weft_django.kill(tid)`
 
+The boolean stop/kill wrappers return false for unresolved routes and other
+existing rejected/missing-task inputs. They translate `CommandExecutionError`
+alongside `ControlRejected`, `TaskNotFound`, and invalid-value errors; management
+commands translate failure to `CommandError`. No control write may use guessed
+routes when observation metadata is unavailable ([MF-5]).
+
 `task` may be:
 
 - a decorated task object
@@ -758,12 +764,11 @@ Known-TID status rule:
 - `weft_django.status(tid)` is a direct known-TID reconciliation helper. It
   uses Weft's non-consuming terminal snapshot API and must not replay the
   global task log from the beginning for a full TID.
-- known-TID terminal snapshots may include task-evidence classification
-  metadata such as `terminal_log`, `terminal_ctrl_out`, `wrapper_lost`,
-  `result_without_terminal`, `terminal_monitor_store`, `live`, or `unknown`.
-  `terminal_monitor_store` means Weft used terminal Monitor-store collation
-  after raw task-log retirement; it is read-only and has no acknowledgement
-  target
+- known-TID terminal snapshots expose task-owned evidence such as
+  `terminal_ctrl_out`, `wrapper_lost`, `terminal_projection`,
+  `result_without_terminal`, `live`, or `unknown`. Ordinary reads never query
+  Monitor tables or implicit raw history. A valid TID whose observation evidence
+  is unavailable or expired yields unknown, rather than proof of nonexistence.
 - `weft_django.status(tid)` returns an object with `.status`, but it does not
   promise the full diagnostic `TaskSnapshot` field set.
 - callers that need diagnostic fields such as `name`, `metadata`, `runtime`,
@@ -774,8 +779,8 @@ Known-TID status rule:
 
 Implementation plan backlinks:
 
-- `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
-- `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
+- retired: 2026-04-30-known-tid-terminal-snapshot-api-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-task-evidence-reconciliation-model-plan — source 396c3b85; see docs/plans/README.md
 
 ### Submission Overrides [DJ-8.4]
 
@@ -893,7 +898,7 @@ Behavior:
   bounded broker ensure
 
 Implementation plan backlink:
-[Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md).
+`2026-09-17-manager-discovery-and-durable-submission-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Request lifecycle ownership is specified by the
 [client-owned submission session reuse plan](../plans/2026-09-25-client-owned-submission-session-plan.md).
@@ -934,8 +939,8 @@ stable Weft Python client rather than a second result backend.
 
 Handle semantics:
 
-- `status()` returns the current public status string, or `None` when no
-  snapshot is visible yet
+- `status()` returns the current public status string. A valid TID without
+  usable observation evidence returns `unknown`; it does not prove absence.
 - `snapshot()` returns the full diagnostic Weft `TaskSnapshot | None`
 - `terminal_snapshot()` returns the compact non-consuming known-TID terminal
   snapshot used by reconciliation code
@@ -997,6 +1002,11 @@ V1 endpoints:
   - returns current task snapshot and available result metadata
 - `GET /weft/tasks/<tid>/events/`
   - returns a realtime stream
+
+A syntactically valid TID with unavailable or expired observation evidence
+returns HTTP 200 with unknown status in detail and realtime snapshots. A
+syntactically invalid TID remains HTTP 404. This follows the core [MF-5]
+observation contract and does not imply the task exists or has failed.
 
 The URLs are convenience views over the Python client. They are not a second
 source of truth and should not have their own persistence.
@@ -1542,17 +1552,17 @@ Once the package is split into a sibling repo:
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
-- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
+- retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)
-- [Django override normalization seam plan](../plans/2026-09-08-django-override-normalization-seam-plan.md)
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-12-public-api-surface-remediation — source 396c3b85; see docs/plans/README.md
+- retired: 2026-09-08-django-override-normalization-seam-plan — source 396c3b85; see docs/plans/README.md
 - Terminal status Monitor-store plan:
-  [../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
+  `2026-06-20-weft-django-terminal-status-monitor-store-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - Client follow hardening plan:
-  [../plans/2026-04-21-client-follow-hardening-plan.md](../plans/2026-04-21-client-follow-hardening-plan.md)
+  `2026-04-21-client-follow-hardening-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - Client and Django hardening plan:
-  [../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md](../plans/2026-04-21-weft-client-and-django-first-class-hardening-plan.md)
+  `2026-04-21-weft-client-and-django-first-class-hardening-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - Core higher-level integration guidance:
   [13B-Using_Weft_In_Higher_Level_Systems.md](13B-Using_Weft_In_Higher_Level_Systems.md)
 - Current agent runtime contract:
@@ -1563,3 +1573,5 @@ Once the package is split into a sibling repo:
   [04-SimpleBroker_Integration.md](04-SimpleBroker_Integration.md)
 - Current CLI contract:
   [10-CLI_Interface.md](10-CLI_Interface.md)
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

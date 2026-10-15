@@ -23,20 +23,17 @@ from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_task_interactive import make_interactive_spec
 from weft._constants import (
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
-    WEFT_GLOBAL_LOG_QUEUE,
     WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 from weft._exceptions import CommandExecutionError
 from weft.cli import app as cli_app
 from weft.cli import run as cli_run
-from weft.commands import _task_history
-from weft.commands import events as event_commands
+from weft.commands import _result_wait
 from weft.commands import run as run_commands
 from weft.commands import tasks as task_commands
 from weft.commands.run import _LiveRunSession, _stop_interactive_run_session
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext
-from weft.core import task_evidence
 from weft.core.control_messages import parse_control_request
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.tasks import Consumer
@@ -181,7 +178,7 @@ class _IdleOutputFaultProbe:
         self.closed_on: list[tuple[str, int]] = []
         self.original_wait = QueueChangeMonitor.wait
         self.original_wake = QueueChangeMonitor.wake
-        self.original_history = task_evidence.read_task_history
+        self.original_observation = _result_wait._acquire_result_observation
         self.original_close = Queue.close
         self.original_join = threading.Thread.join
 
@@ -200,8 +197,7 @@ class _IdleOutputFaultProbe:
             "join",
             lambda thread, timeout=None: self.join(thread, timeout),
         )
-        for owner in (task_evidence, _task_history, event_commands):
-            monkeypatch.setattr(owner, "read_task_history", self.history)
+        monkeypatch.setattr(_result_wait, "_acquire_result_observation", self.observe)
 
     def wait(self, monitor: QueueChangeMonitor, timeout: float | None) -> bool:
         if threading.get_ident() != self.main_thread:
@@ -212,10 +208,10 @@ class _IdleOutputFaultProbe:
             self.idle.set()
         return self.original_wait(monitor, timeout)
 
-    def history(self, *args: Any, **kwargs: Any) -> Any:
+    def observe(self, *args: Any, **kwargs: Any) -> Any:
         if self.cancelled.is_set() and threading.get_ident() != self.main_thread:
-            self.post_cancel_reads.append("history")
-        return self.original_history(*args, **kwargs)
+            self.post_cancel_reads.append("observation")
+        return self.original_observation(*args, **kwargs)
 
     def wake(self, monitor: QueueChangeMonitor) -> None:
         if (
@@ -332,7 +328,8 @@ def test_active_cli_stop_failure_cancels_idle_output_before_join(
         )
         assert not probe.post_cancel_reads
         assert any(
-            name == WEFT_GLOBAL_LOG_QUEUE and owner != probe.main_thread
+            name == f"{WEFT_TASK_STATE_QUEUE_PREFIX}{session.tid}"
+            and owner != probe.main_thread
             for name, owner in probe.closed_on
         )
         assert thread_exception_guard == []

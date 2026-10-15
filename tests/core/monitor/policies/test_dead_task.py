@@ -79,6 +79,7 @@ def test_dead_task_queue_cleanup_plan_keeps_retention_queues_until_old() -> None
         tid,
         now_ns=now_ns,
         retention_seconds=60.0,
+        observation_retention_seconds=60.0,
     )
 
     assert plan.queue_names == (
@@ -98,6 +99,7 @@ def test_dead_task_queue_cleanup_plan_includes_retention_queues_when_old() -> No
         tid,
         now_ns=now_ns,
         retention_seconds=60.0,
+        observation_retention_seconds=60.0,
     )
 
     assert plan.queue_names == (
@@ -110,3 +112,31 @@ def test_dead_task_queue_cleanup_plan_includes_retention_queues_when_old() -> No
     assert plan.outbox_queue_names == (f"T{tid}.outbox",)
     assert plan.reserved_queue_names == (f"T{tid}.reserved",)
     assert plan.retention_eligible is True
+
+
+@pytest.mark.parametrize(
+    ("reserved_age", "anchor_age", "snapshot_hold", "reserved_expected"),
+    [(60.0, 10, False, True), (300.0, 10, False, False), (60.0, 180, True, True)],
+)
+def test_dead_task_completion_clock_is_independent_of_reserved(
+    reserved_age: float,
+    anchor_age: int,
+    snapshot_hold: bool,
+    reserved_expected: bool,
+) -> None:
+    """Fresh terminal evidence protects results of an old task, not reserved work."""
+    tid = "1778084345905438801"
+    now_ns = int(tid) + 200_000_000_000
+    plan = dead_task_queue_cleanup_plan(
+        tid,
+        now_ns=now_ns,
+        retention_seconds=reserved_age,
+        observation_retention_seconds=120.0,
+        terminal_message_id=now_ns - anchor_age * 1_000_000_000,
+        snapshot_hold=snapshot_hold,
+    )
+    assert plan.control_queue_names == (f"T{tid}.ctrl_in",)
+    assert plan.outbox_queue_names == ()
+    assert plan.reserved_queue_names == (
+        (f"T{tid}.reserved",) if reserved_expected else ()
+    )

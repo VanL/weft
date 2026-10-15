@@ -47,8 +47,8 @@ CLI constraints remain unchanged:
 
 ## Related Plans
 
-- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
-- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- retired: 2026-04-13-result-stream-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-runtime-endpoint-registry-boundary-plan — source 396c3b85; see docs/plans/README.md
 
 ## Backlinks [10A-3]
 

@@ -12,6 +12,7 @@ from typing import Any, Self
 from django.db import transaction
 
 from weft.client import (
+    CommandExecutionError,
     ControlRejected,
     PreparedSubmission,
     Task,
@@ -774,7 +775,7 @@ def result(tid: str, timeout: float | None = None) -> TaskResult:
 def stop(tid: str) -> bool:
     try:
         _current_client().stop(tid)
-    except (ControlRejected, TaskNotFound, ValueError):
+    except (CommandExecutionError, ControlRejected, TaskNotFound, ValueError):
         return False
     return True
 
@@ -782,6 +783,6 @@ def stop(tid: str) -> bool:
 def kill(tid: str) -> bool:
     try:
         _current_client().kill(tid)
-    except (ControlRejected, TaskNotFound, ValueError):
+    except (CommandExecutionError, ControlRejected, TaskNotFound, ValueError):
         return False
     return True

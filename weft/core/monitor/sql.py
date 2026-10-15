@@ -715,6 +715,8 @@ def select_summary_ready_terminal_tasks(
 def select_terminal_control_cleanup_ready_tasks(
     collations_table: str,
     columns: Sequence[str],
+    *,
+    after: bool = False,
 ) -> str:
     """Build a query for retained task-local runtime-queue cleanup.
 
@@ -736,6 +738,7 @@ def select_terminal_control_cleanup_ready_tasks(
             (terminal_seen = 1 AND last_message_id <= ?)
             OR disposition_at_ns IS NOT NULL
           )
+          {"AND (last_message_id > ? OR (last_message_id = ? AND tid > ?))" if after else ""}
         ORDER BY last_message_id, tid
         LIMIT ?
         """
@@ -744,12 +747,15 @@ def select_terminal_control_cleanup_ready_tasks(
 def select_retained_open_control_cleanup_candidates(
     collations_table: str,
     columns: Sequence[str],
+    *,
+    after: bool = False,
 ) -> str:
     """Select disposed open families with an existing control-cleanup mark.
 
     A prior ``ctrl_in``-only cleanup pass sets ``task_control_deleted_at_ns``
-    while preserving ``T{tid}.ctrl_out`` until retention cutoff; the caller
-    filters these candidates against live ``T{tid}.ctrl_out`` occupancy.
+    while preserving ``T{tid}.ctrl_out`` until retention cutoff. Merge these
+    raw candidates in keyset order before limiting; the worker checks its
+    queue-name inventory and advances over empty families without a new mark.
     Spec: [MF-5], [OBS.13.13]
     """
 
@@ -761,6 +767,7 @@ def select_retained_open_control_cleanup_candidates(
           AND task_control_deleted_at_ns IS NOT NULL
           AND terminal_seen = 0
           AND disposition_at_ns IS NOT NULL
+          {"AND (last_message_id > ? OR (last_message_id = ? AND tid > ?))" if after else ""}
         ORDER BY last_message_id, tid
         LIMIT ?
         """

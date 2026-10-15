@@ -28,9 +28,9 @@ See also:
 - current CLI-to-code ownership map:
   [`11-CLI_Architecture_Crosswalk.md`](11-CLI_Architecture_Crosswalk.md)
 - implementation plan:
-  [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+  `2026-04-16-runtime-endpoint-registry-boundary-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - related service-health convergence plan:
-  [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
+  `2026-05-09-service-liveness-and-health-convergence-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 
 ## Design Principles [CLI-0.1]
 
@@ -319,7 +319,7 @@ observation callback when teardown cancels output.
 `weft/cli/run.py::consume_run_session` owns driving, waiting, and session cleanup.
 `tests/commands/test_active_interactive_lifecycle.py` covers the active CLI
 owner, cancellation, EOF, and keyed STOP settlement.
-Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
 
@@ -360,7 +360,7 @@ Foreground manager operational JSONL formats only its owned broker-ID fields
 TIDs, and all other diagnostic fields retain their current types.
 
 Plan backlink:
-[`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
+`2026-05-13-manager-replace-start-serve-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Detached manager bootstrap for `weft run` and `weft manager start` remains a
 separate contract from `manager serve`: it starts the canonical manager through
@@ -398,6 +398,23 @@ sections below.
 
 ### `status` - Show project status [CLI-1.2.1]
 
+Status/list/stats default to current nonterminal snapshots. `--all` includes
+retained terminal snapshots. `--log` explicitly unions retained raw history and
+implies historical inclusion; `--log --watch` is a usage error. Bulk reads use
+no per-task control/outbox peeks or active PING and may lag local completion or
+`wrapper_lost` after failed final publication. Known-TID reads still honor local
+terminal precedence. Ordinary reads never query Monitor tables. Without timeout,
+unresolved result metadata returns unknown / `observation_metadata_unavailable`
+(exit 1); finite timeout waits to the caller deadline then uses observation
+timeout (exit 124). Unresolved control routes fail before writing (exit 1).
+Expired metadata never authorizes guessed routes. Event streams expose retained/
+live raw events without a lossless-history guarantee. See [MF-5].
+
+`WEFT_TASK_OBSERVATION_RETENTION_SECONDS` defaults to 172800 seconds, accepts
+finite values at least 2400, and governs newest validated terminal projections
+and standard terminal completion/output. Raw-log and reserved clocks are
+separate. The setting is a minimum, not exact expiry or an audit guarantee.
+
 _Implementation mapping_: `weft/commands/system.py` owns status collection and
 the explicit task/manager/service JSON projections and `cmd_status()`;
 `weft/cli/app.py` registers `weft status` and reuses the shared task projection
@@ -423,15 +440,14 @@ Current behavior:
   task-log replay, including `runtime_conflict`, `stale_status_payload`,
   `stale_liveness`, superseded manager/internal-service, and runtime-missing
   reconciliations, retains a task-log row ID and uses [SB-0.2].
-  `terminal_monitor_store` retains a Monitor relational message ID and also
-  uses [SB-0.2]. A timestamp sourced from
+  Task-state projection timestamps retain broker row IDs and use [SB-0.2]. A timestamp sourced from
   `claimed_result_without_terminal`, `stale_created`, a pipeline-status body,
   or a terminal control-envelope body (`ctrl_out_terminal`) is a Unix clock
   and stays a JSON number
 - the same task projection is used by project status, `task list --json`, and
   `task status --json`; public Python snapshots retain integer values
-- uses task-log replay plus manager/task registry queues rather than a separate
-  state database
+- uses task-owned projections plus manager/service registry queues; explicit
+  `--log` adds retained raw task-log history
 - JSON status output includes an additive top-level `services` list. Each
   service row reports the service key, display name, desired/enabled flags,
   status, winning evidence source, and optional TID, manager TID, queue, PID,
@@ -484,13 +500,13 @@ global log once for a global view.
 
 Implementation plan backlinks:
 
-- `docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`
-- `docs/plans/2026-04-30-known-tid-terminal-snapshot-api-plan.md`
-- `docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`
-- `docs/plans/2026-05-06-terminal-publication-hardening-plan.md`
-- `docs/plans/2026-05-07-extended-ping-pong-state-probe-plan.md`
-- `docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`
-- `docs/plans/2026-05-11-internal-service-observability-plan.md`
+- retired: 2026-05-06-status-coherence-and-stale-pid-liveness-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-30-known-tid-terminal-snapshot-api-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-task-evidence-reconciliation-model-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-terminal-publication-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-extended-ping-pong-state-probe-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-11-internal-service-observability-plan — source 396c3b85; see docs/plans/README.md
 
 ### `result` - Read task output [CLI-1.2.2]
 
@@ -547,20 +563,9 @@ Current behavior:
   with lifecycle evidence, when a typed terminal `ctrl_out` envelope proves
   terminal state, or when one-shot outbox evidence is visible without terminal
   task-log publication
-- If raw task-log evidence has retired and the Monitor store cannot be read,
-  `weft task status TID` reports a degraded `unknown` snapshot with
-  `reconciliation.classification="monitor_store_unavailable"` instead of
-  treating the task as not found. A successful Monitor store read that returns
-  no row still means not found.
-- Compact known-TID terminal snapshot helpers use the same terminal
-  Monitor-store fallback after raw task-log retirement. This fallback is
-  read-only and has no acknowledgement target. Nonterminal Monitor-store rows
-  are not returned as live/running terminal snapshots.
-- A completely uninitialized Monitor store supplies no fallback task evidence.
-  A partially present, unsupported, unreadable, or failed store produces the
-  existing degraded `monitor_store_unavailable` snapshot. The distinction uses
-  an explicit store result or exception type, never backend exception prose,
-  and performs no schema mutation.
+- Ordinary known-TID status reads task-owned snapshots and local completion;
+  it never queries Monitor storage or implicit raw history. Missing usable
+  observation evidence yields unknown diagnostics, not proof of nonexistence.
 - Plain task-status output must contain the required facts. Exact line order,
   punctuation, spacing, and label spelling are presentation details unless
   explicitly enumerated here. JSON names and semantic values remain exact.
@@ -590,7 +595,7 @@ all IDs before writing any control message. Derive shorts from suffixes using
 A full-ID lookup goes directly to that task's state queue. Names alone grant
 neither control authorization nor runtime/lifecycle evidence.
 
-Implementation plans: [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md), [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md).
+Implementation plans: `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`), `2026-08-31-short-tid-derivation-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 _Implementation mapping_: `weft/helpers/__init__.py::tid_short_form` owns
 short-form derivation; `weft/core/task_state.py` owns namespace discovery and
@@ -679,9 +684,9 @@ Pattern-based task stop/kill reuse queue broadcast and control messages rather
 than inventing a second control channel.
 
 Implementation plan backlink:
-[`2026-05-10-control-and-service-convergence-state-machine-plan.md`](../plans/2026-05-10-control-and-service-convergence-state-machine-plan.md).
-[`2026-05-13-manager-replace-start-serve-plan.md`](../plans/2026-05-13-manager-replace-start-serve-plan.md).
-[`2026-05-14-manager-list-diagnostics-plan.md`](../plans/2026-05-14-manager-list-diagnostics-plan.md).
+`2026-05-10-control-and-service-convergence-state-machine-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
+`2026-05-13-manager-replace-start-serve-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
+`2026-05-14-manager-list-diagnostics-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ## Spec Management (`weft spec …`) [CLI-1.4]
 
@@ -876,7 +881,7 @@ letters, digits, dot, dash, and underscore; an explicitly empty database name
 is invalid even when selecting another backend. Omit an irrelevant SQLite name
 when configuring PostgreSQL.
 
-Related plan: [SimpleBroker 8.2 configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
+Related plan: `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 TaskMonitor cleanup behavior is configured through the same `load_config()` and
 `build_context()` path as other Weft settings. `WEFT_TASK_MONITOR_MODE` selects
@@ -951,7 +956,7 @@ Current manager-serve operational-log configuration:
   lifecycle logging, or task-monitor foreground command output.
 
 Related plan:
-- `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
+- retired: 2026-04-16-configurable-weft-directory-name-plan — source 396c3b85; see docs/plans/README.md
 
 ## System Maintenance (`weft system …`) [CLI-6]
 
@@ -1074,8 +1079,8 @@ Current behavior:
   writes begin
 
 Implementation plan backlink:
-[`2026-05-07-runtime-state-pruning-plan.md`](../plans/2026-05-07-runtime-state-pruning-plan.md).
-[`2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md).
+`2026-05-07-runtime-state-pruning-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
+`2026-08-29-liveness-reaper-and-custody-split-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ## Scope Boundary
 
@@ -1092,52 +1097,52 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
-- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
+- retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
-- [`SimpleBroker 8.0 Upgrade Plan`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
-- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
-- [SimpleBroker 7.3 dump watermark plan](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
-- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
-- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
-- [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
-- [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
-- [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
-- [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
-- [`docs/plans/2026-05-06-task-evidence-reconciliation-model-plan.md`](../plans/2026-05-06-task-evidence-reconciliation-model-plan.md)
-- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
-- [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
-- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
-- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
-- [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
-- [`docs/plans/2026-04-14-spawn-request-reconciliation-plan.md`](../plans/2026-04-14-spawn-request-reconciliation-plan.md)
-- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
-- [`docs/plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md`](../plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
-- [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
-- [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
-- [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)
-- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
-- [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
-- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
-- [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
-- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
-- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
-- [`docs/plans/2026-05-11-manager-serve-operational-log-plan.md`](../plans/2026-05-11-manager-serve-operational-log-plan.md)
-- [`docs/plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md`](../plans/2026-05-13-manager-liveness-and-leadership-robustness-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
-- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
+- retired: 2026-08-28-simplebroker-8-upgrade-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-13-simplebroker-7-3-dump-watermark-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-simplebroker-7-json-message-id-boundary-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-interactive-session-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-result-observation-and-control-transition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-31-simplebroker-6-api-migration-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-validation-capability-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-20-weft-django-terminal-status-monitor-store-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-11-simplebroker-dump-load-adoption-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-mode-and-rotating-log-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-lifecycle-reconciliation-architecture-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-status-coherence-and-stale-pid-liveness-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-task-evidence-reconciliation-model-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-terminal-publication-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-lifecycle-monitor-archive-sink-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-09-prune-path-unification-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-config-precedence-and-parsing-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-spawn-request-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-result-stream-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-delegated-agent-authority-boundary-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-builtin-taskspecs-and-spec-resolution-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-builtin-contract-and-doc-drift-reduction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-system-builtins-command-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-13-early-env-file-bootstrap-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-run-input-adapter-and-declared-args-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-aware-run-help-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-autostart-hardening-and-contract-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-pipeline-autostart-extension-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-11-manager-serve-operational-log-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-13-manager-liveness-and-leadership-robustness-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-external-log-health-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
@@ -1147,4 +1152,6 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`12-Pipeline_Composition_and_UX.md`](12-Pipeline_Composition_and_UX.md)
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
 
-Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) removes legacy tuple adapters, keeps typed command owners, and restores owned-ID JSON projection and claimed-result reconciliation in the live CLI adapter.
+Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) removes legacy tuple adapters, keeps typed command owners, and restores owned-ID JSON projection and claimed-result reconciliation in the live CLI adapter.
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

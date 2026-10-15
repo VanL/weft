@@ -15,10 +15,12 @@ import pytest
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import CONTROL_KILL, CONTROL_STOP, WEFT_GLOBAL_LOG_QUEUE
 from weft._exceptions import CommandExecutionError
 from weft.client import WeftClient
+from weft.commands import _result_wait
 from weft.commands import queue as queue_cmd
 from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
@@ -72,6 +74,15 @@ def test_client_observer_failure_is_typed_and_closes_owned_resources(
                 }
             )
         )
+    write_task_observation(
+        context,
+        {
+            "tid": tid,
+            "event": "work_started",
+            "status": "running",
+            "taskspec": taskspec.model_dump(mode="json"),
+        },
+    )
     watched_name = "observer-error.values"
     with context.queue(watched_name) as writer:
         writer.write("first value")
@@ -80,7 +91,8 @@ def test_client_observer_failure_is_typed_and_closes_owned_resources(
     observed_queues: list[Queue] = []
     owned_queues: list[Queue] = []
     closed_queue_ids: set[int] = set()
-    monitor_closed: list[bool] = []
+    monitor_closed: set[object] = set()
+    monitor_opened: list[object] = []
     real_close = Queue.close
     real_queue = WeftContext.queue
 
@@ -106,17 +118,28 @@ def test_client_observer_failure_is_typed_and_closes_owned_resources(
             observed_queues.extend(queues)
             if failure_at == "construction":
                 raise fault
+            self.queues = tuple(queues)
+            monitor_opened.append(self)
 
         def wait(self, timeout: float | None) -> bool:
             del timeout
             raise fault
 
         def close(self) -> None:
-            monitor_closed.append(True)
+            # A rebound scope may share queue loans, but its waiter must still
+            # release before any queue it observes is closed.
+            assert all(id(queue) not in closed_queue_ids for queue in self.queues)
+            monitor_closed.add(self)
 
     monkeypatch.setattr(Queue, "close", close_queue)
     monkeypatch.setattr(WeftContext, "queue", create_queue)
-    owner = queue_cmd if surface == "queue" else task_cmd
+    owner = (
+        queue_cmd
+        if surface == "queue"
+        else _result_wait
+        if surface == "status"
+        else task_cmd
+    )
     monkeypatch.setattr(owner, "QueueChangeMonitor", FailingMonitor)
 
     with WeftClient(context=context) as client:
@@ -140,7 +163,7 @@ def test_client_observer_failure_is_typed_and_closes_owned_resources(
                 assert caught.value.__cause__ is fault
                 assert observed_queues
                 assert all(id(queue) in closed_queue_ids for queue in owned_queues)
-                assert monitor_closed == ([True] if failure_at == "wait" else [])
+                assert monitor_closed == set(monitor_opened)
             finally:
                 close = getattr(stream, "close", None)
                 assert callable(close)
@@ -152,7 +175,7 @@ def test_client_observer_failure_is_typed_and_closes_owned_resources(
             assert caught.value.__cause__ is fault
             assert observed_queues
             assert all(id(queue) in closed_queue_ids for queue in owned_queues)
-            assert monitor_closed == ([True] if failure_at == "wait" else [])
+            assert monitor_closed == set(monitor_opened)
             # The failed observation follows a committed command. It cannot
             # be reported as a rejected/missing task or erase that custody.
             with context.queue(f"T{tid}.ctrl_in") as control:

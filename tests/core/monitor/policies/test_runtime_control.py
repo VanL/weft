@@ -7,7 +7,6 @@ import pytest
 from weft._constants import TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS
 from weft.core.monitor.policies.runtime_control import (
     runtime_dead_task_record_probe_tids,
-    select_runtime_dead_task_cleanup_candidates,
     stale_service_owner_runtime_queue_cleanup_plan,
     standard_task_control_queue_names,
     terminal_task_runtime_queue_cleanup_plan,
@@ -254,36 +253,6 @@ def test_stale_service_owner_cleanup_plan_rejects_nonstandard_controls() -> None
     )
 
 
-def test_dead_task_selection_treats_deferred_outbox_only_as_base_for_now() -> None:
-    now_ns = 1_778_100_000_000_000_000
-    base_tid = now_ns - int(
-        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
-    )
-    queue_names = tuple(f"T{base_tid - offset}.outbox" for offset in range(25))
-
-    def fail_task_record(tid: str) -> MonitorTaskCollationRecord | None:
-        raise AssertionError(f"deferred-only TID should not be probed: {tid}")
-
-    def fail_deadline() -> bool:
-        raise AssertionError("deferred-only work should not consult deadline")
-
-    selection = select_runtime_dead_task_cleanup_candidates(
-        queue_names,
-        now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
-        retention_seconds=172800.0,
-        limit=1,
-        active_tids=set(),
-        task_record=fail_task_record,
-        deadline_reached=fail_deadline,
-    )
-
-    assert selection.tids == ()
-    assert selection.deferred_retention == len(queue_names)
-    assert selection.pending is False
-    assert selection.deadline_hit is False
-
-
 def test_dead_task_record_probe_tids_ignores_retention_deferred_only_queues() -> None:
     now_ns = 1_778_100_000_000_000_000
     deferred_tid = str(
@@ -302,61 +271,8 @@ def test_dead_task_record_probe_tids_ignores_retention_deferred_only_queues() ->
         now_ns=now_ns,
         min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
+        observation_retention_seconds=172800.0,
         active_tids=set(),
     )
 
     assert probe_tids == (actionable_tid,)
-
-
-def test_dead_task_selection_preserves_actionable_limit_waypoint() -> None:
-    now_ns = 1_778_100_000_000_000_000
-    base_tid = now_ns - int(
-        (TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 60.0) * 1e9
-    )
-    queue_names = tuple(f"T{base_tid - offset}.ctrl_in" for offset in range(3))
-
-    selection = select_runtime_dead_task_cleanup_candidates(
-        queue_names,
-        now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
-        retention_seconds=172800.0,
-        limit=1,
-        active_tids=set(),
-        task_record=lambda _tid: None,
-        deadline_reached=lambda: False,
-    )
-
-    assert selection.tids == (str(base_tid - 2),)
-    assert selection.pending is True
-    assert selection.deferred_retention == 0
-
-
-def test_dead_task_selection_skips_preserved_data_only_families_before_limit() -> None:
-    """Ambiguous data-only families cannot starve later control cleanup."""
-
-    now_ns = 1_778_100_000_000_000_000
-    base_tid = now_ns - int(200_000.0 * 1e9)
-    preserved_tids = tuple(str(base_tid + offset) for offset in range(3))
-    actionable_tid = str(base_tid + 10)
-    queue_names = (
-        *(f"T{tid}.inbox" for tid in preserved_tids),
-        *(f"T{tid}.reserved" for tid in preserved_tids),
-        *(f"T{tid}.outbox" for tid in preserved_tids),
-        f"T{actionable_tid}.ctrl_in",
-    )
-
-    selection = select_runtime_dead_task_cleanup_candidates(
-        queue_names,
-        now_ns=now_ns,
-        min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
-        retention_seconds=172800.0,
-        limit=1,
-        active_tids=set(),
-        task_record=lambda _tid: None,
-        deadline_reached=lambda: False,
-        preserve_data_without_terminal_proof=True,
-    )
-
-    assert selection.tids == (actionable_tid,)
-    assert selection.deferred_retention == len(preserved_tids)
-    assert selection.pending is False

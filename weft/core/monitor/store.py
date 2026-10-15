@@ -50,7 +50,6 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     INTERNAL_SERVICE_ROLES,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
-    QUEUE_CTRL_OUT_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
@@ -1979,6 +1978,7 @@ class _MonitorTableAccess:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        after: tuple[int, str] | None = None,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
         """Return retained terminal families ready for control cleanup.
 
@@ -2001,8 +2001,14 @@ class _MonitorTableAccess:
             monitor_sql.select_terminal_control_cleanup_ready_tasks(
                 self._tables.task_collations,
                 _task_columns,
+                after=after is not None,
             ),
-            (self._context_key, cutoff_ns, int(limit)),
+            (
+                self._context_key,
+                cutoff_ns,
+                *((after[0], after[0], after[1]) if after is not None else ()),
+                int(limit),
+            ),
             fetch=True,
         )
         return tuple(_record_from_row(row) for row in rows)
@@ -2011,6 +2017,7 @@ class _MonitorTableAccess:
         self,
         *,
         limit: int,
+        after: tuple[int, str] | None = None,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
         """Return disposed open families with an existing control-cleanup mark."""
 
@@ -2020,8 +2027,13 @@ class _MonitorTableAccess:
             monitor_sql.select_retained_open_control_cleanup_candidates(
                 self._tables.task_collations,
                 _task_columns,
+                after=after is not None,
             ),
-            (self._context_key, int(limit)),
+            (
+                self._context_key,
+                *((after[0], after[0], after[1]) if after is not None else ()),
+                int(limit),
+            ),
             fetch=True,
         )
         return tuple(_record_from_row(row) for row in rows)
@@ -2855,63 +2867,35 @@ class MonitorStore:
         limit: int,
         now_ns: int,
         retention_seconds: float,
-        deadline_monotonic: float | None = None,
+        after: tuple[int, str] | None = None,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return cleanup candidates within the family and broker-probe budgets.
+        """Merge bounded SQL candidate streams before applying the family limit.
 
-        A deadline bounds work between broker calls, not an individual call.
+        Empty retained-open families stay in this ordered traversal so a
+        continuation cannot skip older, unexamined residue. The cleanup owner
+        applies queue-presence checks and its slice deadline.
         Spec: [MF-5], [OBS.13.13]
         """
-
         if limit <= 0:
             return ()
         with self._sidecar_session() as session:
             access = self._access(session)
-            ready = list(
-                access.list_terminal_control_cleanup_ready_tasks(
-                    limit=limit,
-                    now_ns=now_ns,
-                    retention_seconds=retention_seconds,
-                )
+            ready = access.list_terminal_control_cleanup_ready_tasks(
+                limit=limit,
+                now_ns=now_ns,
+                retention_seconds=retention_seconds,
+                after=after,
             )
-            retained_open = (
-                access.list_retained_open_control_cleanup_candidates(
-                    limit=int(limit),
-                )
-                if len(ready) < limit
-                else ()
+            retained_open = access.list_retained_open_control_cleanup_candidates(
+                limit=limit,
+                after=after,
             )
-        if retained_open and (
-            deadline_monotonic is None or time.monotonic() < deadline_monotonic
-        ):
-            ready_tids = {record.tid for record in ready}
-            connection = (
-                self._queue.get_connection()
-                if self._queue is not None
-                else self._context.broker()
-            )
-            with connection as broker:
-                for record in retained_open:
-                    if (
-                        deadline_monotonic is not None
-                        and time.monotonic() >= deadline_monotonic
-                    ):
-                        break
-                    if (
-                        record.tid in ready_tids
-                        or record.service_classification().is_service_record
-                    ):
-                        continue
-                    stat = broker.get_queue_stat(
-                        f"T{record.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-                    )
-                    if stat is not None and stat.total > 0:
-                        ready.append(record)
-                        ready_tids.add(record.tid)
-                        if len(ready) >= limit:
-                            break
-            ready.sort(key=lambda item: (item.last_message_id, item.tid))
-        return tuple(ready[: int(limit)])
+        return tuple(
+            sorted(
+                (*ready, *retained_open),
+                key=lambda record: (record.last_message_id, record.tid),
+            )[:limit]
+        )
 
     def list_stale_service_owner_candidates(
         self,

@@ -218,16 +218,16 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
-- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
-- [`docs/plans/2026-07-29-task-snapshot-reducer-plan.md`](../plans/2026-07-29-task-snapshot-reducer-plan.md)
-- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
-- [`docs/plans/2026-07-29-validation-capability-layering-plan.md`](../plans/2026-07-29-validation-capability-layering-plan.md)
-- [`docs/plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md`](../plans/2026-06-20-weft-django-terminal-status-monitor-store-plan.md)
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-result-observation-and-control-transition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-deduplication-and-test-integrity-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-task-snapshot-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-validation-capability-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-20-weft-django-terminal-status-monitor-store-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 

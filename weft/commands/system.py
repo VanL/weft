@@ -15,7 +15,6 @@ import json
 import os
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -84,15 +83,14 @@ from ._resources import command_resource_scope
 from ._task_snapshot_reducer import (
     CollectedTaskSnapshot,
     FoldedTaskRecord,
-    RuntimeObservation,
     SnapshotEvidence,
-    SnapshotProbePlan,
     TaskSnapshot,
     order_task_snapshots,
     plan_snapshot_probes,
     prepare_snapshot,
     reduce_task_event,
     reduce_task_snapshot,
+    reduce_task_state_snapshot,
     runner_name_for_snapshot,
     service_key_from_taskspec,
 )
@@ -158,70 +156,8 @@ class _ServiceEvidence:
     reconciliation: dict[str, Any] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _InternalServiceOwnerEvidenceIndex:
-    """Latest service-registry evidence keyed for status reconciliation."""
-
-    by_key: dict[str, tuple[_ServiceEvidence, ...]]
-    by_owner: dict[tuple[str, str], _ServiceEvidence]
-
-    @classmethod
-    def from_evidence(
-        cls,
-        evidence: Sequence[_ServiceEvidence],
-    ) -> _InternalServiceOwnerEvidenceIndex:
-        by_key_lists: dict[str, list[_ServiceEvidence]] = {}
-        by_owner: dict[tuple[str, str], _ServiceEvidence] = {}
-        for item in evidence:
-            by_key_lists.setdefault(item.key, []).append(item)
-            if item.tid is not None:
-                by_owner[(item.key, item.tid)] = item
-        return cls(
-            by_key={
-                key: tuple(sorted(items, key=_service_evidence_sort_key))
-                for key, items in by_key_lists.items()
-            },
-            by_owner=by_owner,
-        )
-
-    def live_owner_for_key(self, service_key: str) -> _ServiceEvidence | None:
-        """Return the best live owner evidence for one internal service key."""
-
-        candidates = [
-            item
-            for item in self.by_key.get(service_key, ())
-            if item.status in {"running", "launched"}
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=_service_evidence_sort_key)
-
-    def owner_evidence(
-        self,
-        service_key: str,
-        owner_tid: str,
-    ) -> _ServiceEvidence | None:
-        """Return service-registry evidence for one service owner TID."""
-
-        return self.by_owner.get((service_key, owner_tid))
-
-
 def _service_evidence_sort_key(candidate: _ServiceEvidence) -> tuple[int, int, str]:
     return (candidate.rank, candidate.updated_at or 0, candidate.tid or "")
-
-
-def _service_owner_tid_is_newer(
-    *,
-    owner_tid: str | None,
-    candidate_tid: str,
-) -> bool:
-    """Return whether service-owner evidence comes from a newer task TID."""
-
-    if not isinstance(owner_tid, str) or not owner_tid.isdigit():
-        return False
-    if not candidate_tid.isdigit():
-        return False
-    return int(owner_tid) > int(candidate_tid)
 
 
 def _resolve_context(
@@ -277,7 +213,7 @@ def _latest_tid_state_entries(
     ctx: WeftContext, tids: Iterable[str] | None = None, *, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     return {
-        full: payload
+        full: {**payload, "timestamp": _message_id}
         for full, (_message_id, payload) in latest_task_state_rows(
             ctx, tids=tids, broker=broker
         ).items()
@@ -362,20 +298,6 @@ def _runtime_handle_from_mapping(entry: Mapping[str, Any]) -> RunnerHandle | Non
         return RunnerHandle.from_dict(payload)
     except ValueError:
         return None
-
-
-def _merge_runtime_entry(
-    mapping_entry: Mapping[str, Any] | None,
-    event_payload: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    """Combine runtime metadata from the mapping queue and the log payload."""
-
-    merged: dict[str, Any] = {}
-    if isinstance(event_payload, Mapping):
-        merged.update(event_payload)
-    if mapping_entry is not None:
-        merged.update(mapping_entry)
-    return merged or None
 
 
 def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
@@ -540,7 +462,7 @@ def _service_observation_is_stale(*, updated_at: int | None, now_ns: int) -> boo
     return now_ns - updated_at > stale_after_ns
 
 
-def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] exception
+def _stale_liveness_reason(
     status: str,
     *,
     tid: str,
@@ -549,10 +471,6 @@ def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] excep
     runtime_description: Mapping[str, Any] | None,
     last_timestamp: int,
     now_ns: int,
-    has_live_manager_record: bool = False,
-    internal_service: bool = False,
-    internal_service_key: str | None = None,
-    service_owner_index: _InternalServiceOwnerEvidenceIndex | None = None,
 ) -> str | None:
     """Return why nonterminal liveness evidence needs read-model reconciliation."""
 
@@ -562,7 +480,6 @@ def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] excep
     host_task_pid = _task_process_id(mapping_entry)
     stale_without_runtime = (
         status in {"spawning", "running"}
-        and not has_live_manager_record
         and host_task_pid is None
         and runtime_description is None
         and last_timestamp > 0
@@ -572,45 +489,6 @@ def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] excep
 
     if status in TERMINAL_TASK_STATUSES:
         return None
-    if internal_service and status in {"spawning", "running"}:
-        host_runtime_absent = host_task_pid is None and runtime_description is None
-        host_runtime_not_live = (
-            host_task_pid is not None
-            and not _task_process_alive(mapping_entry)
-            and not _runtime_description_is_live(runtime_description)
-        )
-        runtime_proof_missing = stale_without_runtime or host_runtime_not_live
-        if internal_service_key is None:
-            return None
-        live_owner = (
-            service_owner_index.live_owner_for_key(internal_service_key)
-            if service_owner_index is not None
-            else None
-        )
-        if (
-            live_owner is not None
-            and live_owner.tid != tid
-            and _service_owner_tid_is_newer(
-                owner_tid=live_owner.tid,
-                candidate_tid=tid,
-            )
-            and (host_runtime_absent or host_runtime_not_live)
-        ):
-            return "superseded_internal_service_record"
-        if not runtime_proof_missing:
-            return None
-        same_owner = (
-            service_owner_index.owner_evidence(internal_service_key, tid)
-            if service_owner_index is not None
-            else None
-        )
-        if same_owner is not None and same_owner.status in {"running", "launched"}:
-            return None
-        if live_owner is not None and live_owner.tid != tid:
-            return "superseded_internal_service_record"
-        if host_runtime_not_live and not stale_without_runtime:
-            return "host_process_not_live"
-        return "internal_service_runtime_missing_after_stale_window"
     if (
         status in {"spawning", "running"}
         and (not normalized_runner or normalized_runner == "host")
@@ -627,110 +505,55 @@ def _stale_liveness_reason(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-117] excep
     return None
 
 
-def _collect_snapshot_evidence(
-    ctx: WeftContext,
-    record: FoldedTaskRecord,
+def _merge_raw_task_history(
+    current: dict[str, CollectedTaskSnapshot],
     *,
-    mapping_entry: Mapping[str, Any] | None,
-    selected_active_manager_tid: str | None,
-    service_owner_index: _InternalServiceOwnerEvidenceIndex,
+    broker: Any,
+    since_timestamp: int | None,
+    tid_filters: set[str] | None,
     now_ns: int,
-    broker: Any | None = None,
-    accepted_taskspec_payload: dict[str, Any] | None = None,
-) -> tuple[SnapshotProbePlan, SnapshotEvidence]:
-    """Acquire only the runtime and queue observations requested by policy."""
-
-    taskspec = record.taskspec_payload
-    if taskspec is None:
-        raise ValueError("snapshot evidence requires a TaskSpec-bearing record")
-    routing_taskspec = (
-        accepted_taskspec_payload if accepted_taskspec_payload is not None else taskspec
-    )
-    runtime_entry = _merge_runtime_entry(mapping_entry, record.event_payload)
-    runtime_handle = _runtime_handle_from_mapping(runtime_entry or {})
-    runner = runner_name_for_snapshot(
-        taskspec=taskspec,
-        mapping_entry=runtime_entry,
-    )
-    runtime_description = task_evidence.describe_runtime(runtime_handle)
-
-    local_evidence: task_evidence.TaskEvidenceSnapshot | None = None
-    if record.status not in TERMINAL_TASK_STATUSES:
-        local_evidence = task_evidence.task_local_terminal_evidence(
-            ctx,
-            tid=record.tid,
-            taskspec_payload=routing_taskspec,
-            broker=broker,
+) -> None:
+    """Union explicit retained history, without per-task runtime acquisition [MF-5]."""
+    records: dict[str, FoldedTaskRecord] = {}
+    for payload, timestamp in _iter_log_events(
+        None, since_timestamp=since_timestamp, broker=broker
+    ):
+        tid = payload.get("tid")
+        if not isinstance(tid, str):
+            continue
+        reduced = reduce_task_event(
+            records.get(tid), payload, timestamp, tid_filters=tid_filters
         )
-    draft = prepare_snapshot(record, local_evidence=local_evidence)
-
-    stale_liveness_reason = None
-    active_service_tid = None
-    if local_evidence is None or not local_evidence.terminal:
-        internal_service_key = _service_key_from_taskspec_payload(taskspec)
-        internal_service = (
-            internal_service_key is not None
-            or _is_internal_service_record({"metadata": record.metadata})
-        )
-        stale_liveness_reason = _stale_liveness_reason(
-            record.status,
-            tid=record.tid,
-            runner_name=runner,
-            mapping_entry=runtime_entry,
-            runtime_description=runtime_description,
-            last_timestamp=record.last_timestamp,
+        if reduced is not None:
+            records[tid] = reduced
+    for tid, record in records.items():
+        if record.taskspec_payload is None:
+            continue
+        existing = current.get(tid)
+        if (
+            record.status not in TERMINAL_TASK_STATUSES
+            and existing is not None
+            and existing.snapshot.reconciliation is None
+        ):
+            continue
+        reduced_snapshot = reduce_task_snapshot(
+            plan_snapshot_probes(
+                prepare_snapshot(record, local_evidence=None),
+                stale_liveness_reason=None,
+            ),
+            SnapshotEvidence(
+                resolved_runtime_entry=None,
+                runtime_handle=None,
+                runtime_description=None,
+                runtime_observation=None,
+                claimed_outbox=None,
+                active_service_tid=None,
+                selected_active_manager_tid=None,
+            ),
             now_ns=now_ns,
-            has_live_manager_record=record.tid == selected_active_manager_tid,
-            internal_service=internal_service,
-            internal_service_key=internal_service_key,
-            service_owner_index=service_owner_index,
         )
-        active_service = (
-            service_owner_index.live_owner_for_key(internal_service_key)
-            if internal_service_key is not None
-            else None
-        )
-        active_service_tid = active_service.tid if active_service is not None else None
-    probe_plan = plan_snapshot_probes(
-        draft,
-        stale_liveness_reason=stale_liveness_reason,
-    )
-
-    runtime_observation = None
-    if probe_plan.acquire_runtime_observation:
-        live, source, strength = _runtime_evidence_details(
-            handle=runtime_handle,
-            runtime_description=runtime_description,
-        )
-        runtime_observation = RuntimeObservation(
-            live=live,
-            evidence=source,
-            strength=strength,
-        )
-
-    claimed_outbox = None
-    if probe_plan.acquire_claimed_outbox:
-        outbox_name, _ctrl_out_name = task_evidence.queue_names_for_tid(
-            record.tid,
-            routing_taskspec,
-        )
-        claimed_outbox = task_evidence.claimed_outbox_result_evidence(
-            ctx,
-            tid=record.tid,
-            outbox_name=outbox_name,
-            taskspec_payload=routing_taskspec,
-            broker=broker,
-        )
-
-    return probe_plan, SnapshotEvidence(
-        resolved_runtime_entry=runtime_entry,
-        runtime_handle=runtime_handle,
-        runtime_description=runtime_description,
-        runtime_observation=runtime_observation,
-        claimed_outbox=claimed_outbox,
-        active_service_tid=active_service_tid,
-        selected_active_manager_tid=selected_active_manager_tid,
-    )
+        if reduced_snapshot is not None:
+            current[tid] = reduced_snapshot
 
 
 def _collect_task_snapshot_records(
@@ -738,94 +561,47 @@ def _collect_task_snapshot_records(
     *,
     include_terminal: bool,
     tid_filters: set[str] | None,
+    include_log_history: bool = False,
     since_timestamp: int | None = None,
     now_ns: int | None = None,
-    service_registry_evidence: Sequence[_ServiceEvidence] | None = None,
     tid_state_entries: Mapping[str, Mapping[str, Any]] | None = None,
     broker: Any | None = None,
-    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
-    accepted_taskspec_payload: dict[str, Any] | None = None,
 ) -> list[CollectedTaskSnapshot]:
-    """Reconstruct current task state from event-sourced log replay.
-
-    Spec: [MF-5]
-    """
+    """Acquire current inventory, optionally unioning explicit raw history [MF-5]."""
+    if broker is None:
+        with ctx.broker() as opened:
+            return _collect_task_snapshot_records(
+                ctx,
+                include_terminal=include_terminal,
+                tid_filters=tid_filters,
+                include_log_history=include_log_history,
+                since_timestamp=since_timestamp,
+                now_ns=now_ns,
+                tid_state_entries=tid_state_entries,
+                broker=opened,
+            )
     if now_ns is None:
         now_ns = time.time_ns()
-    registry_evidence = (
-        tuple(service_registry_evidence)
-        if service_registry_evidence is not None
-        else tuple(
-            _collect_service_registry_evidence(ctx, now_ns=now_ns, broker=broker)
-        )
-    )
-    service_owner_index = _InternalServiceOwnerEvidenceIndex.from_evidence(
-        registry_evidence
-    )
-    records: dict[str, FoldedTaskRecord] = {}
-    try:
-        selected_manager = manager_runtime.select_active_manager(ctx, broker=broker)
-        selected_active_manager_tid = (
-            str(selected_manager["tid"])
-            if isinstance(selected_manager, Mapping)
-            and isinstance(selected_manager.get("tid"), str)
-            and selected_manager.get("status") == "active"
-            else None
-        )
-    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-335] exception
-        selected_active_manager_tid = None
-    with (
-        _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
-        if broker is None and task_events is None
-        else nullcontext()
-    ) as log_queue:
-        events = (
-            task_events
-            if task_events is not None
-            else _iter_log_events(
-                log_queue,
-                since_timestamp=since_timestamp,
-                broker=broker,
-            )
-        )
-        for payload, timestamp in events:
-            tid = payload.get("tid")
-            if not isinstance(tid, str):
-                continue
-            reduced = reduce_task_event(
-                records.get(tid),
-                payload,
-                timestamp,
-                tid_filters=tid_filters,
-            )
-            if reduced is not None:
-                records[tid] = reduced
     if tid_state_entries is None:
         tid_state_entries = _latest_tid_state_entries(
-            ctx, tids=records if tid_filters is not None else None, broker=broker
+            ctx, tids=tid_filters, broker=broker
         )
-    records_out: list[CollectedTaskSnapshot] = []
-    for tid, record in records.items():
-        if record.taskspec_payload is None:
-            continue
-        probe_plan, evidence = _collect_snapshot_evidence(
-            ctx,
-            record,
-            mapping_entry=tid_state_entries.get(tid),
-            selected_active_manager_tid=selected_active_manager_tid,
-            service_owner_index=service_owner_index,
-            now_ns=now_ns,
+    current = {
+        tid: reduce_task_state_snapshot(tid, payload, now_ns=now_ns)
+        for tid, payload in tid_state_entries.items()
+        if tid_filters is None or tid in tid_filters
+    }
+    if include_log_history:
+        _merge_raw_task_history(
+            current,
             broker=broker,
-            accepted_taskspec_payload=accepted_taskspec_payload,
-        )
-        snapshot = reduce_task_snapshot(
-            probe_plan,
-            evidence,
+            since_timestamp=since_timestamp,
+            tid_filters=tid_filters,
             now_ns=now_ns,
         )
-        if snapshot is not None:
-            records_out.append(snapshot)
-    return order_task_snapshots(records_out, include_terminal=include_terminal)
+    return order_task_snapshots(
+        current.values(), include_terminal=include_terminal or include_log_history
+    )
 
 
 def _service_evidence_from_child_task(
@@ -833,9 +609,9 @@ def _service_evidence_from_child_task(
     *,
     now_ns: int,
 ) -> _ServiceEvidence | None:
-    if record.taskspec_payload is None:
-        return None
-    key = _service_key_from_taskspec_payload(record.taskspec_payload)
+    key = _service_key_from_taskspec_payload(
+        record.taskspec_payload or {"metadata": record.snapshot.metadata}
+    )
     if key is None:
         return None
     snapshot = record.snapshot
@@ -844,7 +620,7 @@ def _service_evidence_from_child_task(
             key=key,
             name=snapshot.name or _service_display_name(key),
             status="terminal",
-            evidence="child-task-log",
+            evidence="child-task-state",
             rank=100,
             tid=snapshot.tid,
             updated_at=snapshot.last_timestamp,
@@ -862,7 +638,7 @@ def _service_evidence_from_child_task(
             key=key,
             name=snapshot.name or _service_display_name(key),
             status="uncertain",
-            evidence="child-task-log",
+            evidence="child-task-state",
             rank=20,
             tid=snapshot.tid,
             pid=pid,
@@ -877,7 +653,7 @@ def _service_evidence_from_child_task(
         key=key,
         name=snapshot.name or _service_display_name(key),
         status="running",
-        evidence="child-task-log",
+        evidence="child-task-state",
         rank=90,
         tid=snapshot.tid,
         pid=pid,
@@ -1250,6 +1026,7 @@ def _collect_internal_service_snapshots(  # noqa: C901 approved [TS-3.1] [RUFF-S
     now_ns: int | None = None,
     service_registry_evidence: Sequence[_ServiceEvidence],
     tid_state_entries: Mapping[str, Mapping[str, Any]],
+    include_log_history: bool = False,
 ) -> list[ServiceSnapshot]:
     """Return queue-derived status for manager-owned internal services."""
 
@@ -1263,14 +1040,12 @@ def _collect_internal_service_snapshots(  # noqa: C901 approved [TS-3.1] [RUFF-S
         if candidate is not None:
             candidates_by_key.setdefault(candidate.key, []).append(candidate)
 
-    log_queue = _queue(ctx, WEFT_GLOBAL_LOG_QUEUE)
-    try:
-        for payload, timestamp in _iter_log_events(log_queue):
-            candidate = _service_evidence_from_manager_spawned(payload, timestamp)
-            if candidate is not None:
-                candidates_by_key.setdefault(candidate.key, []).append(candidate)
-    finally:
-        log_queue.close()
+    if include_log_history:
+        with _queue(ctx, WEFT_GLOBAL_LOG_QUEUE) as log_queue:
+            for payload, timestamp in _iter_log_events(log_queue):
+                candidate = _service_evidence_from_manager_spawned(payload, timestamp)
+                if candidate is not None:
+                    candidates_by_key.setdefault(candidate.key, []).append(candidate)
 
     for candidate in service_registry_evidence:
         candidates_by_key.setdefault(candidate.key, []).append(candidate)
@@ -1338,6 +1113,7 @@ def _collect_task_snapshots(
     *,
     include_terminal: bool,
     tid_filters: set[str] | None,
+    include_log_history: bool = False,
     broker: Any | None = None,
 ) -> list[TaskSnapshot]:
     """Reconstruct current task state from one event-sourced log replay.
@@ -1351,6 +1127,7 @@ def _collect_task_snapshots(
             ctx,
             include_terminal=include_terminal,
             tid_filters=tid_filters,
+            include_log_history=include_log_history,
             broker=broker,
         )
     ]
@@ -1362,22 +1139,16 @@ def collect_known_tid_record(
     *,
     include_terminal: bool = True,
     broker: Any | None = None,
-    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
-    accepted_taskspec_payload: dict[str, Any] | None = None,
 ) -> CollectedTaskSnapshot | None:
     """Keep a full-TID snapshot and its fresh payload in one acquisition [MF-5]."""
 
     if not is_task_tid(tid):
         return None
-    if task_events is None:
-        task_events, _horizon = task_evidence.read_task_history(ctx, tid, broker=broker)
     records = _collect_task_snapshot_records(
         ctx,
         include_terminal=include_terminal,
         tid_filters={tid},
         broker=broker,
-        task_events=task_events,
-        accepted_taskspec_payload=accepted_taskspec_payload,
     )
     return records[0] if records else None
 
@@ -1507,6 +1278,7 @@ def _status_event_stream(
 def cmd_status(
     *,
     all: bool = False,
+    include_log_history: bool = False,
     status: str | None = None,
     watch: bool = False,
     interval: float = 1.0,
@@ -1531,6 +1303,8 @@ def cmd_status(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
 
+    if include_log_history and watch:
+        raise CommandUsageError("--log cannot be combined with --watch")
     if interval < 0:
         raise CommandUsageError("interval must be non-negative")
     try:
@@ -1544,13 +1318,19 @@ def cmd_status(
             interval=interval,
         )
     try:
-        snapshot = system_status(resolved_context, include_stopped_managers=all)
+        snapshot = system_status(
+            resolved_context,
+            include_stopped_managers=all,
+            include_terminal=all,
+            status=status,
+            include_log_history=include_log_history,
+        )
     except Exception as exc:
         raise CommandExecutionError(f"failed to collect project status: {exc}") from exc
     tasks = [
         task
         for task in snapshot.tasks
-        if (all or task.status not in TERMINAL_TASK_STATUSES)
+        if (all or include_log_history or task.status not in TERMINAL_TASK_STATUSES)
         and (status is None or task.status == status)
     ]
     return SystemStatusSnapshot(
@@ -1639,6 +1419,9 @@ def system_status(
     context: WeftContext,
     *,
     include_stopped_managers: bool = False,
+    include_terminal: bool = False,
+    status: str | None = None,
+    include_log_history: bool = False,
 ) -> SystemStatusSnapshot:
     """Return the top-level broker, manager, and task status view."""
 
@@ -1654,9 +1437,9 @@ def system_status(
     task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,
+        include_log_history=include_log_history,
         tid_filters=None,
         now_ns=now_ns,
-        service_registry_evidence=service_registry_evidence,
         tid_state_entries=tid_state_entries,
     )
     services = _collect_internal_service_snapshots(
@@ -1666,11 +1449,21 @@ def system_status(
         now_ns=now_ns,
         service_registry_evidence=service_registry_evidence,
         tid_state_entries=tid_state_entries,
+        include_log_history=include_log_history,
     )
     return SystemStatusSnapshot(
         broker=collect_broker_status(context).to_dict(),
         managers=[_manager_snapshot(record) for record in managers],
-        tasks=[_public_task_snapshot(record.snapshot) for record in task_records],
+        tasks=[
+            _public_task_snapshot(record.snapshot)
+            for record in task_records
+            if (
+                include_terminal
+                or include_log_history
+                or record.snapshot.status not in TERMINAL_TASK_STATUSES
+            )
+            and (status is None or record.snapshot.status == status)
+        ],
         services=services,
     )
 

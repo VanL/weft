@@ -51,10 +51,12 @@ class TasksNamespace:
         *,
         status: str | None = None,
         include_terminal: bool = False,
+        include_log_history: bool = False,
     ) -> list[TaskSnapshot]:
         return tasks.list_task_snapshots(
             status_filter=status,
             include_terminal=include_terminal,
+            include_log_history=include_log_history,
             context=self.client.context,
         )
 
@@ -63,10 +65,12 @@ class TasksNamespace:
         *,
         status: str | None = None,
         include_terminal: bool = False,
+        include_log_history: bool = False,
     ) -> dict[str, int]:
         return tasks.task_stats(
             status_filter=status,
             include_terminal=include_terminal,
+            include_log_history=include_log_history,
             context=self.client.context,
         )
 
@@ -428,8 +432,19 @@ class SpecsNamespace:
 class SystemNamespace:
     client: ClientContextHandle
 
-    def status(self) -> SystemStatusSnapshot:
-        return system.system_status(self.client.context)
+    def status(
+        self,
+        *,
+        include_terminal: bool = False,
+        status: str | None = None,
+        include_log_history: bool = False,
+    ) -> SystemStatusSnapshot:
+        return system.system_status(
+            self.client.context,
+            include_terminal=include_terminal,
+            status=status,
+            include_log_history=include_log_history,
+        )
 
     def tidy(self) -> SystemTidyResult:
         return tidy.tidy_system(self.client.context)

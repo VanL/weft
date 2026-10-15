@@ -178,6 +178,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
             "WEFT_TASK_MONITOR_BATCH_SIZE": 12,
             "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 120,
             "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": 172800.0,
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS": 3600.0,
             "WEFT_LOG_TASKS_EXTERNAL_PATH": "task-log.jsonl",
             "WEFT_LOG_TASKS_EXTERNAL_MODE": "raw",
             "WEFT_TASK_MONITOR_MODE": "report_only",
@@ -193,6 +194,7 @@ def test_runtime_config_reads_loaded_weft_config() -> None:
     assert runtime_config.batch_size == 12
     assert runtime_config.task_log_scan_limit == 120
     assert runtime_config.task_log_retention_period_seconds == 172800.0
+    assert runtime_config.task_observation_retention_seconds == 3600.0
     assert runtime_config.task_log_external_path == "task-log.jsonl"
     assert runtime_config.task_log_external_enabled is False
     assert runtime_config.task_log_external_mode == "raw"
@@ -293,6 +295,18 @@ def test_runtime_config_rejects_custom_mode_without_processor() -> None:
 @pytest.mark.parametrize(
     ("config", "first_error"),
     [
+        (
+            {"TASK_OBSERVATION_RETENTION_SECONDS": float("nan")},
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS",
+        ),
+        (
+            {"TASK_OBSERVATION_RETENTION_SECONDS": float("inf")},
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS",
+        ),
+        (
+            {"TASK_OBSERVATION_RETENTION_SECONDS": 2399.0},
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS",
+        ),
         (
             {
                 "TASK_MONITOR_INTERVAL_SECONDS": 0,

@@ -56,4 +56,4 @@ The current contract already relies on SimpleBroker's hard size limit and shared
   [05A-Message_Flow_and_State_Planned.md](05A-Message_Flow_and_State_Planned.md)
 - CLI surface: [10-CLI_Interface.md](10-CLI_Interface.md)
 - Implementation plan:
-  [docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+  `2026-04-16-runtime-endpoint-registry-boundary-plan` (retired — source 396c3b85; see `docs/plans/README.md`)

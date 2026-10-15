@@ -51,23 +51,26 @@ def _collection_facts(
 ) -> tuple[result_wait._CollectedResult, result_wait.ResultMaterialization]:
     """Build acquired configuration and literal collection facts, without I/O."""
     mode = fields.get("mode", "one_shot")
-    payload = (
-        None
-        if mode is None
-        else {
-            "spec": {"persistent": mode == "persistent"},
-            "metadata": {"role": "pipeline"} if mode == "pipeline" else {},
-        }
-    )
     observed_at = fields.get("observed_at")
     count = fields.get("final_count", 0)
     framed = fields.get("stream_output", False)
     output = fields.get("output_evidence", _COMPLETED if count and not framed else None)
     terminal = fields.get("terminal")
+    config = (
+        None
+        if mode is None
+        else result_wait.task_evidence.TaskObservationConfig(
+            mode,
+            bool(framed),
+            "test.inbox",
+            "test.outbox",
+            "test.ctrl_in",
+            "test.ctrl_out",
+            "test.status" if mode == "pipeline" else None,
+        )
+    )
     materialized = result_wait.ResultMaterialization(
-        payload,
-        "test.outbox",
-        "test.ctrl_out",
+        config,
         terminal_evidence=terminal,
         terminal_observed_monotonic=observed_at if terminal is not None else None,
         output_evidence=output,

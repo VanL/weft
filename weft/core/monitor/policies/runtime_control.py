@@ -23,7 +23,6 @@ from weft._constants import (
 from weft.core.monitor.policies.dead_task import (
     dead_task_queue_cleanup_plan,
     select_dead_task_tids_from_queue_names,
-    standard_dead_task_retention_queue_names,
     standard_task_queue_identity,
 )
 from weft.core.monitor.progress import PolicyProgress
@@ -217,6 +216,8 @@ def terminal_task_runtime_queue_cleanup_plan(
     now_ns: int,
     retention_seconds: float,
     preserve_data_without_terminal_proof: bool = False,
+    terminal_message_id: int | None = None,
+    snapshot_hold: bool = False,
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
     """Return standard task-local queues eligible for terminal cleanup.
 
@@ -237,7 +238,10 @@ def terminal_task_runtime_queue_cleanup_plan(
         if record.terminal_message_id is not None
         else int(record.tid)
     )
-    retention_eligible = is_old_enough(retention_message_id, now_ns, retention_seconds)
+    retention_message_id = max(retention_message_id, terminal_message_id or 0)
+    retention_eligible = not snapshot_hold and is_old_enough(
+        retention_message_id, now_ns, retention_seconds
+    )
     # Completion evidence shares the outbox lifetime, including claimed rows.
     control_queue_names = (
         standard_control_names if retention_eligible else standard_control_names[:1]
@@ -268,6 +272,8 @@ def stale_service_owner_runtime_queue_cleanup_plan(
     *,
     now_ns: int,
     retention_seconds: float,
+    terminal_message_id: int | None = None,
+    snapshot_hold: bool = False,
 ) -> TerminalTaskRuntimeQueueCleanupPlan | None:
     """Retain disposed service-owner completion evidence through [MF-5] age."""
 
@@ -294,7 +300,10 @@ def stale_service_owner_runtime_queue_cleanup_plan(
         if record.terminal_message_id is not None
         else int(record.tid)
     )
-    retention_eligible = is_old_enough(retention_message_id, now_ns, retention_seconds)
+    retention_message_id = max(retention_message_id, terminal_message_id or 0)
+    retention_eligible = not snapshot_hold and is_old_enough(
+        retention_message_id, now_ns, retention_seconds
+    )
     control_queue_names = (
         (expected_ctrl_in, expected_ctrl_out)
         if retention_eligible
@@ -415,6 +424,7 @@ def runtime_dead_task_record_probe_tids(
     retention_seconds: float,
     active_tids: set[str],
     preserve_data_without_terminal_proof: bool = False,
+    observation_retention_seconds: float,
 ) -> tuple[str, ...]:
     """Return actionable queue-derived dead TIDs needing Monitor-record probes."""
 
@@ -437,8 +447,14 @@ def runtime_dead_task_record_probe_tids(
             tid,
             now_ns=now_ns,
             retention_seconds=retention_seconds,
+            observation_retention_seconds=observation_retention_seconds,
         )
-        if any(queue_name in queue_name_set for queue_name in plan.queue_names):
+        permitted = (
+            plan.control_queue_names
+            if preserve_data_without_terminal_proof
+            else plan.queue_names
+        )
+        if any(queue_name in queue_name_set for queue_name in permitted):
             probe_tids.append(tid)
     return tuple(probe_tids)
 
@@ -458,27 +474,6 @@ def _task_queue_suffixes_by_tid(
     return grouped
 
 
-def _has_retention_deferred_only_work(
-    *,
-    tid: str,
-    suffixes: set[str],
-    now_ns: int,
-    retention_seconds: float,
-) -> bool:
-    """Return whether a TID has only future retention-gated cleanup work."""
-
-    if is_old_enough(int(tid), now_ns, retention_seconds):
-        return False
-    retention_suffixes = {
-        QUEUE_INBOX_SUFFIX,
-        QUEUE_OUTBOX_SUFFIX,
-        QUEUE_CTRL_OUT_SUFFIX,
-        QUEUE_RESERVED_SUFFIX,
-    }
-    stale_suffixes = {QUEUE_CTRL_IN_SUFFIX}
-    return bool(suffixes & retention_suffixes) and not bool(suffixes & stale_suffixes)
-
-
 def _has_data_bearing_only_work(suffixes: set[str]) -> bool:
     """Return whether only queues preserved without terminal proof remain."""
 
@@ -488,88 +483,3 @@ def _has_data_bearing_only_work(suffixes: set[str]) -> bool:
         QUEUE_RESERVED_SUFFIX,
     }
     return bool(suffixes) and suffixes <= data_bearing_suffixes
-
-
-def select_runtime_dead_task_cleanup_candidates(
-    queue_names: Iterable[str],
-    *,
-    now_ns: int,
-    min_age_seconds: float,
-    retention_seconds: float,
-    limit: int,
-    active_tids: set[str],
-    task_record: Callable[[str], MonitorTaskCollationRecord | None],
-    deadline_reached: Callable[[], bool],
-    preserve_data_without_terminal_proof: bool = False,
-) -> RuntimeDeadTaskCleanupSelection:
-    """Select actionable dead-task queue cleanup candidates.
-
-    Dead-task runtime cleanup is intentionally name-derived and must not mark
-    Monitor-store families. If a Monitor collation row exists, terminal or
-    reserved cleanup owns that family instead.
-    """
-
-    queue_name_tuple = tuple(queue_names)
-    dead_selection = select_dead_task_tids_from_queue_names(
-        queue_name_tuple,
-        live_tids=active_tids,
-        now_ns=now_ns,
-        min_age_seconds=min_age_seconds,
-    )
-    queue_name_set = set(queue_name_tuple)
-    suffixes_by_tid = _task_queue_suffixes_by_tid(queue_name_tuple)
-    selected_tids: list[str] = []
-    skipped_monitor_records = 0
-    deferred_retention = 0
-    pending = False
-    deadline_hit = False
-
-    for tid in dead_selection.selected_tids:
-        suffixes = suffixes_by_tid.get(tid, set())
-        if preserve_data_without_terminal_proof and _has_data_bearing_only_work(
-            suffixes
-        ):
-            deferred_retention += 1
-            continue
-        if _has_retention_deferred_only_work(
-            tid=tid,
-            suffixes=suffixes,
-            now_ns=now_ns,
-            retention_seconds=retention_seconds,
-        ):
-            deferred_retention += 1
-            continue
-        plan = dead_task_queue_cleanup_plan(
-            tid,
-            now_ns=now_ns,
-            retention_seconds=retention_seconds,
-        )
-        if not any(queue_name in queue_name_set for queue_name in plan.queue_names):
-            if not plan.retention_eligible and any(
-                queue_name in queue_name_set
-                for queue_name in standard_dead_task_retention_queue_names(tid)
-            ):
-                deferred_retention += 1
-            continue
-        if task_record(tid) is not None:
-            skipped_monitor_records += 1
-            continue
-        if len(selected_tids) >= limit:
-            pending = True
-            break
-        if deadline_reached():
-            pending = True
-            deadline_hit = True
-            break
-        selected_tids.append(tid)
-
-    return RuntimeDeadTaskCleanupSelection(
-        tids=tuple(selected_tids),
-        discovered_tids=dead_selection.discovered_tids,
-        skipped_live=dead_selection.skipped_live,
-        skipped_too_young=dead_selection.skipped_too_young,
-        skipped_monitor_records=skipped_monitor_records,
-        deferred_retention=deferred_retention,
-        pending=pending,
-        deadline_hit=deadline_hit,
-    )

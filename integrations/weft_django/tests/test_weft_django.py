@@ -690,14 +690,10 @@ def test_settings_rotation_keeps_prepared_callbacks_on_captured_roots(
             assert second.task.task.context is not None
             assert first.task.task.context.root == first_root.root.resolve()
             assert second.task.task.context.root == second_root.root.resolve()
-            assert (
-                WeftClient(path=second_root.root).task(first.task.tid).snapshot()
-                is None
-            )
-            assert (
-                WeftClient(path=first_root.root).task(second.task.tid).snapshot()
-                is None
-            )
+            snapshot = WeftClient(path=second_root.root).task(first.task.tid).snapshot()
+            assert snapshot is not None and snapshot.status == "unknown"
+            snapshot = WeftClient(path=first_root.root).task(second.task.tid).snapshot()
+            assert snapshot is not None and snapshot.status == "unknown"
         finally:
             request_finished.send(sender=object())
 
@@ -830,7 +826,7 @@ def test_django_client_snapshot_preserves_invalid_tid_none_contract() -> None:
     assert DjangoWeftClient(core).snapshot("bad") is None
 
 
-def test_status_returns_monitor_store_terminal_snapshot(
+def test_status_returns_task_owned_terminal_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeTask:
@@ -839,10 +835,10 @@ def test_status_returns_monitor_store_terminal_snapshot(
             return TaskTerminalSnapshot(
                 tid="1770000000000000001",
                 status="failed",
-                source="monitor_store",
+                source="task_state",
                 terminal=True,
                 error="retired failure",
-                metadata={"classification": "terminal_monitor_store"},
+                metadata={"classification": "terminal_projection"},
             )
 
         def snapshot(self) -> object:
@@ -859,9 +855,9 @@ def test_status_returns_monitor_store_terminal_snapshot(
 
     assert snapshot is not None
     assert snapshot.status == "failed"
-    assert snapshot.source == "monitor_store"
+    assert snapshot.source == "task_state"
     assert snapshot.error == "retired failure"
-    assert snapshot.metadata["classification"] == "terminal_monitor_store"
+    assert snapshot.metadata["classification"] == "terminal_projection"
 
 
 def _spec_reference_path(name: str = "native-reference") -> Path:
@@ -897,10 +893,15 @@ def _pipeline_reference_path(
 def _wait_for_snapshot(tid: str, *, timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if get_core_client().task(tid).snapshot() is not None:
+        if (
+            snapshot := get_core_client().task(tid).snapshot()
+        ) is not None and snapshot.status != "unknown":
             return
         time.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for snapshot for task {tid}")
+    raise AssertionError(
+        f"Timed out waiting for snapshot for task {tid}\n"
+        f"{_HARNESS.dump_completion_timeout_state(tid)}"
+    )
 
 
 @pytest.mark.shared
@@ -1376,7 +1377,8 @@ def test_deferred_families_keep_captured_context_after_settings_change(
                 == _bootstrap_context.broker_target
             )
             assert deferred.task.task.context.broker_config["BUSY_TIMEOUT"] == 3210
-            assert other_client.task(deferred.task.tid).snapshot() is None
+            snapshot = other_client.task(deferred.task.tid).snapshot()
+            assert snapshot is not None and snapshot.status == "unknown"
 
 
 @pytest.mark.parametrize("family", ["decorated", "native", "reference", "pipeline"])
@@ -1467,12 +1469,12 @@ def test_deferred_explicit_paths_bind_before_commit(
             assert result.value == "captured"
             assert deferred.task.task.context is not None
             assert deferred.task.task.context.root == origin
-            assert (
+            snapshot = (
                 WeftClient.from_weft_context(other.context)
                 .task(deferred.task.tid)
                 .snapshot()
-                is None
             )
+            assert snapshot is not None and snapshot.status == "unknown"
 
 
 def test_default_django_enqueue_and_observation_use_base_dir(
@@ -1759,8 +1761,16 @@ def test_http_views_handle_invalid_and_unknown_tids_cleanly() -> None:
 
     assert client.get("/weft/tasks/not-a-tid/").status_code == 404
     assert client.get("/weft/tasks/not-a-tid/events/").status_code == 404
-    assert client.get(f"/weft/tasks/{unknown_tid}/").status_code == 404
-    assert client.get(f"/weft/tasks/{unknown_tid}/events/").status_code == 404
+    detail = client.get(f"/weft/tasks/{unknown_tid}/")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "unknown"
+    events = client.get(f"/weft/tasks/{unknown_tid}/events/")
+    try:
+        assert events.status_code == 200
+        payload = b"".join(events.streaming_content)
+        assert b'"status": "unknown"' in payload
+    finally:
+        events.close()
 
 
 @pytest.mark.shared
@@ -2258,6 +2268,7 @@ class _IdleFollowProbe:
         self.response: Any = None
         self.consumer: Any = None
         self.advance: asyncio.Task[Any] | None = None
+        self.snapshot_seen = False
         self._original_wait = QueueChangeMonitor.wait
         self._original_close = QueueChangeMonitor.close
         self._original_queue = WeftContext.queue
@@ -2350,7 +2361,13 @@ class _IdleFollowProbe:
                 weft_django_sse, "get_core_client", lambda: self.client
             )
             self.response = weft_django_sse.sse_response(self.tid, asynchronous=True)
-            self.advance = asyncio.create_task(anext(self.response.streaming_content))
+            content = self.response.streaming_content
+            initial = await asyncio.wait_for(anext(content), 2.0)
+            data = next(
+                line[6:] for line in initial.splitlines() if line.startswith(b"data: ")
+            )
+            self._assert_initial_snapshot(json.loads(data))
+            self.advance = asyncio.create_task(anext(content))
         else:
             await self._start_channels()
 
@@ -2364,9 +2381,11 @@ class _IdleFollowProbe:
         self.monkeypatch.setattr(module, "get_realtime_transport", lambda: "channels")
         self.monkeypatch.setattr(module, "_authorize_scope", lambda *a: True)
         self.monkeypatch.setattr(module.TaskEventsConsumer, "accept", self._accept)
-        self.monkeypatch.setattr(
-            module.TaskEventsConsumer, "send_json", self._reject_event
-        )
+
+        async def send_snapshot(_consumer: Any, payload: dict[str, Any]) -> None:
+            self._assert_initial_snapshot(payload)
+
+        self.monkeypatch.setattr(module.TaskEventsConsumer, "send_json", send_snapshot)
         self.monkeypatch.setattr(module.TaskEventsConsumer, "close", self._socket_close)
         self.consumer = module.TaskEventsConsumer()
         self.consumer.scope = {"url_route": {"kwargs": {"tid": self.tid}}}
@@ -2379,9 +2398,16 @@ class _IdleFollowProbe:
     async def _accept(_consumer: Any) -> None:
         return
 
-    @staticmethod
-    async def _reject_event(_consumer: Any, _payload: Any) -> None:
-        raise AssertionError("idle cancellation must not publish an event")
+    def _assert_initial_snapshot(self, payload: dict[str, Any]) -> None:
+        assert not self.cancellation_wake.is_set(), (
+            "snapshot arrived after cancellation"
+        )
+        assert not self.snapshot_seen, (
+            "idle cancellation must not publish another event"
+        )
+        assert payload["event_type"] == "snapshot"
+        assert payload["payload"]["status"] == "unknown"
+        self.snapshot_seen = True
 
     @staticmethod
     async def _socket_close(_consumer: Any, code: int | None = None) -> None:
@@ -2416,6 +2442,7 @@ class _IdleFollowProbe:
     def assert_finished(self) -> None:
         # Monitor close comes before queue/session teardown. Only call this
         # after the iterator owner has completed its serialized closure.
+        assert self.snapshot_seen
         assert self.waits == [True]
         assert self.wait_timeouts == [None]
         assert len(set(self.owner_threads)) == 1

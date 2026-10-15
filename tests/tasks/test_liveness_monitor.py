@@ -138,13 +138,18 @@ def test_liveness_next_wait_timeout_publishes_only_real_deadlines(
 ) -> None:
     _context, monitor, _queue, tid, now = namespace_case
     monitor._drain_worker_results()
-    monitor._due_heap = [(12.0, tid, "generation")]
+    monitor._reconcile_mapping_rows(full=False)
+    row = monitor._latest_rows[tid]
+    for scheduled_tid in tuple(monitor._scheduled_due):
+        monitor._drop_due(scheduled_tid)
+    monitor._push_due(row, due_at=11.0)
+    monitor._push_due(row, due_at=12.0)
     monitor._next_state_refresh_at = 13.0
     monitor._next_full_reconcile_at = 14.0
 
     assert monitor.next_wait_timeout() == pytest.approx(2.0)
 
-    monitor._due_heap.clear()
+    monitor._drop_due(tid)
     assert monitor.next_wait_timeout() == pytest.approx(3.0)
     monitor._next_state_refresh_at = 15.0
     assert monitor.next_wait_timeout() == pytest.approx(4.0)
@@ -153,7 +158,7 @@ def test_liveness_next_wait_timeout_publishes_only_real_deadlines(
     assert monitor.next_wait_timeout() == pytest.approx(1.5)
 
     monitor._paused = True
-    monitor._due_heap = [(now[0] - 1.0, tid, "generation")]
+    monitor._push_due(row, due_at=now[0] - 1.0)
     monitor._next_state_refresh_at = now[0] - 1.0
     monitor._next_full_reconcile_at = now[0] - 1.0
     assert monitor.next_wait_timeout() == pytest.approx(1.5)
@@ -779,12 +784,10 @@ def test_late_probe_result_requires_current_token_and_generation(
 
         monitor._apply_probe_result(ProbeResult(current, observation, True))
         accepted_deadline = monitor._deadlines[tid]
-        due_count = sum(entry[1] == tid for entry in monitor._due_heap)
         assert tid not in monitor._in_flight
 
         monitor._apply_probe_result(ProbeResult(current, observation, True))
         assert monitor._deadlines[tid] == accepted_deadline
-        assert sum(entry[1] == tid for entry in monitor._due_heap) == due_count
     finally:
         monitor.stop(join=False)
         monitor.cleanup()
@@ -815,21 +818,21 @@ def test_full_reconcile_preserves_unchanged_deadline_and_in_flight_probe(
         )
         monitor._deadlines[tid] = deadline
         monitor._in_flight[tid] = in_flight
-        due_count = sum(entry[1] == tid for entry in monitor._due_heap)
 
         monitor._reconcile_mapping_rows(full=True)
 
         assert monitor._latest_rows[tid] == row
         assert monitor._deadlines[tid] == deadline
         assert monitor._in_flight[tid] == in_flight
-        assert sum(entry[1] == tid for entry in monitor._due_heap) == due_count
     finally:
         monitor.stop(join=False)
         monitor.cleanup()
         queue.close()
 
 
-def test_same_generation_mapping_appends_replace_due_entry(workdir: Path) -> None:
+def test_same_generation_mapping_appends_dispatch_only_newest_row(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     queue = context.queue(task_state_queue_name(tid), persistent=False)
@@ -841,17 +844,21 @@ def test_same_generation_mapping_appends_replace_due_entry(workdir: Path) -> Non
     )
     try:
         monitor._reconcile_mapping_rows(full=True)
-        initial_due_count = len(monitor._due_heap)
-        assert sum(entry[1] == tid for entry in monitor._due_heap) == 1
-
         newest_id = queue.write(json.dumps(payload))
         monitor._reconcile_mapping_rows(full=False)
 
         assert monitor._latest_rows[tid].message_id == newest_id
-        assert len(monitor._due_heap) == initial_due_count
-        target_entries = [entry for entry in monitor._due_heap if entry[1] == tid]
-        assert len(target_entries) == 1
-        assert target_entries[0][1:] == (tid, monitor._latest_rows[tid].generation)
+        enqueued: list[ProbeWork] = []
+
+        def enqueue(_name: str, item: ProbeWork, *, block: bool) -> bool:
+            enqueued.append(item)
+            return True
+
+        monkeypatch.setattr(monitor, "_enqueue_service_work", enqueue)
+        monitor._schedule_due_probes(now=time.monotonic() + 1.0)
+        target_work = [work for work in enqueued if work.tid == tid]
+        assert len(target_work) == 1
+        assert target_work[0].message_id == newest_id
     finally:
         monitor.stop(join=False)
         monitor.cleanup()
@@ -902,7 +909,6 @@ def test_mapping_update_keeps_probe_lane_owned_until_old_result_finishes(
         monitor._apply_probe_result(ProbeResult(in_flight, observation, True))
 
         assert tid not in monitor._in_flight
-        assert sum(entry[1] == tid for entry in monitor._due_heap) == 1
 
         enqueued: list[ProbeWork] = []
 
@@ -1001,7 +1007,7 @@ def test_namespace_disappearance_keeps_in_flight_lane_owned(
     monitor._reconcile_mapping_rows(full=False)
     assert tid not in monitor._latest_rows
     assert tid not in monitor._deadlines
-    assert tid not in monitor._due_tids
+    assert tid not in monitor._scheduled_due
     assert monitor._in_flight[tid] == work
 
 
@@ -1055,7 +1061,7 @@ def test_namespace_listing_failure_is_not_disappearance(
     monkeypatch.setattr(liveness_monitor_mod, "list_task_state_tids", failed_listing)
     monitor._reconcile_mapping_rows(full=True)
     assert monitor._latest_rows[tid] == row
-    assert tid in monitor._due_tids
+    assert tid in monitor._scheduled_due
 
 
 def test_retirement_rejects_newer_unobserved_publication(
@@ -1067,7 +1073,7 @@ def test_retirement_rejects_newer_unobserved_publication(
     _complete_stale_probe(monitor, tid)
     assert monitor._latest_rows[tid].message_id == newest_id
     assert queue.peek_one(exact_timestamp=newest_id) is not None
-    assert tid in monitor._due_tids
+    assert tid in monitor._scheduled_due
 
 
 def test_retirement_rejects_missing_probed_row_and_adopts_older_current(
@@ -1247,7 +1253,7 @@ def test_namespace_history_handles_do_not_accumulate_in_task_cache(
     for tid in retired_tids:
         assert task_state_queue_name(tid) not in monitor._queue_cache
         assert tid not in monitor._latest_rows
-        assert tid not in monitor._due_tids
+        assert tid not in monitor._scheduled_due
 
 
 def test_retirement_read_failure_preserves_latest_and_retries(
@@ -1265,7 +1271,7 @@ def test_retirement_read_failure_preserves_latest_and_retries(
     _complete_stale_probe(monitor, tid)
     assert monitor._latest_rows[tid] == row
     assert queue.peek_one(exact_timestamp=row.message_id) is not None
-    assert tid in monitor._due_tids
+    assert tid in monitor._scheduled_due
 
 
 def test_retirement_missing_queue_discards_unprobed_work(
@@ -1277,7 +1283,7 @@ def test_retirement_missing_queue_discards_unprobed_work(
     _complete_stale_probe(monitor, tid)
     assert tid not in monitor._latest_rows
     assert tid not in monitor._deadlines
-    assert tid not in monitor._due_tids
+    assert tid not in monitor._scheduled_due
     assert tid not in monitor._in_flight
 
 
@@ -1440,3 +1446,68 @@ def test_precheckpoint_reservation_preserves_only_manager_protocol_evidence(
                 )
             assert monitor._retire_mapping_row(row) is True
             assert queue.peek() is None
+
+
+def test_terminal_projection_retains_snapshot_without_repeated_probes(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dead terminal rows wait for observation expiry and revalidate there [MF-5]."""
+    _context, monitor, queue, tid, now = namespace_case
+    terminal = _mapping(tid)
+    terminal.update(
+        terminal=True,
+        projection={
+            "version": 1,
+            "status": "completed",
+            "event": "work_completed",
+            "started_at": None,
+            "metadata": {},
+        },
+        observation={"version": "invalid"},
+    )
+    queue.write(json.dumps(terminal))
+    monitor._reconcile_mapping_rows(full=True)
+    row = monitor._latest_rows[tid]
+    wall = [row.message_id]
+    monkeypatch.setattr(liveness_monitor_mod.time, "time_ns", lambda: wall[0])
+    submitted: list[ProbeWork] = []
+
+    def enqueue(_name: str, work: ProbeWork, **_kwargs: Any) -> bool:
+        submitted.append(work)
+        return True
+
+    monkeypatch.setattr(monitor, "_enqueue_service_work", enqueue)
+    monitor._schedule_due_probes(now=now[0])
+    work = next(work for work in submitted if work.tid == tid)
+    stale = LivenessObservation(tid, "stale", "dead", True, row.generation)
+    monitor._apply_probe_result(ProbeResult(work, stale, attempted=True))
+    assert queue.peek_one(exact_timestamp=row.message_id) is not None
+    submitted.clear()
+    now[0] += 10
+    monitor._schedule_due_probes(now=now[0])
+    assert not any(work.tid == tid for work in submitted)
+
+    # Changed runtime identity invalidates the old retention-only deferral.
+    terminal["runtime_handle"]["id"] = "replacement-runtime"  # type: ignore[index]
+    replacement_id = queue.write(json.dumps(terminal))
+    monitor._reconcile_mapping_rows(full=False)
+    monitor._schedule_due_probes(now=now[0])
+    replacement = next(work for work in submitted if work.tid == tid)
+    assert replacement.message_id == replacement_id
+    assert replacement.generation != work.generation
+    replacement_stale = LivenessObservation(
+        tid, "stale", "dead", True, replacement.generation
+    )
+    monitor._apply_probe_result(
+        ProbeResult(replacement, replacement_stale, attempted=True)
+    )
+    assert queue.peek_one(exact_timestamp=replacement_id) is not None
+
+    submitted.clear()
+    wall[0] = replacement_id + 172801 * 1_000_000_000
+    now[0] += 172801
+    monitor._schedule_due_probes(now=now[0])
+    expiry = next(work for work in submitted if work.tid == tid)
+    monitor._apply_probe_result(ProbeResult(expiry, replacement_stale, attempted=True))
+    assert queue.peek_one(exact_timestamp=replacement_id) is None

@@ -217,11 +217,13 @@ def test_concurrent_accepted_waits_wake_on_local_completion_only(
 
 
 @pytest.mark.parametrize("fail", [False, True], ids=["empty-terminal", "failure"])
-def test_bare_tid_reads_historical_global_only_terminal(fail: bool) -> None:
-    """Old retained tasks need no local copy to recover their terminal outcome.
+def test_bare_tid_reads_terminal_projection_without_local_completion(
+    fail: bool,
+) -> None:
+    """Retained task-owned projection settles after local completion was removed.
 
     Failure is produced by real work; the empty persistent terminal is produced
-    by a queued STOP. Removing control rows models the pre-cutover retained data.
+    by a queued STOP. Removing control rows leaves the current terminal view.
     """
     with WeftTestHarness() as harness:
         spec = _spec(harness, fail=fail, persistent=not fail)
@@ -355,7 +357,7 @@ def test_bare_custom_route_detaches_history_and_observes_new_empty_batch(
                 patch.setattr(QueueChangeMonitor, "wait", wait)
                 result = await_task_result(harness.context, task.tid, timeout=20)
             assert result.status == "completed" and result.value is None
-            assert WEFT_GLOBAL_LOG_QUEUE in subscriptions[0]
+            assert WEFT_GLOBAL_LOG_QUEUE not in subscriptions[0]
             assert WEFT_GLOBAL_LOG_QUEUE not in subscriptions[-1]
             assert spec.io.control["ctrl_out"] in subscriptions[-1]
             assert waits

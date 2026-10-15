@@ -244,8 +244,8 @@ The companion file answers "what may exist later."
 
 ## Related Documents
 
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)

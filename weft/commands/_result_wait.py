@@ -26,7 +26,6 @@ from weft.context import WeftContext
 from weft.core import task_evidence
 from weft.core.outbox import decode_result_payload
 from weft.core.outbox import process_outbox_message as decode_outbox_message
-from weft.core.pipelines import pipeline_public_queues
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
@@ -40,14 +39,6 @@ from ._streaming import (
     aggregate_public_outputs,
     handle_ctrl_stream,
     process_outbox_message,
-)
-from ._task_history import (
-    MonitorTaskCollationRecord,
-    is_pipeline_taskspec_payload,
-    load_latest_taskspec_payload,
-    monitor_terminal_evidence,
-    pipeline_status_queue_name,
-    read_monitor_task_record,
 )
 from .types import TaskEvent, TaskResult
 
@@ -88,7 +79,19 @@ def result_observation(
             queue = context.queue(name, persistent=True)
             resources.callback(queue.close)
             queues[name] = queue
-        monitor = QueueChangeMonitor(list(queues.values()), config=context.config)
+        # A watcher mutates its facade's stop-event custody. A borrowed facade
+        # can already belong to an outer observer, so give this subscription
+        # independent facades while retaining the caller's broker/session loan.
+        borrowed_names = {queue.name for queue in borrowed_queues}
+        watched: list[Queue] = []
+        for queue in queues.values():
+            if queue.name in borrowed_names:
+                watch_queue = context.queue(queue.name, persistent=True)
+                resources.callback(watch_queue.close)
+                watched.append(watch_queue)
+            else:
+                watched.append(queue)
+        monitor = QueueChangeMonitor(watched, config=context.config)
         resources.callback(monitor.close)
         register = getattr(cancel_event, "_register_wakeup", None)
         if callable(register):
@@ -197,11 +200,25 @@ class _ResultSettlement:
 class ResultMaterialization:
     """Retained configuration, bounded history and acquired source clocks [MF-5]."""
 
-    taskspec_payload: dict[str, Any] | None
-    outbox_name: str
-    ctrl_out_name: str
+    config: task_evidence.TaskObservationConfig | None
+    taskspec_payload: dict[str, Any] | None = None
+    mapping_entry: dict[str, Any] | None = None
+
+    @property
+    def outbox_name(self) -> str:
+        """Resolved output route; unavailable configuration has no output route."""
+        if self.config is None:
+            raise ValueError("observation metadata unavailable")
+        return self.config.outbox
+
+    @property
+    def ctrl_out_name(self) -> str:
+        """Resolved completion route."""
+        if self.config is None:
+            raise ValueError("observation metadata unavailable")
+        return self.config.ctrl_out
+
     log_last_timestamp: int | None = None
-    log_initial_timestamp: int | None = None
     ctrl_last_timestamp: int | None = None
     ctrl_initial_timestamp: int | None = None
     # Each selected fact carries its own source's initial observation horizon.
@@ -210,29 +227,9 @@ class ResultMaterialization:
     batch_boundaries: list[tuple[int, float, int]] = field(default_factory=list)
     boundary_indexes: dict[str, tuple[int, bool]] = field(default_factory=dict)
     result_surface_had_activity: bool = False
-    log_evidence: task_evidence.LogFold = field(default_factory=task_evidence.LogFold)
-    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None
     terminal_evidence: task_evidence.TaskEvidenceSnapshot | None = None
     terminal_observed_monotonic: float | None = None
     output_evidence: task_evidence.TaskEvidenceSnapshot | None = None
-
-
-def _result_mode(
-    payload: dict[str, Any] | None,
-) -> Literal["one_shot", "persistent", "pipeline"] | None:
-    """Return known immutable collection mode without inferring from traffic [MF-5]."""
-    if payload is None:
-        return None
-    if is_pipeline_taskspec_payload(payload):
-        return "pipeline"
-    spec = payload.get("spec")
-    if not isinstance(spec, dict):
-        return None
-    return (
-        "persistent"
-        if spec.get("persistent") or spec.get("interactive")
-        else "one_shot"
-    )
 
 
 def _accepted_result_materialization(taskspec: TaskSpec) -> ResultMaterialization:
@@ -240,32 +237,27 @@ def _accepted_result_materialization(taskspec: TaskSpec) -> ResultMaterializatio
     if taskspec.tid is None:
         raise ValueError("accepted TaskSpec requires its committed TID")
     payload = taskspec.model_dump(mode="json")
-    outbox, control = task_evidence.queue_names_for_tid(taskspec.tid, payload)
-    return ResultMaterialization(payload, outbox, control)
+    config = task_evidence.observation_config_from_taskspec(taskspec)
+    return ResultMaterialization(config, taskspec_payload=payload)
 
 
 def _result_observation_names(
     tid: str,
     materialized: ResultMaterialization,
     *,
-    include_history: bool = True,
+    include_history: bool = False,
 ) -> list[str]:
-    """Name exact result, lifecycle and runtime interests before reading [MF-5]."""
-    names = [
-        materialized.outbox_name,
-        materialized.ctrl_out_name,
-    ]
+    """Register discovery or exact bound routes before reading [MF-5]."""
+    names = [task_state_queue_name(tid)] if is_task_tid(tid) else []
+    config = materialized.config
+    if config is None:
+        names.append(f"T{tid}.ctrl_out")
+    else:
+        names.extend((config.outbox, config.ctrl_out))
+        if config.pipeline_status is not None:
+            names.append(config.pipeline_status)
     if include_history:
         names.append(WEFT_GLOBAL_LOG_QUEUE)
-    if is_task_tid(tid):
-        names.append(task_state_queue_name(tid))
-    if materialized.taskspec_payload is None:
-        pipeline = pipeline_public_queues(tid)
-        names.extend([pipeline.outbox, pipeline.ctrl_out, pipeline.status])
-    else:
-        status = pipeline_status_queue_name(tid, materialized.taskspec_payload)
-        if status is not None:
-            names.append(status)
     return list(dict.fromkeys(names))
 
 
@@ -365,9 +357,9 @@ def _acquire_result_observation(
     broker: Any,
     *,
     now: float,
-    include_history: bool = True,
+    include_history: bool = False,
 ) -> tuple[ResultMaterialization, tuple[tuple[dict[str, Any], int], ...]]:
-    """Acquire discovery/progress history and the registered local suffix [MF-5]."""
+    """Acquire task-owned metadata and registered local completion [MF-5]."""
     fresh, cursor = (
         task_evidence.read_task_history(
             context, tid, broker=broker, after_timestamp=materialized.log_last_timestamp
@@ -375,68 +367,44 @@ def _acquire_result_observation(
         if include_history
         else ([], materialized.log_last_timestamp)
     )
-    log_initial = materialized.log_initial_timestamp
-    if include_history and log_initial is None:
-        log_initial = cursor or 0
-    payload = materialized.taskspec_payload
-    if payload is None:
-        payload = load_latest_taskspec_payload(context, tid, task_events=fresh)
-    log_evidence = materialized.log_evidence.fold(fresh, tid=tid)
-    log_terminal = log_evidence.terminal
-    lookup = materialized.monitor_lookup
-    if lookup is None:
-        lookup = (
-            read_monitor_task_record(context, tid, queue=log_queue)
-            if payload is None
-            else ((None, None) if log_terminal is not None else None)
-        )
-    retained = monitor_terminal_evidence(lookup[0]) if lookup is not None else None
-    if payload is None and retained is not None:
-        payload = retained.taskspec_payload
-    outbox, control = (
-        task_evidence.queue_names_for_tid(tid, payload)
-        if payload is not None
-        else (materialized.outbox_name, materialized.ctrl_out_name)
+    mapping = (
+        read_task_state_snapshot(context, tid, broker=broker)
+        if is_task_tid(tid)
+        else None
     )
+    projection = (
+        task_evidence.task_state_terminal_evidence(tid, mapping[1], mapping[0])
+        if mapping is not None
+        else None
+    )
+    config = materialized.config
+    if config is None:
+        config = task_evidence.discover_task_observation(
+            context, tid, broker=broker, mapping_entry=mapping[1] if mapping else None
+        )
+    if projection is not None and materialized.terminal_evidence is None:
+        materialized = _with_terminal_evidence(materialized, projection, now=now)
     ctrl_cursor = materialized.ctrl_last_timestamp
     ctrl_initial = materialized.ctrl_initial_timestamp
     local: list[tuple[dict[str, Any], int]] = []
-    if control == materialized.ctrl_out_name:
+    # A newly discovered route is read on the next turn, after subscription.
+    if config is not None and config == materialized.config:
         local, ctrl_cursor, ctrl_initial = _local_completion_rows(
-            broker,
-            control,
-            tid=tid,
-            cursor=ctrl_cursor,
-            initial=ctrl_initial,
+            broker, config.ctrl_out, tid=tid, cursor=ctrl_cursor, initial=ctrl_initial
         )
-    else:
-        # The newly discovered route is acquired only after registration.
+    elif config != materialized.config:
         ctrl_cursor = ctrl_initial = None
-    log_evidence = log_evidence.fold(local, tid=tid)
-    log_terminal = log_evidence.terminal
-    for rows, initial, is_local in (
-        (fresh, log_initial or 0, False),
-        (local, ctrl_initial or 0, True),
-    ):
-        _retain_batch_boundaries(
-            materialized, rows, initial=initial, is_local=is_local, now=now
-        )
+    _retain_batch_boundaries(
+        materialized, local, initial=ctrl_initial or 0, is_local=True, now=now
+    )
     acquired = replace(
         materialized,
-        taskspec_payload=payload,
-        outbox_name=outbox,
-        ctrl_out_name=control,
-        log_evidence=log_evidence,
+        config=config,
+        mapping_entry={**mapping[1], "timestamp": mapping[0]} if mapping else None,
         log_last_timestamp=cursor,
-        log_initial_timestamp=log_initial,
         ctrl_last_timestamp=ctrl_cursor,
         ctrl_initial_timestamp=ctrl_initial,
-        monitor_lookup=lookup,
     )
-    if log_terminal is not None:
-        acquired = _with_terminal_evidence(acquired, log_terminal, now=now)
-    elif retained is not None and acquired.terminal_observed_monotonic is None:
-        acquired = replace(acquired, terminal_observed_monotonic=now)
     return acquired, tuple(fresh)
 
 
@@ -450,73 +418,48 @@ def _classify_result_observation(
     now: float,
     allow_outbox_completion: bool = True,
 ) -> ResultMaterialization:
-    """Classify already registered surfaces, borrowing the same history [MF-5]."""
-    mapping = (
-        read_task_state_snapshot(context, tid, broker=broker)
-        if is_task_tid(tid)
-        else None
-    )
+    """Classify queue-owned evidence using bound configuration [MF-5]."""
+    mapping_entry = materialized.mapping_entry
     acquired = task_evidence.known_tid_evidence(
         context,
         tid=tid,
         taskspec_payload=materialized.taskspec_payload,
-        mapping_entry=mapping[1] if mapping is not None else None,
-        log_evidence=materialized.log_evidence,
+        observation_config=materialized.config,
+        mapping_entry=mapping_entry,
+        discover_observation=False,
         broker=broker,
     )
     output = None
     if acquired is not None and acquired.classification == "result_without_terminal":
         if (
             allow_outbox_completion
-            and _result_mode(materialized.taskspec_payload) == "one_shot"
+            and materialized.config is not None
+            and materialized.config.mode == "one_shot"
         ):
             output = acquired
-        acquired = task_evidence.runtime_evidence(
-            tid=tid, mapping_entry=mapping[1] if mapping is not None else None
-        )
+        acquired = task_evidence.runtime_evidence(tid=tid, mapping_entry=mapping_entry)
     terminal = acquired if acquired is not None and acquired.terminal else None
     previous = materialized.terminal_evidence
-    if (
-        previous is not None
-        and previous.source == "log"
-        and (terminal is None or terminal.source != "log")
+    if previous is not None and (
+        terminal is None
+        or (
+            previous.metadata.get("terminal_source") == "task",
+            previous.classification == "terminal_projection",
+        )
+        > (
+            terminal.metadata.get("terminal_source") == "task",
+            terminal.classification == "terminal_projection",
+        )
     ):
         terminal = previous
-    lookup = materialized.monitor_lookup
-    if lookup is None:
-        strong = (
-            acquired is not None
-            and acquired.terminal
-            and acquired.classification != "claimed_result_without_terminal"
+    activity = materialized.result_surface_had_activity
+    if materialized.config is not None:
+        activity = activity or any(
+            broker.peek_one(name) is not None
+            for name in (materialized.config.outbox, materialized.config.ctrl_out)
         )
-        lookup = (
-            (None, None)
-            if strong
-            else read_monitor_task_record(context, tid, queue=log_queue)
-        )
-    record = lookup[0]
-    retained = monitor_terminal_evidence(record, acquired_evidence=acquired)
-    if (
-        retained is not None
-        and (
-            terminal is None
-            or terminal.classification == "claimed_result_without_terminal"
-        )
-        and (output is None or retained.status == "completed")
-    ):
-        terminal = retained
-    names = [materialized.outbox_name, materialized.ctrl_out_name]
-    if materialized.taskspec_payload is None:
-        pipeline = pipeline_public_queues(tid)
-        names.extend([pipeline.outbox, pipeline.ctrl_out, pipeline.status])
-    activity = materialized.result_surface_had_activity or any(
-        broker.peek_one(name) is not None for name in names
-    )
     classified = replace(
-        materialized,
-        output_evidence=output,
-        result_surface_had_activity=activity,
-        monitor_lookup=lookup,
+        materialized, output_evidence=output, result_surface_had_activity=activity
     )
     return _with_terminal_evidence(classified, terminal, now=now)
 
@@ -645,14 +588,16 @@ class _CollectedResult:
     mode: Literal["one_shot", "persistent", "pipeline"] | None = None
 
     def _observe_configuration(self, materialized: ResultMaterialization) -> None:
-        self.mode = _result_mode(materialized.taskspec_payload)
-        spec = (materialized.taskspec_payload or {}).get("spec")
-        if isinstance(spec, dict):
-            self.stream_output = self.stream_output or bool(spec.get("stream_output"))
+        config = materialized.config
+        self.mode = config.mode if config is not None else None
+        if config is not None:
+            self.stream_output = self.stream_output or config.stream_output
 
     def should_read_output(self, materialized: ResultMaterialization) -> bool:
         """Avoid output scans when neither observation nor delivery is eligible."""
         self._observe_configuration(materialized)
+        if materialized.config is None:
+            return False
         if self.scope == "task" or materialized.terminal_evidence is not None:
             return True
         return self.mode is not None and (self.mode != "pipeline" or self.live_delivery)
@@ -808,22 +753,21 @@ class _CollectedResult:
                 terminal.error,
                 reconciliation=terminal.reconciliation,
             )
-        if self.scope == "task" or self.mode is not None or terminal is not None:
+        if self.mode is not None:
             return None
-        if self.deadline is not None and not self._expired(self.deadline, now):
+        if self.deadline is not None:
             return None
-        lookup = materialized.monitor_lookup
-        if lookup is not None and lookup[1] is not None:
-            return _ResultSettlement(
-                "result",
-                "unknown",
-                f"monitor store unavailable: {lookup[1]}",
-                reconciliation={
-                    "classification": "monitor_store_unavailable",
-                    "reason": "store_read_failed",
-                },
-            )
-        return _ResultSettlement("result", "missing") if self.deadline is None else None
+        reconciliation: dict[str, Any] = {
+            "classification": "observation_metadata_unavailable"
+        }
+        if terminal is not None:
+            reconciliation["observed_terminal_status"] = terminal.status
+        return _ResultSettlement(
+            "result",
+            "unknown",
+            "observation metadata unavailable",
+            reconciliation=reconciliation,
+        )
 
     def _ordinary_count_eligible(self, count: int) -> bool:
         """Qualify an ordinary window or decoded batch using its actual count."""
@@ -856,6 +800,8 @@ class _CollectedResult:
         expired: bool,
         grace_expired: bool,
     ) -> _ResultSettlement | None:
+        if materialized.config is None:
+            return None
         terminal = materialized.terminal_evidence
         if (
             terminal is not None
@@ -919,6 +865,65 @@ class _CollectedResult:
         )
 
 
+def _wait_unconfigured_result(
+    tid: str,
+    materialized: ResultMaterialization,
+    collected: _CollectedResult,
+    monitor: QueueChangeMonitor,
+    *,
+    deadline: float | None,
+    timeout: float | None,
+) -> Iterator[TaskResult]:
+    """Keep unresolved discovery within the caller's original budget [MF-5]."""
+    decision = collected.settle(materialized, now=time.monotonic())
+    if decision.action == "result":
+        yield TaskResult(
+            tid,
+            "unknown",
+            None,
+            None,
+            None,
+            decision.error,
+            reconciliation=decision.reconciliation,
+        )
+        return
+    if decision.action == "timeout":
+        raise CommandTimeoutError(
+            f"Timed out after {timeout} seconds waiting for task {tid}"
+        )
+    monitor.wait(None if deadline is None else max(0.0, deadline - time.monotonic()))
+
+
+def _result_window(
+    broker: Any,
+    materialized: ResultMaterialization,
+    collected: _CollectedResult,
+) -> list[tuple[str, int]]:
+    """Read a bounded window only once collection is eligible [MF-5]."""
+    if not collected.should_read_output(materialized):
+        return []
+    name = materialized.outbox_name
+    horizon = broker.latest_pending_timestamp(name)
+    return [
+        row
+        for row in _peek_result_rows(broker, name, horizon)
+        if isinstance(row, tuple)
+    ]
+
+
+def _lifecycle_events(
+    tid: str, rows: Sequence[tuple[dict[str, Any], int]]
+) -> Iterator[TaskEvent]:
+    """Adapt explicitly followed raw lifecycle rows to public events [MF-5]."""
+    for payload, message_id in rows:
+        yield TaskEvent(
+            tid,
+            str(payload.get("event") or payload.get("status") or "task_event"),
+            message_id,
+            payload,
+        )
+
+
 def _iter_consuming_result(
     context: WeftContext,
     tid: str,
@@ -929,7 +934,6 @@ def _iter_consuming_result(
     show_stderr: bool,
     emit_stream: bool,
     include_stream_events: bool,
-    discover_history: bool = True,
     follow_lifecycle: bool = False,
 ) -> Iterator[TaskEvent | TaskResult]:
     """One consuming observation from unresolved routes to final verdict [MF-5]."""
@@ -937,7 +941,7 @@ def _iter_consuming_result(
         deadline=deadline, live_delivery=emit_stream or include_stream_events
     )
     pending_events: list[tuple[dict[str, Any], int]] = []
-    include_history = discover_history or follow_lifecycle
+    include_history = follow_lifecycle
     with command_resource_scope() as resources:
         resources.enter_context(context.session())
         lease = resources.enter_context(command_resource_scope())
@@ -947,7 +951,6 @@ def _iter_consuming_result(
         observation = lease.enter_context(result_observation(context, names))
         while True:
             queues, monitor = observation
-            old_activity = materialized.result_surface_had_activity
             connection_owner = queues[names[0]]
             with connection_owner.get_connection() as broker:
                 materialized, fresh = _acquire_result_observation(
@@ -960,7 +963,7 @@ def _iter_consuming_result(
                     include_history=include_history,
                 )
             pending_events.extend(fresh)
-            include_history = follow_lifecycle or materialized.taskspec_payload is None
+            include_history = follow_lifecycle
             wanted = _result_observation_names(
                 tid, materialized, include_history=include_history
             )
@@ -983,42 +986,26 @@ def _iter_consuming_result(
                     broker,
                     now=time.monotonic(),
                 )
-            if (
-                materialized.taskspec_payload is None
-                and not old_activity
-                and materialized.result_surface_had_activity
-            ):
-                # Actual new local traffic may race metadata committed just after
-                # the history horizon. Refresh once for that evidence, not time.
-                continue
             if pending_events:
-                yield from (
-                    TaskEvent(
-                        tid,
-                        str(
-                            payload.get("event")
-                            or payload.get("status")
-                            or "task_event"
-                        ),
-                        message_id,
-                        payload,
-                    )
-                    for payload, message_id in pending_events
-                )
+                yield from _lifecycle_events(tid, pending_events)
                 pending_events.clear()
                 # The caller may publish while we yield. Reacquire the bounded
                 # suffix and local evidence on resume before deciding a verdict.
                 continue
+            if materialized.config is None:
+                yield from _wait_unconfigured_result(
+                    tid,
+                    materialized,
+                    collected,
+                    monitor,
+                    deadline=deadline,
+                    timeout=timeout,
+                )
+                if deadline is None:
+                    return
+                continue
             with connection_owner.get_connection() as broker:
-                outbox = queues[materialized.outbox_name]
-                rows: list[tuple[str, int]] = []
-                if collected.should_read_output(materialized):
-                    horizon = broker.latest_pending_timestamp(outbox.name)
-                    rows = [
-                        row
-                        for row in _peek_result_rows(broker, outbox.name, horizon)
-                        if isinstance(row, tuple)
-                    ]
+                rows = _result_window(broker, materialized, collected)
                 selected = collected.select_claims(
                     rows, materialized, now=time.monotonic()
                 )

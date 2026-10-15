@@ -401,9 +401,9 @@ last live PID; locked paths may also surface through 8.3 short-name segments
   `finally` before any direct `_tempdir.cleanup()`.
 
 (Distilled from 4 lessons.md sections, 2026-04-07..2026-04-09, source
-`1c997978`: "Interactive TTY Tests", "CLI Harness Timeouts", "Spawn-Heavy
+`52e74599`: "Interactive TTY Tests", "CLI Harness Timeouts", "Spawn-Heavy
 Timeout Tests", "Cancelled Task Teardown". Full raw entries:
-`git show 1c997978:docs/lessons.md`.)
+`git show 52e74599:docs/lessons.md`.)
 
 ### Pattern 11: The Test Neutralizes the Hostile Default It Claims to Cover
 

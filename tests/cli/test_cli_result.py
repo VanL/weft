@@ -388,7 +388,7 @@ def test_result_missing_task_reports_error(
 
     assert rc == 2
     assert out == ""
-    assert "no outbox queue" in err
+    assert "task 999 not found" in err
     assert "Traceback" not in err
 
 

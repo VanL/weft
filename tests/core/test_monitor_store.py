@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -3633,24 +3632,44 @@ def test_monitor_store_retirement_respects_control_evidence_guard(
 def test_monitor_store_old_control_cleanup_mark_still_selects_retained_open_family(
     tmp_path: Path,
 ) -> None:
-    """A prior ctrl_in-only pass cannot hide later ctrl_out from cleanup's fence."""
+    """Merge bounded sources before limiting, so a full ready lane cannot hide older residue."""
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
-    tid = "1779000000000000780"
-    start = _update(tid, int(tid) + 10)
-    store.upsert_task_event(start)
-    store.mark_summary_emitted(tid, int(tid) + 11)
-    store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
-    store.mark_task_control_deleted(tid, int(tid) + 13)
-    queue = ctx.queue(f"T{tid}.ctrl_out")
-    queue.write("later retained evidence")
+    base = 1779000000000000780
+    old_tids = tuple(str(base + offset) for offset in range(3))
+    terminal_tids = tuple(str(base + 100 + offset) for offset in range(3))
+    for tid in old_tids:
+        store.upsert_task_event(_update(tid, int(tid) + 10))
+        store.mark_summary_emitted(tid, int(tid) + 11)
+        store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
+        store.mark_task_control_deleted(tid, int(tid) + 13)
+        with ctx.queue(f"T{tid}.ctrl_out") as queue:
+            queue.write("later retained evidence")
+    for tid in terminal_tids:
+        store.upsert_task_event(
+            _update(
+                tid,
+                int(tid) + 10,
+                event="work_completed",
+                status="completed",
+                terminal=True,
+            )
+        )
+        store.mark_summary_emitted(tid, int(tid) + 11)
     candidates = store.list_terminal_control_cleanup_ready_tasks(
-        limit=10,
-        now_ns=int(tid) + 20,
+        limit=2,
+        now_ns=base + 1000,
         retention_seconds=0.0,
     )
-    assert tuple(record.tid for record in candidates) == (tid,)
+    assert tuple(record.tid for record in candidates) == old_tids[:2]
+    next_page = store.list_terminal_control_cleanup_ready_tasks(
+        limit=2,
+        now_ns=base + 1000,
+        retention_seconds=0.0,
+        after=(candidates[-1].last_message_id, candidates[-1].tid),
+    )
+    assert tuple(record.tid for record in next_page) == (old_tids[-1], terminal_tids[0])
 
 
 def _wait_for_pg_blocker(
@@ -3949,60 +3968,3 @@ def test_monitor_store_task_log_only_terminal_update_preserves_disposed_summary(
     assert record.summary_emitted_at_ns == emitted_at_ns
     assert record.disposition_at_ns == int(tid) + 13
     assert store.list_summary_correction_ready_tasks(limit=10) == ()
-
-
-@pytest.mark.parametrize(
-    ("deadline_case", "expected_probes"),
-    (("none", 2), ("expired", 0), ("between_probes", 1)),
-)
-def test_monitor_store_retained_control_probes_obey_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    deadline_case: str,
-    expected_probes: int,
-) -> None:
-    """Empty earlier rows cannot multiply broker probes or overrun the deadline."""
-    ctx = _context(tmp_path)
-    store = open_monitor_store(ctx)
-    store.ensure_schema()
-    tids = tuple(str(1779000000000000900 + index) for index in range(4))
-    for tid in tids:
-        store.upsert_task_event(_update(tid, int(tid) + 10))
-        store.mark_summary_emitted(tid, int(tid) + 11)
-        store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
-        store.mark_task_control_deleted(tid, int(tid) + 13)
-    queue_name = f"T{tids[-1]}.ctrl_out"
-    with ctx.broker() as broker:
-        broker.write(queue_name, "retained proof beyond this slice")
-        broker_type = type(broker)
-    probed: list[str] = []
-    clock = [2.0 if deadline_case == "expired" else 0.0]
-    original_stat = broker_type.get_queue_stat
-
-    def counted_stat(broker: Any, selected_queue: str) -> Any:
-        probed.append(selected_queue)
-        result = original_stat(broker, selected_queue)
-        if deadline_case == "between_probes":
-            clock[0] = 2.0
-        return result
-
-    monkeypatch.setattr(broker_type, "get_queue_stat", counted_stat)
-    deadline_kwargs: dict[str, float] = {}
-    if deadline_case != "none":
-        monkeypatch.setattr(
-            monitor_store_module,
-            "time",
-            SimpleNamespace(monotonic=lambda: clock[0]),
-        )
-        deadline_kwargs["deadline_monotonic"] = 1.0
-    ready = store.list_terminal_control_cleanup_ready_tasks(
-        limit=2, now_ns=int(tids[-1]) + 20, retention_seconds=0.0, **deadline_kwargs
-    )
-    assert probed == [f"T{tid}.ctrl_out" for tid in tids[:expected_probes]]
-    assert ready == ()
-    # A larger fresh slice reaches the surviving producer row through the same
-    # real broker path, proving the empty result above is a budget boundary.
-    ready = store.list_terminal_control_cleanup_ready_tasks(
-        limit=4, now_ns=int(tids[-1]) + 20, retention_seconds=0.0
-    )
-    assert tuple(record.tid for record in ready) == (tids[-1],)

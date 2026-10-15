@@ -96,7 +96,7 @@ lifecycle. Exact target/config behavior is covered by
 real-backend task/session cleanup is covered by
 `tests/core/test_task_runtime_connections.py`.
 
-Related plan: [SimpleBroker configuration migration](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md).
+Related plan: `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
 
 Extension value types preserve their existing fields and behavior.
@@ -143,13 +143,21 @@ _Implementation mapping_: `weft/client/_client.py::WeftClient.__init__`,
 
 ## Commands surface contract [PY-2]
 
-Task observations use the shared per-TID runtime-state readers
-([OBS.6]); known-TID snapshots read that state queue directly. Snapshot and
-control waiters subscribe to the exact queue even before its first write;
-realtime snapshot requests remain fresh. CLI event watches remain incremental
-event streams. This storage change adds no public signature, result shape,
-iterator retention contract, or lifecycle precedence change. Python system
-status retains its unfiltered default; CLI status retains terminal filtering.
+Task observations use task-owned per-TID snapshots and bound observation
+configuration under [MF-5]. Waiting observers register exact task-state interests
+before their read/check/wait cycle. Pure point queries use a broker read without
+an activity subscription.
+System status, task list, and stats default to current nonterminal inventory;
+`include_terminal=True` adds retained terminal projections. `include_log_history=True`
+explicitly unions retained raw history. System status exposes
+`include_terminal=False`, `status=None`, and `include_log_history=False`; task
+list/stats retain their existing selection arguments and add
+`include_log_history=False`. Bulk inventory may lag completion after failed
+publication or abrupt child death; known-TID local evidence keeps its authority.
+Ordinary observation never queries Monitor tables. Missing configuration follows
+[MF-5]'s unknown/finite-timeout contract; unresolved controls fail before writing.
+Accepted handles retain their immutable configuration after metadata retirement.
+Explicit event streams provide retained/live raw events without lossless history.
 
 Every canonical CLI verb has one actual implementation exported from
 `weft.commands`: `cmd_` plus its full CLI path, joined with underscores and
@@ -266,7 +274,7 @@ and `integrations/weft_django/tests/test_weft_django.py`.
   existing claimed-result metadata contract [CLI-1.2.2]. The owner is
   `weft/commands/result.py::await_task_result`; the CLI renders that evidence
   without another lifecycle probe. Implementation plan:
-  [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
+  `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 - `TaskPingResult(tid: str, acknowledged: bool, timed_out: bool,
   error: str | None, observed_at: int | None, pong: Mapping[str, Any] | None,
   snapshot: TaskSnapshot | None)`. A synchronous keyed PING owns an ephemeral
@@ -369,7 +377,7 @@ share the resolved-context materializer; `weft/commands/load.py` and
 `weft/commands/tidy.py` share theirs the same way, and
 `weft/commands/run.py::_LiveRunSession.stop` passes its session context
 to the task-control owner.
-Correction plan: [Complexity review corrections](../plans/2026-09-08-complexity-review-corrections-plan.md).
+Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### Typed errors and CLI exits
 
@@ -480,7 +488,7 @@ whose effective runtime root differs from the base client context uses bounded
 ownership; clients do not retain a map of alternate-root sessions.
 
 This also serves the Django on-commit adapter.
-See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
+See `2026-09-17-submission-manager-check-cost-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ## Layering [PY-4]
 
@@ -510,20 +518,22 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 
-- [Interactive source integration](../plans/2026-09-19-interactive-source-integration-plan.md)
+- retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
-- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
+- retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
-- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
+- retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
-- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+- retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [Public API surface remediation plan](../plans/2026-08-12-public-api-surface-remediation.md)
-- [Django override normalization seam plan](../plans/2026-09-08-django-override-normalization-seam-plan.md)
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-12-public-api-surface-remediation — source 396c3b85; see docs/plans/README.md
+- retired: 2026-09-08-django-override-normalization-seam-plan — source 396c3b85; see docs/plans/README.md
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

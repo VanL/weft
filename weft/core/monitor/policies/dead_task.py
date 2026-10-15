@@ -103,27 +103,28 @@ def dead_task_queue_cleanup_plan(
     *,
     now_ns: int,
     retention_seconds: float,
+    observation_retention_seconds: float,
+    terminal_message_id: int | None = None,
+    snapshot_hold: bool = False,
 ) -> DeadTaskQueueCleanupPlan:
-    """Return the queue cleanup policy for one proven-dead task TID.
-
-    Retention eligibility here is TID-creation-based only, unlike the
-    record-backed ``terminal_task_runtime_queue_cleanup_plan`` (which prefers
-    terminal evidence): this function receives only ``tid``/queues/retention
-    by construction, for TIDs discovered by name-parsing standard queue
-    names with no Monitor collation record and therefore no terminal
-    evidence to prefer (Spec: [MF-5]).
-    """
+    """Select queue roles using independent result and reserved clocks [MF-5]."""
 
     ctrl_in, inbox = standard_dead_task_stale_queue_names(tid)
-    retention_eligible = is_old_enough(int(tid), now_ns, retention_seconds)
+    reserved_eligible = is_old_enough(int(tid), now_ns, retention_seconds)
+    retention_eligible = not snapshot_hold and is_old_enough(
+        terminal_message_id if terminal_message_id is not None else int(tid),
+        now_ns,
+        observation_retention_seconds,
+    )
     control_queue_names: tuple[str, ...] = (ctrl_in,)
     outbox_queue_names: tuple[str, ...] = ()
     reserved_queue_names: tuple[str, ...] = ()
     if retention_eligible:
-        ctrl_out, outbox, reserved = standard_dead_task_retention_queue_names(tid)
+        ctrl_out, outbox, _reserved = standard_dead_task_retention_queue_names(tid)
         control_queue_names += (ctrl_out,)
         outbox_queue_names = (outbox,)
-        reserved_queue_names = (reserved,)
+    if reserved_eligible:
+        reserved_queue_names = (f"T{tid}.{QUEUE_RESERVED_SUFFIX}",)
     return DeadTaskQueueCleanupPlan(
         queue_names=(
             *control_queue_names,

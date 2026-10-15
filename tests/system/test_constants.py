@@ -1146,3 +1146,24 @@ def test_context_config_rejects_non_string_values(value: object) -> None:
         ),
     ):
         load_config({"WEFT_CONTEXT": value})
+
+
+def test_task_observation_retention_has_independent_validated_floor() -> None:
+    """Observation retention has its own clock and the liveness minimum [MF-5]."""
+    config = constants.load_config(
+        {
+            "WEFT_TASK_OBSERVATION_RETENTION_SECONDS": "2400",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "7200",
+        }
+    )
+    assert config["TASK_OBSERVATION_RETENTION_SECONDS"] == 2400.0
+    assert config["LOG_TASKS_RETENTION_PERIOD_SECONDS"] == 7200.0
+
+
+@pytest.mark.parametrize("value", ["2399", "nan", "inf"])
+def test_task_observation_retention_rejects_invalid_floor(value: str) -> None:
+    with (
+        pytest.warns(UserWarning, match="WEFT_TASK_OBSERVATION_RETENTION_SECONDS"),
+        pytest.raises(ValueError, match="WEFT_TASK_OBSERVATION_RETENTION_SECONDS"),
+    ):
+        constants.load_config({"WEFT_TASK_OBSERVATION_RETENTION_SECONDS": value})

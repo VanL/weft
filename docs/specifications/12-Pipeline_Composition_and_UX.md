@@ -943,11 +943,11 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
-- [`docs/plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md`](../plans/2026-04-13-pipeline-first-class-runtime-implementation-plan.md)
-- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
-- [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-pipeline-spec-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-pipeline-first-class-runtime-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-pipeline-autostart-extension-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-12-bounded-task-monitor-cleanup-policy-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 

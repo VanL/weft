@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal, cast
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_SURFACE_WAIT_TIMEOUT,
+    PIPELINE_RUNTIME_METADATA_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     RUNNER_DIAGNOSTICS_FIELD,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     TASK_HISTORY_MAX_MESSAGE_ID,
+    TASK_LIFECYCLE_STATUS_VALUES,
     TASK_TERMINAL_ENVELOPE_SOURCES,
     TERMINAL_ENVELOPE_TYPE,
     TERMINAL_TASK_EVENTS,
@@ -39,11 +41,270 @@ from weft.core.outbox import (
 )
 from weft.core.queue_window import queue_broker
 from weft.core.runner_diagnostics import diagnostic_summary
+from weft.core.task_state import read_task_state_snapshot
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
     handle_has_live_host_process,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskObservationConfig:
+    """Immutable resolved observation routes and collection policy [MF-5]."""
+
+    mode: Literal["one_shot", "persistent", "pipeline"]
+    stream_output: bool
+    inbox: str
+    outbox: str
+    ctrl_in: str
+    ctrl_out: str
+    pipeline_status: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        """Serialize the versioned task-state observation value."""
+        return {
+            "version": 1,
+            "mode": self.mode,
+            "stream_output": self.stream_output,
+            "routes": {
+                "inbox": self.inbox,
+                "outbox": self.outbox,
+                "ctrl_in": self.ctrl_in,
+                "ctrl_out": self.ctrl_out,
+                "pipeline_status": self.pipeline_status,
+            },
+        }
+
+
+def _queue_identifier(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value != "[REDACTED]"
+
+
+def parse_task_observation(payload: Any) -> TaskObservationConfig | None:
+    """Validate a complete observation wire value once [MF-5]."""
+    if not isinstance(payload, dict) or set(payload) != {
+        "version",
+        "mode",
+        "stream_output",
+        "routes",
+    }:
+        return None
+    if type(payload["version"]) is not int or payload["version"] != 1:
+        return None
+    mode = payload["mode"]
+    if (
+        mode not in ("one_shot", "persistent", "pipeline")
+        or type(payload["stream_output"]) is not bool
+    ):
+        return None
+    routes = payload["routes"]
+    if not isinstance(routes, dict) or set(routes) != {
+        "inbox",
+        "outbox",
+        "ctrl_in",
+        "ctrl_out",
+        "pipeline_status",
+    }:
+        return None
+    if not all(
+        _queue_identifier(routes[key])
+        for key in ("inbox", "outbox", "ctrl_in", "ctrl_out")
+    ):
+        return None
+    if (mode == "pipeline" and not _queue_identifier(routes["pipeline_status"])) or (
+        mode != "pipeline" and routes["pipeline_status"] is not None
+    ):
+        return None
+    return TaskObservationConfig(
+        cast(Literal["one_shot", "persistent", "pipeline"], mode),
+        payload["stream_output"],
+        routes["inbox"],
+        routes["outbox"],
+        routes["ctrl_in"],
+        routes["ctrl_out"],
+        routes["pipeline_status"],
+    )
+
+
+def observation_config_from_taskspec_payload(
+    payload: Any,
+) -> TaskObservationConfig | None:
+    """Read required configuration, allowing unrelated TaskSpec redaction [MF-5]."""
+    if not isinstance(payload, dict):
+        return None
+    spec, metadata, io = (payload.get(key) for key in ("spec", "metadata", "io"))
+    if (
+        not isinstance(spec, dict)
+        or not isinstance(metadata, dict)
+        or not isinstance(io, dict)
+    ):
+        return None
+    if any(
+        type(spec.get(key)) is not bool
+        for key in ("persistent", "interactive", "stream_output")
+    ):
+        return None
+    role = metadata.get("role")
+    if role is not None and (not isinstance(role, str) or role == "[REDACTED]"):
+        return None
+    mode = (
+        "pipeline"
+        if role == "pipeline"
+        else "persistent"
+        if spec["persistent"] or spec["interactive"]
+        else "one_shot"
+    )
+    inputs, outputs, control = (io.get(key) for key in ("inputs", "outputs", "control"))
+    if (
+        not isinstance(inputs, dict)
+        or not isinstance(outputs, dict)
+        or not isinstance(control, dict)
+    ):
+        return None
+    pipeline_status = None
+    if mode == "pipeline":
+        runtime = metadata.get(PIPELINE_RUNTIME_METADATA_KEY, {})
+        if not isinstance(runtime, dict) or not isinstance(
+            runtime.get("queues", {}), dict
+        ):
+            return None
+        pipeline_status = runtime.get("queues", {}).get("status")
+    return parse_task_observation(
+        {
+            "version": 1,
+            "mode": mode,
+            "stream_output": spec["stream_output"],
+            "routes": {
+                "inbox": inputs.get("inbox"),
+                "outbox": outputs.get("outbox"),
+                "ctrl_in": control.get("ctrl_in"),
+                "ctrl_out": control.get("ctrl_out"),
+                "pipeline_status": pipeline_status,
+            },
+        }
+    )
+
+
+def observation_config_from_taskspec(
+    taskspec: Any,
+    *,
+    routes: Mapping[str, str] | None = None,
+) -> TaskObservationConfig:
+    """Convert an accepted resolved TaskSpec to its canonical config [MF-5]."""
+    payload = taskspec.model_dump(
+        mode="json",
+        include={
+            "tid": True,
+            "spec": {"persistent", "interactive", "stream_output"},
+            "io": True,
+            "metadata": {"role", PIPELINE_RUNTIME_METADATA_KEY},
+        },
+    )
+    # Accepted TaskSpecs use the same default expansion as BaseTask queue wiring.
+    # Queue payload discovery stays strict and never supplies these defaults.
+    prefix = f"T{taskspec.tid}."
+    for section, roles in (
+        ("inputs", ("inbox",)),
+        ("outputs", ("outbox",)),
+        ("control", ("ctrl_in", "ctrl_out")),
+    ):
+        for role in roles:
+            if routes is not None:
+                payload["io"][section][role] = routes[role]
+            else:
+                payload["io"][section].setdefault(role, prefix + role)
+    if payload["metadata"].get("role") == "pipeline":
+        runtime = payload["metadata"].setdefault(PIPELINE_RUNTIME_METADATA_KEY, {})
+        if isinstance(runtime, dict):
+            queues = runtime.setdefault("queues", {})
+            if isinstance(queues, dict):
+                queues.setdefault("status", f"P{taskspec.tid}.status")
+    config = observation_config_from_taskspec_payload(payload)
+    if config is None:
+        raise ValueError("TaskSpec does not contain complete observation configuration")
+    return config
+
+
+def parse_task_projection(payload: Any, *, terminal: bool) -> dict[str, Any] | None:
+    """Validate lifecycle projection independently of route metadata [MF-5]."""
+    required = {"version", "status", "event", "started_at", "metadata"}
+    optional = {"completed_at", "return_code", "error"}
+    if (
+        not isinstance(payload, dict)
+        or not required <= set(payload)
+        or set(payload) - required - optional
+    ):
+        return None
+    if type(payload["version"]) is not int or payload["version"] != 1:
+        return None
+    status = payload["status"]
+    if (
+        not isinstance(status, str)
+        or status not in TASK_LIFECYCLE_STATUS_VALUES
+        or (status in TERMINAL_TASK_STATUSES) != terminal
+    ):
+        return None
+    if (
+        not isinstance(payload["event"], str)
+        or not payload["event"].strip()
+        or not isinstance(payload["metadata"], dict)
+    ):
+        return None
+    started = payload["started_at"]
+    if started is not None and (type(started) is not int or started < 0):
+        return None
+    if optional & set(payload) and not terminal:
+        return None
+    if any(
+        key in payload and type(payload[key]) is not int
+        for key in ("completed_at", "return_code")
+    ):
+        return None
+    completed = payload.get("completed_at")
+    if completed is not None and (
+        completed < 0 or (started is not None and completed < started)
+    ):
+        return None
+    if "error" in payload and (
+        not isinstance(payload["error"], str) or not payload["error"].strip()
+    ):
+        return None
+    return dict(payload) if _json_metadata_valid(payload["metadata"]) else None
+
+
+def _json_metadata_valid(metadata: dict[str, Any]) -> bool:
+    """Reject non-JSON metadata at the queue boundary."""
+    try:
+        json.dumps(metadata, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def task_state_terminal_evidence(
+    tid: str, payload: dict[str, Any], message_id: int
+) -> TaskEvidenceSnapshot | None:
+    """Convert a validated task-owned terminal projection [MF-5]."""
+    projection = parse_task_projection(
+        payload.get("projection"), terminal=payload.get("terminal") is True
+    )
+    if payload.get("full") != tid or projection is None or not payload.get("terminal"):
+        return None
+    return TaskEvidenceSnapshot(
+        tid=tid,
+        status=projection["status"],
+        classification="terminal_projection",
+        source="task_state",
+        terminal=True,
+        event=projection["event"],
+        started_at=projection["started_at"],
+        completed_at=projection.get("completed_at"),
+        observed_at=message_id,
+        error=projection.get("error"),
+        return_code=projection.get("return_code"),
+        metadata=projection["metadata"],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,10 +740,13 @@ def ping_pong_evidence(
     taskspec_payload: dict[str, Any] | None = None,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     broker: Any | None = None,
+    ctrl_in_name: str | None = None,
+    ctrl_out_name: str | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Send a keyed PING and return matching live PONG evidence if visible."""
 
-    ctrl_in_name, _ctrl_out_name = control_queue_names_for_tid(tid, taskspec_payload)
+    default_in, _default_out = control_queue_names_for_tid(tid, taskspec_payload)
+    ctrl_in_name = ctrl_in_name or default_in
     result = send_keyed_ping_probe(
         ctx,
         tid=tid,
@@ -761,11 +1025,16 @@ def peek_final_outbox_evidence(
     outbox_name: str,
     taskspec_payload: dict[str, Any] | None,
     broker: Any | None = None,
+    observation_config: TaskObservationConfig | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Peek conservative final one-shot outbox evidence without consuming it."""
 
-    if task_is_persistent_payload(taskspec_payload) or task_is_interactive_payload(
-        taskspec_payload
+    if (observation_config is not None and observation_config.mode != "one_shot") or (
+        observation_config is None
+        and (
+            task_is_persistent_payload(taskspec_payload)
+            or task_is_interactive_payload(taskspec_payload)
+        )
     ):
         return None
     stream_buffer: list[str] = []
@@ -851,6 +1120,7 @@ def claimed_outbox_result_evidence(
     outbox_name: str,
     taskspec_payload: dict[str, Any] | None,
     broker: Any | None = None,
+    observation_config: TaskObservationConfig | None = None,
 ) -> TaskEvidenceSnapshot | None:
     """Return a recovery diagnostic for claimed one-shot outbox residue.
 
@@ -861,8 +1131,12 @@ def claimed_outbox_result_evidence(
     Spec: [MF-5]
     """
 
-    if task_is_persistent_payload(taskspec_payload) or task_is_interactive_payload(
-        taskspec_payload
+    if (observation_config is not None and observation_config.mode != "one_shot") or (
+        observation_config is None
+        and (
+            task_is_persistent_payload(taskspec_payload)
+            or task_is_interactive_payload(taskspec_payload)
+        )
     ):
         return None
     counts = queue_message_counts(ctx, outbox_name, broker=broker)
@@ -1107,46 +1381,6 @@ def read_task_history(
         return matched, horizon
 
 
-@dataclass(frozen=True, slots=True)
-class LogFold:
-    """Incremental lifecycle proof from acquired exact-TID rows (Spec: [MF-5])."""
-
-    terminal: TaskEvidenceSnapshot | None = None
-    latest_live_at: int | None = None
-
-    def fold(
-        self,
-        rows: Sequence[tuple[dict[str, Any], int]],
-        *,
-        tid: str,
-    ) -> LogFold:
-        """Retain newest terminal and prior-live facts after a fresh suffix."""
-        latest_terminal = self.terminal
-        latest_live_at = self.latest_live_at
-        for payload, timestamp in rows:
-            status = payload.get("status")
-            if isinstance(status, str) and status in {"spawning", "running"}:
-                latest_live_at = max(latest_live_at or 0, timestamp)
-            terminal = log_terminal_evidence(payload, tid=tid, timestamp=timestamp)
-            if terminal is not None and (
-                latest_terminal is None
-                or timestamp >= (latest_terminal.observed_at or 0)
-            ):
-                latest_terminal = terminal
-        return LogFold(latest_terminal, latest_live_at)
-
-
-def bounded_log_terminal_evidence(
-    ctx: WeftContext,
-    *,
-    tid: str,
-    broker: Any | None = None,
-) -> LogFold:
-    """Acquire and fold one bounded exact-TID history range (Spec: [MF-5])."""
-    rows, _horizon = read_task_history(ctx, tid, broker=broker)
-    return LogFold().fold(rows, tid=tid)
-
-
 def stale_observer_evidence(
     *,
     tid: str,
@@ -1186,7 +1420,76 @@ def stale_observer_evidence(
     )
 
 
-def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
+def _current_mapping_entry(
+    ctx: WeftContext, tid: str, *, broker: Any | None
+) -> dict[str, Any] | None:
+    """Acquire one current generation together with its observation time [MF-5]."""
+    snapshot = read_task_state_snapshot(ctx, tid, broker=broker)
+    return {**snapshot[1], "timestamp": snapshot[0]} if snapshot is not None else None
+
+
+def discover_task_observation(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    broker: Any | None = None,
+    mapping_entry: dict[str, Any] | None = None,
+) -> TaskObservationConfig | None:
+    """Discover exact task-owned routes without history or guessed destinations [MF-5]."""
+    if mapping_entry is None:
+        mapping_entry = _current_mapping_entry(ctx, tid, broker=broker)
+    if mapping_entry is not None:
+        config = parse_task_observation(mapping_entry.get("observation"))
+        if config is not None:
+            return config
+    name = f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+    selected: tuple[int, TaskObservationConfig] | None = None
+    with (
+        queue_broker(ctx, name, broker=broker) as db,
+        closing_queue_iterator(db.peek_generator(name, with_timestamps=True)) as rows,
+    ):
+        for raw, message_id in rows:
+            envelope = coerce_terminal_envelope(raw, tid=tid)
+            if envelope is None or envelope["source"] != "task":
+                continue
+            spec_payload = envelope.get("taskspec")
+            if not isinstance(spec_payload, dict) or spec_payload.get("tid") != tid:
+                continue
+            config = observation_config_from_taskspec_payload(spec_payload)
+            if config is not None and (selected is None or message_id > selected[0]):
+                selected = message_id, config
+    return selected[1] if selected is not None else None
+
+
+def _configured_outbox_evidence(
+    ctx: WeftContext,
+    *,
+    tid: str,
+    config: TaskObservationConfig | None,
+    taskspec_payload: dict[str, Any] | None,
+    broker: Any | None,
+) -> TaskEvidenceSnapshot | None:
+    """Preserve conservative one-shot recovery only with resolved routes [MF-5]."""
+    if config is None or config.mode != "one_shot":
+        return None
+    return peek_final_outbox_evidence(
+        ctx,
+        tid=tid,
+        outbox_name=config.outbox,
+        taskspec_payload=taskspec_payload,
+        broker=broker,
+        observation_config=config,
+    ) or claimed_outbox_result_evidence(
+        ctx,
+        tid=tid,
+        outbox_name=config.outbox,
+        taskspec_payload=taskspec_payload,
+        broker=broker,
+        observation_config=config,
+    )
+
+
+def known_tid_evidence(
     ctx: WeftContext,
     *,
     tid: str,
@@ -1195,102 +1498,90 @@ def known_tid_evidence(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-039] exception
     ping: bool = False,
     probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     broker: Any | None = None,
-    log_evidence: LogFold | None = None,
+    observation_config: TaskObservationConfig | None = None,
+    discover_observation: bool = True,
 ) -> TaskEvidenceSnapshot | None:
-    """Select evidence using an authoritative log fold, when supplied [MF-5]."""
-
-    log = (
-        bounded_log_terminal_evidence(ctx, tid=tid, broker=broker)
-        if log_evidence is None
-        else log_evidence
+    """Select task-owned evidence without global history reads [MF-5]."""
+    if mapping_entry is None and discover_observation:
+        mapping_entry = _current_mapping_entry(ctx, tid, broker=broker)
+    config = observation_config or observation_config_from_taskspec_payload(
+        taskspec_payload
     )
-    read_only_snapshot: TaskEvidenceSnapshot | None = log.terminal
-
-    if read_only_snapshot is None:
-        local_snapshot = task_local_terminal_evidence(
+    if config is None and discover_observation:
+        config = discover_task_observation(
+            ctx, tid, broker=broker, mapping_entry=mapping_entry
+        )
+    local = peek_terminal_ctrl_out_evidence(
+        ctx,
+        tid=tid,
+        ctrl_out_name=config.ctrl_out if config else f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
+        taskspec_payload=taskspec_payload,
+        broker=broker,
+    )
+    if local is not None and local.metadata.get("terminal_source") == "task":
+        return local
+    projection = (
+        task_state_terminal_evidence(
+            tid, mapping_entry, int(mapping_entry.get("timestamp", 0))
+        )
+        if mapping_entry is not None
+        else None
+    )
+    if projection is not None:
+        return projection
+    if local is not None:
+        return local
+    runtime = runtime_evidence(tid=tid, mapping_entry=mapping_entry)
+    if runtime is None:
+        runtime = _configured_outbox_evidence(
             ctx,
             tid=tid,
+            config=config,
             taskspec_payload=taskspec_payload,
             broker=broker,
         )
-        if local_snapshot is not None:
-            read_only_snapshot = local_snapshot
-
-    if read_only_snapshot is None:
-        runtime_snapshot = runtime_evidence(tid=tid, mapping_entry=mapping_entry)
-        if runtime_snapshot is not None:
-            read_only_snapshot = runtime_snapshot
-
-    if read_only_snapshot is None:
-        prior_live = log.latest_live_at is not None or isinstance(
-            (mapping_entry or {}).get("runtime_handle"),
-            dict,
-        )
-        prior_live_at = log.latest_live_at
-        mapping_timestamp = (
-            mapping_entry.get("timestamp") if isinstance(mapping_entry, dict) else None
-        )
-        if isinstance(mapping_timestamp, int):
-            prior_live_at = max(prior_live_at or 0, mapping_timestamp)
-        stale_snapshot = stale_observer_evidence(
+    if ping and config is not None:
+        # PING is permitted only after route discovery; accepted payloads retain
+        # their original full configuration for the existing keyed probe.
+        pong = ping_pong_evidence(
+            ctx,
             tid=tid,
-            prior_live=prior_live,
-            prior_live_at=prior_live_at,
+            taskspec_payload=taskspec_payload,
+            timeout=probe_timeout,
+            broker=broker,
+            ctrl_in_name=config.ctrl_in,
+            ctrl_out_name=config.ctrl_out,
         )
-        if stale_snapshot is not None:
-            outbox_name, _ctrl_out_name = queue_names_for_tid(tid, taskspec_payload)
-            claimed_snapshot = claimed_outbox_result_evidence(
-                ctx,
-                tid=tid,
-                outbox_name=outbox_name,
-                taskspec_payload=taskspec_payload,
-                broker=broker,
-            )
-            read_only_snapshot = claimed_snapshot or stale_snapshot
+        if pong is not None:
+            return pong
+    return runtime or _nonterminal_mapping_evidence(tid, mapping_entry)
 
-    if not ping:
-        return read_only_snapshot
 
-    pong_snapshot = ping_pong_evidence(
-        ctx,
-        tid=tid,
-        taskspec_payload=taskspec_payload,
-        timeout=probe_timeout,
-        broker=broker,
+def _nonterminal_mapping_evidence(
+    tid: str, mapping_entry: dict[str, Any] | None
+) -> TaskEvidenceSnapshot | None:
+    """Preserve task-owned nonterminal lifecycle when no stronger evidence exists [MF-5]."""
+    payload = mapping_entry or {}
+    projection = parse_task_projection(
+        payload.get("projection"), terminal=payload.get("terminal") is True
     )
-    if pong_snapshot is None:
-        return read_only_snapshot
-    if read_only_snapshot is None:
-        return pong_snapshot
-
-    existing_at = read_only_snapshot.observed_at
-    pong_at = pong_snapshot.observed_at
-    if (
-        read_only_snapshot.terminal
-        and isinstance(existing_at, int)
-        and isinstance(pong_at, int)
-        and existing_at >= pong_at
-    ):
-        return read_only_snapshot
-    if read_only_snapshot.terminal and (
-        not isinstance(existing_at, int) or not isinstance(pong_at, int)
-    ):
-        return read_only_snapshot
-    if read_only_snapshot.terminal:
-        return replace(
-            pong_snapshot,
-            reconciliation=reconciliation_for_live_pong(
-                pong_snapshot,
-                reason="live_pong_after_terminal_evidence",
-            ),
+    if projection is not None:
+        return TaskEvidenceSnapshot(
+            tid=tid,
+            status=projection["status"],
+            classification="task_state_projection",
+            source="task_state",
+            terminal=False,
+            event=projection["event"],
+            started_at=projection["started_at"],
+            observed_at=payload.get("timestamp"),
+            metadata=projection["metadata"],
         )
-    if (
-        isinstance(existing_at, int)
-        and isinstance(pong_at, int)
-        and existing_at > pong_at
-    ):
-        return read_only_snapshot
-    return pong_snapshot
+    return stale_observer_evidence(
+        tid=tid,
+        prior_live=mapping_entry is not None,
+        prior_live_at=payload.get("timestamp"),
+    )
 
 
 def terminal_snapshot_from_evidence(
@@ -1299,8 +1590,6 @@ def terminal_snapshot_from_evidence(
     """Convert shared evidence to the compact known-TID terminal snapshot."""
 
     source = evidence.source
-    if source == "log":
-        source = "log_fallback"
     metadata = {
         **dict(evidence.metadata),
         "classification": evidence.classification,

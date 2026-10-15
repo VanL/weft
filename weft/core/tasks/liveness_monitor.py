@@ -36,6 +36,7 @@ from weft._constants import (
     WEFT_TASK_STATE_QUEUE_PREFIX,
 )
 from weft._runner_plugins import get_runner_plugin
+from weft.core.deferred import get_task_evidence
 from weft.core.queue_window import is_old_enough
 from weft.core.task_state import (
     iter_task_state_rows,
@@ -117,11 +118,14 @@ class LivenessMonitor(ServiceTask):
         self._latest_rows: dict[str, MappingRow] = {}
         self._deadlines: dict[str, UnknownDeadlineState] = {}
         self._in_flight: dict[str, ProbeWork] = {}
-        self._due_heap: list[tuple[float, str, str]] = []
-        self._due_tids: set[str] = set()
+        self._due_heap: list[tuple[float, str, str, int]] = []
+        self._scheduled_due: dict[str, tuple[float, str, int]] = {}
         self._next_full_reconcile_at = self._monotonic()
         self._next_state_refresh_at = self._next_full_reconcile_at
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
+        self._observation_retention_seconds = float(
+            self._weft_config["TASK_OBSERVATION_RETENTION_SECONDS"]
+        )
         with self._initialization_scope():
             self._initialize_liveness_runtime()
 
@@ -286,27 +290,36 @@ class LivenessMonitor(ServiceTask):
         self._push_due(row, due_at=self._monotonic())
 
     def _push_due(self, row: MappingRow, *, due_at: float) -> None:
-        if row.tid in self._due_tids:
-            self._drop_due(row.tid)
-        heapq.heappush(self._due_heap, (due_at, row.tid, row.generation))
-        self._due_tids.add(row.tid)
+        """Replace one deadline in O(log N), lazily invalidating old heap entries."""
+        self._scheduled_due[row.tid] = (due_at, row.generation, row.message_id)
+        heapq.heappush(
+            self._due_heap, (due_at, row.tid, row.generation, row.message_id)
+        )
 
     def _drop_due(self, tid: str) -> None:
-        """Remove the one scheduled due entry for ``tid``, if present."""
+        """Invalidate scheduled work without scanning retained deadlines."""
+        self._scheduled_due.pop(tid, None)
 
-        if tid not in self._due_tids:
-            return
-        retained = [entry for entry in self._due_heap if entry[1] != tid]
-        self._due_heap[:] = retained
-        heapq.heapify(self._due_heap)
-        self._due_tids.discard(tid)
+    def _discard_stale_due_heads(self) -> None:
+        """Remove invalidated heap heads before selecting a wait deadline."""
+        while self._due_heap:
+            due_at, tid, generation, message_id = self._due_heap[0]
+            if self._scheduled_due.get(tid) == (due_at, generation, message_id):
+                return
+            heapq.heappop(self._due_heap)
 
     def _schedule_due_probes(self, *, now: float) -> None:
         while self._due_heap and self._due_heap[0][0] <= now:
-            _due_at, tid, generation = heapq.heappop(self._due_heap)
-            self._due_tids.discard(tid)
+            due_at, tid, generation, message_id = heapq.heappop(self._due_heap)
+            if self._scheduled_due.get(tid) != (due_at, generation, message_id):
+                continue
+            self._scheduled_due.pop(tid)
             row = self._latest_rows.get(tid)
-            if row is None or row.generation != generation:
+            if (
+                row is None
+                or row.generation != generation
+                or row.message_id != message_id
+            ):
                 continue
             if tid in self._in_flight:
                 continue
@@ -480,6 +493,21 @@ class LivenessMonitor(ServiceTask):
             self._deadlines[current.tid] = state
         if (
             retire
+            and current.payload.get("terminal") is True
+            and get_task_evidence().parse_task_projection(
+                current.payload.get("projection"), terminal=True
+            )
+            is not None
+        ):
+            retention = self._observation_retention_seconds
+            remaining_seconds = (
+                current.message_id + int(retention * 1_000_000_000) - time.time_ns()
+            ) / 1_000_000_000
+            if remaining_seconds > 0:
+                self._push_due(current, due_at=now + remaining_seconds)
+                return
+        if (
+            retire
             and is_old_enough(
                 current.message_id,
                 time.time_ns(),
@@ -570,6 +598,7 @@ class LivenessMonitor(ServiceTask):
         if self._paused:
             return base_timeout
         now = self._monotonic()
+        self._discard_stale_due_heads()
         due = self._due_heap[0][0] - now if self._due_heap else None
         full = self._next_full_reconcile_at - now
         values = [full, self._next_state_refresh_at - now]

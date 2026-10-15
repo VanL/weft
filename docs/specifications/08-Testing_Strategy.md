@@ -140,7 +140,7 @@ checks publication assets. Required action: add new first-party test suites to
 the main or extension stage and to the release-helper target map atomically;
 never add a second test execution path to a release workflow.
 
-Related plan: [Single CI Release Gate](../plans/2026-09-16-single-ci-release-gate-plan.md).
+Related plan: `2026-09-16-single-ci-release-gate-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Current classification rule:
 
@@ -196,7 +196,7 @@ necessary typing escape is local to the invalid value and explains the boundary
 under test. Directory-wide test exclusions and test-wide disabling of definition
 or body checking are not permitted.
 
-Related plan: [Test Typing and Correctness Audit](../plans/2026-09-11-test-typing-and-correctness-audit.md).
+Related plan: `2026-09-11-test-typing-and-correctness-audit` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Weft's Python lint gate uses the stable default rule set of the Ruff version
 locked in `uv.lock`, extended with the repository's reviewed `E`, `W`, `F`,
@@ -419,27 +419,27 @@ bug evidence.
 - [Contention theory stop condition](../plans/2026-10-14-contention-theory-stop-condition.md) records the owner correction and its investigation rule.
 
 - [Xdist Title Contention Investigation](../plans/2026-09-14-xdist-title-contention-plan.md) records native evidence and the infrastructure-only title boundary.
-- [Load-Sensitive Test Lifecycle Fixes](../plans/2026-09-09-load-sensitive-test-lifecycle-fixes-plan.md) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.
+- retired: `2026-09-09-load-sensitive-test-lifecycle-fixes-plan` (source 396c3b85; see `docs/plans/README.md`) records harness driver closure, owned CLI contexts, readiness barriers, and optional run diagnostics.
 - [Updated Dependency Suite Repairs](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md) records full-suite failure investigation and Django integration runtime ownership.
 
-- [`docs/plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md`](../plans/2026-08-11-shared-reactor-test-driver-adoption-plan.md)
+- retired: 2026-08-11-shared-reactor-test-driver-adoption-plan — source 396c3b85; see docs/plans/README.md
 - [`docs/plans/2026-08-10-subprocess-coverage-collection-plan.md`](../plans/2026-08-10-subprocess-coverage-collection-plan.md)
-- [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
-- [`docs/plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md`](../plans/2026-08-08-registry-selection-pruning-authority-refactor-plan.md)
-- [`docs/plans/2026-08-07-ruff-suppression-registry-extraction-plan.md`](../plans/2026-08-07-ruff-suppression-registry-extraction-plan.md)
-- [`docs/plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md`](../plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md)
-- [`docs/plans/2026-08-04-ruff-complexity-and-suppression-registry-plan.md`](../plans/2026-08-04-ruff-complexity-and-suppression-registry-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
-- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
-- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
+- retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-interactive-session-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-result-observation-and-control-transition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-registry-selection-pruning-authority-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-07-ruff-suppression-registry-extraction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-05-ruff-stable-default-lint-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-04-ruff-complexity-and-suppression-registry-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-deduplication-and-test-integrity-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-18-hypothesis-property-testing-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-task-log-external-logging-and-retention-policy-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
 - [08A-Testing_Strategy_Planned.md](08A-Testing_Strategy_Planned.md)
 - [07-System_Invariants.md](07-System_Invariants.md)
 - [10-CLI_Interface.md](10-CLI_Interface.md)
-- [Internal State Machine Helper Plan](../plans/2026-05-13-internal-state-machine-helper-plan.md)
+- retired: 2026-05-13-internal-state-machine-helper-plan — source 396c3b85; see docs/plans/README.md

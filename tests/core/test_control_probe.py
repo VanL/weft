@@ -31,7 +31,7 @@ from weft.core.control_probe import (
     send_keyed_ping_probe,
 )
 from weft.core.monitor.policies.runtime_control import (
-    select_runtime_dead_task_cleanup_candidates,
+    runtime_dead_task_record_probe_tids,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -303,29 +303,25 @@ def test_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
     assert result.timed_out
     assert reply_to in _queue_names(ctx)
     age_ns = int(TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS * 1_000_000_000)
-    young = select_runtime_dead_task_cleanup_candidates(
+    young = runtime_dead_task_record_probe_tids(
         (reply_to,),
         now_ns=int(requester_tid) + age_ns - 1,
         min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
-        limit=1,
+        observation_retention_seconds=172800.0,
         active_tids=set(),
-        task_record=lambda _tid: None,
-        deadline_reached=lambda: False,
     )
-    old = select_runtime_dead_task_cleanup_candidates(
+    old = runtime_dead_task_record_probe_tids(
         (reply_to,),
         now_ns=int(requester_tid) + age_ns + 1,
         min_age_seconds=TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
         retention_seconds=172800.0,
-        limit=1,
+        observation_retention_seconds=172800.0,
         active_tids=set(),
-        task_record=lambda _tid: None,
-        deadline_reached=lambda: False,
     )
 
-    assert young.tids == ()
-    assert old.tids == (requester_tid,)
+    assert young == ()
+    assert old == (requester_tid,)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,11 @@ import psutil
 import pytest
 
 from simplebroker import Config, Queue
+from tests.helpers.task_observation import (
+    task_observation_fields,
+    write_task_event,
+    write_task_observation,
+)
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
@@ -273,8 +278,7 @@ def _write_task_log_entry(
     }
     if runner_diagnostics is not None:
         payload["runner_diagnostics"] = runner_diagnostics
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(json.dumps(payload))
+    write_task_event(ctx, payload)
 
 
 def _task_monitor_taskspec_payload(
@@ -323,28 +327,26 @@ def _write_manager_spawned_task_monitor(
     child_tid: str,
     child_pid: int,
 ) -> None:
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "task_spawned",
+    write_task_event(
+        ctx,
+        {
+            "event": "task_spawned",
+            "tid": manager_tid,
+            "tid_short": tid_short_form(manager_tid),
+            "status": "running",
+            "timestamp": time.time_ns(),
+            "taskspec": {
                 "tid": manager_tid,
-                "tid_short": tid_short_form(manager_tid),
-                "status": "running",
-                "timestamp": time.time_ns(),
-                "taskspec": {
-                    "tid": manager_tid,
-                    "name": "manager",
-                    "spec": {"runner": {"name": "host", "options": {}}},
-                    "state": {"status": "running", "started_at": time.time_ns()},
-                    "metadata": {"role": "manager"},
-                },
-                "child_tid": child_tid,
-                "child_pid": child_pid,
-                "child_taskspec": _task_monitor_taskspec_payload(child_tid),
-                "service_key": INTERNAL_SERVICE_KEY_TASK_MONITOR,
-            }
-        )
+                "name": "manager",
+                "spec": {"runner": {"name": "host", "options": {}}},
+                "state": {"status": "running", "started_at": time.time_ns()},
+                "metadata": {"role": "manager"},
+            },
+            "child_tid": child_tid,
+            "child_pid": child_pid,
+            "child_taskspec": _task_monitor_taskspec_payload(child_tid),
+            "service_key": INTERNAL_SERVICE_KEY_TASK_MONITOR,
+        },
     )
 
 
@@ -357,42 +359,40 @@ def _write_pipeline_log_entry(
     started_at: int | None = None,
     completed_at: int | None = None,
 ) -> None:
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": event,
-                "status": status,
+    write_task_event(
+        ctx,
+        {
+            "event": event,
+            "status": status,
+            "tid": tid,
+            "taskspec": {
                 "tid": tid,
-                "taskspec": {
-                    "tid": tid,
-                    "name": "demo-pipeline",
-                    "spec": {
-                        "type": "function",
-                        "function_target": "weft.core.tasks.pipeline:runtime",
-                        "runner": {"name": "host", "options": {}},
-                    },
-                    "io": {
-                        "outputs": {"outbox": f"P{tid}.outbox"},
-                        "control": {
-                            "ctrl_in": f"P{tid}.ctrl_in",
-                            "ctrl_out": f"P{tid}.ctrl_out",
-                        },
-                    },
-                    "state": {
-                        "status": status,
-                        "started_at": started_at,
-                        "completed_at": completed_at,
-                    },
-                    "metadata": {
-                        "role": "pipeline",
-                        "_weft_pipeline_runtime": {
-                            "queues": {"status": f"P{tid}.status"},
-                        },
+                "name": "demo-pipeline",
+                "spec": {
+                    "type": "function",
+                    "function_target": "weft.core.tasks.pipeline:runtime",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": f"P{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"P{tid}.ctrl_in",
+                        "ctrl_out": f"P{tid}.ctrl_out",
                     },
                 },
-            }
-        )
+                "state": {
+                    "status": status,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                },
+                "metadata": {
+                    "role": "pipeline",
+                    "_weft_pipeline_runtime": {
+                        "queues": {"status": f"P{tid}.status"},
+                    },
+                },
+            },
+        },
     )
 
 
@@ -475,7 +475,7 @@ def test_status_services_include_manager_spawned_task_monitor_before_child_log(
         child_pid=os.getpid(),
     )
 
-    status_snapshot = status_cmd.cmd_status(context=root)
+    status_snapshot = status_cmd.cmd_status(context=root, include_log_history=True)
     assert isinstance(status_snapshot, SystemStatusSnapshot)
     payload = asdict(status_snapshot)
 
@@ -519,6 +519,7 @@ def test_status_services_report_task_monitor_external_log_diagnostics(
     ctx.queue(task_state_queue_name(tid), persistent=False).write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "full": tid,
                 "short": tid_short_form(tid),
                 "runner": "host",
@@ -598,7 +599,7 @@ def test_status_services_child_terminal_evidence_overrides_manager_spawn(
     )
     assert monitor["status"] == "terminal"
     assert monitor["tid"] == child_tid
-    assert monitor["evidence"] == "child-task-log"
+    assert monitor["evidence"] == "child-task-state"
     assert monitor["reconciliation"]["lifecycle_status"] == "completed"
 
 
@@ -651,7 +652,7 @@ def test_status_services_prefer_live_duplicate_over_terminal_duplicate(
     )
     assert heartbeat["status"] == "running"
     assert heartbeat["tid"] == live_tid
-    assert heartbeat["evidence"] == "child-task-log"
+    assert heartbeat["evidence"] == "child-task-state"
 
 
 def test_status_services_report_pending_internal_spawn_request(
@@ -781,7 +782,7 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     assert monitor["tid"] == live_tid
     assert monitor["evidence"] == "service-registry"
     tasks = payload["tasks"]
-    assert stale_tid not in {task["tid"] for task in tasks}
+    assert stale_tid in {task["tid"] for task in tasks}
 
     status_snapshot = status_cmd.cmd_status(all=True, context=root)
     assert isinstance(status_snapshot, SystemStatusSnapshot)
@@ -790,14 +791,8 @@ def test_status_services_prefer_live_service_owner_over_stale_child_log(
     assert payload is not None
     tasks = payload["tasks"]
     stale = next(task for task in tasks if task["tid"] == stale_tid)
-    stale_snapshot = task_cmd.task_status(stale_tid, context_path=root)
-    assert stale_snapshot is not None
-    assert stale["status"] == "failed"
-    assert stale["reconciliation"]["classification"] == (
-        "superseded_internal_service_record"
-    )
-    assert stale["reconciliation"]["active_service_tid"] == live_tid
-    assert stale["last_timestamp"] == stale_snapshot.last_timestamp
+    assert stale["status"] == "running"
+    assert stale["reconciliation"] is None
 
 
 def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_superseded(
@@ -868,7 +863,7 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
 
     assert payload is not None
     tasks = payload["tasks"]
-    assert stale_tid not in {task["tid"] for task in tasks}
+    assert stale_tid in {task["tid"] for task in tasks}
 
     status_snapshot = status_cmd.cmd_status(all=True, context=root)
     assert isinstance(status_snapshot, SystemStatusSnapshot)
@@ -877,14 +872,8 @@ def test_status_tasks_treat_fresh_runtime_less_internal_service_log_as_supersede
     assert payload is not None
     tasks = payload["tasks"]
     stale = next(task for task in tasks if task["tid"] == stale_tid)
-    stale_snapshot = task_cmd.task_status(stale_tid, context_path=root)
-    assert stale_snapshot is not None
-    assert stale["status"] == "failed"
-    assert stale["reconciliation"]["classification"] == (
-        "superseded_internal_service_record"
-    )
-    assert stale["reconciliation"]["active_service_tid"] == live_tid
-    assert stale["last_timestamp"] == stale_snapshot.last_timestamp
+    assert stale["status"] == "running"
+    assert stale["reconciliation"] is None
 
 
 def test_cmd_status_json_output(tmp_path: Path) -> None:
@@ -912,35 +901,34 @@ def test_cmd_status_json_includes_runner_runtime_details(
     ctx = build_context(spec_context=root)
     tid = "1844674407370955161"
     started = 1_762_000_000_000_000_000
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
     mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "work_started",
-                "status": "running",
-                "tid": tid,
-                "taskspec": {
-                    "name": "docker-task",
-                    "spec": {
-                        "runner": {
-                            "name": "docker",
-                            "options": {"image": "python:3.13-alpine"},
-                        }
-                    },
-                    "state": {
-                        "status": "running",
-                        "started_at": started,
-                        "completed_at": None,
-                    },
-                    "metadata": {"owner": "tests"},
+    write_task_event(
+        ctx,
+        {
+            "event": "work_started",
+            "status": "running",
+            "tid": tid,
+            "taskspec": {
+                "name": "docker-task",
+                "spec": {
+                    "runner": {
+                        "name": "docker",
+                        "options": {"image": "python:3.13-alpine"},
+                    }
                 },
-            }
-        )
+                "state": {
+                    "status": "running",
+                    "started_at": started,
+                    "completed_at": None,
+                },
+                "metadata": {"owner": "tests"},
+            },
+        },
     )
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
@@ -983,11 +971,8 @@ def test_cmd_status_json_includes_runner_runtime_details(
     assert entry["runner"] == "docker"
     assert entry["runtime_handle"]["runner"] == "docker"
     assert entry["runtime_handle"]["id"] == "container-123"
-    assert entry["runtime"]["runner"] == "docker"
-    assert entry["runtime"]["id"] == "container-123"
-    assert entry["runtime"]["state"] == "running"
-    assert entry["runtime"]["metadata"]["image"] == "python:3.13-alpine"
     assert entry["metadata"]["owner"] == "tests"
+    assert entry["runtime"] is None
 
 
 def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
@@ -1013,6 +998,7 @@ def test_task_status_does_not_apply_host_pid_identity_to_docker_runtime(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
@@ -1085,6 +1071,7 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1123,7 +1110,7 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     assert len(tasks) == 1
     assert tasks[0]["status"] == "failed"
     assert tasks[0]["completed_at"] == completed
-    assert tasks[0]["reconciliation"]["classification"] == "runtime_conflict"
+    assert tasks[0]["reconciliation"] is None
     assert tasks[0]["last_timestamp"] == snapshot.last_timestamp
 
     status_snapshot = status_cmd.cmd_status(context=root)
@@ -1168,7 +1155,9 @@ def test_terminal_event_reconciles_stale_running_status_payload(
         name=f"stale-{event}",
     )
 
-    snapshot = task_cmd.task_status(tid, context_path=root)
+    snapshot = status_cmd._collect_task_snapshots(
+        ctx, include_terminal=True, tid_filters={tid}, include_log_history=True
+    )[0]
 
     assert snapshot is not None
     assert snapshot.event == event
@@ -1180,7 +1169,9 @@ def test_terminal_event_reconciles_stale_running_status_payload(
     assert snapshot.reconciliation["classification"] == "stale_status_payload"
     assert snapshot.reconciliation["reason"] == "contradictory_terminal_event_status"
 
-    status_snapshot = status_cmd.cmd_status(all=True, context=root)
+    status_snapshot = status_cmd.cmd_status(
+        all=True, context=root, include_log_history=True
+    )
     assert isinstance(status_snapshot, SystemStatusSnapshot)
     payload = asdict(status_snapshot)
 
@@ -1237,6 +1228,7 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
     ctx.queue(task_state_queue_name(old_tid), persistent=False).write(
         json.dumps(
             {
+                **task_observation_fields(ctx, old_tid),
                 "short": tid_short_form(old_tid),
                 "full": old_tid,
                 "runner": "host",
@@ -1294,6 +1286,7 @@ def test_task_status_keeps_terminal_log_state_when_task_pid_is_alive(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1349,8 +1342,7 @@ def test_task_snapshot_full_tid_uses_bounded_known_tid_helper(
     assert snapshot.name == "bounded-full-tid"
 
 
-def test_list_task_snapshots_reuses_collected_taskspec_payload(
-    monkeypatch: pytest.MonkeyPatch,
+def test_list_task_snapshots_uses_current_projection(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1366,11 +1358,6 @@ def test_list_task_snapshots_reuses_collected_taskspec_payload(
         completed_at=None,
         name="single-replay-list",
     )
-
-    def fail_taskspec_reload(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("list re-read task history for TaskSpec payload")
-
-    monkeypatch.setattr(task_cmd, "load_latest_taskspec_payload", fail_taskspec_reload)
 
     snapshots = task_cmd.list_task_snapshots(context=ctx, include_terminal=True)
 
@@ -1401,6 +1388,7 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
@@ -1440,7 +1428,7 @@ def test_task_status_treats_created_runtime_as_non_live_for_terminal_docker_task
     assert snapshot.status == "cancelled"
 
 
-def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
+def test_task_status_uses_terminal_projection_without_runtime(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -1448,43 +1436,37 @@ def test_task_status_uses_log_runtime_metadata_when_mapping_is_missing(
     tid = "1844674407370955164"
     started = 1_762_000_000_000_000_000
     completed = started + 1_000_000_000
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "control_stop",
-                "status": "cancelled",
-                "tid": tid,
-                "runner": "host",
-                "runtime_handle": _runtime_handle(
-                    "host",
-                    "host-current",
-                    host_pids=[os.getpid()],
-                ),
-                "taskspec": {
-                    "name": "log-only-live-consumer-task",
-                    "spec": {"runner": {"name": "host", "options": {}}},
-                    "state": {
-                        "status": "cancelled",
-                        "started_at": started,
-                        "completed_at": completed,
-                    },
-                    "metadata": {},
+    write_task_event(
+        ctx,
+        {
+            "event": "control_stop",
+            "status": "cancelled",
+            "tid": tid,
+            "runner": "host",
+            "runtime_handle": _runtime_handle(
+                "host",
+                "host-current",
+                host_pids=[os.getpid()],
+            ),
+            "taskspec": {
+                "name": "log-only-live-consumer-task",
+                "spec": {"runner": {"name": "host", "options": {}}},
+                "state": {
+                    "status": "cancelled",
+                    "started_at": started,
+                    "completed_at": completed,
                 },
-            }
-        )
+                "metadata": {},
+            },
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
 
     assert snapshot is not None
     assert snapshot.status == "cancelled"
-    assert snapshot.reconciliation is not None
-    assert snapshot.reconciliation["classification"] == "runtime_conflict"
-    assert (
-        snapshot.reconciliation["reason"]
-        == "weak_host_pid_ignored_for_terminal_lifecycle"
-    )
+    assert snapshot.runtime_handle is None
+    assert snapshot.reconciliation is None
 
 
 def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
@@ -1509,6 +1491,7 @@ def test_task_status_surfaces_terminal_log_state_once_task_pid_is_gone(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1548,6 +1531,7 @@ def test_task_status_reports_dead_host_running_snapshot_as_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1591,6 +1575,7 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1619,8 +1604,7 @@ def test_cmd_status_surfaces_dead_host_running_snapshot_as_stale_liveness(
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
-    assert tasks[0]["reconciliation"]["classification"] == "stale_liveness"
-    assert tasks[0]["reconciliation"]["reason"] == "host_process_not_live"
+    assert tasks[0]["reconciliation"] is None
     assert tasks[0]["last_timestamp"] == snapshot.last_timestamp
 
 
@@ -1653,7 +1637,7 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
-    assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
+    assert tasks[0]["reconciliation"] is None
 
     status_snapshot = status_cmd.cmd_status(all=True, context=root)
     assert isinstance(status_snapshot, SystemStatusSnapshot)
@@ -1664,7 +1648,7 @@ def test_cmd_status_reports_stale_runtime_less_running_snapshot(
     assert len(tasks) == 1
     assert tasks[0]["tid"] == tid
     assert tasks[0]["status"] == "running"
-    assert tasks[0]["reconciliation"]["reason"] == "runtime_missing_after_stale_window"
+    assert tasks[0]["reconciliation"] is None
 
 
 def test_cmd_status_keeps_recent_internal_service_running_without_runtime_proof(
@@ -1689,16 +1673,15 @@ def test_cmd_status_keeps_recent_internal_service_running_without_runtime_proof(
             "_weft_service_key": "_weft.service.task_monitor",
         },
     )
-    ctx.queue("weft.log.tasks", persistent=False).write(
-        json.dumps(
-            {
-                "event": "task_activity",
-                "status": "running",
-                "tid": tid,
-                "activity": "scanning",
-                "waiting_on": "weft.log.tasks",
-            }
-        )
+    write_task_event(
+        ctx,
+        {
+            "event": "task_activity",
+            "status": "running",
+            "tid": tid,
+            "activity": "scanning",
+            "waiting_on": "weft.log.tasks",
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
@@ -1737,11 +1720,9 @@ def test_cmd_status_marks_stale_internal_service_without_owner_failed(
     snapshot = task_cmd.task_status(tid, context_path=root)
 
     assert snapshot is not None
-    assert snapshot.status == "failed"
+    assert snapshot.status == "running"
     assert snapshot.reconciliation is not None
-    assert snapshot.reconciliation["classification"] == (
-        "internal_service_runtime_missing_after_stale_window"
-    )
+    assert snapshot.reconciliation["classification"] == "stale_liveness"
 
     status_snapshot = status_cmd.cmd_status(all=True, context=root)
     assert isinstance(status_snapshot, SystemStatusSnapshot)
@@ -1779,6 +1760,7 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
     ctx.queue(task_state_queue_name(tid), persistent=False).write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -1814,12 +1796,8 @@ def test_cmd_status_does_not_call_host_pid_missing_from_container_namespace(
     tasks = payload["tasks"]
     task = next(item for item in tasks if item["tid"] == tid)
     assert task["status"] == "running"
-    assert task["runtime"]["state"] == "unknown"
-    assert task["runtime"]["metadata"]["host_pid_visibility"] == (
-        "namespace_unobservable"
-    )
-    assert task["runtime"]["metadata"]["container_runtime"] == "docker"
     assert task["reconciliation"] is None
+    assert task["runtime"] is None
 
 
 def test_cmd_status_keeps_runtime_less_manager_running_when_registry_is_live(
@@ -1919,7 +1897,7 @@ def test_cmd_status_marks_superseded_manager_record_failed(
 
     assert payload is not None
     default_tasks = payload["tasks"]
-    assert [task["tid"] for task in default_tasks] == [active_tid]
+    assert {task["tid"] for task in default_tasks} == {active_tid, old_tid}
     assert default_tasks[0]["status"] == "running"
 
     status_snapshot = status_cmd.cmd_status(all=True, context=root)
@@ -1928,16 +1906,9 @@ def test_cmd_status_marks_superseded_manager_record_failed(
 
     assert payload is not None
     tasks = {task["tid"]: task for task in payload["tasks"]}
-    old_snapshot = task_cmd.task_status(old_tid, context_path=root)
-    assert old_snapshot is not None
     assert tasks[active_tid]["status"] == "running"
-    assert tasks[old_tid]["status"] == "failed"
-    assert tasks[old_tid]["completed_at"] is None
-    assert tasks[old_tid]["reconciliation"]["classification"] == (
-        "superseded_manager_record"
-    )
-    assert tasks[old_tid]["reconciliation"]["active_manager_tid"] == active_tid
-    assert tasks[old_tid]["last_timestamp"] == old_snapshot.last_timestamp
+    assert tasks[old_tid]["status"] == "running"
+    assert tasks[old_tid]["reconciliation"] is None
 
 
 def test_status_snapshot_preserves_activity_from_latest_log_event(
@@ -1957,16 +1928,15 @@ def test_status_snapshot_preserves_activity_from_latest_log_event(
         completed_at=None,
         name="waiting-stage",
     )
-    ctx.queue("weft.log.tasks", persistent=False).write(
-        json.dumps(
-            {
-                "event": "task_activity",
-                "tid": tid,
-                "status": "running",
-                "activity": "waiting",
-                "waiting_on": "P123.first-to-second",
-            }
-        )
+    write_task_event(
+        ctx,
+        {
+            "event": "task_activity",
+            "tid": tid,
+            "status": "running",
+            "activity": "waiting",
+            "waiting_on": "P123.first-to-second",
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
@@ -1998,7 +1968,9 @@ def test_status_snapshot_preserves_runner_diagnostics(tmp_path: Path) -> None:
         runner_diagnostics=diagnostics,
     )
 
-    snapshot = task_cmd.task_status(tid, context_path=root)
+    snapshot = status_cmd._collect_task_snapshots(
+        ctx, include_terminal=True, tid_filters={tid}, include_log_history=True
+    )[0]
 
     assert snapshot is not None
     assert snapshot.status == "failed"
@@ -2024,36 +1996,33 @@ def test_terminal_snapshot_omits_activity_when_status_is_terminal(
         completed_at=None,
         name="terminal-stage",
     )
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "task_activity",
-                "tid": tid,
-                "status": "running",
-                "activity": "waiting",
-                "waiting_on": "P123.first-to-second",
-            }
-        )
+    write_task_event(
+        ctx,
+        {
+            "event": "task_activity",
+            "tid": tid,
+            "status": "running",
+            "activity": "waiting",
+            "waiting_on": "P123.first-to-second",
+        },
     )
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "work_completed",
-                "tid": tid,
-                "status": "completed",
-                "taskspec": {
-                    "name": "terminal-stage",
-                    "spec": {"runner": {"name": "host", "options": {}}},
-                    "state": {
-                        "status": "completed",
-                        "started_at": started,
-                        "completed_at": completed,
-                    },
-                    "metadata": {},
+    write_task_event(
+        ctx,
+        {
+            "event": "work_completed",
+            "tid": tid,
+            "status": "completed",
+            "taskspec": {
+                "name": "terminal-stage",
+                "spec": {"runner": {"name": "host", "options": {}}},
+                "state": {
+                    "status": "completed",
+                    "started_at": started,
+                    "completed_at": completed,
                 },
-            }
-        )
+                "metadata": {},
+            },
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
@@ -2082,17 +2051,15 @@ def test_task_status_ignores_late_activity_regression_after_terminal_state(
         completed_at=completed,
         name="terminal-stage",
     )
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "task_activity",
-                "tid": tid,
-                "status": "running",
-                "activity": "waiting",
-                "waiting_on": "T1844674407370955179.inbox",
-            }
-        )
+    write_task_event(
+        ctx,
+        {
+            "event": "task_activity",
+            "tid": tid,
+            "status": "running",
+            "activity": "waiting",
+            "waiting_on": "T1844674407370955179.inbox",
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
@@ -2122,25 +2089,23 @@ def test_task_status_ignores_late_full_payload_regression_after_terminal_state(
         completed_at=completed,
         name="terminal-stage",
     )
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "poll_report",
-                "status": "running",
-                "tid": tid,
-                "taskspec": {
-                    "name": "terminal-stage",
-                    "spec": {"runner": {"name": "host", "options": {}}},
-                    "state": {
-                        "status": "running",
-                        "started_at": started,
-                        "completed_at": completed,
-                    },
-                    "metadata": {},
+    write_task_event(
+        ctx,
+        {
+            "event": "poll_report",
+            "status": "running",
+            "tid": tid,
+            "taskspec": {
+                "name": "terminal-stage",
+                "spec": {"runner": {"name": "host", "options": {}}},
+                "state": {
+                    "status": "running",
+                    "started_at": started,
+                    "completed_at": completed,
                 },
-            }
-        )
+                "metadata": {},
+            },
+        },
     )
 
     snapshot = task_cmd.task_status(tid, context_path=root)
@@ -2279,6 +2244,7 @@ def test_task_status_keeps_external_runner_terminal_when_runtime_is_missing(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "docker",
@@ -2322,30 +2288,29 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     ctx = build_context(spec_context=root)
     tid = "1844674407370955166"
     started = 1_762_000_000_000_000_000
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
     mapping_queue = ctx.queue(task_state_queue_name(tid), persistent=False)
-    log_queue.write(
-        json.dumps(
-            {
-                "event": "work_started",
-                "status": "running",
-                "tid": tid,
-                "taskspec": {
-                    "name": "host-task",
-                    "spec": {"runner": {"name": "host", "options": {}}},
-                    "state": {
-                        "status": "running",
-                        "started_at": started,
-                        "completed_at": None,
-                    },
-                    "metadata": {},
+    write_task_event(
+        ctx,
+        {
+            "event": "work_started",
+            "status": "running",
+            "tid": tid,
+            "taskspec": {
+                "name": "host-task",
+                "spec": {"runner": {"name": "host", "options": {}}},
+                "state": {
+                    "status": "running",
+                    "started_at": started,
+                    "completed_at": None,
                 },
-            }
-        )
+                "metadata": {},
+            },
+        },
     )
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -2370,8 +2335,7 @@ def test_cmd_status_host_runtime_uses_zombie_safe_pid_liveness(
     assert len(data["tasks"]) == 1
     entry = data["tasks"][0]
     assert entry["runtime_handle"]["runner"] == "host"
-    assert entry["runtime"]["runner"] == "host"
-    assert entry["runtime"]["state"] == "missing"
+    assert entry["runtime"] is None
 
 
 def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
@@ -2397,6 +2361,7 @@ def test_task_status_rejects_running_host_task_when_pid_identity_mismatches(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(ctx, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -2515,7 +2480,7 @@ def test_task_snapshot_collection_tolerates_unexpected_manager_selection_failure
         tid_filters=None,
     )
 
-    assert selection_attempts == [ctx]
+    assert selection_attempts == []
     assert [(record.snapshot.tid, record.snapshot.status) for record in records] == [
         (tid, "completed")
     ]
@@ -2757,7 +2722,15 @@ def test_status_reads_each_required_state_queue_once(
         )
         queue = ctx.queue(task_state_queue_name(tid), persistent=False)
         try:
-            queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+            queue.write(
+                json.dumps(
+                    {
+                        **task_observation_fields(ctx, tid),
+                        "full": tid,
+                        "short": tid_short_form(tid),
+                    }
+                )
+            )
         finally:
             queue.close()
     with ctx.broker() as db:
@@ -2774,8 +2747,123 @@ def test_status_reads_each_required_state_queue_once(
     if selected:
         snapshot = task_cmd.task_snapshot(tids[0], context=ctx)
         assert snapshot is not None and snapshot.tid == tids[0]
-        assert state_reads == [task_state_queue_name(tids[0])]
+        assert set(state_reads) == {task_state_queue_name(tids[0])}
     else:
-        system_snapshot = status_cmd.system_status(ctx)
+        system_snapshot = status_cmd.system_status(ctx, include_terminal=True)
         assert {task.tid for task in system_snapshot.tasks} == set(tids)
         assert sorted(state_reads) == sorted(task_state_queue_name(tid) for tid in tids)
+
+
+def test_inventory_uses_snapshots_and_explicit_history(tmp_path: Path) -> None:
+    """Current inventory survives log absence; raw-only tasks require --log."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    current_tid, historical_tid = "1780000000000000101", "1780000000000000102"
+    write_task_observation(
+        ctx,
+        {
+            "tid": current_tid,
+            "event": "task_started",
+            "status": "running",
+            "taskspec": {
+                "name": "current",
+                "state": {"status": "running"},
+                "metadata": {},
+            },
+        },
+    )
+    with ctx.queue("weft.log.tasks", persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "tid": historical_tid,
+                    "event": "work_completed",
+                    "status": "completed",
+                    "taskspec": {
+                        "name": "retired",
+                        "state": {"status": "completed"},
+                        "metadata": {},
+                    },
+                }
+            )
+        )
+    assert [task.tid for task in status_cmd.system_status(ctx).tasks] == [current_tid]
+    historical = status_cmd.system_status(ctx, include_log_history=True)
+    assert {task.tid: task.status for task in historical.tasks} == {
+        current_tid: "running",
+        historical_tid: "completed",
+    }
+
+
+def test_bulk_inventory_keeps_last_projection_after_supervisor_failure(
+    tmp_path: Path,
+) -> None:
+    """Abrupt child death is known locally before a task can republish state."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1780000000000000103"
+    write_task_observation(
+        ctx,
+        {
+            "tid": tid,
+            "event": "task_started",
+            "status": "running",
+            "taskspec": {
+                "name": "crashed",
+                "state": {"status": "running"},
+                "metadata": {},
+            },
+        },
+    )
+    with ctx.queue(f"T{tid}.ctrl_out", persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "tid": tid,
+                    "source": "manager",
+                    "event": "work_failed",
+                    "status": "failed",
+                    "error": "wrapper_lost",
+                }
+            )
+        )
+    assert [
+        (task.tid, task.status) for task in status_cmd.system_status(ctx).tasks
+    ] == [(tid, "running")]
+    local = core_task_evidence.known_tid_evidence(ctx, tid=tid)
+    assert local is not None and local.status == "failed"
+    with ctx.queue(f"T{tid}.ctrl_out", persistent=False) as queue:
+        assert queue.peek() is not None
+
+
+def test_newest_invalid_projection_does_not_revive_previous_status(
+    tmp_path: Path,
+) -> None:
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1780000000000000104"
+    write_task_observation(
+        ctx,
+        {
+            "tid": tid,
+            "event": "work_completed",
+            "status": "completed",
+            "taskspec": {
+                "state": {"status": "completed"},
+                "metadata": {"secret": "old"},
+            },
+        },
+    )
+    with ctx.queue(task_state_queue_name(tid), persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": tid_short_form(tid),
+                    "projection": {"version": 2},
+                }
+            )
+        )
+    tasks = status_cmd.system_status(ctx, include_terminal=True).tasks
+    assert len(tasks) == 1 and tasks[0].status == "unknown"
+    assert tasks[0].metadata == {}
+    assert tasks[0].reconciliation is not None
+    assert tasks[0].reconciliation["classification"] == "task_state_projection_invalid"

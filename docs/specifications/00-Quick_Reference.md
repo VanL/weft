@@ -54,7 +54,7 @@ are not created by current managers; a queue with such a name appearing in a
 dump has no implicit live consumer.
 
 Implementation: `weft/core/manager_runtime.py::_manager_ctrl_queue_name` and
-`_manager_ctrl_out_queue_name`; plan: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
+`_manager_ctrl_out_queue_name`; plan: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Notes:
 - `weft.state.*` queues are runtime state and are excluded from dumps by default.
@@ -62,14 +62,16 @@ Notes:
   as live convergence evidence. `stopped`, `superseded`, and `terminal` are
   non-live evidence; a latest `superseded` row excludes that owner TID from
   manager leadership.
-- Each `weft.state.tasks.<tid>` queue holds one task's snapshot history; the
+- `weft.state.tasks.<tid>` is append-only task-owned current/retained observation
+  and runtime evidence, selected newest-valid and deleted only by LivenessMonitor.
+  Each queue holds one task's snapshot history; the
   newest valid row is current. Names support discovery, not process liveness.
   Task-owned payloads include additive runtime evidence. The manager-supervised `LivenessMonitor` reduces exact host
   identity or extension-owned probe evidence and is the sole row deleter.
   Unknown deadlines are process-local and reset after restart. See [CC-2.4],
   [OBS.13.7], and [LIVENESS.R1]-[LIVENESS.R5].
-- `weft.log.tasks` is runtime evidence used by Weft status, result, and
-  debugging surfaces while retained. It is not legal, forensic, or audit
+- `weft.log.tasks` supplies explicit `--log`/history and debugging evidence
+  while retained; ordinary status/result reads use task-owned queues. It is not legal, forensic, or audit
   evidence; retention is an operational policy.
 - `weft_monitor_meta`, `weft_monitor_task_collations`,
   `weft_monitor_task_messages`, and `weft_monitor_deferred_writes` are
@@ -198,6 +200,7 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE` | Maximum Monitor-store updates written in one transaction while collating task-log lifecycle evidence. Defaults to 100. |
 | `WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS` | Hard age before an open Monitor-table task family with no usable reporting interval is classified `stale_open`. Defaults to 604800 seconds. |
 | `WEFT_TASK_MONITOR_CONTROL_QUEUE_DELETE_LIMIT` | Operator cap for each supervised runtime-queue cleanup slice from task-local `T{tid}.ctrl_in`, `T{tid}.ctrl_out`, eligible stale `T{tid}.reserved`, and eligible dead-TID queues. The monitor may apply a smaller internal per-slice cap and catch up through `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS`. Defaults to 1000. |
+| `WEFT_TASK_OBSERVATION_RETENTION_SECONDS` | Minimum retention for newest validated terminal-projection snapshots and standard terminal completion/output; default 172800 seconds, finite and at least 2400. Separate from raw-log/reserved clocks; not exact expiry or audit retention. |
 | `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` | Minimum age before supervised TaskMonitor may classify open task-log families or raw external rows. Terminal families may be summarized and retired as soon as the monitor reaches a complete FIFO high-water pass. Defaults to 172800 seconds. |
 | `WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS` | Minimum age (terminal-evidence age where available, TID age as fallback) before supervised reserved-queue cleanup may delete a `T{tid}.reserved` row, keeping `ReservedPolicy.KEEP` evidence inspectable ([QUEUE.6], [OBS.13.5]). Must be non-negative; zero means immediate cleanup once cleanup proof exists. When unset, follows the configured `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` so both gates agree; an explicit value wins. |
 | `WEFT_LOG_TASKS_EXTERNAL_PATH` | JSONL file path for external task-log operational retention output. Defaults to `logs/weft.log` under the Weft project root. Relative paths resolve from the Weft project root. Changing this configured path requires a TaskMonitor restart; writability of the resolved path is re-probed on the monitor cadence. |
@@ -252,23 +255,25 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 - [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
 - [Manager admission control plan](../plans/2026-08-25-manager-admission-control-plan.md)
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
-- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
-- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
-- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
-- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
-- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
-- [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-general-lifetime-reporting-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-mode-and-rotating-log-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-external-log-health-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-reliability-and-doc-fixes-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-collation-table-retirement-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-fair-cleanup-scheduling-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-task-log-external-logging-and-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-monitor-table-driven-retained-log-cleanup-plan — source 396c3b85; see docs/plans/README.md
 
-The collation-store toggle was retired by [Collation store toggle removal](../plans/2026-08-31-collation-store-toggle-removal-plan.md). An exported removed key is rejected; use `WEFT_TASK_MONITOR_MODE=report_only` for non-destructive operation.
+The collation-store toggle was retired by `2026-08-31-collation-store-toggle-removal-plan` (retired — source 396c3b85; see `docs/plans/README.md`). An exported removed key is rejected; use `WEFT_TASK_MONITOR_MODE=report_only` for non-destructive operation.
 
 `WEFT_SCHEDULER_MAX_FRONTIERS` was removed. Unset it before upgrading all producers and consumers; it is an actionable configuration error.
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

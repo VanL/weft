@@ -58,9 +58,9 @@ Boundary:
 
 ## Related Plans
 
-- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-09-manager-bootstrap-unification-plan.md`](../plans/2026-04-09-manager-bootstrap-unification-plan.md)
-- [`docs/plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md`](../plans/2026-04-09-manager-lifecycle-command-consolidation-plan.md)
-- [`docs/plans/2026-04-09-weft-serve-supervised-manager-plan.md`](../plans/2026-04-09-weft-serve-supervised-manager-plan.md)
-- [`docs/plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md`](../plans/2026-04-13-detached-manager-bootstrap-hardening-plan.md)
-- [`docs/plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md`](../plans/2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan.md)
+- retired: 2026-04-13-spec-corpus-current-vs-planned-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-09-manager-bootstrap-unification-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-09-manager-lifecycle-command-consolidation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-09-weft-serve-supervised-manager-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-detached-manager-bootstrap-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-manager-bootstrap-readiness-and-cleanup-test-plan — source 396c3b85; see docs/plans/README.md

@@ -795,13 +795,31 @@ Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
 audit record; use TaskMonitor `jsonl_then_delete` when you want Weft's built-in
 task-lifetime JSONL handoff before cleanup.
 
+Task status and list use current task-owned snapshots by default. `--all` includes
+retained terminal snapshots; `--log` explicitly adds retained raw history and
+cannot be combined with `--watch`. Bulk inventory can lag a completion after a
+failed final publication or abrupt child death; known-TID status/result reads
+local completion directly. Ordinary reads do not query TaskMonitor tables.
+
+`WEFT_TASK_OBSERVATION_RETENTION_SECONDS` defaults to 48 hours (finite, at least
+2400 seconds). It is a minimum for validated terminal snapshots and standard
+completion/output, separate from raw-log retention. Custom queues can outlive
+the metadata that identifies them. Once metadata and usable standard completion
+expire, bare-TID lookup may be unavailable, including after dump/load (runtime
+snapshots are excluded). Already-bound handles retain their configuration.
+Without a timeout, unavailable result metadata returns unknown (exit 1); finite
+waits end at the caller deadline (exit 124). Unresolved controls fail before any
+write. Upgrade writers and readers together after stopping/draining old task
+processes; do not erase queues or automatically restart running user jobs.
+
 The manager also supervises a default-on `LivenessMonitor`. It periodically
 reduces task-owned runtime evidence through the broker-free `weft.liveness`
 package and is the sole deleter of `weft.state.tasks.*` rows. It refreshes
 current snapshots every five seconds and reconciles history every ten minutes;
 slow refresh work can delay discovery. Unknown results remain in memory for
 five minutes before permitting retirement, still subject to the forty-minute
-minimum row age; a process restart resets that deadline. Exact deletion keeps
+minimum row age; validated terminal projections additionally satisfy the
+configured observation minimum. A process restart resets unknown deadlines. Exact deletion keeps
 newer concurrent publications intact. Short-ID resolution uses queue names;
 status and control require valid snapshots and their existing evidence checks. Runtime extensions own their probes through the
 process-local liveness registry. Disable this service with
@@ -899,14 +917,14 @@ Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
 weft init [DIRECTORY] [--autostart/--no-autostart] [-q/--quiet]
 
 # Show system status
-weft status [--all] [--status STATUS] [--json] [--watch] [--interval SECONDS] [--context PATH]
+weft status [--all] [--log] [--status STATUS] [--json] [--watch] [--interval SECONDS] [--context PATH]
 
 # Task detail view (--ping proves current state via a keyed PING/PONG)
 weft task status TID [--process] [--watch] [--json] [--ping] [--context PATH]
 weft task tid [TID] [--pid PID] [--reverse FULL_TID] [--context PATH]
 
 # List tasks
-weft task list [--status STATUS] [--all] [--stats] [--json] [--context PATH]
+weft task list [--status STATUS] [--all] [--log] [--stats] [--json] [--context PATH]
 
 # Control running tasks
 weft task stop [TID] [--all] [--pattern TEXT] [--context PATH]

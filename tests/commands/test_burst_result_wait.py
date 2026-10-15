@@ -11,11 +11,13 @@ from typing import Any
 
 import pytest
 
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import result
 from weft.context import build_context
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator
@@ -141,8 +143,13 @@ def test_result_wait_does_not_fetch_or_decode_unrelated_history_bodies(
                 turn += 1
                 if turn == 1:
                     log.write(bodies[1])
+                    with ctx.queue(f"T{tid}.ctrl_out", persistent=True) as control:
+                        control.write("observer-wakeup")
                 elif turn == 2:
                     log.write(metadata_body)
+                    write_task_observation(
+                        ctx, {"tid": tid, "event": "work_started", "taskspec": spec}
+                    )
                     with ctx.queue(f"T{tid}.outbox", persistent=True) as outbox:
                         outbox.write(json.dumps("response"))
             return original_wait(monitor, timeout)
@@ -157,8 +164,8 @@ def test_result_wait_does_not_fetch_or_decode_unrelated_history_bodies(
         assert observed.status == "completed"
         assert observed.value == "response"
         assert turn >= 2
-        assert transferred == Counter({metadata_body: 1})
-        assert decoded == Counter({metadata_body: 1})
+        assert transferred == Counter()
+        assert decoded == Counter()
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -167,8 +174,8 @@ def test_result_uses_metadata_committed_before_observed_output(
 ) -> None:
     """A late real Consumer's metadata must determine output batch custody.
 
-    The first outbox peek follows an empty history snapshot. Produce metadata
-    and output inside that dependency boundary, then let the real peek observe
+    The first task-state discovery read races publication. Produce metadata
+    and output inside that dependency boundary, then let the real read observe
     them. Persistent execution produces two real work-item boundaries: treating
     this as one-shot would wrongly collect the next batch as well.
     """
@@ -178,7 +185,7 @@ def test_result_uses_metadata_committed_before_observed_output(
         spec = _child_spec(tid, persistent=persistent)
         with log.get_connection() as broker:
             broker_type = type(broker)
-            original_peek = broker_type.peek_one
+            original_peek = broker_type.peek_many
         outbox_name = spec.io.outputs["outbox"]
         collector_thread = threading.get_ident()
         published = False
@@ -189,7 +196,7 @@ def test_result_uses_metadata_committed_before_observed_output(
             if (
                 not published
                 and threading.get_ident() == collector_thread
-                and queue_name == outbox_name
+                and queue_name == task_state_queue_name(tid)
             ):
                 published = True
                 consumer = Consumer(ctx.broker_target, spec, config=ctx.config)
@@ -198,7 +205,7 @@ def test_result_uses_metadata_committed_before_observed_output(
                     assert consumer.run_work_item({"args": ["second"]}) == "second"
             return original_peek(db, queue_name, **kwargs)
 
-        monkeypatch.setattr(broker_type, "peek_one", peek)
+        monkeypatch.setattr(broker_type, "peek_many", peek)
         try:
             observed = result.await_task_result(ctx, tid, timeout=0)
             assert published

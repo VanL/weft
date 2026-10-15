@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import time
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -28,6 +29,7 @@ import weft.core.task_evidence as task_evidence  # noqa: PLR0402 approved [TS-3.
 from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_MIN_INTERVAL_SECONDS,
+    LIVENESS_MAPPING_MIN_AGE_SECONDS,
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
@@ -55,6 +57,7 @@ from weft._constants import (
     WEFT_TASK_MONITOR_STALE_OPEN_FAMILY_SECONDS_DEFAULT,
     WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE_DEFAULT,
     WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT_DEFAULT,
+    WEFT_TASK_OBSERVATION_RETENTION_SECONDS_DEFAULT,
 )
 from weft.context import WeftContext
 from weft.core.queue_window import iter_broker_queue_entries, queue_broker
@@ -193,6 +196,9 @@ class TaskMonitorRuntimeConfig:
     task_log_retention_period_seconds: float = (
         WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT
     )
+    task_observation_retention_seconds: float = (
+        WEFT_TASK_OBSERVATION_RETENTION_SECONDS_DEFAULT
+    )
     reserved_cleanup_min_age_seconds: float = (
         TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS
     )
@@ -260,6 +266,21 @@ class TaskMonitorRuntimeConfig:
             "LOG_TASKS_RETENTION_PERIOD_SECONDS",
             WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS_DEFAULT,
         )
+
+        task_observation_retention_seconds = float(
+            config.get(
+                "TASK_OBSERVATION_RETENTION_SECONDS",
+                WEFT_TASK_OBSERVATION_RETENTION_SECONDS_DEFAULT,
+            )
+        )
+        if (
+            not math.isfinite(task_observation_retention_seconds)
+            or task_observation_retention_seconds < LIVENESS_MAPPING_MIN_AGE_SECONDS
+        ):
+            raise ValueError(
+                "WEFT_TASK_OBSERVATION_RETENTION_SECONDS must be finite and at least "
+                f"{LIVENESS_MAPPING_MIN_AGE_SECONDS}"
+            )
 
         reserved_gate_value = config.get(
             "TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS"
@@ -355,6 +376,7 @@ class TaskMonitorRuntimeConfig:
             stale_open_family_seconds=stale_open_family_seconds,
             control_queue_delete_limit=control_queue_delete_limit,
             task_log_retention_period_seconds=task_log_retention_period_seconds,
+            task_observation_retention_seconds=task_observation_retention_seconds,
             reserved_cleanup_min_age_seconds=reserved_cleanup_min_age_seconds,
             task_log_external_path=task_log_external_path,
             task_log_external_enabled=task_log_external_enabled,

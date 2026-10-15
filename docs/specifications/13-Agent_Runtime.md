@@ -887,30 +887,30 @@ This slice does not attempt to:
 
 ## Related Plans
 
-- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+- retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
-- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
-- [`docs/plans/2026-08-24-llm-0-33-compatibility-plan.md`](../plans/2026-08-24-llm-0-33-compatibility-plan.md)
-- [`docs/plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-29-import-boundary-remediation-plan.md`](../plans/2026-07-29-import-boundary-remediation-plan.md)
-- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
-- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
-- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
-- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
-- [`docs/plans/2026-04-14-agent-runtime-package-refactor-plan.md`](../plans/2026-04-14-agent-runtime-package-refactor-plan.md)
-- [`docs/plans/2026-04-13-result-stream-implementation-plan.md`](../plans/2026-04-13-result-stream-implementation-plan.md)
-- [`docs/plans/2026-04-13-delegated-agent-runtime-phase-1-implementation-plan.md`](../plans/2026-04-13-delegated-agent-runtime-phase-1-implementation-plan.md)
-- [`docs/plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md`](../plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
-- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
-- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
-- [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
+- retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-24-llm-0-33-compatibility-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-02-runtime-correctness-and-retention-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-17-microsandbox-runner-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-28-docker-container-profiles-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-agent-session-and-task-startup-observability-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-agent-runtime-package-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-result-stream-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-delegated-agent-runtime-phase-1-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-delegated-agent-authority-boundary-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-container-runtime-descriptor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-run-input-adapter-and-declared-args-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-multi-provider-docker-provider-cli-expansion-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 

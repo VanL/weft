@@ -358,7 +358,7 @@ field and `weft/core/taskspec/model.py::TaskSpec.to_log_dict` its explicit summa
 state/log snapshots and live STATUS/PONG diagnostics. Native errors originate
 in `weft/core/process_title.py`.
 
-Implementation plan: [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md).
+Implementation plan: `2026-09-10-deferred-macos-process-title-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 Both `state` and `metadata` are mutable at runtime, but they have distinct
 ownership:
@@ -585,7 +585,7 @@ Option parsing is shared by validation and runner creation in
 Existing capability gates remain at their existing boundaries. Runtime-only IO
 validation remains `TaskSpec._validate_runtime_ready_io`, invoked by
 `BaseTask.__init__`; empty IO templates remain valid before resolution.
-Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md).
+Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### Autostart Manifests [TS-1.2]
 
@@ -688,32 +688,32 @@ its internal spawn-request `requeue` policy.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
-- [Public Python construction and extension contracts](../plans/2026-09-11-public-python-contracts-plan.md)
+- retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 
-- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
-- [Python API surfaces plan](../plans/2026-08-11-python-api-surfaces-sb-contract.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-07-29-deduplication-and-test-integrity-plan.md`](../plans/2026-07-29-deduplication-and-test-integrity-plan.md)
-- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
-- [`docs/plans/2026-06-17-microsandbox-runner-plan.md`](../plans/2026-06-17-microsandbox-runner-plan.md)
-- [`docs/plans/2026-05-28-docker-container-profiles-plan.md`](../plans/2026-05-28-docker-container-profiles-plan.md)
-- [`docs/plans/2026-04-06-piped-input-support-plan.md`](../plans/2026-04-06-piped-input-support-plan.md)
-- [`docs/plans/2026-04-13-pipeline-spec-expansion-plan.md`](../plans/2026-04-13-pipeline-spec-expansion-plan.md)
-- [`docs/plans/2026-04-06-runner-extension-point-plan.md`](../plans/2026-04-06-runner-extension-point-plan.md)
-- [`docs/plans/2026-04-06-taskspec-clean-design-plan.md`](../plans/2026-04-06-taskspec-clean-design-plan.md)
-- [`docs/plans/2026-04-06-persistent-agent-runtime-implementation-plan.md`](../plans/2026-04-06-persistent-agent-runtime-implementation-plan.md)
-- [`docs/plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md`](../plans/2026-04-06-agent-runtime-boundary-cleanup-plan.md)
-- [`docs/plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md`](../plans/2026-04-13-delegated-agent-authority-boundary-cleanup-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
-- [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
-- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
-- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
-- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
-- [`docs/plans/2026-04-16-pipeline-autostart-extension-plan.md`](../plans/2026-04-16-pipeline-autostart-extension-plan.md)
-- [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
+- retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-29-deduplication-and-test-integrity-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-17-microsandbox-runner-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-28-docker-container-profiles-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-piped-input-support-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-pipeline-spec-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-runner-extension-point-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-taskspec-clean-design-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-persistent-agent-runtime-implementation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-06-agent-runtime-boundary-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-delegated-agent-authority-boundary-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-multi-provider-docker-provider-cli-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-container-runtime-descriptor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-run-input-adapter-and-declared-args-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-autostart-hardening-and-contract-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-pipeline-autostart-extension-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-10-manager-service-authority-boundary-hardening-plan — source 396c3b85; see docs/plans/README.md

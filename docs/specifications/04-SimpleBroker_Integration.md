@@ -21,21 +21,21 @@ See also:
 - current CLI contract:
   [`10-CLI_Interface.md`](10-CLI_Interface.md)
 - implementation plan:
-  [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+  `2026-04-16-runtime-endpoint-registry-boundary-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - SimpleBroker 7.5.1 compatibility plan:
   [`docs/plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md`](../plans/2026-08-26-simplebroker-7-5-1-compatibility-plan.md)
 - SimpleBroker 8.2 configuration plan:
-  [`docs/plans/2026-09-14-simplebroker-8-2-configuration-plan.md`](../plans/2026-09-14-simplebroker-8-2-configuration-plan.md)
+  `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - SimpleBroker 8.0 upgrade plan:
-  [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
+  `2026-08-28-simplebroker-8-upgrade-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - validated dependency floor alignment:
-  [`docs/plans/2026-10-07-dependency-floor-alignment-plan.md`](../plans/2026-10-07-dependency-floor-alignment-plan.md)
+  `2026-10-07-dependency-floor-alignment-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - explicit broker session lifetime plan:
   [`docs/plans/2026-09-15-explicit-broker-session-lifetimes-plan.md`](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 - cleanup policy convergence plan:
-  [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
+  `2026-05-23-monitor-cleanup-policy-convergence-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - monitor policy progress contract plan:
-  [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
+  `2026-05-24-monitor-policy-progress-contract-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 
 ## SimpleBroker Features Leveraged by Weft [SB-0]
 
@@ -211,8 +211,8 @@ including failed construction and cleanup paths. Coverage lives in
 recorded in [the connection reuse repair plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
 The same loans cover status-watch and terminal-snapshot loops, submission
 reconciliation in `_spawn_submission.py`, result acquisition/collection in `_result_wait.py`,
-realtime following in `events.py`, and the interactive Monitor-store fallback
-in `run.py`. Transactions end before waits and generator yields; a bounded
+realtime following in `events.py`, and interactive shutdown observation of
+resolved local queues in `run.py`. Transactions end before waits and generator yields; a bounded
 observer may retain an operation lease without retaining a transaction. Regression
 coverage also lives in `test_spawn_observation_connections.py`,
 `test_result_observation_connections.py`, and `test_event_observation_connections.py`
@@ -354,7 +354,7 @@ recovery. `weft/client/_client.py::WeftClient` owns any retained lease and
 never retains a checkout or alternate-root session. Standalone
 `weft/core/manager_runtime.py::observe_manager_availability` owns its own bounded
 session/connection. Coverage lives in `tests/core/test_manager_runtime_connections.py`.
-See the [submission manager check cost plan](../plans/2026-09-17-submission-manager-check-cost-plan.md).
+See `2026-09-17-submission-manager-check-cost-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### Weft-Owned Operational Tables [SB-0.4a]
 
@@ -585,9 +585,7 @@ pre-checkpoint gaps, pending deferred writes, and forced-process residue. Data
 written by an older Monitor schema is handled by its schema migration, not by
 a permanent normal-cycle compatibility lane.
 
-_Implementation mapping_: `weft/commands/_task_history.py::read_monitor_task_record`
-owns read-only retained task lookup on the observation broker.
-`weft/core/monitor/store.py` uses the resolved
+_Implementation mapping_: `weft/core/monitor/store.py` uses the resolved
 `WeftContext` and owns table access; `weft/core/monitor/sql.py` owns SQL
 templates/builders and validates code-owned identifiers; `weft/core/tasks/base.py`
 builds task contexts with `create_database=False`; `weft/core/monitor/task_monitor.py`
@@ -716,7 +714,7 @@ materializing the configured Weft metadata directory, and resolving the broker
 target.
 
 Related plan:
-- `docs/plans/2026-04-16-configurable-weft-directory-name-plan.md`
+- retired: 2026-04-16-configurable-weft-directory-name-plan — source 396c3b85; see docs/plans/README.md
 
 _Implementation mapping_: `weft/context.py` (`build_context`,
 `WeftContext.queue`, `WeftContext.broker`); `weft/_constants.py`
@@ -872,35 +870,35 @@ connection-pooling designs are tracked in the companion doc:
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
 
-- [Django context resolution owned by Weft](../plans/2026-09-14-django-core-context-resolution-plan.md)
+- retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
-- [`docs/plans/2026-08-28-simplebroker-8-upgrade-plan.md`](../plans/2026-08-28-simplebroker-8-upgrade-plan.md)
+- retired: 2026-08-28-simplebroker-8-upgrade-plan — source 396c3b85; see docs/plans/README.md
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
-- [`docs/plans/2026-08-25-monitor-schema-semantic-validation-plan.md`](../plans/2026-08-25-monitor-schema-semantic-validation-plan.md)
-- [`docs/plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md`](../plans/2026-08-24-simplebroker-7-4-1-compatibility-plan.md)
-- [`docs/plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md`](../plans/2026-08-13-simplebroker-7-3-dump-watermark-plan.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md`](../plans/2026-08-10-simplebroker-7-json-message-id-boundary-plan.md)
-- [`docs/plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md`](../plans/2026-08-10-interactive-session-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
-- [`docs/plans/2026-07-31-simplebroker-6-api-migration-plan.md`](../plans/2026-07-31-simplebroker-6-api-migration-plan.md)
-- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
-- [`docs/plans/2026-06-11-simplebroker-dump-load-adoption-plan.md`](../plans/2026-06-11-simplebroker-dump-load-adoption-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)
-- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
-- [`docs/plans/2026-05-20-simplebroker-api-adoption-plan.md`](../plans/2026-05-20-simplebroker-api-adoption-plan.md)
-- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
-- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
-- [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
-- [`docs/plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md`](../plans/2026-04-16-autostart-hardening-and-contract-alignment-plan.md)
-- [`docs/plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md`](../plans/2026-04-14-config-precedence-and-parsing-alignment-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
-- [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
-- [`docs/plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md`](../plans/2026-05-05-simplebroker-multiqueue-waiter-integration-plan.md)
-- [`docs/plans/2026-05-13-early-env-file-bootstrap-plan.md`](../plans/2026-05-13-early-env-file-bootstrap-plan.md)
-- [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
-- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- retired: 2026-08-25-monitor-schema-semantic-validation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-24-simplebroker-7-4-1-compatibility-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-13-simplebroker-7-3-dump-watermark-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-simplebroker-7-json-message-id-boundary-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-interactive-session-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-result-observation-and-control-transition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-31-simplebroker-6-api-migration-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-10-postgresql-dynamic-native-waiter-rebind-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-11-simplebroker-dump-load-adoption-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-25-monitor-dead-task-catchup-convergence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-collation-table-retirement-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-simplebroker-api-adoption-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-reactor-worker-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-task-log-external-logging-and-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-store-hardening-and-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-autostart-hardening-and-contract-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-config-precedence-and-parsing-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-builtin-taskspecs-and-spec-resolution-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-05-simplebroker-multiqueue-waiter-integration-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-13-early-env-file-bootstrap-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-durable-collation-store-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-reactive-task-loop-hot-probe-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
@@ -908,3 +906,5 @@ connection-pooling designs are tracked in the companion doc:
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md) removes public Monitor-store lookup under [SB-0.4a]; private collation ownership remains unchanged.

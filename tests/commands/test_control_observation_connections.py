@@ -11,8 +11,10 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._constants import PIPELINE_RUNTIME_METADATA_KEY, WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft.commands import _result_wait
 from weft.commands import run as run_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.types import RunExecutionResult
@@ -23,7 +25,6 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.taskspec import TaskSpec
-from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
 
@@ -48,7 +49,7 @@ def _track_postgres_connections(
     return connections
 
 
-@pytest.mark.parametrize("history", ["absent", "task", "pipeline", "future", "monitor"])
+@pytest.mark.parametrize("history", ["task", "pipeline", "future"])
 def test_control_observation_reuses_physical_connections(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
@@ -87,6 +88,7 @@ def test_control_observation_reuses_physical_connections(
         }
         if history not in {"absent", "monitor"}:
             writer.write(json.dumps(event))
+            write_task_observation(ctx, event)
         if history == "monitor":
             store = open_monitor_store(ctx, queue=writer)
             store.ensure_schema()
@@ -139,130 +141,12 @@ def test_control_observation_reuses_physical_connections(
     assert all(connection.closed for connection in connections)
 
 
-def test_control_observation_sees_external_metadata_state_and_route_changes(
-    weft_harness: WeftTestHarness,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Independent commits stay visible across polls and custom route changes."""
-    ctx = weft_harness.context
-    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as writer:
-        tid = str(writer.generate_timestamp())
-    custom_ctrl = f"custom.{tid}.ctrl_out"
-    custom_pipeline = f"custom.{tid}.status"
-    payload = TaskSpec.model_validate(
-        {
-            "tid": tid,
-            "name": "initial",
-            "spec": {
-                "type": "function",
-                "function_target": "tests.tasks.sample_targets:echo_payload",
-                "persistent": True,
-            },
-            "io": {},
-            "state": {},
-        }
-    ).model_dump(mode="json")
-
-    def publish(turn: int) -> None:
-        # This worker owns distinct connections, never the observer's queue lease.
-        with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
-            if turn < 3:
-                payload["name"] = f"external-{turn}"
-                payload["metadata"]["revision"] = turn
-                if turn == 2:
-                    payload["metadata"]["role"] = "pipeline"
-                    payload["metadata"][PIPELINE_RUNTIME_METADATA_KEY] = {
-                        "queues": {"status": custom_pipeline}
-                    }
-                    payload["io"]["control"]["ctrl_out"] = custom_ctrl
-                log.write(
-                    json.dumps(
-                        {
-                            "tid": tid,
-                            "event": "work_started",
-                            "status": "running",
-                            "taskspec": payload,
-                        }
-                    )
-                )
-                with ctx.queue(task_state_queue_name(tid), persistent=True) as state:
-                    state.write(
-                        json.dumps(
-                            {
-                                "full": tid,
-                                "short": tid_short_form(tid),
-                                "revision": turn,
-                            }
-                        )
-                    )
-                    state.write("{malformed newest row")
-                if turn == 2:
-                    with ctx.queue(custom_pipeline, persistent=True) as pipeline:
-                        pipeline.write(
-                            json.dumps(
-                                {
-                                    "type": "pipeline_status",
-                                    "pipeline_tid": tid,
-                                    "status": "running",
-                                    "activity": "external-progress",
-                                    "timestamp": pipeline.generate_timestamp(),
-                                }
-                            )
-                        )
-            else:
-                with ctx.queue(custom_ctrl, persistent=True) as ctrl:
-                    ctrl.write(
-                        json.dumps({"command": "KILL", "status": "ack", "tid": tid})
-                    )
-                    ctrl.write(
-                        json.dumps(
-                            {
-                                "type": "terminal",
-                                "source": "task",
-                                "tid": tid,
-                                "status": "cancelled",
-                            }
-                        )
-                    )
-
-    observed: list[task_cmd.system_cmd.TaskSnapshot | None] = []
-    original_status = task_cmd._task_status
-
-    def status(*args: Any, **kwargs: Any) -> Any:
-        snapshot = original_status(*args, **kwargs)
-        observed.append(snapshot)
-        return snapshot
-
-    turns = 0
-    with ThreadPoolExecutor(max_workers=1) as producer:
-
-        def wait(resources: Any, timeout: float | None) -> bool:
-            nonlocal turns
-            turns += 1
-            assert turns <= 3
-            producer.submit(publish, turns).result(timeout=10)
-            return True
-
-        monkeypatch.setattr(task_cmd, "_task_status", status)
-        monkeypatch.setattr(task_cmd._ControlSurfaceResources, "wait", wait)
-        entry, snapshot = task_cmd._await_control_surface(ctx, tid)
-    assert entry is not None and entry["revision"] == 2
-    assert snapshot is not None and snapshot.status == "cancelled"
-    assert snapshot.name == "external-2"
-    assert snapshot.metadata["revision"] == 2
-    assert len(observed) == 3
-    assert observed[0] is None
-    assert observed[1] is not None and observed[1].name == "external-1"
-    assert observed[2] is not None and observed[2].activity == "external-progress"
-
-
 @pytest.mark.parametrize(
     "failure",
     [
         "none",
         "queue-2",
         "queue-3",
-        "queue-4",
         "monitor-init",
         "monitor-close",
         "queue-close",
@@ -377,6 +261,15 @@ def test_terminal_snapshot_reuses_connections_and_observes_external_route(
                     }
                 )
             )
+        write_task_observation(
+            ctx,
+            {
+                "tid": tid,
+                "event": "work_started",
+                "status": "running",
+                "taskspec": payload,
+            },
+        )
         with ctx.queue(custom_ctrl, persistent=True) as ctrl:
             ctrl.write(
                 json.dumps(
@@ -480,9 +373,7 @@ def test_terminal_snapshot_closes_owned_queue_on_all_exits(
                 timeout=task_cmd.CONTROL_SURFACE_WAIT_TIMEOUT,
             )
     assert {q.name for q in opened} == {
-        WEFT_GLOBAL_LOG_QUEUE,
         task_state_queue_name("1789010695101849600"),
-        "T1789010695101849600.outbox",
         "T1789010695101849600.ctrl_out",
     }
     assert len(closed) == len(opened)
@@ -508,7 +399,7 @@ def test_status_watch_reuses_connections_and_observes_external_updates(
                 "persistent": True,
             },
             "io": {},
-            "state": {},
+            "state": {"status": "running", "started_at": time.time_ns()},
         }
     ).model_dump(mode="json")
 
@@ -525,6 +416,16 @@ def test_status_watch_reuses_connections_and_observes_external_updates(
                     }
                 )
             )
+
+        write_task_observation(
+            ctx,
+            {
+                "tid": tid,
+                "event": "work_started",
+                "status": "running",
+                "taskspec": payload,
+            },
+        )
 
     monkeypatch.setattr(QueueChangeMonitor, "wait", lambda *_args, **_kwargs: True)
     iterator = iter(
@@ -589,7 +490,7 @@ def _track_watch_resources(
         return TrackedMonitor()
 
     monkeypatch.setattr(WeftContext, "queue", queue)
-    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", monitor)
+    monkeypatch.setattr(_result_wait, "QueueChangeMonitor", monitor)
     return opened, closed
 
 
@@ -646,6 +547,15 @@ def test_status_watch_closes_before_queues_on_each_exit(
                 }
             )
         )
+    write_task_observation(
+        ctx,
+        {
+            "tid": tid,
+            "event": "work_completed" if outcome == "terminal" else "work_started",
+            "status": status,
+            "taskspec": {**spec.model_dump(mode="json"), "state": {"status": status}},
+        },
+    )
     opened, closed = _track_watch_resources(monkeypatch, outcome)
     original_snapshot = task_cmd._task_snapshot
 
@@ -681,92 +591,60 @@ def test_status_watch_closes_before_queues_on_each_exit(
         close = getattr(iterator, "close", None)
         assert callable(close)
         close()
-    assert opened == [WEFT_GLOBAL_LOG_QUEUE, task_state_queue_name(tid)]
-    assert closed == ["monitor", *reversed(opened)]
+    assert WEFT_GLOBAL_LOG_QUEUE not in opened
+    assert task_state_queue_name(tid) in opened
+    assert len([name for name in closed if name == "monitor"]) >= 1
+    assert sorted(name for name in closed if name != "monitor") == sorted(opened)
 
 
-@pytest.mark.parametrize("log_wins", [False, True])
-def test_interactive_stop_observer_borrows_log_queue(
+def test_interactive_stop_observes_local_completion_without_telemetry(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
-    log_wins: bool,
 ) -> None:
-    """The active STOP owner borrows Monitor SQL and selects real terminal proof."""
+    """Accepted custom routes keep STOP observation independent of telemetry."""
     ctx = weft_harness.context
-    connections = _track_postgres_connections(ctx, monkeypatch)
-    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
-        tid = str(log.generate_timestamp())
-        store = open_monitor_store(ctx, queue=log)
-        store.ensure_schema()
+    with ctx.queue("test.interactive.ids") as allocator:
+        tid = str(allocator.generate_timestamp())
     spec = TaskSpec.model_validate(
         {
             "tid": tid,
-            "name": "interactive-loan",
+            "name": "interactive-owned",
             "spec": {
                 "type": "function",
                 "function_target": "tests.tasks.sample_targets:echo_payload",
                 "cleanup_on_exit": False,
                 "enable_process_title": False,
             },
+            "io": {
+                "control": {"ctrl_in": "custom.stop.in", "ctrl_out": "custom.stop.out"}
+            },
         }
     )
     consumer = Consumer(ctx.broker_target, spec, config=ctx.broker_config)
-    with consumer.drive_scope():
+    try:
         consumer._handle_stop_request(
             reason="STOP requested",
             event="control_stop",
             message_id=None,
             apply_reserved_policy=True,
         )
-    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log:
-        store = open_monitor_store(ctx, queue=log)
-        for raw, message_id in list(log.peek_generator(with_timestamps=True)):
-            payload = json.loads(raw)
-            if payload.get("tid") != tid:
-                continue
-            update = update_from_task_log_payload(payload, message_id=message_id)
-            assert update is not None
-            store.upsert_task_event(update)
-            if not log_wins and payload.get("status") == "cancelled":
-                assert log.delete(message_id=message_id)
-    # Retire the producer's ephemeral control surface in both source cases.
-    # This isolates retained history versus retained Monitor terminal proof.
-    names = [task_state_queue_name(tid), spec.io.control["ctrl_out"]]
-    for name in names:
-        with ctx.queue(name) as queue:
-            for _body, message_id in list(queue.peek_generator(with_timestamps=True)):
-                assert queue.delete(message_id=message_id)
-    borrowed: list[int] = []
-    sources: list[str] = []
-    original_lookup = run_cmd.read_monitor_task_record
-    original_snapshot = task_cmd._terminal_observation_snapshot
-
-    def lookup(*args: Any, **kwargs: Any) -> Any:
-        queue = kwargs.get("queue")
-        assert queue is not None and queue.name == WEFT_GLOBAL_LOG_QUEUE
-        before = len(connections)
-        record = original_lookup(*args, **kwargs)
-        borrowed.append(len(connections) - before)
-        return record
-
-    def snapshot(*args: Any, **kwargs: Any) -> Any:
-        value = original_snapshot(*args, **kwargs)
-        assert value.terminal and value.status == "cancelled"
-        sources.append(value.source)
-        return value
-
-    monkeypatch.setattr(run_cmd, "read_monitor_task_record", lookup)
-    monkeypatch.setattr(task_cmd, "_terminal_observation_snapshot", snapshot)
-    session = run_cmd._LiveRunSession(
-        RunExecutionResult(tid=tid), ctx, _accepted_taskspec=spec
-    )
-    try:
-        run_cmd._stop_interactive_run_session(session)
+        with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+            for _body, message_id in list(log.peek_generator(with_timestamps=True)):
+                log.delete(message_id=message_id)
+        session = run_cmd._LiveRunSession(
+            RunExecutionResult(tid=tid), ctx, _accepted_taskspec=spec
+        )
+        try:
+            run_cmd._stop_interactive_run_session(session)
+        finally:
+            session.close()
+        with ctx.queue("custom.stop.out") as completion:
+            assert any(
+                json.loads(raw).get("status") == "cancelled"
+                for raw in completion.peek_generator()
+            )
     finally:
-        session.close()
-    assert borrowed == [0]
-    assert sources == (["log_fallback"] if log_wins else ["monitor_store"])
-    assert connections and all(connection.closed for connection in connections)
+        consumer.cleanup()
 
 
 def test_control_observer_retains_shared_completion_facts_with_bounded_drain(

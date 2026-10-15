@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.9.112] - 2026-10-15
+
+### Changed
+
+- Status/list now use task-owned current snapshots. `--all` adds retained terminal
+  snapshots; explicit `--log` adds retained raw history (`--log --watch` is invalid).
+  Ordinary status/result/control and Python handles no longer query TaskMonitor
+  tables. Bulk inventory may lag abrupt failures or a failed final publication;
+  known-TID local completion remains authoritative.
+- Add `WEFT_TASK_OBSERVATION_RETENTION_SECONDS` (48-hour default, finite minimum
+  2400 seconds), independent of log/reserved retention. After route metadata and
+  usable standard completion expire, bare-TID lookup may be unavailable even if
+  custom output remains, including after dump/load. Bound handles retain routes.
+  Missing metadata returns unknown without timeout (exit 1), or observation
+  timeout at a finite caller deadline (exit 124); unresolved controls fail before
+  writing. Coordinate writer/reader upgrades and drain old task processes first.
+
 ### Fixed
 
 - Remove the five-family concurrency cap. Available measured capacity now
@@ -9,6 +26,9 @@
 - PostgreSQL admission now defaults to its current `max_connections` minus the
   global reserve and measured usage; a positive configured ceiling overrides
   it. Remove `WEFT_SCHEDULER_MAX_FRONTIERS` before a coordinated process upgrade.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.47`, `weft-docker 0.9.87`,
+  `weft-macos-sandbox 0.6.16`, and `weft-microsandbox 0.5.17`.
 
 ## [0.9.111] - 2026-10-14
 

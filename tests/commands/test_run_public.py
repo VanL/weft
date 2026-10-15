@@ -104,7 +104,7 @@ def test_run_session_collects_custom_output_without_child_initialization(
         # This forbidden operation is part of MF-5, rather than an incidental
         # call count. It also prevents a missing route from hanging the events case.
         monkeypatch.setattr(
-            result_wait, "load_latest_taskspec_payload", refuse_discovery
+            result_wait.task_evidence, "discover_task_observation", refuse_discovery
         )
         if collection == "wait":
             result = session.wait(timeout=0.0)

@@ -20,6 +20,7 @@ import weft.commands._spawn_submission as spawn_submission_cmd
 import weft.commands.run as run_cmd
 import weft.commands.submission as submission_cmd
 from simplebroker import Config, Queue
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
@@ -625,249 +626,58 @@ def _seed_terminal_monitor_store_record(
     )
 
 
-def test_terminal_snapshot_falls_back_to_monitor_store_after_raw_log_retirement(
+@pytest.mark.parametrize("surface", ["terminal", "status"])
+def test_retired_monitor_record_does_not_restore_ordinary_observation(
     tmp_path: Path,
+    surface: str,
 ) -> None:
+    """Private telemetry cannot provide a public lifecycle after queue evidence expires."""
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     tid = "1779226615233821720"
     _seed_terminal_monitor_store_record(context, tid=tid)
     store = open_monitor_store(context)
     retained_before = store.get_task(tid)
-    assert retained_before is not None
-    assert retained_before.terminal_seen
-    assert retained_before.terminal_status == "failed"
-    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
-        raw_before = list(log_queue.peek_generator(with_timestamps=True))
-
-    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
-
+    assert retained_before is not None and retained_before.terminal_seen
+    if surface == "terminal":
+        snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
+        assert snapshot.status == "unknown" and not snapshot.terminal
+    else:
+        current = task_cmd.task_status(tid, context_path=root)
+        assert current is not None and current.status == "unknown"
+        assert current.reconciliation == {
+            "classification": "observation_metadata_unavailable"
+        }
     assert store.get_task(tid) == retained_before
-    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
-        assert list(log_queue.peek_generator(with_timestamps=True)) == raw_before == []
-    assert snapshot.tid == tid
-    assert snapshot.status == "failed"
-    assert snapshot.source == "monitor_store"
-    assert snapshot.terminal is True
-    assert snapshot.error == "retired failure"
-    assert snapshot.return_code == 1
-    assert snapshot.observed_at == int(tid) + 279
-    assert snapshot.metadata["classification"] == "terminal_monitor_store"
-    assert retained_before.taskspec_summary == {
-        "tid": tid,
-        "name": "retired-terminal-task",
-        "metadata": {"kind": "terminal-fallback"},
-    }
-    assert snapshot.ack_targets == ()
 
 
-def test_terminal_snapshot_ignores_nonterminal_monitor_store_rows(
+@pytest.mark.parametrize("status", ["running", "completed"])
+def test_task_status_uses_task_owned_snapshot_without_raw_history(
     tmp_path: Path,
+    status: str,
 ) -> None:
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
-    store = open_monitor_store(context)
-    store.ensure_schema()
-    tid = "1779226615233821820"
-    started_at = int(tid) - 500
-    observed_at = int(tid) + 279
-    store.upsert_task_event(
-        MonitorTaskEventUpdate(
-            tid=tid,
-            queue_name=WEFT_GLOBAL_LOG_QUEUE,
-            message_id=observed_at,
-            event="task_started",
-            status="running",
-            observed_at_ns=observed_at,
-            name="retired-running-task",
-            runner="host",
-            terminal_seen=False,
-            first_seen_at_ns=started_at,
-            last_seen_at_ns=observed_at,
-            started_at_ns=started_at,
-            taskspec_summary={
-                "tid": tid,
-                "name": "retired-running-task",
-                "metadata": {"kind": "nonterminal-fallback"},
-            },
-            state={"status": "running", "started_at": started_at},
-            lifecycle={"event": "task_started", "status": "running"},
-            resources={},
-            diagnostics={},
-            bookkeeping={},
-        )
-    )
-
-    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
-
-    assert snapshot.status == "unknown"
-    assert snapshot.source == "observer"
-    assert snapshot.terminal is False
-
-
-def test_terminal_snapshot_preserves_observer_unknown_when_monitor_schema_missing(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    tid = "1779226615233821920"
-
-    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
-
-    assert snapshot.status == "unknown"
-    assert snapshot.source == "observer"
-    assert snapshot.terminal is False
-
-
-def test_terminal_snapshot_reports_monitor_store_read_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    tid = "1779226615233821970"
-
-    def fail_open_monitor_store(*args: Any, **kwargs: Any) -> object:
-        del args, kwargs
-        raise RuntimeError("store temporarily unavailable")
-
-    monkeypatch.setattr(
-        "weft.commands._task_history.open_monitor_store", fail_open_monitor_store
-    )
-
-    snapshot = task_cmd.task_terminal_snapshot(tid, context=context)
-
-    assert snapshot.status == "unknown"
-    assert snapshot.source == "monitor_store_unavailable"
-    assert snapshot.terminal is False
-    assert snapshot.error == "monitor store unavailable: store temporarily unavailable"
-    assert snapshot.metadata == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-
-
-def test_task_status_falls_back_to_monitor_store_after_raw_log_retirement(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    store = open_monitor_store(context)
-    store.ensure_schema()
     tid = "1779226615233822720"
-    store.upsert_task_event(
-        MonitorTaskEventUpdate(
-            tid=tid,
-            queue_name=WEFT_GLOBAL_LOG_QUEUE,
-            message_id=1779226615233822999,
-            event="work_completed",
-            status="completed",
-            observed_at_ns=1779226615233822999,
-            name="retired-log-task",
-            runner="host",
-            terminal_seen=True,
-            terminal_event="work_completed",
-            terminal_status="completed",
-            first_seen_at_ns=1779226615233822000,
-            last_seen_at_ns=1779226615233822999,
-            completed_at_ns=1779226615233822999,
-            taskspec_summary={
+    event = "work_completed" if status == "completed" else "task_started"
+    write_task_observation(
+        context,
+        {
+            "tid": tid,
+            "event": event,
+            "status": status,
+            "taskspec": {
                 "tid": tid,
-                "name": "retired-log-task",
-                "metadata": {"kind": "status-fallback"},
+                "name": "current-task",
+                "metadata": {"kind": "current"},
+                "state": {"status": status},
             },
-            state={"status": "completed"},
-            lifecycle={"event": "work_completed", "status": "completed"},
-            resources={},
-            diagnostics={},
-            bookkeeping={},
-        )
+        },
     )
-
     snapshot = task_cmd.task_status(tid, context_path=root)
-
     assert snapshot is not None
-    assert snapshot.tid == tid
-    assert snapshot.name == "retired-log-task"
-    assert snapshot.status == "completed"
-    assert snapshot.event == "work_completed"
-    assert snapshot.metadata == {"kind": "status-fallback"}
-
-
-def test_task_status_reports_running_monitor_store_snapshot_after_raw_log_retirement(
-    tmp_path: Path,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    context = build_context(spec_context=root)
-    store = open_monitor_store(context)
-    store.ensure_schema()
-    tid = "1779226615233823720"
-    started_at = 1779226615233823000
-    observed_at = 1779226615233823999
-    store.upsert_task_event(
-        MonitorTaskEventUpdate(
-            tid=tid,
-            queue_name=WEFT_GLOBAL_LOG_QUEUE,
-            message_id=observed_at,
-            event="task_started",
-            status="running",
-            observed_at_ns=observed_at,
-            name="retired-running-log-task",
-            runner="host",
-            terminal_seen=False,
-            first_seen_at_ns=started_at,
-            last_seen_at_ns=observed_at,
-            started_at_ns=started_at,
-            taskspec_summary={
-                "tid": tid,
-                "name": "retired-running-log-task",
-                "metadata": {"kind": "status-fallback"},
-            },
-            state={"status": "running", "started_at": started_at},
-            lifecycle={"event": "task_started", "status": "running"},
-            resources={},
-            diagnostics={},
-            bookkeeping={},
-        )
-    )
-
-    snapshot = task_cmd.task_status(tid, context_path=root)
-
-    assert snapshot is not None
-    assert snapshot.tid == tid
-    assert snapshot.name == "retired-running-log-task"
-    assert snapshot.status == "running"
-    assert snapshot.event == "monitor_store"
-    assert snapshot.started_at == started_at
-    assert snapshot.metadata == {"kind": "status-fallback"}
-
-
-def test_task_status_reports_unknown_when_monitor_store_read_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    tid = "1779226615233824720"
-
-    def fail_open_monitor_store(*args: Any, **kwargs: Any) -> object:
-        del args, kwargs
-        raise RuntimeError("store temporarily unavailable")
-
-    monkeypatch.setattr(
-        "weft.commands._task_history.open_monitor_store", fail_open_monitor_store
-    )
-
-    snapshot = task_cmd.task_status(tid, context_path=root)
-
-    assert snapshot is not None
-    assert snapshot.tid == tid
-    assert snapshot.status == "unknown"
-    assert snapshot.event == "monitor_store_unavailable"
-    assert snapshot.reconciliation == {
-        "classification": "monitor_store_unavailable",
-        "reason": "store_read_failed",
-    }
-    assert snapshot.error == "monitor store unavailable: store temporarily unavailable"
+    assert snapshot.name == "current-task" and snapshot.status == status
+    assert snapshot.event == event and snapshot.metadata == {"kind": "current"}
 
 
 def _stop_active_manager(context: WeftContext) -> None:

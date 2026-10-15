@@ -1,4 +1,4 @@
-"""Filtered task history and evidence loans (Spec: [MF-5], [SB-0.4])."""
+"""Filtered explicit task history (Spec: [MF-5], [SB-0.4])."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _track_transferred_bodies(
     return transferred
 
 
-def test_bounded_terminal_evidence_fetches_only_matching_candidate_bodies(
+def test_history_reader_fetches_only_matching_candidate_bodies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ordinary unrelated task bodies must stay at the broker filter boundary."""
@@ -107,27 +107,25 @@ def test_bounded_terminal_evidence_fetches_only_matching_candidate_bodies(
                 if json.loads(body).get("tid") == target.tid
             ]
             transferred = _track_transferred_bodies(broker, patch)
-            fold = task_evidence.bounded_log_terminal_evidence(
-                ctx, tid=target.tid, broker=broker
+            acquired, _horizon = task_evidence.read_task_history(
+                ctx, target.tid, broker=broker
             )
-            assert fold.terminal is not None and fold.terminal.status == "completed"
-            assert fold.terminal.observed_at == target_rows[-1][1]
-            assert fold.latest_live_at is not None
+            assert acquired == [
+                (json.loads(body), message_id) for body, message_id in target_rows
+            ]
             assert transferred == [body for body, _message_id in target_rows]
-            # A later diagnostic is real writer output but cannot replace the
-            # completed lifecycle. Only the newly acquired suffix is folded.
+            # A resumed explicit reader acquires only the newly committed suffix.
             unrelated._report_state_change(event="task_activity", note="later")
             target._report_state_change(event="task_activity", note="after completion")
             rows, _horizon = task_evidence.read_task_history(
                 ctx, target.tid, broker=broker, after_timestamp=target_rows[-1][1]
             )
             assert rows
-            updated = fold.fold(rows, tid=target.tid)
-            assert updated.terminal == fold.terminal
-            assert updated.latest_live_at == fold.latest_live_at
+            assert all(message_id > target_rows[-1][1] for _body, message_id in rows)
+            assert all(payload["tid"] == target.tid for payload, _message_id in rows)
 
 
-def test_bounded_terminal_evidence_includes_imported_history_older_than_tid(
+def test_history_reader_includes_imported_history_older_than_tid(
     history_broker: tuple[WeftContext, Any, pytest.MonkeyPatch],
 ) -> None:
     """A task ID is identity, not an earliest retained-history timestamp."""
@@ -143,9 +141,8 @@ def test_bounded_terminal_evidence_includes_imported_history_older_than_tid(
             )
         ]
     )
-    fold = task_evidence.bounded_log_terminal_evidence(ctx, tid=tid, broker=broker)
-    assert fold.terminal is not None and fold.terminal.status == "failed"
-    assert fold.terminal.observed_at == imported_id
+    rows, _horizon = task_evidence.read_task_history(ctx, tid, broker=broker)
+    assert rows == [({"tid": tid, "status": "failed"}, imported_id)]
 
 
 def test_history_reader_pages_canonical_candidates_and_exact_top_level_identity(
@@ -288,31 +285,3 @@ def test_history_reader_failure_is_not_partial_or_silent_absence(
         patch.setattr(type(broker), "peek_one", exact)
     with pytest.raises(BrokerError):
         task_evidence.read_task_history(ctx, tid, broker=broker)
-
-
-@pytest.mark.parametrize("loan", ["empty", "terminal"])
-def test_known_tid_evidence_uses_acquired_fold_without_rereading_history(
-    history_broker: tuple[WeftContext, Any, pytest.MonkeyPatch],
-    loan: str,
-) -> None:
-    ctx, broker, patch = history_broker
-    tid = str(broker.generate_timestamp())
-    broker.write(WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": tid, "status": "failed"}))
-    outbox_id = broker.write(f"T{tid}.outbox", "completed output")
-
-    def no_history(*args: Any, **kwargs: Any) -> Any:
-        pytest.fail("acquired task events must not trigger history rediscovery")
-
-    patch.setattr(task_evidence, "read_task_history", no_history)
-    task_events = (
-        [] if loan == "empty" else [({"tid": tid, "status": "cancelled"}, outbox_id)]
-    )
-    evidence = task_evidence.known_tid_evidence(
-        ctx,
-        tid=tid,
-        broker=broker,
-        log_evidence=task_evidence.LogFold().fold(task_events, tid=tid),
-    )
-    assert evidence is not None
-    assert evidence.status == ("completed" if loan == "empty" else "cancelled")
-    assert evidence.source == ("outbox" if loan == "empty" else "log")

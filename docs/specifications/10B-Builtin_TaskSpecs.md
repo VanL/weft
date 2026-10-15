@@ -112,7 +112,7 @@ Explicit spec resolution lives in `weft/commands/specs.py` and
 
 ## Related Plans
 
-- [`docs/plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md`](../plans/2026-04-16-runtime-endpoint-registry-boundary-plan.md)
+- retired: 2026-04-16-runtime-endpoint-registry-boundary-plan — source 396c3b85; see docs/plans/README.md
 
 ## Builtins
 
@@ -384,15 +384,15 @@ resolution: `weft/core/imports.py`.
 
 ## Related Plans
 
-- [`Compatibility Contract Hardening Release Plan`](../plans/2026-08-25-compatibility-contract-hardening-plan.md)
-- [`docs/plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md`](../plans/2026-04-14-builtin-taskspecs-and-spec-resolution-plan.md)
-- [`docs/plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md`](../plans/2026-04-14-builtin-contract-and-doc-drift-reduction-plan.md)
-- [`docs/plans/2026-04-14-system-builtins-command-plan.md`](../plans/2026-04-14-system-builtins-command-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md`](../plans/2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan.md)
-- [`docs/plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md`](../plans/2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan.md)
-- [`docs/plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md`](../plans/2026-04-14-provider-cli-container-runtime-descriptor-plan.md)
-- [`docs/plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md`](../plans/2026-04-15-spec-run-input-adapter-and-declared-args-plan.md)
-- [`docs/plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md`](../plans/2026-04-15-multi-provider-docker-provider-cli-expansion-plan.md)
-- [`docs/plans/2026-04-15-parameterized-taskspec-materialization-plan.md`](../plans/2026-04-15-parameterized-taskspec-materialization-plan.md)
-- [`docs/plans/2026-04-15-spec-aware-run-help-plan.md`](../plans/2026-04-15-spec-aware-run-help-plan.md)
-- [`docs/plans/2026-04-16-docker-builtins-windows-guard-plan.md`](../plans/2026-04-16-docker-builtins-windows-guard-plan.md)
+- retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-builtin-taskspecs-and-spec-resolution-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-builtin-contract-and-doc-drift-reduction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-system-builtins-command-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-validation-boundary-and-agent-settings-alignment-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-docker-agent-images-and-one-shot-provider-cli-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-14-provider-cli-container-runtime-descriptor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-run-input-adapter-and-declared-args-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-multi-provider-docker-provider-cli-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-parameterized-taskspec-materialization-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-15-spec-aware-run-help-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-16-docker-builtins-windows-guard-plan — source 396c3b85; see docs/plans/README.md

@@ -7,10 +7,10 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
@@ -28,7 +28,7 @@ from weft.commands._task_snapshot_reducer import (
     reduce_task_event,
     reduce_task_snapshot,
 )
-from weft.context import WeftContext, build_context
+from weft.context import build_context
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.ext import RunnerHandle
 from weft.helpers import tid_short_form
@@ -483,194 +483,6 @@ def test_order_task_snapshots_filters_terminal_and_orders_active_first() -> None
     ] == ["1", "2", "0"]
 
 
-def test_evidence_acquisition_skips_local_and_claimed_for_terminal_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_probe(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("terminal rows must not probe task-local queues")
-
-    runtime_calls: list[bool] = []
-    monkeypatch.setattr(
-        system.task_evidence,
-        "task_local_terminal_evidence",
-        fail_probe,
-    )
-    monkeypatch.setattr(
-        system.task_evidence,
-        "claimed_outbox_result_evidence",
-        fail_probe,
-    )
-
-    def _record_runtime_calls(**kwargs: object) -> tuple[bool, str, str]:
-        runtime_calls.append(True)
-        return (False, "none", "unknown")
-
-    monkeypatch.setattr(
-        system,
-        "_runtime_evidence_details",
-        _record_runtime_calls,
-    )
-    plan, evidence = system._collect_snapshot_evidence(
-        Mock(spec=WeftContext),
-        _record(status="completed", completed_at=3_000_000_000),
-        mapping_entry=None,
-        selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
-        now_ns=5_000_000_000,
-    )
-    assert plan.acquire_runtime_observation
-    assert not plan.acquire_claimed_outbox
-    assert evidence.runtime_observation is not None
-    assert runtime_calls == [True]
-
-
-@pytest.mark.parametrize("with_reconciliation", [False, True])
-def test_evidence_acquisition_preserves_local_claimed_probe_guard(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    with_reconciliation: bool,
-) -> None:
-    local = TaskEvidenceSnapshot(
-        tid=TID,
-        status="completed",
-        classification="readable_result",
-        source="outbox",
-        terminal=True,
-        reconciliation=(
-            {"classification": "readable_result"} if with_reconciliation else None
-        ),
-    )
-    claimed_calls: list[str] = []
-    monkeypatch.setattr(
-        system.task_evidence,
-        "task_local_terminal_evidence",
-        lambda *args, **kwargs: local,
-    )
-
-    def _record_claimed_calls(*args: object, **kwargs: object) -> None:
-        claimed_calls.append(TID)
-
-    monkeypatch.setattr(
-        system.task_evidence,
-        "claimed_outbox_result_evidence",
-        _record_claimed_calls,
-    )
-    monkeypatch.setattr(
-        system,
-        "_runtime_evidence_details",
-        lambda **kwargs: (False, "none", "unknown"),
-    )
-    plan, _evidence_value = system._collect_snapshot_evidence(
-        Mock(spec=WeftContext),
-        _record(),
-        mapping_entry=None,
-        selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
-        now_ns=5_000_000_000,
-    )
-    assert plan.acquire_claimed_outbox is (not with_reconciliation)
-    assert claimed_calls == ([] if with_reconciliation else [TID])
-
-
-def test_evidence_acquisition_skips_runtime_diagnostic_for_nonterminal_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        system.task_evidence,
-        "task_local_terminal_evidence",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        system.task_evidence,
-        "claimed_outbox_result_evidence",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        system,
-        "_stale_liveness_reason",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        system,
-        "_runtime_evidence_details",
-        lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError("ordinary nonterminal row acquired runtime diagnostic")
-        ),
-    )
-    plan, evidence = system._collect_snapshot_evidence(
-        Mock(spec=WeftContext),
-        _record(),
-        mapping_entry=None,
-        selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
-        now_ns=5_000_000_000,
-    )
-    assert not plan.acquire_runtime_observation
-    assert evidence.runtime_observation is None
-
-
-def test_mapping_runtime_fields_override_event_runtime_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    event_handle = RunnerHandle(
-        runner="host",
-        kind="process",
-        id="event",
-        control={"authority": "external-supervisor"},
-    )
-    mapping_handle = RunnerHandle(
-        runner="docker",
-        kind="process",
-        id="mapping",
-        control={"authority": "external-supervisor"},
-    )
-    described: list[RunnerHandle | None] = []
-
-    def _record_described(handle: RunnerHandle) -> dict[str, object]:
-        described.append(handle)
-        return {"runner": handle.runner, "id": handle.id, "state": "unknown"}
-
-    monkeypatch.setattr(
-        system.task_evidence,
-        "describe_runtime",
-        _record_described,
-    )
-    monkeypatch.setattr(
-        system.task_evidence,
-        "task_local_terminal_evidence",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        system.task_evidence,
-        "claimed_outbox_result_evidence",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(system, "_stale_liveness_reason", lambda *args, **kwargs: None)
-    record = _record(
-        event_payload={
-            "runner": "host",
-            "runtime_handle": event_handle.to_dict(),
-        }
-    )
-    plan, evidence = system._collect_snapshot_evidence(
-        Mock(spec=WeftContext),
-        record,
-        mapping_entry={
-            "runner": "docker",
-            "runtime_handle": mapping_handle.to_dict(),
-        },
-        selected_active_manager_tid=None,
-        service_owner_index=system._InternalServiceOwnerEvidenceIndex.from_evidence([]),
-        now_ns=5_000_000_000,
-    )
-    reduced = reduce_task_snapshot(plan, evidence, now_ns=5_000_000_000)
-    assert reduced is not None
-    assert described == [mapping_handle]
-    assert evidence.runtime_handle == mapping_handle
-    assert reduced.snapshot.runner == "docker"
-    assert reduced.snapshot.runtime_handle == mapping_handle.to_dict()
-
-
 def test_reducer_has_no_io_or_runtime_probe_dependencies() -> None:
     path = (
         Path(__file__).resolve().parents[2]
@@ -736,9 +548,9 @@ def test_collector_preserves_exact_compact_snapshot_contract(
     records = system._collect_task_snapshot_records(
         ctx,
         include_terminal=True,
+        include_log_history=True,
         tid_filters=None,
         now_ns=6_000_000_000,
-        service_registry_evidence=[],
     )
     assert len(records) == 1
     assert records[0].snapshot.to_dict() == {
@@ -773,37 +585,25 @@ def test_collector_combines_tid_filters_terminal_filter_and_ordering(
         ("1700000000000000002", "spawning"),
         ("1700000000000000001", "running"),
     ]
-    log_queue = ctx.queue("weft.log.tasks", persistent=False)
-    try:
-        for tid, status in rows:
-            log_queue.write(
-                json.dumps(
-                    _event(
-                        tid=tid,
-                        status=status,
-                        event=(
-                            "task_completed"
-                            if status == "completed"
-                            else "task_started"
-                        ),
-                        taskspec=_taskspec(
-                            status=status,
-                            completed_at=(
-                                2_000_000_000 if status == "completed" else None
-                            ),
-                        ),
-                    )
-                )
-            )
-    finally:
-        log_queue.close()
+    for tid, status in rows:
+        write_task_observation(
+            ctx,
+            _event(
+                tid=tid,
+                status=status,
+                event="task_completed" if status == "completed" else "task_started",
+                taskspec=_taskspec(
+                    status=status,
+                    completed_at=2_000_000_000 if status == "completed" else None,
+                ),
+            ),
+        )
 
     all_records = system._collect_task_snapshot_records(
         ctx,
         include_terminal=True,
         tid_filters=None,
         now_ns=6_000_000_000,
-        service_registry_evidence=[],
     )
     assert [record.snapshot.tid for record in all_records] == [
         "1700000000000000001",
@@ -817,11 +617,10 @@ def test_collector_combines_tid_filters_terminal_filter_and_ordering(
         include_terminal=False,
         tid_filters={
             "1700000000000000001",
-            tid_short_form("1700000000000000002"),
+            "1700000000000000002",
             "1700000000000000004",
         },
         now_ns=6_000_000_000,
-        service_registry_evidence=[],
     )
     assert [record.snapshot.tid for record in filtered] == [
         "1700000000000000001",

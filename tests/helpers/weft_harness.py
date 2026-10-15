@@ -40,6 +40,7 @@ from weft._constants import (
 from weft._constants import (
     TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
 )
+from weft._exceptions import CommandExecutionError
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -1148,8 +1149,16 @@ class WeftTestHarness:
         finally:
             queue.close()
 
-    def _send_task_stop(self, tid: str) -> None:
-        task_cmd._send_control(self.context, tid, CONTROL_STOP)
+    def _send_task_stop(self, tid: str) -> bool:
+        try:
+            task_cmd._send_control(self.context, tid, CONTROL_STOP)
+        except CommandExecutionError as exc:
+            if str(exc) != f"observation metadata unavailable for task {tid}":
+                raise
+            # Legacy/expired test observations have no authorized route. Scoped
+            # registered PID cleanup below remains responsible for their processes.
+            return False
+        return True
 
     def _stop_active_managers(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-233] exception
         self,
@@ -1176,14 +1185,22 @@ class WeftTestHarness:
                 ]
                 if task_tids:
                     for tid in task_tids:
-                        self._send_task_stop(tid)
-                    issued_task_stops.update(task_tids)
+                        if self._send_task_stop(tid) is not False:
+                            issued_task_stops.add(tid)
             live_pids = self._wait_for_registered_pids_to_exit(timeout=1.0)
             if not live_pids:
                 break
 
         if force and issued_task_stops:
-            task_cmd.kill_tasks(sorted(issued_task_stops), context_path=context_path)
+            for tid in sorted(issued_task_stops):
+                try:
+                    task_cmd.kill_tasks([tid], context_path=context_path)
+                except CommandExecutionError as exc:
+                    if str(exc) != f"observation metadata unavailable for task {tid}":
+                        raise
+                    # STOP may have retired its route before force escalation.
+                    # The registered PID path still checks process identity.
+
         if force:
             for tid in sorted(manager_records):
                 manager_runtime.stop_manager(

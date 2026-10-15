@@ -39,18 +39,20 @@ ALLOWED_ANYWHERE = (
     "weft.context",
     "weft.helpers",
 )
-MONITOR_DERIVED_STATUS_IMPORT = (
-    "weft.commands.tasks",
-    "weft.core.monitor.store",
-)
 MONITOR_AUTHORITY_TARGETS = (
     "weft.core.monitor.collation",
     "weft.core.monitor.sql",
     "weft.core.monitor.store",
 )
-RESULT_AUTHORITY_SOURCES = (
+OBSERVATION_AUTHORITY_SOURCES = (
     "weft.commands._result_wait",
+    "weft.commands._task_history",
+    "weft.commands.events",
     "weft.commands.result",
+    "weft.commands.run",
+    "weft.commands.system",
+    "weft.commands.tasks",
+    "weft.core.task_evidence",
 )
 
 pytestmark = [pytest.mark.shared]
@@ -419,8 +421,8 @@ def test_internal_import_boundaries() -> None:  # noqa: C901 approved [TS-3.1] [
     assert not typer_violations, "\n".join(typer_violations)
 
 
-def test_monitor_tables_are_not_result_or_client_authority() -> None:
-    """Monitor tables are derived status evidence, not result/client authority."""
+def test_monitor_tables_are_private_to_telemetry_cleanup() -> None:
+    """Ordinary observation uses task-owned queues, independent of Monitor collation."""
 
     violations: list[str] = []
 
@@ -430,17 +432,12 @@ def test_monitor_tables_are_not_result_or_client_authority() -> None:
         if not target:
             continue
 
-        if (source, target) == MONITOR_DERIVED_STATUS_IMPORT:
-            # Derived status fallback after raw task-log retirement; this is
-            # command-layer status reconstruction, not result authority.
-            continue
-
         if not any(
             _is_module_or_child(target, prefix) for prefix in MONITOR_AUTHORITY_TARGETS
         ):
             continue
 
-        if source in RESULT_AUTHORITY_SOURCES or _is_module_or_child(
+        if source in OBSERVATION_AUTHORITY_SOURCES or _is_module_or_child(
             source, "weft.client"
         ):
             violations.append(

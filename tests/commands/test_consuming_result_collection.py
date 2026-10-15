@@ -569,7 +569,7 @@ def test_unavailable_monitor_waits_for_stronger_task_evidence_before_deadline(
     assert result.error is None
     assert waits
     assert waits[0] is not None and 0 < waits[0] <= 20.0
-    assert lookups == [spec.tid]
+    assert lookups == []
 
 
 def test_live_persistent_prefix_keeps_next_batch_after_early_final(

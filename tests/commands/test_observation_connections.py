@@ -71,7 +71,7 @@ def test_event_follow_reuses_physical_connections(
 
 
 @pytest.mark.parametrize(
-    "accepted,fail_at", [(True, 2), (True, 3), (True, None), (False, 4)]
+    "accepted,fail_at", [(True, 2), (True, 3), (True, None), (False, 2)]
 )
 def test_result_acquisition_failure_releases_previous_queues(
     weft_harness: WeftTestHarness,

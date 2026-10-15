@@ -64,9 +64,7 @@ def _fence_marker(line: str) -> tuple[str, int, str] | None:
     return None
 
 
-def _closes_fence(
-    marker: tuple[str, int, str] | None, fence: tuple[str, int]
-) -> bool:
+def _closes_fence(marker: tuple[str, int, str] | None, fence: tuple[str, int]) -> bool:
     return (
         marker is not None
         and marker[0] == fence[0]

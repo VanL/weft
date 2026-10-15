@@ -37,7 +37,7 @@ from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payl
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.pipeline import PipelineTask
-from weft.helpers import process_create_time
+from weft.helpers import process_create_time, tid_short_form
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(60)]
 
@@ -304,7 +304,35 @@ def test_claimed_outbox_counts_borrow_connection_without_changing_proof(
         owner.write("owner remains usable")
 
 
-@pytest.mark.parametrize("source", ["log", "ctrl_out", "outbox", "claimed"])
+def _observation_row(tid: str, *, terminal: bool = False) -> dict[str, Any]:
+    return {
+        "full": tid,
+        "short": tid_short_form(tid),
+        "runtime_handle": None,
+        "terminal": terminal,
+        "projection": {
+            "version": 1,
+            "status": "completed" if terminal else "running",
+            "event": "work_completed" if terminal else "work_started",
+            "started_at": None,
+            "metadata": {},
+        },
+        "observation": {
+            "version": 1,
+            "mode": "one_shot",
+            "stream_output": False,
+            "routes": {
+                "inbox": f"T{tid}.inbox",
+                "outbox": f"T{tid}.outbox",
+                "ctrl_in": f"T{tid}.ctrl_in",
+                "ctrl_out": f"T{tid}.ctrl_out",
+                "pipeline_status": None,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("source", ["ctrl_out", "outbox", "claimed"])
 def test_known_tid_evidence_borrows_all_reads_and_sees_new_commits(
     counted_service_connections: tuple[WeftContext, list[Any]], source: str
 ) -> None:
@@ -314,26 +342,18 @@ def test_known_tid_evidence_borrows_all_reads_and_sees_new_commits(
         ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as owner,
         owner.get_connection() as broker,
     ):
-        live_at = owner.write(json.dumps({"tid": tid, "status": "running"}))
+        owner.write(json.dumps({"tid": tid, "status": "running"}))
+        broker.write(task_state_queue_name(tid), json.dumps(_observation_row(tid)))
         owner.write("{malformed")
         owner.write(json.dumps({"tid": "another-task", "status": "failed"}))
         before = len(connections)
-        assert task_evidence.bounded_log_terminal_evidence(
-            ctx, tid=tid, broker=broker
-        ) == task_evidence.LogFold(latest_live_at=live_at)
         initial = task_evidence.known_tid_evidence(ctx, tid=tid, broker=broker)
         assert initial is not None and not initial.terminal
         assert len(connections) == before
 
-        destination = (
-            WEFT_GLOBAL_LOG_QUEUE
-            if source == "log"
-            else f"T{tid}.{'outbox' if source == 'claimed' else source}"
-        )
+        destination = f"T{tid}.{'outbox' if source == 'claimed' else source}"
         with ctx.broker() as writer:
-            if source == "log":
-                body = json.dumps({"tid": tid, "status": "completed"})
-            elif source == "ctrl_out":
+            if source == "ctrl_out":
                 body = json.dumps(
                     {
                         "tid": tid,
@@ -356,7 +376,7 @@ def test_known_tid_evidence_borrows_all_reads_and_sees_new_commits(
             if source == "claimed":
                 assert evidence.classification == "claimed_result_without_terminal"
                 assert evidence.ack_targets == ()
-            elif source != "log":
+            else:
                 assert evidence.ack_targets == (
                     task_evidence.QueueAckTarget(destination, message_id),
                 )
@@ -374,11 +394,11 @@ def test_known_tid_evidence_borrows_all_reads_and_sees_new_commits(
         owner.write("owner remains usable")
 
 
-@pytest.mark.parametrize("pong_order", ["before-terminal", "after-terminal", "absent"])
-def test_known_tid_ping_borrows_probe_and_preserves_timestamp_precedence(
+@pytest.mark.parametrize("terminal", [False, True])
+def test_known_tid_ping_borrows_probe_without_reviving_terminal_lifecycle(
     counted_service_connections: tuple[WeftContext, list[Any]],
     monkeypatch: pytest.MonkeyPatch,
-    pong_order: str,
+    terminal: bool,
 ) -> None:
     ctx, connections = counted_service_connections
     tid = str(time.time_ns())
@@ -405,11 +425,11 @@ def test_known_tid_ping_borrows_probe_and_preserves_timestamp_precedence(
         ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as owner,
         owner.get_connection() as broker,
     ):
-        if pong_order == "before-terminal":
-            broker.write(reply_queue, pong)
-        terminal_id = owner.write(json.dumps({"tid": tid, "status": "completed"}))
-        if pong_order == "after-terminal":
-            broker.write(reply_queue, pong)
+        terminal_id = broker.write(
+            task_state_queue_name(tid),
+            json.dumps(_observation_row(tid, terminal=terminal)),
+        )
+        broker.write(reply_queue, pong)
         broker.write(reply_queue, json.dumps({"request_id": "unrelated"}))
         before = len(connections)
         evidence = task_evidence.known_tid_evidence(
@@ -423,15 +443,18 @@ def test_known_tid_ping_borrows_probe_and_preserves_timestamp_precedence(
                 with pytest.raises(sqlite3.ProgrammingError, match="closed"):
                     connection.execute("SELECT 1")
         assert evidence is not None
-        if pong_order == "after-terminal":
+        if not terminal:
             assert evidence.status == "running"
             assert evidence.classification == "live_pong"
             assert evidence.source == "control-pong"
         else:
             assert evidence.status == "completed"
             assert evidence.observed_at == terminal_id
-        assert reply_queue not in broker.list_queues()
-        assert broker.get_queue_stat(f"T{tid}.ctrl_in").pending == 1
+        if not terminal:
+            assert reply_queue not in broker.list_queues()
+            assert broker.get_queue_stat(f"T{tid}.ctrl_in").pending == 1
+        else:
+            assert broker.get_queue_stat(f"T{tid}.ctrl_in").pending == 0
         owner.write("owner remains usable")
 
 

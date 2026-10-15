@@ -76,9 +76,7 @@ def _fence_marker(line: str) -> tuple[str, int, str] | None:
     return None
 
 
-def _closes_fence(
-    marker: tuple[str, int, str] | None, fence: tuple[str, int]
-) -> bool:
+def _closes_fence(marker: tuple[str, int, str] | None, fence: tuple[str, int]) -> bool:
     return (
         marker is not None
         and marker[0] == fence[0]
@@ -201,9 +199,7 @@ def self_test() -> int:
             return check_tree(root, declared_future=declared_future)
 
     future_path = "docs/specifications/99-future-artifact.md"
-    probes: list[
-        tuple[str, str, set[str], str | None, tuple[str, str] | None, int]
-    ] = [
+    probes: list[tuple[str, str, set[str], str | None, tuple[str, str] | None, int]] = [
         (
             "unlisted missing claim was not flagged",
             "`docs/specifications/missing.md`\n",

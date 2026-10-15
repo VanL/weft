@@ -91,7 +91,7 @@ They are not repeated here.
 
 ## Related Plans
 
-- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
+- retired: 2026-06-18-hypothesis-property-testing-plan — source 396c3b85; see docs/plans/README.md
 
 ## Backlink
 

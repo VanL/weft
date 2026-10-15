@@ -12,9 +12,9 @@ See also:
   [`01-Core_Components.md`](01-Core_Components.md),
   [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - related service-health convergence plan:
-  [`docs/plans/2026-05-09-service-liveness-and-health-convergence-plan.md`](../plans/2026-05-09-service-liveness-and-health-convergence-plan.md)
+  `2026-05-09-service-liveness-and-health-convergence-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - related internal state-machine helper plan:
-  [`docs/plans/2026-05-13-internal-state-machine-helper-plan.md`](../plans/2026-05-13-internal-state-machine-helper-plan.md)
+  `2026-05-13-internal-state-machine-helper-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 
 ## Table of Contents
 
@@ -301,7 +301,7 @@ Title implementation: `weft/core/tasks/base.py::BaseTask._update_process_title`
 formats titles using shared bounds in `weft/_constants.py`;
 `weft/core/process_title.py` applies them and owns the deferred handoff through
 `weft/core/deferred.py`. See [CC-2.4] and the
-[implementation plan](../plans/2026-09-10-deferred-macos-process-title-plan.md).
+`2026-09-10-deferred-macos-process-title-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 - **OBS.1**: Lifecycle changes are written to `weft.log.tasks`. Task completion and
   persistent work-item boundaries are additionally addressed to the task's configured
@@ -346,9 +346,21 @@ _Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py
   a canonical 19-ASCII-decimal full-TID suffix, including queues containing
   only malformed rows. Discovery does not read payloads and proves neither
   snapshot validity nor process liveness. Malformed suffixes are ignored.
-  Implementation plans: [Short TID derivation](../plans/2026-08-31-short-tid-derivation-plan.md),
-  [Registry custody contracts](../plans/2026-08-31-registry-custody-contracts-plan.md).
+  Implementation plans: `2026-08-31-short-tid-derivation-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
+  `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 ### Task-owned runtime snapshots [OBS.6]
+
+Snapshots carry independently validated `projection` and `observation` objects.
+Projection v1 carries lifecycle status, display event, nanosecond lifecycle
+timestamps, terminal outcome fields, and redacted metadata. Observation v1
+carries immutable mode, stream framing, and resolved transport routes. Exact
+schemas and validation are in [MF-5]. Invalid nested data leaves liveness
+validity unchanged; readers never revive older nested data behind newest-valid.
+Publication is task-owned, append-only, edge-triggered, and best effort.
+Terminal publication follows local completion. No other component writes task
+verdicts into this queue. BaseTask owns the common publication fields and
+subclasses extend that path. Implementation: `weft/core/tasks/base.py` and
+`weft/core/task_evidence.py`.
 
 Each task owns a runtime-state queue, `weft.state.tasks.<tid>`,
 containing complete runtime-observability snapshots. Its suffix is the
@@ -477,9 +489,8 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     may create, verify, and migrate only those tables through the supported
     version edge inside an already initialized Weft broker database; it must
     not create or initialize the broker database. The store
-    may support command-layer derived status fallback after raw task-log
-    retirement, but it must not become result authority, control authority, or
-    lifecycle truth.
+    is private export/cleanup state. Ordinary status, result, control, and client
+    observation never query it; task-owned queues supply public evidence.
   - **OBS.13.2**: Dealing with processes can be messy: children may die between
     probes, managers may restart, retained logs may outlive queues, and cleanup
     passes may stop after partial progress. The Monitor exists to make that
@@ -555,10 +566,14 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     and family disposition, not just later queue deletion. That set is newest
     non-terminal mapping-row presence plus live service-registry evidence;
     TaskMonitor performs no host or runtime liveness probe. A terminal mapping
-    row, or a family with no mapping row and no live service-registry owner,
-    grants no protection. The same standard applies at delete time to an
-    already-disposed family lacking terminal task-log proof; a family with
-    terminal proof keeps only the positive live-service recheck.
+    row grants no whole-family destruction protection. Independently, newest
+    liveness-valid snapshot presence, including terminal rows, holds standard
+    `T{tid}.ctrl_out` and `T{tid}.outbox` until LivenessMonitor retirement
+    ([MF-5]); read failure retains those queues. A family without either valid
+    mapping evidence or live service-registry ownership has no presence hold. The same whole-family protection applies at delete time to an
+    already-disposed family, including one with terminal task-log proof.
+    Terminal proof never overrides current nonterminal snapshot presence;
+    completion/output additionally keep their independent all-snapshot hold.
     Without terminal lifecycle proof, plain `delete` may remove stale control
     queues but preserves pending inbox, reserved, and unread outbox rows. The
     existing explicit archived `--apply --force` task-local retention-prune
@@ -693,6 +708,13 @@ deletion. Concurrent unseen appends survive. Historical deletion failures
 retry at full reconciliation; latest failures retry on probe scheduling.
 Operator CLI deletion is an explicit human override; an emptied virtual
 queue disappears naturally. No second deletion policy or writer trim exists.
+Only newest liveness-valid rows with validated terminal projections additionally
+satisfy `WEFT_TASK_OBSERVATION_RETENTION_SECONDS` (default 172800, finite and
+at least 2400). Other categories keep existing retirement rules. After liveness
+policy permits retirement, terminal rows may defer to retention expiry without
+recurring probes. At expiry obtain current liveness authorization and revalidate
+generation, custody, and older-row absence before exact deletion. Terminal
+lifecycle evidence alone never proves process death.
 
 _Implementation mapping_: `weft/core/tasks/liveness_monitor.py`, `weft/core/task_state.py`, `tests/core/test_task_state.py`, `tests/tasks/test_liveness_monitor.py`.
 
@@ -725,7 +747,12 @@ _Implementation mapping_: `weft/core/tasks/liveness_monitor.py::LivenessMonitor.
 Immediately before reserved or dead-task deletion, TaskMonitor checks Manager checkpoint reservation custody. Present referenced rows or uncertain reads defer deletion and retain pending cleanup.
  TaskMonitor destruction protection reads newest-valid
 snapshot presence (non-terminal) in each candidate task's state queue plus
-live service-registry evidence, with no probing. A queue name alone grants
+live service-registry evidence for whole-family protection (`stale_open`,
+`ctrl_in`, `inbox`, and `reserved`), with no probing. Standard `ctrl_out` and
+`outbox` additionally remain held by newest liveness-valid snapshot presence,
+including terminal rows, until LivenessMonitor retirement; recheck presence at
+the destructive boundary and retain on read failure. This hold does not widen
+whole-family protection or change reserved policy. A queue name alone grants
 no protection. Candidate discovery must still find residue whose owner has
 no state queue and must not truncate protected candidates before policy
 application in a way that starves later eligible work.
@@ -768,9 +795,9 @@ _Implementation mapping_: `weft/core/monitor/task_monitor.py`, `weft/core/task_s
   shared broker scope, never permanent per-historical-TID handle caching.
 
 _Plan backlinks_:
-- [`docs/plans/2026-08-29-liveness-reaper-and-custody-split-plan.md`](../plans/2026-08-29-liveness-reaper-and-custody-split-plan.md)
-- [`docs/plans/2026-05-07-task-local-reaper-retention-policy-plan.md`](../plans/2026-05-07-task-local-reaper-retention-policy-plan.md)
-- [`docs/plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md`](../plans/2026-05-30-cleanup-progress-fifo-boundary-plan.md)
+- retired: 2026-08-29-liveness-reaper-and-custody-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-task-local-reaper-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-cleanup-progress-fifo-boundary-plan — source 396c3b85; see docs/plans/README.md
 
 ### Implementation Invariants
 
@@ -944,7 +971,7 @@ worker reports a completed maintenance pass.
 `TaskMonitor._handle_control_cleanup_worker_result` owns the queue-discovery
 deadline; a skipped discovery pass preserves it, while a completed `dead_tid`
 chain advances it. Real store/worker-result cadence regressions are in
-`tests/tasks/test_task_monitor.py`; see [Monitor and task correctness fixes](../plans/2026-08-31-monitor-and-task-correctness-fixes-plan.md).
+`tests/tasks/test_task_monitor.py`; see `2026-08-31-monitor-and-task-correctness-fixes-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### Manager Invariants
 
@@ -1337,89 +1364,89 @@ doc:
 
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
-- [Owner-thread topology mutation](../plans/2026-09-21-owner-thread-topology-mutation-plan.md) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].
-- [Watcher SIGINT lock safety](../plans/2026-09-21-watcher-sigint-lock-safety-plan.md) - keeps deferred standalone SIGINT handling free of lock-taking operations.
+- retired: `2026-09-21-owner-thread-topology-mutation-plan` (source 396c3b85; see `docs/plans/README.md`) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].
+- retired: `2026-09-21-watcher-sigint-lock-safety-plan` (source 396c3b85; see `docs/plans/README.md`) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
 - [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.
 
-- [Manager discovery and durable submission](../plans/2026-09-17-manager-discovery-and-durable-submission-plan.md)
+- retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
 - [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
 
-- [Per-TID task-state namespace](../plans/2026-09-11-per-tid-task-state-namespace-plan.md)
+- retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
-- [Deferred macOS process titles](../plans/2026-09-10-deferred-macos-process-title-plan.md)
+- retired: 2026-09-10-deferred-macos-process-title-plan — source 396c3b85; see docs/plans/README.md
 
 - [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
 
-- [`docs/plans/2026-08-25-bounded-tid-mapping-publication-plan.md`](../plans/2026-08-25-bounded-tid-mapping-publication-plan.md)
+- retired: 2026-08-25-bounded-tid-mapping-publication-plan — source 396c3b85; see docs/plans/README.md
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
-- [`Canonical Contract And Dead Code Cleanup Plan`](../plans/2026-08-10-canonical-contract-and-dead-code-cleanup-plan.md)
-- [`docs/plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md`](../plans/2026-08-08-terminal-handoff-adapter-refactor-plan.md)
-- [`docs/plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md`](../plans/2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan.md)
-- [`docs/plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md`](../plans/2026-08-10-result-observation-and-control-transition-refactor-plan.md)
-- [`docs/plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md`](../plans/2026-08-05-ruff-stable-default-lint-expansion-plan.md)
-- [`docs/plans/2026-08-01-terminal-handoff-reducer-plan.md`](../plans/2026-08-01-terminal-handoff-reducer-plan.md)
-- [`docs/plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md`](../plans/2026-07-11-simplebroker-committed-write-id-adoption-plan.md)
-- [`docs/plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md`](../plans/2026-07-10-postgresql-dynamic-native-waiter-rebind-plan.md)
-- [`docs/plans/2026-07-09-reference-reactor-safety-hardening-plan.md`](../plans/2026-07-09-reference-reactor-safety-hardening-plan.md)
-- [`docs/plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md`](../plans/2026-07-02-runtime-correctness-and-retention-remediation-plan.md)
-- [`docs/plans/2026-06-29-manager-task-spawned-retention-policy-plan.md`](../plans/2026-06-29-manager-task-spawned-retention-policy-plan.md)
-- [`docs/plans/2026-06-18-hypothesis-property-testing-plan.md`](../plans/2026-06-18-hypothesis-property-testing-plan.md)
-- [`docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md`](../plans/2026-06-10-self-healing-runtime-maintenance-plan.md)
-- [`docs/plans/2026-06-01-critical-review-remediation-plan.md`](../plans/2026-06-01-critical-review-remediation-plan.md)
-- [`docs/plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md`](../plans/2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md`](../plans/2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan.md)
-- [`docs/plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md`](../plans/2026-05-29-task-monitor-general-lifetime-reporting-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md`](../plans/2026-05-30-task-monitor-mode-and-rotating-log-plan.md)
-- [`docs/plans/2026-05-29-reliability-and-doc-fixes-plan.md`](../plans/2026-05-29-reliability-and-doc-fixes-plan.md)
-- [`docs/plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md`](../plans/2026-05-28-stale-service-owner-runtime-cleanup-plan.md)
-- [`docs/plans/2026-05-27-service-collation-reporting-plan.md`](../plans/2026-05-27-service-collation-reporting-plan.md)
-- [`docs/plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md`](../plans/2026-05-26-monitor-five-cleanup-policy-consolidation-plan.md)
-- [`docs/plans/2026-05-26-service-task-worker-api-plan.md`](../plans/2026-05-26-service-task-worker-api-plan.md)
-- [`docs/plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md`](../plans/2026-05-25-monitor-dead-task-catchup-convergence-plan.md)
-- [`docs/plans/2026-05-24-monitor-policy-progress-contract-plan.md`](../plans/2026-05-24-monitor-policy-progress-contract-plan.md)
-- [`docs/plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md`](../plans/2026-05-23-monitor-cleanup-policy-convergence-plan.md)
-- [`docs/plans/2026-05-23-monitor-cleanup-executor-plan.md`](../plans/2026-05-23-monitor-cleanup-executor-plan.md)
-- [`docs/plans/2026-05-20-service-task-shared-reactor-extraction-plan.md`](../plans/2026-05-20-service-task-shared-reactor-extraction-plan.md)
-- [`docs/plans/2026-05-30-task-monitor-external-log-health-plan.md`](../plans/2026-05-30-task-monitor-external-log-health-plan.md)
-- [`docs/plans/2026-05-20-monitor-collation-table-retirement-plan.md`](../plans/2026-05-20-monitor-collation-table-retirement-plan.md)
-- [`docs/plans/2026-05-20-monitor-reactor-worker-refactor-plan.md`](../plans/2026-05-20-monitor-reactor-worker-refactor-plan.md)
-- [`docs/plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md`](../plans/2026-05-20-monitor-fair-cleanup-scheduling-plan.md)
-- [`docs/plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md`](../plans/2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan.md)
-- [`docs/plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md`](../plans/2026-05-16-task-log-external-logging-and-retention-policy-plan.md)
-- [`docs/plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md`](../plans/2026-05-18-monitor-table-driven-retained-log-cleanup-plan.md)
-- [`docs/plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md`](../plans/2026-05-19-task-monitor-bounded-control-cleanup-plan.md)
-- [`docs/plans/2026-05-16-monitor-store-hardening-and-layering-plan.md`](../plans/2026-05-16-monitor-store-hardening-and-layering-plan.md)
-- [`docs/plans/2026-05-08-agent-session-and-task-startup-observability-plan.md`](../plans/2026-05-08-agent-session-and-task-startup-observability-plan.md)
-- [`docs/plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md`](../plans/2026-05-06-lifecycle-reconciliation-architecture-plan.md)
-- [`docs/plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md`](../plans/2026-05-06-status-coherence-and-stale-pid-liveness-plan.md)
-- [`docs/plans/2026-05-06-terminal-publication-hardening-plan.md`](../plans/2026-05-06-terminal-publication-hardening-plan.md)
-- [`docs/plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md`](../plans/2026-05-07-lifecycle-monitor-archive-sink-plan.md)
-- [`docs/plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md`](../plans/2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan.md)
-- [`docs/plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md`](../plans/2026-05-07-manager-selection-ping-pong-liveness-plan.md)
-- [`docs/plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md`](../plans/2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan.md)
-- [`docs/plans/2026-05-08-manager-owned-internal-service-supervision-plan.md`](../plans/2026-05-08-manager-owned-internal-service-supervision-plan.md)
-- [`docs/plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md`](../plans/2026-05-08-phase-7-manager-service-reconciler-cleanup-plan.md)
-- [`docs/plans/2026-05-08-deterministic-manager-service-reconciler-plan.md`](../plans/2026-05-08-deterministic-manager-service-reconciler-plan.md)
-- [`docs/plans/2026-05-09-managed-service-restart-clock-hardening-plan.md`](../plans/2026-05-09-managed-service-restart-clock-hardening-plan.md)
-- [`docs/plans/2026-05-09-prune-path-unification-plan.md`](../plans/2026-05-09-prune-path-unification-plan.md)
-- [`docs/plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md`](../plans/2026-05-10-manager-service-authority-boundary-hardening-plan.md)
-- [`docs/plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md`](../plans/2026-04-13-spec-corpus-current-vs-planned-split-plan.md)
-- [`docs/plans/2026-04-17-canonical-owner-fence-plan.md`](../plans/2026-04-17-canonical-owner-fence-plan.md)
-- [`docs/plans/2026-05-11-manager-work-stealing-dispatch-plan.md`](../plans/2026-05-11-manager-work-stealing-dispatch-plan.md)
-- [`docs/plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md`](../plans/2026-05-12-bounded-task-monitor-cleanup-policy-plan.md)
-- [`docs/plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md`](../plans/2026-05-12-task-monitor-cleanup-composition-refactor-plan.md)
-- [`docs/plans/2026-05-13-task-monitor-pong-policy-stats-plan.md`](../plans/2026-05-13-task-monitor-pong-policy-stats-plan.md)
-- [`docs/plans/2026-05-15-swappable-task-log-family-scanner-plan.md`](../plans/2026-05-15-swappable-task-log-family-scanner-plan.md)
-- [`docs/plans/2026-05-15-manager-hot-loop-reduction-plan.md`](../plans/2026-05-15-manager-hot-loop-reduction-plan.md)
-- [`docs/plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md`](../plans/2026-05-15-manager-reactor-hot-loop-follow-up-plan.md)
-- [`docs/plans/2026-05-16-monitor-durable-collation-store-plan.md`](../plans/2026-05-16-monitor-durable-collation-store-plan.md)
-- [`docs/plans/2026-05-18-reactive-task-loop-hot-probe-plan.md`](../plans/2026-05-18-reactive-task-loop-hot-probe-plan.md)
+- retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-08-subprocess-and-docker-provider-lifecycle-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-10-result-observation-and-control-transition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-05-ruff-stable-default-lint-expansion-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-08-01-terminal-handoff-reducer-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-11-simplebroker-committed-write-id-adoption-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-10-postgresql-dynamic-native-waiter-rebind-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-09-reference-reactor-safety-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-07-02-runtime-correctness-and-retention-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-29-manager-task-spawned-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-18-hypothesis-property-testing-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-10-self-healing-runtime-maintenance-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-06-01-critical-review-remediation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-31-task-monitor-orphan-log-and-status-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-config-and-reactor-cache-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-task-monitor-general-lifetime-reporting-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-mode-and-rotating-log-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-29-reliability-and-doc-fixes-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-28-stale-service-owner-runtime-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-27-service-collation-reporting-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-26-monitor-five-cleanup-policy-consolidation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-26-service-task-worker-api-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-25-monitor-dead-task-catchup-convergence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-24-monitor-policy-progress-contract-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-23-monitor-cleanup-policy-convergence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-23-monitor-cleanup-executor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-service-task-shared-reactor-extraction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-30-task-monitor-external-log-health-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-collation-table-retirement-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-reactor-worker-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-20-monitor-fair-cleanup-scheduling-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-monitor-terminal-retirement-and-runtime-queue-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-task-log-external-logging-and-retention-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-monitor-table-driven-retained-log-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-19-task-monitor-bounded-control-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-store-hardening-and-layering-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-agent-session-and-task-startup-observability-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-lifecycle-reconciliation-architecture-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-status-coherence-and-stale-pid-liveness-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-06-terminal-publication-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-lifecycle-monitor-archive-sink-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-result-evidence-and-superseded-manager-reconciliation-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-manager-selection-ping-pong-liveness-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-07-phase-7-task-monitor-supervision-and-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-manager-owned-internal-service-supervision-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-phase-7-manager-service-reconciler-cleanup-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-08-deterministic-manager-service-reconciler-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-09-managed-service-restart-clock-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-09-prune-path-unification-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-10-manager-service-authority-boundary-hardening-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-13-spec-corpus-current-vs-planned-split-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-04-17-canonical-owner-fence-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-11-manager-work-stealing-dispatch-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-12-bounded-task-monitor-cleanup-policy-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-12-task-monitor-cleanup-composition-refactor-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-13-task-monitor-pong-policy-stats-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-swappable-task-log-family-scanner-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-manager-hot-loop-reduction-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-15-manager-reactor-hot-loop-follow-up-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-16-monitor-durable-collation-store-plan — source 396c3b85; see docs/plans/README.md
+- retired: 2026-05-18-reactive-task-loop-hot-probe-plan — source 396c3b85; see docs/plans/README.md
 - [`docs/plans/2026-09-18-event-routed-manager-pong-plan.md`](../plans/2026-09-18-event-routed-manager-pong-plan.md)
-- [`docs/plans/2026-06-09-evaluation-findings-remediation-plan.md`](../plans/2026-06-09-evaluation-findings-remediation-plan.md)
+- retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
@@ -1428,4 +1455,6 @@ doc:
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)
 
-Implementation maintenance: [Dead generation retirement](../plans/2026-08-31-dead-generation-retirement-plan.md) removes the unused dead-TID raw-log coalescing chain and its SQL/store accessors. Live orphan recovery and store-cycle ingestion remain owned by `weft/core/monitor/task_monitor.py::TaskMonitor`; dead-TID cleanup does not coalesce task logs.
+Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) removes the unused dead-TID raw-log coalescing chain and its SQL/store accessors. Live orphan recovery and store-cycle ingestion remain owned by `weft/core/monitor/task_monitor.py::TaskMonitor`; dead-TID cleanup does not coalesce task logs.
+
+Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

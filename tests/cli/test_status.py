@@ -17,6 +17,10 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.conftest import run_cli
+from tests.helpers.task_observation import (
+    task_observation_fields,
+    write_task_observation,
+)
 from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -50,6 +54,7 @@ class _ClosingInterruptTaskStream:
 def _write_log_event(context: WeftContext, payload: dict[str, Any]) -> None:
     queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     queue.write(json.dumps(payload))
+    write_task_observation(context, payload)
 
 
 def _host_runtime_handle(pid: int) -> dict[str, Any]:
@@ -314,7 +319,7 @@ def test_status_reports_running_task_json(workdir: Path) -> None:
     assert entry["metadata"]["owner"] == "tests"
 
 
-def test_status_json_reports_dead_host_running_task_as_stale_liveness(
+def test_bulk_status_reports_last_running_projection_for_dead_host(
     workdir: Path,
 ) -> None:
     context = build_context(spec_context=workdir)
@@ -352,6 +357,7 @@ def test_status_json_reports_dead_host_running_task_as_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(context, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -368,8 +374,7 @@ def test_status_json_reports_dead_host_running_task_as_stale_liveness(
     assert len(data["tasks"]) == 1
     assert data["tasks"][0]["tid"] == tid
     assert data["tasks"][0]["status"] == "running"
-    assert data["tasks"][0]["reconciliation"]["classification"] == "stale_liveness"
-    assert data["tasks"][0]["reconciliation"]["reason"] == "host_process_not_live"
+    assert data["tasks"][0]["reconciliation"] is None
 
 
 def test_task_status_process_json_reports_dead_pid_stale_liveness(
@@ -410,6 +415,7 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(context, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -476,6 +482,7 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
     mapping_queue.write(
         json.dumps(
             {
+                **task_observation_fields(context, tid),
                 "short": tid_short_form(tid),
                 "full": tid,
                 "runner": "host",
@@ -531,3 +538,36 @@ def test_task_status_rejects_removed_live_probe_option(workdir: Path) -> None:
     assert rc != 0
     assert out == ""
     assert "probe-live" in err
+
+
+def test_status_log_flag_is_explicit_and_rejects_watch(workdir: Path) -> None:
+    context = build_context(spec_context=workdir)
+    tid = "1780000000000000110"
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "event": "work_completed",
+                    "status": "completed",
+                    "taskspec": {
+                        "name": "retired",
+                        "state": {"status": "completed"},
+                        "metadata": {},
+                    },
+                }
+            )
+        )
+    for command in (("status",), ("task", "list")):
+        rc, out, err = run_cli(*command, "--json", cwd=workdir)
+        assert rc == 0 and not err
+        payload = json.loads(out)
+        assert (payload["tasks"] if isinstance(payload, dict) else payload) == []
+        rc, out, err = run_cli(*command, "--log", "--json", cwd=workdir)
+        assert rc == 0 and not err
+        payload = json.loads(out)
+        tasks = payload["tasks"] if isinstance(payload, dict) else payload
+        assert [(task["tid"], task["status"]) for task in tasks] == [(tid, "completed")]
+    result = CliRunner().invoke(cli_app.app, ["status", "--log", "--watch"])
+    assert result.exit_code != 0
+    assert "--log cannot be combined with --watch" in result.output

@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.conftest import run_cli
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
@@ -35,6 +36,7 @@ def _write_task_log(context: WeftContext, payload: dict[str, object]) -> None:
         queue.write(json.dumps(payload))
     finally:
         queue.close()
+    write_task_observation(context, payload)
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -261,7 +263,7 @@ def test_task_monitor_stdout_json_conflict_is_usage_error(workdir: Path) -> None
 
 
 @pytest.mark.parametrize("verb", ["stop", "kill"])
-def test_single_task_control_unknown_tid_is_not_found_without_traceback(
+def test_single_task_control_unavailable_metadata_fails_without_traceback(
     workdir: Path,
     verb: str,
 ) -> None:
@@ -274,8 +276,8 @@ def test_single_task_control_unknown_tid_is_not_found_without_traceback(
         cwd=workdir,
     )
 
-    assert rc == 2
-    assert "Task 1777000000000000999 not found" in err
+    assert rc == 1
+    assert "observation metadata unavailable" in err
     assert "Traceback" not in err
 
     rc, _out, err = run_cli(

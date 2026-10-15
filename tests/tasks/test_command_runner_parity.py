@@ -1055,8 +1055,9 @@ def test_running_command_runners_surface_runner_status(
         snapshots = task_cmd.list_tasks(context_path=root)
         entry = next(item for item in snapshots if item.tid == tid)
         assert entry.runner == runner_name
-        assert entry.runtime is not None
-        assert entry.runtime["state"] == "running"
+        assert entry.runtime is None
+        assert entry.runtime_handle is not None
+        assert entry.runtime_handle["runner"] == runner_name
     finally:
         task_cmd.stop_tasks([tid], context_path=root)
         process.join(timeout=10)

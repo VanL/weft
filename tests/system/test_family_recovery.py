@@ -243,6 +243,13 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
                 assert sum(r["event"] == "enrichment_started" for r in rows) == 1
                 harness.register_tid(leaves[0]["tid"])
                 if background:
+                    # Fault suppression is now disabled. Wait for the owner to
+                    # publish its routes before sending a bare-TID control.
+                    _wait(
+                        harness,
+                        [task_state_queue_name(parent.tid)],
+                        lambda: read_task_state_snapshot(context, parent.tid),
+                    )
                     parent.stop()
                 else:
                     assert parent.result(timeout=60.0).status == "completed"

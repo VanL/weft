@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft.cli.app import app
 from weft.context import build_context
@@ -53,6 +54,15 @@ def test_result_claimed_outbox_json_keeps_reconciliation_without_waiting(
                     "taskspec": taskspec,
                 }
             )
+        )
+        write_task_observation(
+            ctx,
+            {
+                "tid": tid,
+                "status": "running",
+                "event": "work_started",
+                "taskspec": taskspec,
+            },
         )
         outbox.write(json.dumps({"ok": True}))
         assert outbox.read_one() is not None

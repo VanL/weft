@@ -38,14 +38,10 @@ from weft._constants import (
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
-    WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft._exceptions import CommandUsageError, SubmissionError
 from weft.commands._boundary import typed_command_errors
 from weft.commands._result_wait import result_observation
-from weft.commands._task_history import (
-    read_monitor_task_record,
-)
 from weft.commands.result import await_task_result
 from weft.commands.submission import (
     _annotate_accepted_submission_error,
@@ -68,7 +64,7 @@ from weft.commands.types import (
     TaskEvent,
 )
 from weft.context import WeftContext, build_context
-from weft.core import manager_runtime
+from weft.core import manager_runtime, task_evidence
 from weft.core.control_messages import decode_control_object, encode_control_message
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import (
@@ -80,7 +76,7 @@ from weft.core.spawn_requests import (
     _submit_spawn_request_with_payload,
     delete_spawn_request,
 )
-from weft.core.task_evidence import LogFold, read_task_history
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import (
     TaskSpec,
     encode_taskspec_transport_payload,
@@ -512,64 +508,45 @@ def _stop_interactive_run_session(session: _LiveRunSession) -> None:
     expiry of the named STOP completion budget.
     """
     # Late import avoids the tasks -> system -> run dependency closure.
-    from .tasks import _terminal_observation_queue_names, _terminal_observation_snapshot
+    from .tasks import _terminal_observation_snapshot
 
     ctx = session._context
     tid = session.tid
+    session.close_input()
     payload = (
         session._accepted_taskspec.model_dump(mode="json")
-        if session._accepted_taskspec is not None
+        if session._accepted_taskspec
         else None
     )
-    control_in = (
-        session._accepted_taskspec.io.control["ctrl_in"]
-        if session._accepted_taskspec is not None
-        else f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
-    )
-    control_out = (
-        session._accepted_taskspec.io.control["ctrl_out"]
-        if session._accepted_taskspec is not None
-        else f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}"
-    )
-    names = [*_terminal_observation_queue_names(tid, payload), control_in]
+    config = task_evidence.observation_config_from_taskspec_payload(payload)
+    if config is None:
+        # Late import avoids the tasks -> system -> run dependency closure.
+        from .tasks import _require_observation_config
+
+        config = _require_observation_config(ctx, tid)
+    names = [task_state_queue_name(tid), config.ctrl_in, config.ctrl_out, config.outbox]
     with result_observation(ctx, names) as (queues, monitor):
-        log_queue = queues[WEFT_GLOBAL_LOG_QUEUE]
         request_id = uuid4().hex
-        session.close_input()
-        queues[control_in].write(
+        queues[config.ctrl_in].write(
             encode_control_message(CONTROL_STOP, request_id=request_id)
         )
         deadline = time.monotonic() + INTERACTIVE_STOP_COMPLETION_TIMEOUT
-        task_events: list[tuple[dict[str, Any], int]] = []
-        log_evidence = LogFold()
-        cursor: int | None = None
-        lookup = None
         while True:
-            with log_queue.get_connection() as broker:
-                if lookup is None:
-                    lookup = read_monitor_task_record(ctx, tid, queue=log_queue)
-                rows, cursor = read_task_history(
-                    ctx, tid, broker=broker, after_timestamp=cursor
-                )
-                task_events.extend(rows)
-                log_evidence = log_evidence.fold(rows, tid=tid)
+            with queues[config.ctrl_out].get_connection() as broker:
                 snapshot = _terminal_observation_snapshot(
                     ctx,
                     tid,
                     routing_payload=payload,
-                    task_events=task_events,
-                    log_evidence=log_evidence,
+                    observation_config=config,
                     broker=broker,
-                    log_queue=log_queue,
-                    monitor_lookup=lookup,
                 )
             if snapshot.terminal or _matching_stop_ack(
-                queues[control_out], tid, request_id
+                queues[config.ctrl_out], tid, request_id
             ):
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                queues[control_in].write(
+                queues[config.ctrl_in].write(
                     encode_control_message(CONTROL_KILL, request_id=uuid4().hex)
                 )
                 return

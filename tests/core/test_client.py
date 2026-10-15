@@ -17,6 +17,7 @@ import pytest
 
 import weft._exceptions as exception_types
 from simplebroker import BrokerSession
+from tests.helpers.task_observation import write_task_event, write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
@@ -404,7 +405,7 @@ def test_task_terminal_snapshot_is_non_consuming() -> None:
         assert task.result(timeout=30.0).value == "hello!"
 
 
-def test_task_terminal_snapshot_uses_monitor_store_terminal_fallback(
+def test_task_terminal_snapshot_ignores_private_monitor_store(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -446,9 +447,9 @@ def test_task_terminal_snapshot_uses_monitor_store_terminal_fallback(
     handle_snapshot = client.task(tid).terminal_snapshot()
     namespace_snapshot = client.tasks.terminal_snapshot(tid)
 
-    assert handle_snapshot.status == "completed"
-    assert handle_snapshot.source == "monitor_store"
-    assert handle_snapshot.metadata["classification"] == "terminal_monitor_store"
+    assert handle_snapshot.status == "unknown"
+    assert handle_snapshot.source == "observer"
+    assert handle_snapshot.terminal is False
     assert namespace_snapshot == handle_snapshot
 
 
@@ -466,43 +467,36 @@ def test_task_terminal_snapshot_positive_timeout_returns_within_budget(
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     tid = str(time.time_ns())
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    try:
-        log_queue.write(
-            json.dumps(
-                {
-                    "event": "work_started",
-                    "status": "running",
-                    "tid": tid,
-                    "taskspec": {
-                        "tid": tid,
-                        "name": "client-bounded-observation",
-                        "spec": {
-                            "type": "function",
-                            "function_target": (
-                                "tests.tasks.sample_targets:echo_payload"
-                            ),
-                            "runner": {"name": "host", "options": {}},
-                        },
-                        "io": {
-                            "outputs": {"outbox": f"T{tid}.outbox"},
-                            "control": {
-                                "ctrl_in": f"T{tid}.ctrl_in",
-                                "ctrl_out": f"T{tid}.ctrl_out",
-                            },
-                        },
-                        "state": {
-                            "status": "running",
-                            "started_at": int(tid),
-                            "completed_at": None,
-                        },
-                        "metadata": {},
+    write_task_event(
+        context,
+        {
+            "event": "work_started",
+            "status": "running",
+            "tid": tid,
+            "taskspec": {
+                "tid": tid,
+                "name": "client-bounded-observation",
+                "spec": {
+                    "type": "function",
+                    "function_target": ("tests.tasks.sample_targets:echo_payload"),
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": f"T{tid}.outbox"},
+                    "control": {
+                        "ctrl_in": f"T{tid}.ctrl_in",
+                        "ctrl_out": f"T{tid}.ctrl_out",
                     },
-                }
-            )
-        )
-    finally:
-        log_queue.close()
+                },
+                "state": {
+                    "status": "running",
+                    "started_at": int(tid),
+                    "completed_at": None,
+                },
+                "metadata": {},
+            },
+        },
+    )
     client = connect(path=root, autostart=False)
 
     def _state_rows() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
@@ -1079,7 +1073,8 @@ def test_submitted_task_binds_materialized_runtime_context() -> None:
         assert result.value == "remote"
         assert task.context is not None
         assert task.context.root == runtime_harness.context.root
-        assert client.tasks.status(task.tid) is None
+        absent_snapshot = client.tasks.status(task.tid)
+        assert absent_snapshot is not None and absent_snapshot.status == "unknown"
 
 
 @pytest.mark.parametrize("surface", ["client", "cmd_run"])
@@ -1145,8 +1140,9 @@ def test_spec_submission_uses_declared_runtime_broker_across_surfaces(
             assert (
                 commands.cmd_task_status(tid, context=runtime_harness.root).tid == tid
             )
-            with pytest.raises(TaskNotFound):
-                commands.cmd_task_status(tid, context=client_harness.root)
+            absent_snapshot = commands.cmd_task_status(tid, context=client_harness.root)
+            assert absent_snapshot.status == "unknown"
+            assert absent_snapshot.tid == tid
 
 
 def test_task_result_propagates_wait_expiry_and_preserves_terminal_timeout(
@@ -1946,3 +1942,53 @@ def test_accepted_handle_observes_custom_routes_before_initialization_after_clos
             assert result_event.payload["value"] == {"structured_output": "briefing"}
         else:
             assert result_event.payload["error"] == "child failed"
+
+
+def test_inventory_namespaces_share_snapshot_and_history_selection(
+    tmp_path: Path,
+) -> None:
+    client = WeftClient(path=prepare_project_root(tmp_path))
+    tid = "1780000000000000120"
+    write_task_observation(
+        client.context,
+        {
+            "tid": tid,
+            "event": "work_completed",
+            "status": "completed",
+            "taskspec": {
+                "name": "retained",
+                "state": {"status": "completed"},
+                "metadata": {},
+            },
+        },
+    )
+    assert client.system.status().tasks == []
+    assert client.tasks.list() == []
+    assert client.tasks.stats() == {}
+    assert [task.tid for task in client.system.status(include_terminal=True).tasks] == [
+        tid
+    ]
+    assert [task.tid for task in client.tasks.list(include_terminal=True)] == [tid]
+    assert client.tasks.stats(include_terminal=True, status="completed") == {
+        "completed": 1
+    }
+    assert client.system.status(include_terminal=True, status="running").tasks == []
+    with client.context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "tid": "1780000000000000121",
+                    "event": "work_failed",
+                    "status": "failed",
+                    "taskspec": {
+                        "name": "historical",
+                        "state": {"status": "failed"},
+                        "metadata": {},
+                    },
+                }
+            )
+        )
+    assert {
+        task.status for task in client.system.status(include_log_history=True).tasks
+    } == {"completed", "failed"}
+    assert client.tasks.stats(include_log_history=True) == {"completed": 1, "failed": 1}

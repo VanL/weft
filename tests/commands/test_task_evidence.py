@@ -18,7 +18,7 @@ from weft.commands import tasks as task_cmd
 from weft.commands.types import SystemStatusSnapshot
 from weft.context import build_context
 from weft.core import task_evidence
-from weft.core.task_state import task_state_queue_name
+from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
 from weft.helpers import tid_short_form
@@ -171,6 +171,9 @@ def _taskspec_payload(
     persistent: bool = False,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
+        "persistent": persistent,
+        "interactive": False,
+        "stream_output": False,
         "type": "function",
         "function_target": "tests.tasks.sample_targets:echo_payload",
         "runner": {"name": "host", "options": {}},
@@ -182,6 +185,7 @@ def _taskspec_payload(
         "name": name,
         "spec": spec,
         "io": {
+            "inputs": {"inbox": f"T{tid}.inbox"},
             "outputs": {"outbox": f"T{tid}.outbox"},
             "control": {
                 "ctrl_in": f"T{tid}.ctrl_in",
@@ -205,12 +209,44 @@ def _write_log(ctx: Any, payload: dict[str, Any]) -> None:
         queue.close()
 
 
-def _write_dead_runtime_mapping(ctx: Any, tid: str) -> None:
+def _write_current_snapshot(ctx: Any, taskspec: dict[str, Any]) -> None:
+    tid = taskspec["tid"]
+    config = task_evidence.observation_config_from_taskspec_payload(taskspec)
+    assert config is not None
     queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     try:
         queue.write(
             json.dumps(
                 {
+                    "full": tid,
+                    "short": tid_short_form(tid),
+                    "terminal": False,
+                    "name": taskspec["name"],
+                    "runtime_handle": None,
+                    "projection": {
+                        "version": 1,
+                        "status": "running",
+                        "event": "work_started",
+                        "started_at": taskspec["state"]["started_at"],
+                        "metadata": taskspec["metadata"],
+                    },
+                    "observation": config.to_payload(),
+                }
+            )
+        )
+    finally:
+        queue.close()
+
+
+def _write_dead_runtime_mapping(ctx: Any, tid: str) -> None:
+    current = read_task_state_snapshot(ctx, tid)
+    snapshot = current[1] if current is not None else {}
+    queue = ctx.queue(task_state_queue_name(tid), persistent=False)
+    try:
+        queue.write(
+            json.dumps(
+                {
+                    **snapshot,
                     "short": tid_short_form(tid),
                     "full": tid,
                     "runner": "host",
@@ -297,6 +333,7 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid, name="reconcile-log-truncation")
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -368,16 +405,12 @@ def test_wrapper_lost_ctrl_out_classifies_status_without_consuming(
         assert payload is not None
         rows = payload["tasks"]
         assert rows[0]["tid"] == tid
-        assert rows[0]["status"] == "failed"
-        assert rows[0]["error"] == task_evidence.WRAPPER_LOST_ERROR
-        assert rows[0]["return_code"] == 1
-        assert rows[0]["reconciliation"]["classification"] == "wrapper_lost"
+        assert rows[0]["status"] == "running"
+        assert rows[0]["error"] is None
 
         status_snapshot = status_cmd.cmd_status(context=root)
         assert isinstance(status_snapshot, SystemStatusSnapshot)
-        payload = asdict(status_snapshot)
-        assert payload is not None
-        assert payload["tasks"] == []
+        assert asdict(status_snapshot)["tasks"][0]["status"] == "running"
     finally:
         ctrl_out.close()
 
@@ -389,6 +422,7 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid, name="wazuh-case-rollup")
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -425,10 +459,8 @@ def test_one_shot_outbox_without_terminal_log_classifies_completed(
         payload = asdict(status_snapshot)
         assert payload is not None
         rows = payload["tasks"]
-        assert rows[0]["status"] == "completed"
-        assert rows[0]["reconciliation"]["classification"] == (
-            "result_without_terminal"
-        )
+        assert rows[0]["status"] == "running"
+        assert rows[0]["reconciliation"] is None
         assert outbox.peek_one() is not None
     finally:
         outbox.close()
@@ -441,6 +473,7 @@ def test_one_shot_outbox_evidence_beats_dead_runtime_reconciliation(
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid, name="wazuh-case-rollup")
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -477,6 +510,7 @@ def test_claimed_outbox_without_terminal_reports_recovery_diagnostic(
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid, name="wazuh-case-rollup")
     monkeypatch.setattr(task_evidence, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -537,6 +571,7 @@ def test_stale_liveness_without_terminal_or_claimed_result_is_not_failed(
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid, name="stale-liveness")
     monkeypatch.setattr(task_evidence, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", -1.0)
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -555,11 +590,10 @@ def test_stale_liveness_without_terminal_or_claimed_result_is_not_failed(
     )
 
     assert evidence is not None
-    assert evidence.status == "pending"
+    assert evidence.status == "running"
     assert evidence.terminal is False
-    assert evidence.classification == "stale_liveness"
-    assert evidence.reconciliation is not None
-    assert evidence.reconciliation["classification"] == "stale_liveness"
+    assert evidence.classification == "task_state_projection"
+    assert evidence.reconciliation is None
 
 
 def test_outbox_evidence_does_not_complete_persistent_or_ambiguous_tasks(
@@ -784,6 +818,7 @@ def test_project_status_does_not_active_ping_tasks_by_default(tmp_path: Path) ->
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     taskspec = _taskspec_payload(tid)
+    _write_current_snapshot(ctx, taskspec)
     _write_log(
         ctx,
         {
@@ -1061,3 +1096,87 @@ def test_terminal_control_windows_bound_backend_fetches_near_message_id_ceiling(
             assert result.evidence is not None
             assert result.evidence.status == "completed"
             assert result.evidence.observed_at == horizon
+
+
+def test_terminal_projection_authority_and_broker_observation_time(
+    tmp_path: Path,
+) -> None:
+    """Task completion beats projection, which beats newer supervisor failure [MF-5]."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    taskspec = _taskspec_payload(tid)
+    config = task_evidence.observation_config_from_taskspec_payload(taskspec)
+    assert config is not None
+    state = ctx.queue(task_state_queue_name(tid), persistent=False)
+    control = ctx.queue(config.ctrl_out, persistent=False)
+    try:
+        snapshot_id = state.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": tid_short_form(tid),
+                    "terminal": True,
+                    "runtime_handle": None,
+                    "observation": config.to_payload(),
+                    "projection": {
+                        "version": 1,
+                        "status": "completed",
+                        "event": "work_completed",
+                        "started_at": None,
+                        "metadata": {},
+                        "return_code": 0,
+                    },
+                }
+            )
+        )
+        control.write(_manager_wrapper_lost_envelope(tid))
+        evidence = task_evidence.known_tid_evidence(ctx, tid=tid)
+        assert evidence is not None
+        assert evidence.status == "completed"
+        assert evidence.classification == "terminal_projection"
+        assert evidence.observed_at == snapshot_id
+        assert evidence.ack_targets == ()
+        control.write(
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "source": "task",
+                    "tid": tid,
+                    "status": "failed",
+                    "error": "task-owned failure",
+                }
+            )
+        )
+        evidence = task_evidence.known_tid_evidence(ctx, tid=tid)
+        assert evidence is not None
+        assert evidence.status == "failed"
+        assert evidence.source == "ctrl_out"
+    finally:
+        state.close()
+        control.close()
+
+
+def test_discovery_rejects_terminal_envelope_with_other_taskspec_identity(
+    tmp_path: Path,
+) -> None:
+    """Outer terminal identity cannot authorize another task's routes [MF-5]."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    control = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    try:
+        control.write(
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "source": "task",
+                    "tid": tid,
+                    "status": "completed",
+                    "taskspec": _taskspec_payload("123"),
+                }
+            )
+        )
+        assert task_evidence.discover_task_observation(ctx, tid) is None
+    finally:
+        control.close()

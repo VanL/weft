@@ -13,6 +13,7 @@ import pytest
 from psycopg_pool import PoolTimeout
 
 from simplebroker import Config, Queue
+from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._exceptions import (
@@ -28,7 +29,6 @@ from weft.commands._streaming import (
     handle_ctrl_stream,
     process_outbox_message,
 )
-from weft.commands._task_history import load_latest_taskspec_payload
 from weft.commands.result import (
     await_task_result,
     cmd_result,
@@ -445,6 +445,45 @@ def _log_timestamps_by_tid(queue: Queue) -> dict[str, list[int]]:
     return timestamps
 
 
+def _publish_observation_fixtures(ctx: WeftContext, tid: str) -> None:
+    """Give observer fixtures task-owned snapshots and local completion rows."""
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
+        events = [
+            payload
+            for payload, _stamp in iter_queue_json_entries(log)
+            if payload.get("tid") == tid
+        ]
+    latest_payload: dict[str, Any] = dict(_one_shot_taskspec_payload(tid))
+    for event in events:
+        payload = event.get("taskspec")
+        if not isinstance(payload, dict):
+            payload = latest_payload
+        latest_payload = payload
+        event = {**event, "taskspec": payload}
+        state = payload.setdefault("state", {})
+        if isinstance(state, dict):
+            for key in ("status", "error"):
+                if key in event:
+                    state[key] = event[key]
+        event.setdefault("event", "task_initialized")
+        write_task_observation(ctx, event)
+        if event["event"] in {
+            "work_item_completed",
+            "work_completed",
+            "work_failed",
+            "work_timeout",
+        }:
+            terminal = {**event, "type": "task_complete", "source": "task"}
+            io = payload.get("io", {})
+            name = (
+                io.get("control", {}).get("ctrl_out", f"T{tid}.ctrl_out")
+                if isinstance(io, dict)
+                else f"T{tid}.ctrl_out"
+            )
+            with ctx.queue(name) as control:
+                control.write(json.dumps(terminal))
+
+
 def _capture_stream_echo(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     rendered: list[str] = []
 
@@ -703,38 +742,7 @@ def test_iter_task_events_non_follow_yields_only_target_events(tmp_path: Path) -
     assert {event.tid for event in events} == {target_tid}
 
 
-def test_load_latest_taskspec_payload_reads_full_log_history(tmp_path: Path) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    queue = ctx.queue("weft.log.tasks", persistent=True)
-
-    target_tid = str(time.time_ns())
-    for index in range(2_050):
-        tid = target_tid if index == 2_049 else str(1_700_000_000_000_000_000 + index)
-        queue.write(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": "completed",
-                    "event": "work_completed",
-                    "taskspec": {
-                        "tid": tid,
-                        "name": f"task-{index}",
-                        "state": {"status": "completed"},
-                        "io": {"outputs": {"outbox": f"T{tid}.outbox"}},
-                        "metadata": {},
-                    },
-                }
-            )
-        )
-
-    taskspec = load_latest_taskspec_payload(ctx, target_tid)
-
-    assert taskspec is not None
-    assert taskspec["tid"] == target_tid
-
-
-def test_result_acquisition_falls_back_on_malformed_io(
+def test_result_acquisition_keeps_malformed_io_unavailable(
     tmp_path: Path,
 ) -> None:
     root = prepare_project_root(tmp_path)
@@ -752,9 +760,7 @@ def test_result_acquisition_falls_back_on_malformed_io(
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE) as log_queue:
         log_queue.write(json.dumps({"tid": tid, "taskspec": taskspec_payload}))
 
-    materialized = result_wait.ResultMaterialization(
-        None, f"T{tid}.outbox", f"T{tid}.ctrl_out"
-    )
+    materialized = result_wait.ResultMaterialization(None)
     with (
         ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as log,
         log.get_connection() as broker,
@@ -762,8 +768,7 @@ def test_result_acquisition_falls_back_on_malformed_io(
         materialized, _rows = result_wait._acquire_result_observation(
             ctx, tid, materialized, log, broker, now=time.monotonic()
         )
-    assert materialized.outbox_name == f"T{tid}.outbox"
-    assert materialized.ctrl_out_name == f"T{tid}.ctrl_out"
+    assert materialized.config is None
 
 
 def test_iter_task_realtime_events_falls_back_on_malformed_io(
@@ -784,40 +789,6 @@ def test_iter_task_realtime_events_falls_back_on_malformed_io(
         log.write(json.dumps({"tid": tid, "taskspec": payload}))
     events = list(events_cmd.iter_task_realtime_events(ctx, tid, follow=False))
     assert all(event.event_type != "result" for event in events)
-
-
-def test_load_latest_taskspec_payload_closes_log_queue(
-    workdir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    context = build_context(spec_context=workdir)
-    tid = "1844674407370955199"
-    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
-        log.write(
-            json.dumps(
-                {"tid": tid, "taskspec": {"tid": tid, "name": "closed-queue-task"}}
-            )
-        )
-    closed: list[str] = []
-    exited: list[bool] = []
-    original_close = Queue.close
-    original_session = WeftContext.session
-
-    def close(queue: Queue) -> None:
-        closed.append(queue.name)
-        original_close(queue)
-
-    @contextmanager
-    def session(ctx: WeftContext) -> Iterator[Any]:
-        with original_session(ctx) as owner:
-            yield owner
-        exited.append(True)
-
-    monkeypatch.setattr(Queue, "close", close)
-    monkeypatch.setattr(WeftContext, "session", session)
-    taskspec = load_latest_taskspec_payload(context, tid)
-    assert taskspec is not None and taskspec["tid"] == tid
-    assert closed == [WEFT_GLOBAL_LOG_QUEUE]
-    assert exited == [True]
 
 
 def test_cmd_result_reports_failed_task_without_outbox(tmp_path: Path) -> None:
@@ -851,6 +822,7 @@ def test_cmd_result_reports_failed_task_without_outbox(tmp_path: Path) -> None:
         )
     )
 
+    _publish_observation_fixtures(ctx, tid)
     result = cmd_result(tid=tid, peek=False, timeout=0.1, context=str(root))
     assert isinstance(result, TaskResult)
 
@@ -914,6 +886,7 @@ def test_cmd_result_reports_claimed_outbox_without_waiting(
         outbox_queue.write(json.dumps({"ok": True}))
         assert outbox_queue.read_one() is not None
 
+        _publish_observation_fixtures(ctx, tid)
         result = cmd_result(
             tid=tid, peek=False, timeout=RESULT_WAIT_TIMEOUT, context=str(root)
         )
@@ -1193,6 +1166,7 @@ def test_await_task_result_returns_terminal_task_timeout_as_result(
         )
     )
 
+    _publish_observation_fixtures(ctx, tid)
     result = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
 
     assert result.status == "timeout"
@@ -1400,6 +1374,7 @@ def test_cmd_result_waits_for_custom_result_channels_to_materialize(
                     }
                 )
             )
+            _publish_observation_fixtures(ctx, tid)
             return False
 
         def close(self) -> None:
@@ -1455,6 +1430,7 @@ def test_await_task_result_tolerates_retained_boundary_before_output(
     )
     outbox_queue.write("hello")
 
+    _publish_observation_fixtures(ctx, tid)
     try:
         observed = await_task_result(ctx, tid, timeout=RESULT_WAIT_TIMEOUT)
     finally:
@@ -1563,6 +1539,7 @@ def test_result_waits_for_taskspec_after_activity_event(
                         }
                     )
                 )
+            _publish_observation_fixtures(ctx, tid)
             return True
 
         def close(self) -> None:

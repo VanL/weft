@@ -20,7 +20,10 @@ from weft._exceptions import CommandExecutionError, CommandTimeoutError
 from weft.commands import result
 from weft.context import WeftContext, build_context
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.task_evidence import observation_config_from_taskspec
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
+from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared]
 _TID = "1780000000000000012"
@@ -147,6 +150,9 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
     accepted = (
         TaskSpec.model_validate(payload) if custom or surface == "pipeline" else None
     )
+    wire_config = observation_config_from_taskspec(
+        TaskSpec.model_validate(payload)
+    ).to_payload()
 
     def writer() -> None:
         with (
@@ -173,6 +179,18 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
                 broker.write(f"P{_TID}.status", "ready")
             broker.write(
                 WEFT_GLOBAL_LOG_QUEUE, json.dumps({"tid": _TID, "taskspec": payload})
+            )
+            broker.write(
+                task_state_queue_name(_TID),
+                json.dumps(
+                    {
+                        "full": _TID,
+                        "short": tid_short_form(_TID),
+                        "terminal": False,
+                        "runtime_handle": None,
+                        "observation": wire_config,
+                    }
+                ),
             )
             broker.write(outbox_name, "late-result")
             broker.broadcast(

@@ -22,9 +22,8 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
 )
-from weft.commands.types import TaskEvent
+from weft.commands.types import TaskEvent, TaskSnapshot
 from weft.context import WeftContext
-from weft.core.monitor.store import MonitorTaskCollationRecord
 from weft.core.outbox import decode_result_payload
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import (
@@ -33,12 +32,12 @@ from weft.core.queue_window import (
 )
 from weft.core.task_evidence import (
     TaskEvidenceSnapshot,
-    queue_names_for_tid,
     read_task_history,
-    terminal_error_message,
     terminal_status_from_event,
 )
+from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
+from weft.helpers import tid_short_form
 
 from ._boundary import typed_command_errors
 from ._resources import command_resource_scope
@@ -48,7 +47,6 @@ from ._result_wait import (
     _acquire_result_observation,
     _classify_result_observation,
     _CollectedResult,
-    _result_mode,
     _result_observation_names,
     _result_stream_payload,
     append_public_value,
@@ -103,26 +101,6 @@ def _state_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _task_streams_output(taskspec_payload: dict[str, Any] | None) -> bool:
-    """Whether a logged TaskSpec payload publishes its output as stream frames.
-
-    Args:
-        taskspec_payload: Logged TaskSpec payload for the observed task, if any.
-
-    Returns:
-        ``True`` when the task writes streaming frames to its outbox.
-
-    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
-    """
-
-    if not isinstance(taskspec_payload, dict):
-        return False
-    spec = taskspec_payload.get("spec")
-    if not isinstance(spec, dict):
-        return False
-    return bool(spec.get("stream_output"))
-
-
 def _peek_result_value(rows: Sequence[tuple[str, int]]) -> tuple[Any, bool]:
     """Assemble a read-only output window, including JSON null (Spec: [MF-5])."""
     stream_buffer: list[str] = []
@@ -144,22 +122,40 @@ def _task_snapshot_event(
     *,
     allow_outbox_completion: bool,
     broker: Any | None = None,
-    observation_queue: Queue | None = None,
-    task_events: Sequence[tuple[dict[str, Any], int]] | None = None,
     accepted_taskspec_payload: dict[str, Any] | None = None,
-    monitor_lookup: tuple[MonitorTaskCollationRecord | None, str | None] | None = None,
+    evidence: TaskEvidenceSnapshot | None = None,
 ) -> TaskEvent | None:
-    snapshot = task_ops._task_snapshot(
-        normalized_tid,
-        context=context,
-        broker=broker,
-        observation_queue=observation_queue,
-        task_events=task_events,
-        accepted_taskspec_payload=accepted_taskspec_payload,
-        monitor_lookup=monitor_lookup,
+    record = task_ops.system_cmd.collect_known_tid_record(
+        context, normalized_tid, broker=broker
+    )
+    internal = record.snapshot if record is not None else None
+    if evidence is not None and evidence.terminal:
+        internal = task_ops._task_snapshot_from_live_pong(
+            normalized_tid,
+            evidence,
+            base_snapshot=internal,
+            taskspec_payload=accepted_taskspec_payload,
+        )
+    snapshot = (
+        task_ops._public_snapshot(internal, taskspec_payload=accepted_taskspec_payload)
+        if internal is not None
+        else None
     )
     if snapshot is None:
-        return None
+        snapshot = TaskSnapshot(
+            tid=normalized_tid,
+            tid_short=tid_short_form(normalized_tid),
+            name=normalized_tid,
+            status="unknown",
+            return_code=None,
+            started_at=None,
+            completed_at=None,
+            error=None,
+            runtime_handle=None,
+            metadata={},
+            event="observation_metadata_unavailable",
+            reconciliation={"classification": "observation_metadata_unavailable"},
+        )
     if (
         not allow_outbox_completion
         and snapshot.reconciliation is not None
@@ -341,25 +337,28 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     if observation_cancelled(cancel_event):
         return
     deadline = task_ops._deadline_from_timeout(timeout) if follow else time.monotonic()
-    outbox_name, ctrl_out_name = queue_names_for_tid(normalized_tid, None)
     materialized = (
         _accepted_result_materialization(_accepted_taskspec)
         if _accepted_taskspec is not None
-        else ResultMaterialization(None, outbox_name, ctrl_out_name)
+        else ResultMaterialization(None)
     )
-    outbox_name, ctrl_out_name = materialized.outbox_name, materialized.ctrl_out_name
+    ctrl_out_name = (
+        materialized.config.ctrl_out
+        if materialized.config
+        else f"T{normalized_tid}.ctrl_out"
+    )
+    outbox_name = materialized.config.outbox if materialized.config else ctrl_out_name
     snapshot_emitted = False
-    startup_rows: list[tuple[dict[str, Any], int]] = []
     collected = _CollectedResult(deadline=deadline, scope="task")
-    last_terminal_state: tuple[str, str | None] | None = None
-    unconfigured_output_seen = False
     last_outbox_timestamp: int | None = None
     last_ctrl_timestamp: int | None = None
     outbox_stream_frames_seen = False
 
     with command_resource_scope() as resources:
         resources.enter_context(context.session())
-        log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True)
+        log_queue = context.queue(
+            task_state_queue_name(normalized_tid), persistent=True
+        )
         resources.callback(log_queue.close)
         watched_names = _result_observation_names(normalized_tid, materialized)
         route_resources, outbox_queue, ctrl_queue, monitor = _open_realtime_routes(
@@ -375,15 +374,15 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
         while not observation_cancelled(cancel_event):
             now = time.monotonic()
             with log_queue.get_connection() as broker:
-                materialized, fresh = _acquire_result_observation(
+                materialized, _fresh = _acquire_result_observation(
                     context, normalized_tid, materialized, log_queue, broker, now=now
                 )
-            if not snapshot_emitted:
-                startup_rows.extend(fresh)
             new_names = _result_observation_names(normalized_tid, materialized)
-            new_outbox, new_control = (
-                materialized.outbox_name,
-                materialized.ctrl_out_name,
+            new_control = (
+                materialized.config.ctrl_out if materialized.config else ctrl_out_name
+            )
+            new_outbox = (
+                materialized.config.outbox if materialized.config else new_control
             )
             if new_names != watched_names:
                 replacement, new_outbox_queue, new_ctrl_queue, new_monitor = (
@@ -408,7 +407,6 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                     last_outbox_timestamp = None
                     outbox_stream_frames_seen = False
                     collected = _CollectedResult(deadline=deadline, scope="task")
-                    unconfigured_output_seen = False
                 if new_control != ctrl_out_name:
                     last_ctrl_timestamp = None
                 outbox_name, ctrl_out_name = new_outbox, new_control
@@ -417,23 +415,31 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 return
 
             taskspec_payload = materialized.taskspec_payload
-            streams_output = outbox_stream_frames_seen or _task_streams_output(
-                taskspec_payload
+            streams_output = outbox_stream_frames_seen or bool(
+                materialized.config and materialized.config.stream_output
             )
             with log_queue.get_connection() as broker:
                 if not snapshot_emitted:
+                    materialized = _classify_result_observation(
+                        context,
+                        normalized_tid,
+                        materialized,
+                        log_queue,
+                        broker,
+                        now=time.monotonic(),
+                        allow_outbox_completion=not streams_output,
+                    )
                     snapshot = _task_snapshot_event(
                         context,
                         normalized_tid,
                         allow_outbox_completion=(
-                            _result_mode(taskspec_payload) == "one_shot"
+                            materialized.config is not None
+                            and materialized.config.mode == "one_shot"
                             and not streams_output
                         ),
                         broker=broker,
-                        observation_queue=log_queue,
-                        task_events=startup_rows,
                         accepted_taskspec_payload=taskspec_payload,
-                        monitor_lookup=materialized.monitor_lookup or (None, None),
+                        evidence=materialized.terminal_evidence,
                     )
                 else:
                     snapshot = None
@@ -442,14 +448,19 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             yielded = False
             if snapshot is not None:
                 snapshot_emitted = True
-                startup_rows.clear()
                 yielded = True
                 yield snapshot
+                if observation_cancelled(cancel_event):
+                    return
 
             output_rows: list[tuple[str, int]] = []
             for queue, cursor, kind in (
-                (outbox_queue, last_outbox_timestamp, "outbox"),
-                (ctrl_queue, last_ctrl_timestamp, "control"),
+                [
+                    (outbox_queue, last_outbox_timestamp, "outbox"),
+                    (ctrl_queue, last_ctrl_timestamp, "control"),
+                ]
+                if materialized.config is not None
+                else []
             ):
                 with log_queue.get_connection() as broker:
                     horizon: int | None = broker.latest_pending_timestamp(queue.name)
@@ -520,23 +531,6 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                         payload=_result_stream_payload(payload),
                     )
 
-            for payload, timestamp in fresh:
-                if observation_cancelled(cancel_event):
-                    return
-                status = terminal_status_from_event(payload)
-                if status is not None:
-                    last_terminal_state = (
-                        status,
-                        terminal_error_message(payload, status),
-                    )
-                yielded = True
-                yield TaskEvent(
-                    tid=normalized_tid,
-                    event_type="state",
-                    timestamp=timestamp,
-                    payload=_state_payload(payload),
-                )
-
             if yielded:
                 # A suspended iterator allows writers to commit. Inspect the
                 # next suffix and drain new frames before deciding from that loan.
@@ -559,7 +553,9 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                     now=time.monotonic(),
                     allow_outbox_completion=(
                         not outbox_stream_frames_seen
-                        and not _task_streams_output(taskspec_payload)
+                        and not bool(
+                            materialized.config and materialized.config.stream_output
+                        )
                     ),
                 )
             if observation_cancelled(cancel_event):
@@ -571,18 +567,13 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 # Local terminal proof may arrive after the preceding stream
                 # peek. Take its fresh last drain before settling that verdict.
                 continue
-            mode = _result_mode(taskspec_payload)
-            if mode is None and final_output_seen and not unconfigured_output_seen:
-                # New local activity can race the preceding history horizon.
-                # Refresh that suffix once; output cannot choose an unknown mode.
-                unconfigured_output_seen = True
-                continue
             now = time.monotonic()
             collected.observe_readonly(
                 materialized,
                 final_output_seen=final_output_seen,
                 stream_framed=(
-                    outbox_stream_frames_seen or _task_streams_output(taskspec_payload)
+                    outbox_stream_frames_seen
+                    or bool(materialized.config and materialized.config.stream_output)
                 ),
                 now=now,
             )
@@ -590,18 +581,16 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             decision = collected.settle(materialized, now=now)
             if decision.action == "result":
                 status = decision.status or "unknown"
-                terminal_state = (status, decision.error)
                 stamp = terminal.observed_at if terminal is not None else None
-                if terminal_state != last_terminal_state:
-                    payload = {"tid": normalized_tid, "status": status}
-                    if decision.error is not None:
-                        payload["error"] = decision.error
-                    yield TaskEvent(
-                        tid=normalized_tid,
-                        event_type="state",
-                        timestamp=stamp or time.time_ns(),
-                        payload=_state_payload(payload),
-                    )
+                payload = {"tid": normalized_tid, "status": status}
+                if decision.error is not None:
+                    payload["error"] = decision.error
+                yield TaskEvent(
+                    tid=normalized_tid,
+                    event_type="state",
+                    timestamp=stamp or time.time_ns(),
+                    payload=_state_payload(payload),
+                )
                 if observation_cancelled(cancel_event):
                     return
                 yield TaskEvent(
