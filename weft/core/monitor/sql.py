@@ -603,13 +603,19 @@ def prune_flushed_deferred_writes(table: str, report_count: int) -> str:
         """
 
 
-def select_task(collations_table: str, columns: Sequence[str]) -> str:
+def select_task(
+    collations_table: str,
+    columns: Sequence[str],
+    *,
+    for_update: bool = False,
+) -> str:
     """Build a Monitor task lookup query."""
 
+    lock_clause = " FOR UPDATE" if for_update else ""
     return f"""
         SELECT {identifier_list(columns)}
         FROM {identifier(collations_table)}
-        WHERE context_key = ? AND tid = ?
+        WHERE context_key = ? AND tid = ?{lock_clause}
         """
 
 
@@ -626,6 +632,55 @@ def select_tasks_by_tids(
         WHERE context_key = ?
           AND tid IN ({placeholders(tid_count)})
         ORDER BY tid
+        """
+
+
+def select_control_reconciliation_candidates(
+    collations_table: str,
+    columns: Sequence[str],
+    *,
+    after_tid: bool,
+) -> str:
+    """Select retained families without task-log terminal proof by immutable TID.
+
+    Disposition and control-cleanup marks do not end retained-evidence inspection.
+    Spec: [MF-5], [OBS.13.13]
+    """
+
+    seek = "AND tid > ?" if after_tid else ""
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ? AND terminal_seen = 0
+          {seek}
+        ORDER BY tid
+        LIMIT ?
+        """
+
+
+def select_summary_correction_ready_tasks(
+    collations_table: str,
+    columns: Sequence[str],
+) -> str:
+    """Select disposed families whose changed verdict awaits verified reporting.
+
+    The caller retains the existing global-log high-water gate.
+    Spec: [MF-5], [OBS.13.13]
+    """
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND disposition_at_ns IS NOT NULL
+          AND summary_emitted_at_ns IS NULL
+          AND (
+            disposition_reason IS NULL
+            OR disposition_reason != 'terminal'
+            OR diagnostics_json LIKE '%"control_terminal_observation"%'
+          )
+        ORDER BY last_message_id, tid
+        LIMIT ?
         """
 
 
@@ -681,6 +736,31 @@ def select_terminal_control_cleanup_ready_tasks(
             (terminal_seen = 1 AND last_message_id <= ?)
             OR disposition_at_ns IS NOT NULL
           )
+        ORDER BY last_message_id, tid
+        LIMIT ?
+        """
+
+
+def select_retained_open_control_cleanup_candidates(
+    collations_table: str,
+    columns: Sequence[str],
+) -> str:
+    """Select disposed open families with an existing control-cleanup mark.
+
+    A prior ``ctrl_in``-only cleanup pass sets ``task_control_deleted_at_ns``
+    while preserving ``T{tid}.ctrl_out`` until retention cutoff; the caller
+    filters these candidates against live ``T{tid}.ctrl_out`` occupancy.
+    Spec: [MF-5], [OBS.13.13]
+    """
+
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          AND summary_emitted_at_ns IS NOT NULL
+          AND task_control_deleted_at_ns IS NOT NULL
+          AND terminal_seen = 0
+          AND disposition_at_ns IS NOT NULL
         ORDER BY last_message_id, tid
         LIMIT ?
         """
@@ -1074,12 +1154,14 @@ def select_retirable_task_collations(
     messages_table: str,
     *,
     apply_retention_cutoff: bool,
+    for_update: bool = False,
 ) -> str:
     """Build a query for completed Monitor collation families.
 
     Spec: [MF-5], [OBS.13]
     """
 
+    lock_clause = " FOR UPDATE" if for_update else ""
     collations = identifier(collations_table)
     messages = identifier(messages_table)
     retention_predicate = (
@@ -1107,7 +1189,7 @@ def select_retirable_task_collations(
               AND m.tid = {collations}.tid
           )
         ORDER BY last_message_id, tid
-        LIMIT ?
+        LIMIT ?{lock_clause}
         """
 
 

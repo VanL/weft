@@ -13,7 +13,7 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.3]
 - docs/specifications/03-Manager_Architecture.md [MA-1], [MA-1.4], [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [IMPL.11]
+- docs/specifications/07-System_Invariants.md [IMPL.11], [OBS.13.13]
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import logging
 import os
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
@@ -83,6 +83,7 @@ from weft.context import WeftContext
 from weft.core.control_messages import ControlRequest
 from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.monitor.collation import (
+    ControlTerminalObservation,
     MonitorTaskEventUpdate,
     update_from_task_log_payload,
     update_from_task_log_row,
@@ -113,6 +114,9 @@ from weft.core.monitor.policies.runtime_control import (
 )
 from weft.core.monitor.policies.runtime_control import (
     TaskControlCleanupResult as _TaskControlCleanupResult,
+)
+from weft.core.monitor.policies.runtime_control import (
+    TerminalTaskRuntimeQueueCleanupPlan as _TerminalTaskRuntimeQueueCleanupPlan,
 )
 from weft.core.monitor.policies.runtime_control import (
     next_runtime_cleanup_slice_kind as _next_runtime_cleanup_slice_kind,
@@ -192,6 +196,10 @@ from weft.core.service_convergence import (
     discard_v1_service_registry_rows,
     manager_service_key,
     reduce_latest_by_service_owner,
+)
+from weft.core.task_evidence import (
+    TerminalControlScan,
+    scan_terminal_ctrl_out_evidence,
 )
 from weft.core.task_state import (
     latest_task_state_rows,
@@ -284,6 +292,7 @@ class _TaskControlCleanupWorkerResult:
     cleanup: _TaskControlCleanupResult
     monitor_status: MonitorStoreStatus | None = None
     external_task_log_status: ExternalTaskLogStatus | None = None
+    control_reconciliation: _ControlReconciliationState | None = None
     close_errors: tuple[str, ...] = ()
 
 
@@ -440,6 +449,15 @@ class _PreCheckpointTaskLogRecoveryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _ControlReconciliationState:
+    """Bounded, detached scan hints; retained queues remain truth [OBS.13.13]."""
+
+    after_tid: str | None = None
+    scans: tuple[TerminalControlScan, ...] = ()
+    pending_tids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceInputs:
     """Detached reactor inputs, captured before dispatch ([IMPL.11])."""
 
@@ -450,6 +468,9 @@ class MaintenanceInputs:
     external_sink_path: Path | None
     external_status: ExternalTaskLogStatus
     next_maintenance_due_monotonic: float
+    control_reconciliation: _ControlReconciliationState = field(
+        default_factory=_ControlReconciliationState
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +565,7 @@ class _MaintenanceDiagnostics:
     maintenance: _MaintenanceMaintenanceDiagnostics | None = None
     policy_progress: tuple[PolicyProgress, ...] | None = None
     external_task_log_status: ExternalTaskLogStatus | None = None
+    control_reconciliation: _ControlReconciliationState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -782,6 +804,21 @@ class MaintenanceWorker:
         self._maintenance_observed = False
         self._progress_observed = False
         self._external_observed = False
+        self._control_scan_cursor = inputs.control_reconciliation.after_tid
+        self._control_pending = inputs.control_reconciliation.pending_tids[
+            : self._monitor_config.batch_size
+        ]
+        self._control_scans = {
+            scan.tid: scan
+            for scan in inputs.control_reconciliation.scans[
+                : self._monitor_config.batch_size
+            ]
+        }
+        self._control_horizons: dict[str, int | None] = {}
+        self._control_families: set[str] = set()
+        self._control_rows_remaining = self._monitor_config.task_log_scan_limit
+        self._control_deadline: float | None = None
+        self._control_reconciliation_observed = False
 
     def _open_resources(self, *, borrowed_session: BrokerSession | None = None) -> None:
         """Acquire resources under the enclosing cleanup scope ([IMPL.11])."""
@@ -880,6 +917,15 @@ class MaintenanceWorker:
         """Detach produced groups without copying unchanged reactor state."""
 
         return _MaintenanceDiagnostics(
+            control_reconciliation=(
+                _ControlReconciliationState(
+                    after_tid=self._control_scan_cursor,
+                    scans=tuple(deepcopy(tuple(self._control_scans.values()))),
+                    pending_tids=self._control_pending,
+                )
+                if self._control_reconciliation_observed
+                else None
+            ),
             scan=deepcopy(self._scan_state) if self._scan_observed else None,
             collation=self._collation_state if self._collation_observed else None,
             runtime_cleanup=self._cleanup_state
@@ -1286,6 +1332,7 @@ class MaintenanceWorker:
                 self._collation_state,
                 last_collation_rows_processed=retained_ingest.scanned,
             )
+            self._reconcile_control_terminals(store, now_ns=now_ns)
             if runtime_cleanup_requested:
                 self._apply_monitor_store_retirement_result(
                     self._trim_manager_task_spawned_task_log_rows(
@@ -1346,11 +1393,17 @@ class MaintenanceWorker:
             if runtime_cleanup_requested:
                 # Retirement uses per-family proofs, independent of ingestion catchup
                 # ([OBS.13.4]); summary creation stays high-water gated above.
+                retirement_deadline = (
+                    _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+                )
                 family_retirement = store.retire_completed_collation_families(
                     limit=self._monitor_config.batch_size,
                     retired_at_ns=now_ns,
                     retention_seconds=(
                         self._monitor_config.task_log_retention_period_seconds
+                    ),
+                    can_retire=lambda record: self._retained_control_absent(
+                        record, deadline_monotonic=retirement_deadline
                     ),
                 )
                 self._apply_monitor_store_retirement_result(family_retirement)
@@ -1399,6 +1452,144 @@ class MaintenanceWorker:
                 ),
             )
         return runtime_cleanup_ready
+
+    def _inspect_control_terminal(
+        self,
+        store: MonitorStore,
+        record: MonitorTaskCollationRecord,
+        *,
+        now_ns: int,
+    ) -> MonitorTaskCollationRecord | None:
+        """Inspect one bounded window; only completed horizons may project [OBS.13.13]."""
+        if record.terminal_seen:
+            return record
+        if record.tid in self._control_horizons:
+            return store.get_task(record.tid)
+        pair = _standard_task_control_queue_names(record)
+        if pair is None:
+            return None
+        if self._control_deadline is None:
+            self._control_deadline = (
+                _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+            )
+        if (
+            self._control_rows_remaining <= 0
+            or _monitor_monotonic() >= self._control_deadline
+            or (
+                record.tid not in self._control_families
+                and len(self._control_families) >= self._monitor_config.batch_size
+            )
+        ):
+            return None
+        self._control_reconciliation_observed = True
+        self._control_families.add(record.tid)
+        window_limit = min(
+            self._monitor_config.store_write_batch_size,
+            self._control_rows_remaining,
+        )
+        # Reserve the whole prefetch window, even if a deadline stops yielding
+        # early. Counting yielded rows alone would hide fetched broker work.
+        self._control_rows_remaining -= window_limit
+        try:
+            with self._connection() as broker:
+                result = scan_terminal_ctrl_out_evidence(
+                    self._monitor_context(),
+                    tid=record.tid,
+                    ctrl_out_name=pair[1],
+                    scan_limit=window_limit,
+                    continuation=self._control_scans.get(record.tid),
+                    taskspec_payload=record.taskspec_summary,
+                    broker=broker,
+                    deadline_monotonic=self._control_deadline,
+                )
+            if not result.completed:
+                self._control_scans[record.tid] = result.scan
+                return None
+            self._control_scans.pop(record.tid, None)
+            if result.evidence is not None:
+                updated_record = store.project_control_terminal_observation(
+                    record.tid,
+                    ControlTerminalObservation.from_snapshot(
+                        result.evidence, first_observed_at_ns=now_ns
+                    ),
+                )
+            else:
+                updated_record = store.get_task(record.tid)
+            if updated_record is not None:
+                self._control_horizons[record.tid] = result.scan.horizon
+            return updated_record
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            self._control_scans.pop(record.tid, None)
+            self._store_observed = True
+            self._store_state = replace(
+                self._store_state,
+                last_collation_store_error=f"control reconciliation {record.tid}: {exc}",
+            )
+            return None
+
+    def _reconcile_control_terminals(self, store: MonitorStore, *, now_ns: int) -> None:
+        """Round-robin retained families, independently of log catchup [MF-5]."""
+        self._control_reconciliation_observed = True
+        pending = deque(dict.fromkeys((*self._control_pending, *self._control_scans)))
+        slots = max(0, self._monitor_config.batch_size - len(pending))
+        candidates = store.list_control_reconciliation_candidates(
+            limit=slots, after_tid=self._control_scan_cursor
+        )
+        if slots and not candidates and self._control_scan_cursor is not None:
+            self._control_scan_cursor = None
+            candidates = store.list_control_reconciliation_candidates(limit=slots)
+        for candidate in candidates:
+            self._control_scan_cursor = candidate.tid
+            if candidate.tid not in pending:
+                pending.append(candidate.tid)
+        while pending and self._control_rows_remaining > 0:
+            if (
+                self._control_deadline is not None
+                and _monitor_monotonic() >= self._control_deadline
+            ):
+                break
+            tid = pending.popleft()
+            record = store.get_task(tid)
+            if (
+                record is None
+                or record.terminal_seen
+                or _standard_task_control_queue_names(record) is None
+            ):
+                self._control_scans.pop(tid, None)
+                continue
+            self._inspect_control_terminal(store, record, now_ns=now_ns)
+            if tid in self._control_scans:
+                pending.append(tid)
+        self._control_pending = tuple(pending)
+
+    def _retained_control_absent(
+        self,
+        record: MonitorTaskCollationRecord,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> bool:
+        """Verify the final empty inspection boundary before retirement [OBS.13.13].
+
+        This public queue probe runs outside the sidecar transaction. A later
+        publication survives this retirement but may outlive the collation.
+        Claimed rows count as retained evidence; a failed probe defers retirement.
+        """
+        pair = _standard_task_control_queue_names(record)
+        if record.terminal_seen or pair is None:
+            return True
+        if (
+            deadline_monotonic is not None
+            and _monitor_monotonic() >= deadline_monotonic
+        ):
+            return False
+        try:
+            with self._connection() as broker:
+                return broker.get_queue_stat(pair[1]).total == 0
+        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
+            self._store_state = replace(
+                self._store_state, last_collation_store_error=str(exc)
+            )
+            return False
 
     def _apply_monitor_store_retirement_result(
         self,
@@ -1887,7 +2078,13 @@ class MaintenanceWorker:
             terminal_retention_seconds=0.0,
             stale_open_family_seconds=self._monitor_config.stale_open_family_seconds,
         )
-        ready_tasks: list[MonitorSummaryReadyTask] = []
+        # Corrections reuse the summary phase and its high-water gate; a disposed
+        # row is re-reported without reopening or expanding its disposition.
+        ready_tasks = list(
+            store.list_summary_correction_ready_tasks(
+                limit=self._monitor_config.batch_size + 1
+            )
+        )
         if any(ready.close_reason == "stale_open" for ready in candidate_tasks):
             # [OBS.13.7]: stale_open has no reporting-interval evidence of
             # its own (that is what makes it "stale_open" rather than
@@ -1958,7 +2155,7 @@ class MaintenanceWorker:
                         ),
                     )
                 )
-            if not apply_disposition:
+            if not apply_disposition or ready.record.disposition_at_ns is not None:
                 continue
 
             if ready.close_reason == "terminal":
@@ -2092,6 +2289,26 @@ class MaintenanceWorker:
             return
         print(json.dumps(payload, sort_keys=True, default=str), flush=True)
 
+    def _select_terminal_control_cleanup_plan(
+        self,
+        record: MonitorTaskCollationRecord,
+        *,
+        now_ns: int,
+    ) -> _TerminalTaskRuntimeQueueCleanupPlan | None:
+        cleanup_plan = _stale_service_owner_runtime_queue_cleanup_plan(
+            record,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+        )
+        if cleanup_plan is not None:
+            return cleanup_plan
+        return _terminal_task_runtime_queue_cleanup_plan(
+            record,
+            now_ns=now_ns,
+            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
+            preserve_data_without_terminal_proof=self._monitor_config.mode == "delete",
+        )
+
     def _delete_terminal_control_queues(
         self,
         record: MonitorTaskCollationRecord,
@@ -2102,24 +2319,17 @@ class MaintenanceWorker:
     ) -> _TaskControlCleanupResult:
         """Delete stale standard queues, retaining completion with results [MF-5]."""
 
-        if record.task_control_deleted_at_ns is not None:
+        if record.task_control_deleted_at_ns is not None and record.terminal_seen:
             return _TaskControlCleanupResult(families_processed=1)
-        cleanup_plan = _stale_service_owner_runtime_queue_cleanup_plan(
-            record,
-            now_ns=now_ns,
-            retention_seconds=self._monitor_config.task_log_retention_period_seconds,
-        )
-        if cleanup_plan is None:
-            cleanup_plan = _terminal_task_runtime_queue_cleanup_plan(
-                record,
-                now_ns=now_ns,
-                retention_seconds=(
-                    self._monitor_config.task_log_retention_period_seconds
-                ),
-                preserve_data_without_terminal_proof=(
-                    self._monitor_config.mode == "delete"
-                ),
-            )
+        if (
+            not record.terminal_seen
+            and _standard_task_control_queue_names(record) is not None
+        ):
+            inspected = self._inspect_control_terminal(store, record, now_ns=now_ns)
+            if inspected is None or inspected.summary_emitted_at_ns is None:
+                return _TaskControlCleanupResult(pending=True)
+            record = inspected
+        cleanup_plan = self._select_terminal_control_cleanup_plan(record, now_ns=now_ns)
         if cleanup_plan is None:
             return _TaskControlCleanupResult(
                 families_processed=1,
@@ -2146,12 +2356,13 @@ class MaintenanceWorker:
         )
         try:
             with self._connection() as broker:
-                if self._launch_custody_pending(record.tid, broker=broker):
-                    return _TaskControlCleanupResult(pending=True)
-                rows_deleted = int(broker.delete_from_queues(cleanup_plan.queue_names))
+                rows_deleted, control_retained = self._delete_covered_control_rows(
+                    broker, cleanup_plan.queue_names, tid=record.tid, record=record
+                )
         except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"{queue_label}: {exc}")
             rows_deleted = 0
+            control_retained = False
 
         if existing_queue_names is None:
             queues_deleted = len(cleanup_plan.queue_names) if rows_deleted > 0 else 0
@@ -2171,7 +2382,8 @@ class MaintenanceWorker:
             )
 
         return _TaskControlCleanupResult(
-            families_processed=1,
+            families_processed=0 if not errors and control_retained else 1,
+            pending=not errors and control_retained,
             queues_deleted=queues_deleted,
             rows_estimated_deleted=0 if errors else rows_deleted,
             errors=tuple(errors),
@@ -2195,6 +2407,17 @@ class MaintenanceWorker:
                 warnings=(f"{tid}: skipped active runtime owner",),
             )
 
+        record = store.get_task(tid)
+        if (
+            record is not None
+            and not record.terminal_seen
+            and _standard_task_control_queue_names(record) is not None
+        ):
+            inspected = self._inspect_control_terminal(store, record, now_ns=now_ns)
+            if inspected is None or inspected.summary_emitted_at_ns is None:
+                return _TaskControlCleanupResult(pending=True)
+            record = inspected
+
         cleanup_plan = _dead_task_queue_cleanup_plan(
             tid,
             now_ns=now_ns,
@@ -2203,6 +2426,7 @@ class MaintenanceWorker:
         errors: list[str] = []
         warnings: list[str] = []
         rows_deleted = 0
+        control_retained = False
         permitted_queue_names = (
             cleanup_plan.control_queue_names
             if self._monitor_config.mode == "delete"
@@ -2231,9 +2455,9 @@ class MaintenanceWorker:
             )
             try:
                 with self._connection() as broker:
-                    if self._launch_custody_pending(tid, broker=broker):
-                        return _TaskControlCleanupResult(pending=True)
-                    rows_deleted = int(broker.delete_from_queues(queue_names_to_delete))
+                    rows_deleted, control_retained = self._delete_covered_control_rows(
+                        broker, queue_names_to_delete, tid=tid, record=record
+                    )
             except (BrokerError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 queue_label = ",".join(queue_names_to_delete)
                 errors.append(f"{queue_label}: {exc}")
@@ -2277,6 +2501,7 @@ class MaintenanceWorker:
             )
 
         return _TaskControlCleanupResult(
+            pending=not errors and control_retained,
             dead_tids_processed=1,
             dead_tid_queues_deleted=(
                 control_queues_deleted
@@ -2292,6 +2517,43 @@ class MaintenanceWorker:
             errors=tuple(errors),
             warnings=tuple(warnings),
         )
+
+    def _delete_covered_control_rows(
+        self,
+        broker: BrokerConnection,
+        queue_names: Sequence[str],
+        *,
+        tid: str,
+        record: MonitorTaskCollationRecord | None,
+    ) -> tuple[int, bool]:
+        """Recheck custody, delete covered rows, and report pending cleanup.
+
+        Both runtime cleanup paths recheck launch custody on the same broker
+        connection immediately before queue effects. Publications beyond a
+        verified horizon survive this deletion. Spec: [MF-5], [OBS.13.13].
+        """
+        if self._launch_custody_pending(tid, broker=broker):
+            return 0, True
+        pair = (
+            _standard_task_control_queue_names(record) if record is not None else None
+        )
+        if record is None or record.terminal_seen or pair is None:
+            return int(broker.delete_from_queues(queue_names)), False
+        ctrl_out = pair[1]
+        others = tuple(name for name in queue_names if name != ctrl_out)
+        deleted = int(broker.delete_from_queues(others)) if others else 0
+        horizon = self._control_horizons[record.tid]
+        if ctrl_out in queue_names and horizon is not None:
+            deleted += int(
+                broker.delete_from_queues((ctrl_out,), before_timestamp=horizon)
+            )
+            deleted += int(broker.delete_message_ids(ctrl_out, (horizon,)))
+        # A retention-protected ctrl_out is outside this pass's deletion set;
+        # recording ctrl_in progress must not hold up the later cleanup slices.
+        # If ctrl_out was eligible, newer or claimed rows keep this pass pending.
+        return deleted, ctrl_out in queue_names and broker.get_queue_stat(
+            ctrl_out
+        ).total > 0
 
     def _launch_custody_pending(self, tid: str, *, broker: Any | None = None) -> bool:
         """Protect exact reserved launches before destruction [LIVENESS.R7]."""
@@ -2608,6 +2870,9 @@ class MaintenanceWorker:
         if control_limit <= 0:
             return _TaskControlCleanupResult()
 
+        deadline_monotonic = (
+            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
+        )
         families_disposed = 0
         families_retired = 0
         errors: list[str] = []
@@ -2629,6 +2894,7 @@ class MaintenanceWorker:
             limit=control_limit + 1,
             now_ns=now_ns,
             retention_seconds=0.0,
+            deadline_monotonic=deadline_monotonic,
         )
         queue_discovery_due = _runtime_cleanup_queue_discovery_due(
             has_terminal_records=bool(ready_records),
@@ -2677,10 +2943,6 @@ class MaintenanceWorker:
             if records
             else set()
         )
-        deadline_monotonic = (
-            _monitor_monotonic() + TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS
-        )
-
         families_processed = 0
         queues_deleted = 0
         rows_estimated_deleted = 0
@@ -4061,6 +4323,7 @@ class TaskMonitor(ServiceTask):
         self._cleanup_state = _MaintenanceRuntimeCleanupDiagnostics()
         self._store_state = _MaintenanceStoreDiagnostics()
         self._maintenance_state = _MaintenanceMaintenanceDiagnostics()
+        self._control_reconciliation = _ControlReconciliationState()
         self._last_processor_success: bool | None = None
         self._last_error: str | None = None
         self._last_processed = 0
@@ -4160,6 +4423,7 @@ class TaskMonitor(ServiceTask):
                 total_blocked_deletions=0,
             ),
             next_maintenance_due_monotonic=self._maintenance_state.next_maintenance_due_monotonic,
+            control_reconciliation=deepcopy(self._control_reconciliation),
         )
 
     def _apply_maintenance_diagnostics(
@@ -4183,6 +4447,8 @@ class TaskMonitor(ServiceTask):
             self._store_state = diagnostics.store
         if diagnostics.maintenance is not None:
             self._maintenance_state = diagnostics.maintenance
+        if diagnostics.control_reconciliation is not None:
+            self._control_reconciliation = diagnostics.control_reconciliation
         if diagnostics.policy_progress is not None:
             self._last_policy_progress = diagnostics.policy_progress
         if diagnostics.external_task_log_status is not None:
@@ -5225,6 +5491,9 @@ class TaskMonitor(ServiceTask):
                     != initial_external_status
                     else None
                 )
+                control_reconciliation = (
+                    scoped_worker.capture_diagnostics().control_reconciliation
+                )
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-325] exception
             worker_result = _TaskControlCleanupWorkerResult(
                 work=work,
@@ -5235,6 +5504,7 @@ class TaskMonitor(ServiceTask):
                 monitor_status=None,
             )
             external_status = None
+            control_reconciliation = None
 
         close_errors = tuple(close_error_list)
         cleanup = worker_result.cleanup
@@ -5255,6 +5525,7 @@ class TaskMonitor(ServiceTask):
             worker_result,
             cleanup=cleanup,
             external_task_log_status=external_status,
+            control_reconciliation=control_reconciliation,
             close_errors=close_errors,
         )
 
@@ -5841,15 +6112,16 @@ class TaskMonitor(ServiceTask):
                 monitor_status = None
             else:
                 cleanup = worker_result.cleanup
-                monitor_status = (
-                    None if worker_result.close_errors else worker_result.monitor_status
-                )
-                if (
-                    worker_result.external_task_log_status is not None
-                    and not worker_result.close_errors
-                ):
-                    self._apply_worker_external_task_log_status(
-                        worker_result.external_task_log_status
+                monitor_status = None
+                if not worker_result.close_errors:
+                    monitor_status = worker_result.monitor_status
+                    self._apply_maintenance_diagnostics(
+                        _MaintenanceDiagnostics(
+                            external_task_log_status=(
+                                worker_result.external_task_log_status
+                            ),
+                            control_reconciliation=worker_result.control_reconciliation,
+                        )
                     )
 
         self._collation_state = replace(

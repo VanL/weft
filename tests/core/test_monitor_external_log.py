@@ -636,6 +636,17 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path: Path) -> None:
             "last_message_id": 1779100000000000017,
             "terminal_message_id": 1779100000000000017,
             "completed_at_ns": 1779100000000000018,
+            "diagnostics": {
+                "control_terminal_observation": {
+                    "queue": "T1779100000000000011.ctrl_out",
+                    "message_id": 1779100000000000009,
+                    "source": "manager",
+                    "status": "failed",
+                    "reported_at_ns": 1779100000000000008,
+                    "first_observed_at_ns": 1779100000000000019,
+                },
+                "opaque": {"message_id": 1779100000000000020},
+            },
         },
         emitted_at_ns=1779100000000000012,
         close_reason="terminal",
@@ -651,6 +662,11 @@ def test_external_task_log_sink_writes_collated_jsonl(tmp_path: Path) -> None:
     assert record["task"]["last_message_id"] == "1779100000000000017"
     assert record["task"]["terminal_message_id"] == "1779100000000000017"
     assert record["task"]["completed_at_ns"] == 1779100000000000018
+    observation = record["task"]["diagnostics"]["control_terminal_observation"]
+    assert observation["message_id"] == "1779100000000000009"
+    assert observation["reported_at_ns"] == 1779100000000000008
+    assert observation["first_observed_at_ns"] == 1779100000000000019
+    assert record["task"]["diagnostics"]["opaque"]["message_id"] == 1779100000000000020
 
 
 def test_external_task_log_sink_projects_lifetime_ids_after_report_identity(

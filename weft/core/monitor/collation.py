@@ -1,12 +1,13 @@
-"""Pure Monitor task-log collation reducers.
+"""Pure Monitor task-log and control-observation collation reducers.
 
 This module converts decoded ``weft.log.tasks`` rows into durable Monitor-store
-updates. It performs no broker I/O, logging, table creation, or deletion.
+updates and retains typed control provenance. It performs no broker I/O,
+logging, table creation, or deletion.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.13], [OBS.17]
 """
 
 from __future__ import annotations
@@ -18,11 +19,147 @@ from typing import Any
 from weft._constants import (
     RUNNER_DIAGNOSTICS_FIELD,
     STATUS_COMPLETED,
+    TASK_TERMINAL_ENVELOPE_SOURCES,
     TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES,
 )
 from weft.core.queue_window import DecodedQueueWindowRow, payload_string
+from weft.core.task_evidence import TaskEvidenceSnapshot, select_terminal_envelope
+
+
+@dataclass(frozen=True, slots=True)
+class ControlTerminalObservation:
+    """Selected control provenance, never task-log proof [MF-5], [OBS.13.13]."""
+
+    source: str
+    status: str
+    queue: str
+    message_id: int
+    reported_at_ns: int | None
+    first_observed_at_ns: int
+    error: str | None = None
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: TaskEvidenceSnapshot, *, first_observed_at_ns: int
+    ) -> ControlTerminalObservation:
+        """Detach a complete control verdict and bound its diagnostic text."""
+        if (
+            snapshot.source != "ctrl_out"
+            or not snapshot.terminal
+            or not snapshot.ack_targets
+        ):
+            raise ValueError(
+                "a terminal control snapshot with exact queue identity is required"
+            )
+        target = snapshot.ack_targets[0]
+        error = snapshot.error
+        if error is not None:
+            error = error.encode("utf-8", errors="replace")[
+                :WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES
+            ].decode("utf-8", errors="ignore")
+        return cls(
+            source=str(snapshot.metadata["terminal_source"]),
+            status=snapshot.status,
+            queue=target.queue,
+            message_id=target.message_id,
+            reported_at_ns=_int_or_none(
+                snapshot.metadata.get("terminal_reported_at_ns")
+            ),
+            first_observed_at_ns=first_observed_at_ns,
+            error=error,
+        )
+
+    @classmethod
+    def from_dict(cls, value: Any) -> ControlTerminalObservation | None:
+        """Decode the canonical persisted observation, rejecting malformed values."""
+        if not isinstance(value, Mapping):
+            return None
+        source = value.get("source")
+        status = value.get("status")
+        queue = value.get("queue")
+        message_id = _int_or_none(value.get("message_id"))
+        first_observed = _int_or_none(value.get("first_observed_at_ns"))
+        if (
+            not isinstance(source, str)
+            or source not in TASK_TERMINAL_ENVELOPE_SOURCES
+            or not isinstance(status, str)
+            or status not in TERMINAL_TASK_STATUSES
+            or not isinstance(queue, str)
+            or not queue
+            or message_id is None
+            or first_observed is None
+        ):
+            return None
+        error = value.get("error")
+        return cls(
+            source=source,
+            status=status,
+            queue=queue,
+            message_id=message_id,
+            reported_at_ns=_int_or_none(value.get("reported_at_ns")),
+            first_observed_at_ns=first_observed,
+            error=error if isinstance(error, str) else None,
+        )
+
+    def identity(self) -> tuple[str, int, str, str]:
+        """Identify selected evidence without scan or observation-clock changes."""
+        return self.queue, self.message_id, self.source, self.status
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return bounded JSON provenance stored in existing diagnostics."""
+        return {
+            "source": self.source,
+            "status": self.status,
+            "queue": self.queue,
+            "message_id": self.message_id,
+            "reported_at_ns": self.reported_at_ns,
+            "first_observed_at_ns": self.first_observed_at_ns,
+            "error": self.error,
+        }
+
+
+def select_control_terminal_observation(
+    current: ControlTerminalObservation | None,
+    incoming: ControlTerminalObservation,
+) -> ControlTerminalObservation:
+    """Select with public control precedence and preserve replay time [MF-5].
+
+    Persisted task evidence survives removal of its source row. This reducer
+    never creates task-log proof or grants cleanup authority [OBS.13.13].
+    """
+    if current is None:
+        return incoming
+    if current.identity() == incoming.identity():
+        return current
+    current_payload = {"source": current.source, "error": current.error}
+    incoming_payload = {"source": incoming.source, "error": incoming.error}
+    selected = select_terminal_envelope(
+        ((current_payload, current.message_id), (incoming_payload, incoming.message_id))
+    )
+    if selected is not None and selected[0] is incoming_payload:
+        return incoming
+    return current
+
+
+def selected_terminal_identity(
+    *,
+    terminal_seen: bool,
+    terminal_status: str | None,
+    terminal_message_id: int | None,
+    diagnostics: Mapping[str, Any],
+) -> tuple[str, int, str, str] | None:
+    """Share report/invalidation identity with task-log priority [MF-5], [OBS.13.13]."""
+    if terminal_seen:
+        if terminal_status is None or terminal_message_id is None:
+            return None
+        return WEFT_GLOBAL_LOG_QUEUE, terminal_message_id, "task", terminal_status
+    observation = ControlTerminalObservation.from_dict(
+        diagnostics.get("control_terminal_observation")
+    )
+    return observation.identity() if observation is not None else None
 
 
 @dataclass(frozen=True, slots=True)

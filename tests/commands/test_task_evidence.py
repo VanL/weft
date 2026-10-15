@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -889,3 +889,175 @@ def test_task_terminal_ctrl_out_beats_manager_wrapper_lost(tmp_path: Path) -> No
     assert snap_c is not None
     assert snap_c.status == "failed"
     assert snap_c.classification == "wrapper_lost"
+
+
+@pytest.mark.parametrize("reported_at", [42, None])
+def test_terminal_control_preserves_reported_time_separate_from_broker_identity(
+    tmp_path: Path, reported_at: int | None
+) -> None:
+    """Unknown producer time stays unknown; the broker ID is not its substitute."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    queue_name = f"T{tid}.ctrl_out"
+    with ctx.queue(queue_name, persistent=False) as queue:
+        message_id = queue.write(
+            json.dumps(
+                {
+                    "type": "terminal",
+                    "source": "task",
+                    "tid": tid,
+                    "status": "completed",
+                    "timestamp": reported_at,
+                }
+            )
+        )
+    evidence = task_evidence.peek_terminal_ctrl_out_evidence(
+        ctx, tid=tid, ctrl_out_name=queue_name
+    )
+    assert evidence is not None
+    assert evidence.observed_at == message_id
+    assert evidence.metadata["terminal_reported_at_ns"] == reported_at
+
+
+@pytest.mark.parametrize("source", [[], {}, 123])
+def test_terminal_coercion_rejects_malformed_source_without_raising(
+    source: Any,
+) -> None:
+    """Malformed control rows are noise, including unhashable JSON source values."""
+    assert (
+        task_evidence.coerce_terminal_envelope(
+            json.dumps(
+                {"type": "terminal", "source": source, "tid": "1", "status": "failed"}
+            ),
+            tid="1",
+        )
+        is None
+    )
+
+
+def test_terminal_control_windows_finish_fixed_horizon_without_premature_verdict(
+    tmp_path: Path,
+) -> None:
+    """Noise uses the row budget and a later task verdict outranks manager loss."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    queue_name = f"T{tid}.ctrl_out"
+    with ctx.queue(queue_name, persistent=False) as queue:
+        queue.write(_manager_wrapper_lost_envelope(tid))
+        queue.write("{broken json")
+        queue.write(_task_completed_envelope("different-task"))
+        task_id = queue.write(_task_completed_envelope(tid))
+        first = task_evidence.scan_terminal_ctrl_out_evidence(
+            ctx, tid=tid, ctrl_out_name=queue_name, scan_limit=2
+        )
+        assert first.scanned == 2
+        assert not first.completed
+        assert first.evidence is None
+        assert first.scan.horizon == task_id
+        queue.write(_manager_wrapper_lost_envelope(tid))
+        second = task_evidence.scan_terminal_ctrl_out_evidence(
+            ctx,
+            tid=tid,
+            ctrl_out_name=queue_name,
+            scan_limit=2,
+            continuation=first.scan,
+        )
+        assert second.completed
+        assert second.scanned == 2
+        assert second.scan.horizon == task_id
+        assert second.evidence is not None
+        assert second.evidence.status == "completed"
+        assert second.evidence.observed_at == task_id
+        # Both readers use the same selection rule, including older task evidence.
+        full = task_evidence.peek_terminal_ctrl_out_evidence(
+            ctx, tid=tid, ctrl_out_name=queue_name
+        )
+        assert full is not None
+        assert full.observed_at == task_id
+        assert len(queue.peek_many(limit=10)) == 5
+
+
+def test_terminal_control_deadline_and_removed_horizon_do_not_invent_progress(
+    tmp_path: Path,
+) -> None:
+    """A paused window retains progress; exact-horizon removal is safe to finish."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    queue_name = f"T{tid}.ctrl_out"
+    with ctx.queue(queue_name, persistent=False) as queue:
+        manager_id = queue.write(_manager_wrapper_lost_envelope(tid))
+        task_id = queue.write(_task_completed_envelope(tid))
+        paused = task_evidence.scan_terminal_ctrl_out_evidence(
+            ctx,
+            tid=tid,
+            ctrl_out_name=queue_name,
+            scan_limit=2,
+            deadline_monotonic=time.monotonic() - 1,
+        )
+        assert not paused.completed
+        assert paused.scanned == 0
+        assert paused.evidence is None
+        queue.delete(message_id=task_id)
+        finished = task_evidence.scan_terminal_ctrl_out_evidence(
+            ctx,
+            tid=tid,
+            ctrl_out_name=queue_name,
+            scan_limit=2,
+            continuation=paused.scan,
+        )
+        assert finished.completed
+        assert finished.scanned == 1
+        assert finished.evidence is not None
+        assert finished.evidence.classification == "wrapper_lost"
+        assert finished.evidence.observed_at == manager_id
+
+
+def test_terminal_control_windows_bound_backend_fetches_near_message_id_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw-row budget includes prefetch, including a high exact horizon."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = str(time.time_ns())
+    queue_name = f"T{tid}.ctrl_out"
+    # The public restore API reserves the following ID as its write high-water.
+    horizon = (1 << 63) - 2
+    with ctx.queue(queue_name, persistent=False) as queue:
+        queue.insert_messages(
+            [(_manager_wrapper_lost_envelope(tid), horizon - 8)]
+            + [("noise", horizon - offset) for offset in range(7, 0, -1)]
+            + [(_task_completed_envelope(tid), horizon)]
+        )
+        with queue.get_connection() as broker:
+            retrieve = cast(Any, broker)._retrieve
+            fetched = 0
+
+            def count_fetched(*args: Any, **kwargs: Any) -> Any:
+                nonlocal fetched
+                rows = retrieve(*args, **kwargs)
+                fetched += len(rows)
+                return rows
+
+            # Observe actual broker retrieval, including rows prefetched but not
+            # yielded. Merely counting iterator yields would miss over-fetching.
+            monkeypatch.setattr(broker, "_retrieve", count_fetched)
+            continuation = None
+            for _ in range(5):
+                fetched = 0
+                result = task_evidence.scan_terminal_ctrl_out_evidence(
+                    ctx,
+                    tid=tid,
+                    ctrl_out_name=queue_name,
+                    scan_limit=2,
+                    continuation=continuation,
+                    broker=broker,
+                )
+                assert fetched <= 2
+                assert result.scanned == fetched
+                if result.completed:
+                    break
+                assert result.evidence is None
+                continuation = result.scan
+            assert result.completed
+            assert result.evidence is not None
+            assert result.evidence.status == "completed"
+            assert result.evidence.observed_at == horizon

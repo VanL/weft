@@ -5,7 +5,7 @@ cleanup eligibility, scan queues, write files, or mutate Monitor tables.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.12], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.12], [OBS.13.13], [OBS.17]
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from weft._constants import (
 from weft.core.queue_window import QueueWindowRow
 from weft.helpers.message_ids import normalize_exact_message_id
 
+from .collation import ControlTerminalObservation, selected_terminal_identity
+
 if TYPE_CHECKING:
     from weft.core.monitor.store import MonitorTaskCollationRecord
 
@@ -40,7 +42,10 @@ def build_collation_lifetime_report(
     close_reason: str,
     observations: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a lifetime report from one Monitor collation record."""
+    """Build a lifetime report with selected evidence distinct from history.
+
+    Spec: [MF-5], [OBS.13.13].
+    """
 
     subject = {"tid": record.tid}
     lifetime = _lifetime_from_collation(record, close_reason=close_reason)
@@ -208,7 +213,7 @@ def project_lifetime_report_for_external_json(
         ),
     )
     if monitor is not None:
-        projected["monitor"] = monitor
+        projected["monitor"] = project_terminal_provenance_for_external_json(monitor)
     observations = _project_message_id_mapping(
         report.get("observations"),
         ("message_id",),
@@ -263,7 +268,7 @@ def restore_lifetime_report_from_external_json(
         ),
     )
     if monitor is not None:
-        restored["monitor"] = monitor
+        restored["monitor"] = restore_terminal_provenance_from_external_json(monitor)
     observations = _restore_message_id_mapping(
         report.get("observations"),
         ("message_id",),
@@ -306,8 +311,17 @@ def stable_report_id(
     monitor: Mapping[str, Any] | None = None,
     observations: Mapping[str, Any] | None = None,
 ) -> str:
-    """Return a deterministic report id from stable report identity fields."""
+    """Identify evidence/outcome, excluding emission and observation clocks.
 
+    Spec: [MF-5], [OBS.13.13].
+    """
+
+    selected = (
+        monitor.get("selected_terminal_evidence")
+        if isinstance(monitor, Mapping)
+        else None
+    )
+    has_selected_evidence = isinstance(selected, Mapping)
     identity = {
         "record_type": TASK_LIFETIME_REPORT_RECORD_TYPE,
         "source_policy": source_policy,
@@ -319,7 +333,9 @@ def stable_report_id(
             monitor.get("terminal_message_id") if isinstance(monitor, Mapping) else None
         ),
         "last_message_id": (
-            monitor.get("last_message_id") if isinstance(monitor, Mapping) else None
+            monitor.get("last_message_id")
+            if isinstance(monitor, Mapping) and not has_selected_evidence
+            else None
         ),
         "collation_kind": (
             monitor.get("collation_kind") if isinstance(monitor, Mapping) else None
@@ -327,6 +343,11 @@ def stable_report_id(
         "service": (monitor.get("service") if isinstance(monitor, Mapping) else None),
         "observation_identity": _observation_identity(observations),
     }
+    if isinstance(selected, Mapping):
+        identity["selected_terminal_evidence"] = {
+            key: selected.get(key)
+            for key in ("queue", "message_id", "source", "status")
+        }
     encoded = json.dumps(
         identity,
         sort_keys=True,
@@ -462,7 +483,7 @@ def _taskspec_from_collation(record: MonitorTaskCollationRecord) -> dict[str, An
 
 
 def _monitor_from_collation(record: MonitorTaskCollationRecord) -> dict[str, Any]:
-    """Return compact Monitor provenance for a collated lifetime report."""
+    """Report the selected verdict and retain superseded control history [MF-5]."""
 
     classification = record.service_classification()
     monitor: dict[str, Any] = {
@@ -479,7 +500,52 @@ def _monitor_from_collation(record: MonitorTaskCollationRecord) -> dict[str, Any
         monitor["disposition_reason"] = record.disposition_reason
     if classification.is_service_record:
         monitor["service"] = classification.to_summary()
+    observation = ControlTerminalObservation.from_dict(
+        record.diagnostics.get("control_terminal_observation")
+    )
+    if observation is not None:
+        monitor["control_terminal_observation"] = observation.to_dict()
+    selected = selected_terminal_identity(
+        terminal_seen=record.terminal_seen,
+        terminal_status=record.terminal_status,
+        terminal_message_id=record.terminal_message_id,
+        diagnostics=record.diagnostics,
+    )
+    if selected is not None:
+        monitor["selected_terminal_evidence"] = dict(
+            zip(("queue", "message_id", "source", "status"), selected, strict=True)
+        )
     return monitor
+
+
+def project_terminal_provenance_for_external_json(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Format only known terminal provenance IDs without traversing opaque JSON.
+
+    Shared by lifetime-report Monitor provenance and task-summary diagnostics.
+    Spec: [MF-5], [OBS.13.13].
+    """
+
+    projected = dict(value)
+    for field in ("control_terminal_observation", "selected_terminal_evidence"):
+        observation = _project_message_id_mapping(value.get(field), ("message_id",))
+        if observation is not None:
+            projected[field] = observation
+    return projected
+
+
+def restore_terminal_provenance_from_external_json(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore only the exact IDs owned by terminal provenance [MF-5]."""
+
+    restored = dict(value)
+    for field in ("control_terminal_observation", "selected_terminal_evidence"):
+        observation = _restore_message_id_mapping(value.get(field), ("message_id",))
+        if observation is not None:
+            restored[field] = observation
+    return restored
 
 
 def _json_object(value: str) -> dict[str, Any] | None:

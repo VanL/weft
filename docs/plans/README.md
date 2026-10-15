@@ -29,7 +29,7 @@ There are currently 248 plan files in this directory.
 | [`2026-10-14-task-monitor-ingest-and-retirement-plan.md`](./2026-10-14-task-monitor-ingest-and-retirement-plan.md) | TaskMonitor Ingest and Retirement | `draft` | none |
 | [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) | Task-Owned Observation and Read Separation | `draft` | none |
 | [`2026-10-14-measured-admission-family-scheduling.md`](./2026-10-14-measured-admission-family-scheduling.md) | Measured admission and bounded family scheduling | `draft` | none |
-| [`2026-10-13-supervisor-terminal-projection.md`](./2026-10-13-supervisor-terminal-projection.md) | Supervisor terminal observations in operational collations | `draft` | none |
+| [`2026-10-13-supervisor-terminal-projection.md`](./2026-10-13-supervisor-terminal-projection.md) | Supervisor terminal observations in operational collations | `completed` | none |
 | [`2026-10-13-connection-aware-child-admission-plan.md`](./2026-10-13-connection-aware-child-admission-plan.md) | Connection-Aware Admission and Child Progress | `draft` | [Measured admission and bounded family scheduling](./2026-10-14-measured-admission-family-scheduling.md) |
 | [`2026-10-12-burst-submission-complexity-plan.md`](./2026-10-12-burst-submission-complexity-plan.md) | Burst Submission: Local Completion and Incremental Manager Bookkeeping | `completed` | none |
 | [`2026-10-10-result-observation-simplification-plan.md`](./2026-10-10-result-observation-simplification-plan.md) | Result Observation: Canonical History and Unified Settlement | `draft` | none |

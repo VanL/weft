@@ -783,6 +783,7 @@ DIAGNOSTIC_FIELDS = {
         "last_maintenance_runtime_prune_partial_batches",
         "last_maintenance_error",
     ),
+    "control_reconciliation": ("after_tid", "scans", "pending_tids"),
 }
 
 DIAGNOSTIC_STATE_ATTRIBUTES = {
@@ -791,12 +792,26 @@ DIAGNOSTIC_STATE_ATTRIBUTES = {
     "runtime_cleanup": "_cleanup_state",
     "store": "_store_state",
     "maintenance": "_maintenance_state",
+    "control_reconciliation": "_control_reconciliation",
 }
 
 
 def _prior_diagnostic(field: str, previous: Any) -> Any:
     """Seed distinct valid owner values so omission and zero cannot look alike."""
 
+    control_hint_values = {
+        "after_tid": "1778089999999999705",
+        "scans": (
+            task_monitor_mod.TerminalControlScan(
+                tid="1778089999999999704",
+                queue="T1778089999999999704.ctrl_out",
+                horizon=None,
+            ),
+        ),
+        "pending_tids": ("1778089999999999704",),
+    }
+    if field in control_hint_values:
+        return control_hint_values[field]
     if field == "monitor_store_status":
         return replace(previous, available=False, error="previous store error")
     if field in {
@@ -943,7 +958,9 @@ def test_diagnostic_groups_apply_produced_fields_and_preserve_omissions(
         if mode != "custom":
             expected_groups.add("scan")
         if mode != "raw_external":
-            expected_groups.update({"runtime_cleanup", "store"})
+            expected_groups.update(
+                {"runtime_cleanup", "store", "control_reconciliation"}
+            )
         if mode != "custom" and maintenance_due:
             expected_groups.add("maintenance")
         _assert_diagnostic_field_contract(

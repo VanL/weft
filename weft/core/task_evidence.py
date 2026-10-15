@@ -3,14 +3,14 @@
 Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.13], [OBS.17]
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -276,7 +276,7 @@ def coerce_terminal_envelope(
     if payload.get("tid") != tid:
         return None
     source = payload.get("source")
-    if source not in TASK_TERMINAL_ENVELOPE_SOURCES:
+    if not isinstance(source, str) or source not in TASK_TERMINAL_ENVELOPE_SOURCES:
         return None
     status = payload.get("status")
     if not isinstance(status, str) or status not in TERMINAL_TASK_STATUSES:
@@ -543,30 +543,27 @@ def select_terminal_envelope(
     return best
 
 
-def peek_terminal_ctrl_out_evidence(
-    ctx: WeftContext,
+def _terminal_control_candidates(
+    rows: Iterable[tuple[str, int] | str], *, tid: str
+) -> Iterator[tuple[dict[str, Any], int]]:
+    """Coerce exact-TID terminal rows for the shared selector [MF-5]."""
+    for item in rows:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        body, timestamp = item
+        payload = coerce_terminal_envelope(str(body), tid=tid)
+        if payload is not None:
+            yield payload, int(timestamp)
+
+
+def _terminal_control_snapshot(
+    selected: tuple[dict[str, Any], int] | None,
     *,
     tid: str,
     ctrl_out_name: str,
-    taskspec_payload: dict[str, Any] | None = None,
-    broker: Any | None = None,
+    taskspec_payload: dict[str, Any] | None,
 ) -> TaskEvidenceSnapshot | None:
-    """Peek typed terminal ctrl_out evidence without consuming it."""
-
-    candidates: list[tuple[dict[str, Any], int]] = []
-    with queue_broker(ctx, ctrl_out_name, broker=broker) as db:
-        iterator = db.peek_generator(ctrl_out_name, with_timestamps=True)
-        with closing_queue_iterator(iterator) as rows:
-            for item in rows:
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-                body, timestamp = item
-                payload = coerce_terminal_envelope(str(body), tid=tid)
-                if payload is None:
-                    continue
-                candidates.append((payload, int(timestamp)))
-
-    selected = select_terminal_envelope(candidates)
+    """Retain producer time separately from queue identity [MF-5], [OBS.13.13]."""
     if selected is None:
         return None
     payload, timestamp = selected
@@ -574,10 +571,9 @@ def peek_terminal_ctrl_out_evidence(
     error = payload.get("error")
     error_text = error if isinstance(error, str) else None
     return_code = payload.get("return_code")
+    reported_at = payload.get("timestamp")
     classification = (
-        "wrapper_lost"
-        if source == "manager" and error_text == WRAPPER_LOST_ERROR
-        else "terminal_ctrl_out"
+        "wrapper_lost" if _candidate_is_wrapper_lost(payload) else "terminal_ctrl_out"
     )
     snapshot = TaskEvidenceSnapshot(
         tid=tid,
@@ -589,13 +585,173 @@ def peek_terminal_ctrl_out_evidence(
         observed_at=timestamp,
         error=error_text,
         return_code=return_code if isinstance(return_code, int) else None,
-        metadata={"terminal_source": source},
+        metadata={
+            "terminal_source": source,
+            "terminal_reported_at_ns": (
+                reported_at
+                if isinstance(reported_at, int) and not isinstance(reported_at, bool)
+                else None
+            ),
+        },
         ack_targets=(QueueAckTarget(queue=ctrl_out_name, message_id=timestamp),),
     )
     return replace(
-        snapshot,
-        reconciliation=reconciliation_for_terminal_ctrl_out(snapshot),
+        snapshot, reconciliation=reconciliation_for_terminal_ctrl_out(snapshot)
     )
+
+
+def peek_terminal_ctrl_out_evidence(
+    ctx: WeftContext,
+    *,
+    tid: str,
+    ctrl_out_name: str,
+    taskspec_payload: dict[str, Any] | None = None,
+    broker: Any | None = None,
+) -> TaskEvidenceSnapshot | None:
+    """Peek typed terminal ctrl_out evidence without consuming it [MF-5]."""
+    with queue_broker(ctx, ctrl_out_name, broker=broker) as db:
+        iterator = db.peek_generator(ctrl_out_name, with_timestamps=True)
+        with closing_queue_iterator(iterator) as rows:
+            selected = select_terminal_envelope(
+                _terminal_control_candidates(rows, tid=tid)
+            )
+    return _terminal_control_snapshot(
+        selected,
+        tid=tid,
+        ctrl_out_name=ctrl_out_name,
+        taskspec_payload=taskspec_payload,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalControlScan:
+    """Detached progress over one finite control horizon [MF-5], [OBS.13.13].
+
+    The worker owns live iterators; only this value crosses worker invocations.
+    A restart discards it and repeats inspection from the beginning.
+    """
+
+    tid: str
+    queue: str
+    horizon: int | None
+    after_message_id: int | None = None
+    best_envelope: tuple[dict[str, Any], int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalControlScanResult:
+    """One bounded window; only complete inspection exposes a verdict [MF-5]."""
+
+    scan: TerminalControlScan
+    scanned: int
+    completed: bool
+    evidence: TaskEvidenceSnapshot | None = None
+
+
+def scan_terminal_ctrl_out_evidence(
+    ctx: WeftContext,
+    *,
+    tid: str,
+    ctrl_out_name: str,
+    scan_limit: int,
+    continuation: TerminalControlScan | None = None,
+    taskspec_payload: dict[str, Any] | None = None,
+    broker: Any | None = None,
+    deadline_monotonic: float | None = None,
+) -> TerminalControlScanResult:
+    """Inspect at most ``scan_limit`` raw rows in a captured finite horizon.
+
+    Noise and other tasks consume the same budget as terminal rows. The broker
+    prefetch batch is bounded by that budget. The caller reserves the full
+    window allowance, including unused prefetch, when enforcing a shared budget.
+    Prefix reads use a strict upper bound, followed by an exact horizon read,
+    avoiding arithmetic at the maximum
+    message ID. A filled budget is incomplete, even if it happened to reach the
+    last prefix row; the next window establishes exhaustion. All iterators close
+    before return. Read failure propagates without returning false progress.
+
+    Spec: [MF-5], [OBS.13.13].
+    """
+    if scan_limit < 1:
+        raise ValueError("scan_limit must be positive")
+    if continuation is not None and (
+        continuation.tid != tid or continuation.queue != ctrl_out_name
+    ):
+        raise ValueError("control scan continuation belongs to another task or queue")
+    with queue_broker(ctx, ctrl_out_name, broker=broker) as db:
+        scan = continuation or TerminalControlScan(
+            tid=tid,
+            queue=ctrl_out_name,
+            horizon=db.latest_pending_timestamp(ctrl_out_name),
+        )
+        if scan.horizon is None:
+            return TerminalControlScanResult(scan=scan, scanned=0, completed=True)
+        iterator = db.peek_generator(
+            ctrl_out_name,
+            with_timestamps=True,
+            batch_size=scan_limit,
+            after_timestamp=scan.after_message_id,
+            before_timestamp=scan.horizon,
+        )
+        scanned = 0
+        exhausted = False
+        with closing_queue_iterator(iterator) as rows:
+            row_iterator = iter(rows)
+            while scanned < scan_limit:
+                if (
+                    deadline_monotonic is not None
+                    and time.monotonic() >= deadline_monotonic
+                ):
+                    break
+                try:
+                    body, message_id = next(row_iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                scanned += 1
+                payload = coerce_terminal_envelope(str(body), tid=tid)
+                selected = scan.best_envelope
+                if payload is not None:
+                    selected = select_terminal_envelope(
+                        ((payload, int(message_id)),)
+                        if selected is None
+                        else (selected, (payload, int(message_id)))
+                    )
+                scan = replace(
+                    scan, after_message_id=int(message_id), best_envelope=selected
+                )
+        if not exhausted or (
+            deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+        ):
+            return TerminalControlScanResult(
+                scan=scan, scanned=scanned, completed=False
+            )
+        horizon_row = db.peek_one(
+            ctrl_out_name,
+            exact_timestamp=scan.horizon,
+            with_timestamps=True,
+            include_claimed=False,
+        )
+        if horizon_row is not None:
+            scanned += 1
+            selected = select_terminal_envelope(
+                (
+                    *(() if scan.best_envelope is None else (scan.best_envelope,)),
+                    *_terminal_control_candidates((horizon_row,), tid=tid),
+                )
+            )
+            scan = replace(scan, after_message_id=scan.horizon, best_envelope=selected)
+        return TerminalControlScanResult(
+            scan=scan,
+            scanned=scanned,
+            completed=True,
+            evidence=_terminal_control_snapshot(
+                scan.best_envelope,
+                tid=tid,
+                ctrl_out_name=ctrl_out_name,
+                taskspec_payload=taskspec_payload,
+            ),
+        )
 
 
 def peek_final_outbox_evidence(

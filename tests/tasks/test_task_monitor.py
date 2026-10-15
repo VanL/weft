@@ -55,12 +55,14 @@ from weft._constants import (
     TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+    TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
+    WRAPPER_LOST_ERROR,
     load_config,
 )
 from weft.context import WeftContext
@@ -119,6 +121,884 @@ def _maintenance_for(task: TaskMonitor) -> Iterator[MaintenanceWorker]:
     ) as worker:
         yield worker
     assert close_errors == []
+
+
+def test_monitor_projects_supervisor_terminal_without_task_log_authority(
+    broker_env: BrokerEnv,
+) -> None:
+    """Exact local failure repairs status without creating cleanup proof [OBS.13.13]."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999301"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "86400",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999300"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=config,
+    )
+    try:
+        child = make_task_monitor_taskspec(tid).model_copy(
+            update={
+                "name": "projection",
+                "metadata": {},
+                "state": StateSection(status="running", started_at=time.time_ns()),
+            }
+        )
+        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps(
+                {
+                    "event": "work_started",
+                    "status": "running",
+                    "tid": tid,
+                    "taskspec": child.model_dump(mode="json"),
+                }
+            )
+        )
+        ctrl_out = make_queue(f"T{tid}.ctrl_out")
+        ctrl_out.write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "manager",
+                    "tid": tid,
+                    "status": "failed",
+                    "error": WRAPPER_LOST_ERROR,
+                    "timestamp": 100,
+                }
+            )
+        )
+        for suffix in ("inbox", "reserved", "outbox"):
+            make_queue(f"T{tid}.{suffix}").write("retained user data")
+        with _maintenance_for(task) as worker:
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.status == "failed"
+            assert record.terminal_seen is False
+            assert record.terminal_status is None
+            assert record.terminal_event is None
+            assert record.terminal_message_id is None
+            assert record.reserved_probe_needed is False
+            observation = record.diagnostics["control_terminal_observation"]
+            assert observation["source"] == "manager"
+            assert observation["reported_at_ns"] == 100
+            assert observation["first_observed_at_ns"] > 100
+        assert ctrl_out.peek_one() is not None
+        for suffix in ("inbox", "reserved", "outbox"):
+            assert make_queue(f"T{tid}.{suffix}").peek_one() == "retained user data"
+    finally:
+        task.stop()
+
+
+def _projection_taskspec(tid: str) -> dict[str, Any]:
+    """Standard non-service family for operational control evidence tests."""
+    return (
+        make_task_monitor_taskspec(tid)
+        .model_copy(
+            update={
+                "name": "projection",
+                "metadata": {},
+                "state": StateSection(status="running", started_at=time.time_ns()),
+            }
+        )
+        .model_dump(mode="json")
+    )
+
+
+def _projection_terminal(
+    tid: str, *, source: str = "manager", status: str = "failed", timestamp: int = 100
+) -> str:
+    """Encode producer-shaped terminal evidence without synthesizing task logs."""
+    return json.dumps(
+        {
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "source": source,
+            "tid": tid,
+            "status": status,
+            "timestamp": timestamp,
+            "error": WRAPPER_LOST_ERROR if source == "manager" else None,
+        }
+    )
+
+
+def test_monitor_control_correction_after_disposition_preserves_task_owned_winner(
+    broker_env: BrokerEnv, tmp_path: Path
+) -> None:
+    """Disposed families are corrected; removing task proof never demotes history."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999331"
+    path = tmp_path / "corrections.jsonl"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999330"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=_jsonl_lifecycle_config(path, scan_limit=400),
+    )
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.mark_summary_emitted(tid, int(tid) + 1)
+            store.mark_family_disposed(
+                tid, int(tid) + 2, disposition_reason="stale_open"
+            )
+            ctrl_out.write(_projection_terminal(tid))
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            first = store.get_task(tid)
+            assert first is not None
+            assert first.status == "failed", (
+                worker._store_state.last_collation_store_error
+            )
+            assert first.summary_emitted_at_ns is not None
+        task_row = ctrl_out.write(
+            _projection_terminal(tid, source="task", status="completed", timestamp=1)
+        )
+        with _maintenance_for(task) as worker:
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            corrected = store.get_task(tid)
+            assert corrected is not None
+            assert corrected.status == "completed"
+            assert corrected.disposition_at_ns == first.disposition_at_ns
+            assert corrected.disposition_reason == "stale_open"
+            assert corrected.summary_emitted_at_ns is not None
+            assert not corrected.terminal_seen
+            assert not corrected.reserved_probe_needed
+        reports = [json.loads(line) for line in path.read_text().splitlines()]
+        corrections = [
+            r for r in reports if r["report_kind"] == "monitor_store_stale_open"
+        ]
+        assert len(corrections) == 2
+        assert corrections[0]["report_id"] != corrections[1]["report_id"]
+        provenance = corrections[1]["monitor"]["control_terminal_observation"]
+        assert provenance["source"] == "task"
+        assert provenance["reported_at_ns"] == 1
+        ctrl_out.delete(message_id=task_row)
+        ctrl_out.write(_projection_terminal(tid, timestamp=200))
+        with _maintenance_for(task) as worker:
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            replayed = store.get_task(tid)
+            assert replayed is not None
+            assert replayed.status == "completed"
+            assert replayed.summary_emitted_at_ns == corrected.summary_emitted_at_ns
+            assert (
+                replayed.diagnostics["control_terminal_observation"]
+                == (corrected.diagnostics["control_terminal_observation"])
+            )
+        assert len(path.read_text().splitlines()) == len(reports)
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            terminal = update_from_task_log_payload(
+                {
+                    "event": "work_failed",
+                    "status": "failed",
+                    "tid": tid,
+                    "taskspec": _projection_taskspec(tid),
+                },
+                message_id=int(tid) + 3,
+            )
+            assert terminal is not None
+            store.record_task_log_updates(
+                WEFT_GLOBAL_LOG_QUEUE, (terminal,), checkpoint_message_id=None
+            )
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            authoritative = store.get_task(tid)
+            assert authoritative is not None
+            assert authoritative.status == "failed"
+            assert authoritative.terminal_seen
+            assert authoritative.terminal_message_id == int(tid) + 3
+            assert authoritative.summary_emitted_at_ns is not None
+            assert authoritative.disposition_at_ns == first.disposition_at_ns
+        final_reports = [json.loads(line) for line in path.read_text().splitlines()]
+        final = final_reports[-1]
+        assert final["report_id"] != corrections[-1]["report_id"]
+        assert (
+            final["monitor"]["selected_terminal_evidence"]["queue"]
+            == WEFT_GLOBAL_LOG_QUEUE
+        )
+        assert final["monitor"]["control_terminal_observation"]["status"] == "completed"
+    finally:
+        task.stop()
+
+
+def test_monitor_projects_control_terminal_before_global_log_catchup(
+    broker_env: BrokerEnv,
+) -> None:
+    """The global-log high-water gate delays reporting, not control projection."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999301"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999500"),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 2,
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1,
+            }
+        ),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            make_queue(f"T{tid}.ctrl_out").write(_projection_terminal(tid))
+            for index in range(3):
+                noise_tid = str(1778089999999999501 + index)
+                make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+                    json.dumps(
+                        {
+                            "event": "work_started",
+                            "status": "running",
+                            "tid": noise_tid,
+                            "taskspec": _projection_taskspec(noise_tid),
+                        }
+                    )
+                )
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            assert not (
+                worker._store_state.last_retained_task_log_ingest.completed_fifo_high_water
+            )
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.status == "failed"
+            assert not record.terminal_seen
+            assert record.terminal_message_id is None
+            assert record.summary_emitted_at_ns is None
+    finally:
+        task.stop()
+
+
+def test_monitor_control_windows_resume_detached_and_finish_finite_horizon(
+    broker_env: BrokerEnv,
+) -> None:
+    """A busy family yields to its peer; new rows cannot extend its old horizon."""
+    db_path, make_queue = broker_env
+    busy, peer = "1778089999999999341", "1778089999999999342"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 2,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 2,
+            "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1,
+        }
+    )
+    task = TaskMonitor(
+        db_path, make_task_monitor_taskspec("1778089999999999340"), config=config
+    )
+    control = make_queue(f"T{busy}.ctrl_out")
+    control.write(_projection_terminal(busy))
+    control.write("malformed row still spends scan budget")
+    winner_id = control.write(
+        _projection_terminal(busy, source="task", status="completed", timestamp=1)
+    )
+    make_queue(f"T{peer}.ctrl_out").write(_projection_terminal(peer))
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            for tid in (busy, peer):
+                store = _ingest_quiet_running_family(
+                    worker, tid=tid, taskspec=_projection_taskspec(tid)
+                )
+            assert store is not None
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            first = store.get_task(busy)
+            second = store.get_task(peer)
+            assert first is not None and second is not None
+            assert first.status == "running"
+            assert second.status == "failed"
+            diagnostics = worker.capture_diagnostics()
+            assert diagnostics.control_reconciliation is not None
+            assert len(diagnostics.control_reconciliation.scans) == 1
+            task._apply_maintenance_diagnostics(diagnostics)
+            # Capturing inputs copies mutable envelope payloads; workers must
+            # never share a broker cursor or mutable scan candidate.
+            detached = task._capture_maintenance_inputs().control_reconciliation
+            original = task._control_reconciliation.scans[0].best_envelope
+            assert original is not None
+            copied = detached.scans[0].best_envelope
+            assert copied is not None
+            copied[0]["status"] = "cancelled"
+            assert original[0]["status"] == "failed"
+        control.write(_projection_terminal(busy, timestamp=300))
+        for _ in range(4):
+            with _maintenance_for(task) as worker:
+                store = worker._ensure_monitor_store()
+                assert store is not None
+                worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+                current = store.get_task(busy)
+                assert current is not None
+                task._apply_maintenance_diagnostics(worker.capture_diagnostics())
+                if current.status == "completed":
+                    break
+        assert current is not None
+        assert current.status == "completed"
+        observation = current.diagnostics["control_terminal_observation"]
+        assert observation["message_id"] == winner_id
+        assert control.stats().total == 4
+    finally:
+        task.stop()
+
+
+def test_monitor_control_probe_failure_yields_and_retries(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unreadable control queue cannot starve another retained family."""
+    db_path, make_queue = broker_env
+    broken, peer = "1778089999999999351", "1778089999999999352"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999350"),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+                "WEFT_TASK_MONITOR_BATCH_SIZE": 2,
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 2,
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1,
+            }
+        ),
+    )
+    real_scan = task_monitor_mod.scan_terminal_ctrl_out_evidence
+
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
+        if kwargs["tid"] == broken:
+            raise OSError("control queue unavailable")
+        return real_scan(*args, **kwargs)
+
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            for tid in (broken, peer):
+                store = _ingest_quiet_running_family(
+                    worker, tid=tid, taskspec=_projection_taskspec(tid)
+                )
+                make_queue(f"T{tid}.ctrl_out").write(_projection_terminal(tid))
+            assert store is not None
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    task_monitor_mod, "scan_terminal_ctrl_out_evidence", unavailable
+                )
+                worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            failed = store.get_task(broken)
+            advanced = store.get_task(peer)
+            assert failed is not None and advanced is not None
+            assert failed.status == "running"
+            assert advanced.status == "failed"
+            assert make_queue(f"T{broken}.ctrl_out").stats().total == 1
+            task._apply_maintenance_diagnostics(worker.capture_diagnostics())
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            recovered = store.get_task(broken)
+            assert recovered is not None
+            assert recovered.status == "failed"
+    finally:
+        task.stop()
+
+
+def test_monitor_incomplete_control_scan_blocks_both_cleanup_paths(
+    broker_env: BrokerEnv,
+) -> None:
+    """A visible manager row is provisional until unread task-owned proof is checked."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999361"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999360"),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+                "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 1,
+                "WEFT_TASK_MONITOR_STORE_WRITE_BATCH_SIZE": 1,
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "0.000001",
+            }
+        ),
+    )
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_out.write(_projection_terminal(tid))
+    ctrl_out.write(_projection_terminal(tid, source="task", status="completed"))
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.mark_summary_emitted(tid, int(tid) + 1)
+            store.mark_family_disposed(
+                tid, int(tid) + 2, disposition_reason="stale_open"
+            )
+            record = store.get_task(tid)
+            assert record is not None
+            cleanup = worker._delete_terminal_control_queues(
+                record, store=store, now_ns=time.time_ns()
+            )
+            assert cleanup.pending
+            after = store.get_task(tid)
+            assert after is not None
+            assert after.status == "running"
+            assert after.task_control_deleted_at_ns is None
+            dead = worker._delete_dead_task_control_queues(
+                tid,
+                store=store,
+                existing_queue_names={ctrl_out.name},
+                active_tids=set(),
+                now_ns=time.time_ns(),
+            )
+            assert dead.pending
+            assert ctrl_out.stats().total == 2
+    finally:
+        task.stop()
+
+
+def test_monitor_control_cleanup_keeps_publication_after_verified_horizon(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report for an old horizon cannot authorize deleting a concurrent verdict."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999371"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999370"),
+        config=_stale_open_test_config(),
+    )
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    covered = ctrl_out.write(_projection_terminal(tid))
+    published: list[int] = []
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.mark_family_disposed(
+                tid, int(tid) + 1, disposition_reason="stale_open"
+            )
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            assert (
+                worker._emit_monitor_store_summaries(
+                    store, now_ns=time.time_ns(), apply_disposition=True
+                )
+                == 1
+            )
+            record = store.get_task(tid)
+            assert record is not None
+            with worker._connection() as broker:
+                broker_type = type(broker)
+            real_delete = broker_type.delete_from_queues
+
+            def publish_before_cutoff(
+                broker: BrokerConnection,
+                names: Sequence[str],
+                *,
+                before_timestamp: int | None = None,
+            ) -> int:
+                if ctrl_out.name in names and before_timestamp == covered:
+                    published.append(
+                        ctrl_out.write(
+                            _projection_terminal(tid, source="task", status="completed")
+                        )
+                    )
+                return real_delete(broker, names, before_timestamp=before_timestamp)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(broker_type, "delete_from_queues", publish_before_cutoff)
+                cleanup = worker._delete_terminal_control_queues(
+                    record, store=store, now_ns=time.time_ns()
+                )
+            assert len(published) == 1
+            assert cleanup.pending
+            assert ctrl_out.peek_one(exact_timestamp=covered) is None
+            assert ctrl_out.peek_one(exact_timestamp=published[0]) is not None
+            retained = store.get_task(tid)
+            assert retained is not None
+            assert retained.task_control_deleted_at_ns is None
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            corrected = store.get_task(tid)
+            assert corrected is not None
+            assert corrected.status == "completed"
+            assert corrected.summary_emitted_at_ns is None
+            assert ctrl_out.stats().total == 1
+    finally:
+        task.stop()
+
+
+def test_monitor_failed_control_report_handoff_blocks_cleanup_until_retry(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A correction must reach either report sink before its control proof is deleted."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999381"
+    path = tmp_path / "handoff.jsonl"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999380"),
+        config=_jsonl_lifecycle_config(path, retention_seconds="0.000001"),
+    )
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_out.write(_projection_terminal(tid))
+
+    def reject_external(*_args: Any, **_kwargs: Any) -> None:
+        raise task_monitor_mod.ExternalTaskLogError("report sink unavailable")
+
+    def reject_deferred(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("deferred store unavailable")
+
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.mark_family_disposed(
+                tid, int(tid) + 1, disposition_reason="stale_open"
+            )
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    task_monitor_mod.ExternalTaskLogSink,
+                    "emit_lifetime_report",
+                    reject_external,
+                )
+                patch.setattr(MonitorStore, "upsert_deferred_write", reject_deferred)
+                assert (
+                    worker._emit_monitor_store_summaries(
+                        store, now_ns=time.time_ns(), apply_disposition=True
+                    )
+                    == 0
+                )
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.summary_emitted_at_ns is None
+            cleanup = worker._delete_terminal_control_queues(
+                record, store=store, now_ns=time.time_ns()
+            )
+            assert cleanup.pending
+            assert ctrl_out.stats().total == 1
+            assert (
+                worker._emit_monitor_store_summaries(
+                    store, now_ns=time.time_ns(), apply_disposition=True
+                )
+                == 1
+            )
+            verified = store.get_task(tid)
+            assert verified is not None
+            assert verified.summary_emitted_at_ns is not None
+            cleanup = worker._delete_terminal_control_queues(
+                verified, store=store, now_ns=time.time_ns()
+            )
+            assert cleanup.success and not cleanup.pending
+            assert ctrl_out.stats().total == 0
+        reports = [json.loads(line) for line in path.read_text().splitlines()]
+        assert any(
+            report["monitor"].get("control_terminal_observation", {}).get("source")
+            == "manager"
+            for report in reports
+        )
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("evidence", ["empty", "nonterminal", "other_tid"])
+def test_monitor_control_absence_supplies_no_terminal_verdict(
+    broker_env: BrokerEnv, evidence: str
+) -> None:
+    """Missing state/process and unrelated control traffic cannot create an outcome."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999391"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999390"),
+        config=_stale_open_test_config(),
+    )
+    if evidence == "nonterminal":
+        make_queue(f"T{tid}.ctrl_out").write(json.dumps({"tid": tid, "status": "ok"}))
+    elif evidence == "other_tid":
+        make_queue(f"T{tid}.ctrl_out").write(_projection_terminal(str(int(tid) + 1)))
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.status == "running"
+            assert not record.terminal_seen
+            assert not record.reserved_probe_needed
+            assert "control_terminal_observation" not in record.diagnostics
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("blocker", ["stat_error", "claimed_row", "deadline"])
+def test_monitor_final_control_inspection_defers_retirement_then_retries(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch, blocker: str
+) -> None:
+    """Retirement requires a successful total-row probe, including claimed evidence."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999401"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999400"),
+        config=_stale_open_test_config(),
+    )
+    control = make_queue(f"T{tid}.ctrl_out")
+    if blocker == "claimed_row":
+        control.write(_projection_terminal(tid))
+        assert control.read_one() is not None
+        assert control.stats().pending == 0
+        assert control.stats().total == 1
+    probes: list[str] = []
+    store: MonitorStore | None
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.delete_task_messages_after_raw_delete(
+                (int(tid),), deleted_at_ns=int(tid) + 1
+            )
+            store.mark_summary_emitted(tid, int(tid) + 2)
+            store.mark_family_disposed(
+                tid, int(tid) + 3, disposition_reason="stale_open"
+            )
+            store.mark_task_control_deleted(tid, int(tid) + 4)
+            with worker._connection() as broker:
+                broker_type = type(broker)
+            real_stat = broker_type.get_queue_stat
+
+            def inspected_stat(broker: BrokerConnection, queue_name: str) -> Any:
+                if queue_name == control.name:
+                    probes.append(queue_name)
+                    if blocker == "stat_error":
+                        raise BrokerError("final control inspection failed")
+                return real_stat(broker, queue_name)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(broker_type, "get_queue_stat", inspected_stat)
+                blocked = store.retire_completed_collation_families(
+                    limit=10,
+                    can_retire=lambda record: worker._retained_control_absent(
+                        record,
+                        deadline_monotonic=0.0 if blocker == "deadline" else None,
+                    ),
+                )
+            assert probes == ([] if blocker == "deadline" else [control.name])
+            assert blocked.families_retired == 0
+            assert store.get_task(tid) is not None
+            if blocker == "claimed_row":
+                control.delete()
+            with _maintenance_for(task) as retry_worker:
+                recovered = store.retire_completed_collation_families(
+                    limit=10, can_retire=retry_worker._retained_control_absent
+                )
+            assert recovered.families_retired == 1
+            assert store.get_task(tid) is None
+    finally:
+        task.stop()
+
+
+def test_monitor_retirement_progresses_after_reconciliation_budget_is_spent(
+    broker_env: BrokerEnv,
+) -> None:
+    """Busy control reconciliation cannot starve retirement of an empty family."""
+    db_path, _make_queue = broker_env
+    tid = "1778089999999999403"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999402"),
+        config=_stale_open_test_config(),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.delete_task_messages_after_raw_delete(
+                (int(tid),), deleted_at_ns=int(tid) + 1
+            )
+            store.mark_summary_emitted(tid, int(tid) + 2)
+            store.mark_family_disposed(
+                tid, int(tid) + 3, disposition_reason="stale_open"
+            )
+            store.mark_task_control_deleted(tid, int(tid) + 4)
+            # Represents a worker whose preceding reconciliation consumed its
+            # soft time slice. Run both real phases, including their wiring.
+            worker._control_deadline = 0.0
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(), task_log_owner="collated_store"
+            )
+            assert store.get_task(tid) is None
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("control_body", ["pong", "manager_terminal"])
+def test_monitor_retained_control_window_yields_to_reserved_cleanup(
+    broker_env: BrokerEnv, control_body: str
+) -> None:
+    """Retention-protected ctrl_out cannot pin the runtime cleanup chain."""
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999410"),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+                "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": "86400",
+            }
+        ),
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    ctrl_in.write("stop")
+    body = _projection_terminal(tid) if control_body == "manager_terminal" else "pong"
+    ctrl_out.write(body)
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(
+                worker, tid=tid, taskspec=_projection_taskspec(tid)
+            )
+            store.mark_family_disposed(
+                tid, int(tid) + 1, disposition_reason="stale_open"
+            )
+            worker._reconcile_control_terminals(store, now_ns=time.time_ns())
+            assert (
+                worker._emit_monitor_store_summaries(
+                    store, now_ns=time.time_ns(), apply_disposition=True
+                )
+                == 1
+            )
+            cleanup = worker._run_terminal_control_cleanup_slice(
+                store, now_ns=time.time_ns()
+            )
+            assert ctrl_in.stats().total == 0
+            assert list(ctrl_out.peek_generator()) == [body]
+            assert cleanup.next_slice_kind == "reserved"
+            record = store.get_task(tid)
+            assert record is not None
+            # This marker records the permitted pass, not empty ctrl_out.
+            assert record.task_control_deleted_at_ns is not None
+            assert not worker._retained_control_absent(record)
+    finally:
+        task.stop()
+
+
+def test_monitor_custom_control_does_not_block_standard_dead_tid_cleanup(
+    broker_env: BrokerEnv,
+) -> None:
+    """Configured custom control stays outside projection and standard cleanup."""
+    db_path, make_queue = broker_env
+    tid = "1778089999999999421"
+    custom_name = "application.custom-completion"
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999420"),
+        config=_stale_open_test_config(),
+    )
+    ctrl_in = make_queue(f"T{tid}.ctrl_in")
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    custom = make_queue(custom_name)
+    ctrl_in.write("stop")
+    ctrl_out.write("pong")
+    custom_body = _projection_terminal(tid)
+    custom.write(custom_body)
+    taskspec = _projection_taskspec(tid)
+    taskspec["io"]["control"]["ctrl_out"] = custom_name
+    taskspec = TaskSpec.model_validate(taskspec).model_dump(mode="json")
+    try:
+        with _maintenance_for(task) as worker:
+            store = _ingest_quiet_running_family(worker, tid=tid, taskspec=taskspec)
+            store.mark_summary_emitted(tid, int(tid) + 1)
+            store.mark_family_disposed(
+                tid, int(tid) + 2, disposition_reason="stale_open"
+            )
+            cleanup = worker._delete_dead_task_control_queues(
+                tid,
+                store=store,
+                existing_queue_names={ctrl_in.name, ctrl_out.name},
+                active_tids=set(),
+                now_ns=time.time_ns(),
+            )
+            assert not cleanup.pending
+            assert cleanup.success
+            assert ctrl_in.stats().total == 0
+            assert ctrl_out.stats().total == 0
+            assert list(custom.peek_generator()) == [custom_body]
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.status == "running"
+            assert "control_terminal_observation" not in record.diagnostics
+    finally:
+        task.stop()
+
+
+def test_monitor_dead_control_cleanup_accepts_already_empty_family(
+    broker_env: BrokerEnv,
+) -> None:
+    """Concurrent queue exhaustion is successful cleanup, not a worker error."""
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999320"),
+        observer=lambda _queue, _message, _timestamp: None,
+        config=_stale_open_test_config(),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            result = worker._delete_dead_task_control_queues(
+                "1778089999999999321",
+                store=store,
+                existing_queue_names=set(),
+                active_tids=set(),
+                now_ns=time.time_ns(),
+            )
+            assert result.success
+            assert result.dead_tids_processed == 1
+            assert result.dead_tid_rows_estimated_deleted == 0
+    finally:
+        task.stop()
 
 
 def test_task_monitor_stop_survives_blocking_heartbeat_probe(

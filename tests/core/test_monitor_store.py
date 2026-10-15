@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -27,8 +31,10 @@ from weft._constants import (
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
     WEFT_MONITOR_SCHEMA_VERSION,
+    WRAPPER_LOST_ERROR,
 )
 from weft.context import WeftContext, build_context
+from weft.core.monitor import collation as collation_module
 from weft.core.monitor import store as monitor_store_module
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import (
@@ -1499,7 +1505,18 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
         taskspec_summary={"opaque": {"message_id": 1779000000000000212}},
         state={"opaque": {"message_id": 1779000000000000213}},
         resources={"opaque": {"message_id": 1779000000000000214}},
-        diagnostics={"opaque": {"message_id": 1779000000000000215}},
+        diagnostics={
+            "opaque": {"message_id": 1779000000000000215},
+            "control_terminal_observation": {
+                "source": "manager",
+                "status": "failed",
+                "queue": f"T{tid}.ctrl_out",
+                "message_id": 1779000000000000219,
+                "reported_at_ns": 1779000000000000220,
+                "first_observed_at_ns": 1779000000000000221,
+                "error": WRAPPER_LOST_ERROR,
+            },
+        },
     )
 
     store.record_task_log_updates(
@@ -1582,6 +1599,18 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     assert state["opaque"]["message_id"] == 1779000000000000213
     assert resources["opaque"]["message_id"] == 1779000000000000214
     assert diagnostics["opaque"]["message_id"] == 1779000000000000215
+    assert (
+        diagnostics["control_terminal_observation"]["message_id"]
+        == "1779000000000000219"
+    )
+    assert (
+        diagnostics["control_terminal_observation"]["reported_at_ns"]
+        == 1779000000000000220
+    )
+    assert (
+        diagnostics["control_terminal_observation"]["first_observed_at_ns"]
+        == 1779000000000000221
+    )
     assert checkpoint["message_id"] == "1779000000000000201"
     assert deferred["subject"]["message_id"] == "1779000000000000201"
     assert deferred["monitor"]["message_id"] == "1779000000000000216"
@@ -1607,6 +1636,10 @@ def test_monitor_store_keeps_relational_ids_integer_and_json_ids_canonical(
     assert record.state["opaque"]["message_id"] == 1779000000000000213
     assert record.resources["opaque"]["message_id"] == 1779000000000000214
     assert record.diagnostics["opaque"]["message_id"] == 1779000000000000215
+    assert (
+        record.diagnostics["control_terminal_observation"]["message_id"]
+        == 1779000000000000219
+    )
     assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == message_id
 
     [deferred_record] = store.list_pending_deferred_writes(limit=10)
@@ -3416,3 +3449,560 @@ def test_monitor_store_reconciles_all_unreferenced_families_in_its_context(
         ).fetch_task(tids[4])
         assert other is not None
         assert other.raw_deleted_at_ns is None
+
+
+def test_monitor_store_reconciles_disposed_control_candidates(tmp_path: Path) -> None:
+    """Disposition/old cleanup marks cannot hide retained control corrections."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tids = tuple(str(1779000000000000600 + index) for index in range(3))
+    for index, tid in enumerate(tids):
+        store.upsert_task_event(_update(tid, int(tid) + 10))
+        if index == 1:
+            store.mark_family_disposed(
+                tid, int(tid) + 11, disposition_reason="stale_open"
+            )
+            store.mark_task_control_deleted(tid, int(tid) + 12)
+    store.upsert_task_event(
+        _update(tids[2], int(tids[2]) + 20, terminal=True, status="completed")
+    )
+
+    candidates = store.list_control_reconciliation_candidates(limit=1)
+    assert tuple(record.tid for record in candidates) == (tids[0],)
+    candidates = store.list_control_reconciliation_candidates(
+        limit=2, after_tid=tids[0]
+    )
+    assert tuple(record.tid for record in candidates) == (tids[1],)
+    assert store.list_control_reconciliation_candidates(limit=0) == ()
+
+
+def test_monitor_store_control_projection_preserves_task_log_authority(
+    tmp_path: Path,
+) -> None:
+    """Projection preserves task-log bounds, proof and reserved authority on replay."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000650"
+    start = _update(tid, int(tid) + 10)
+    store.upsert_task_event(start)
+    store.set_checkpoint(WEFT_GLOBAL_LOG_QUEUE, start.message_id)
+    store.mark_summary_emitted(tid, int(tid) + 11)
+    store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
+    before = store.get_task(tid)
+    assert before is not None
+    observation = collation_module.ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue=f"T{tid}.ctrl_out",
+        message_id=int(tid) + 100,
+        reported_at_ns=int(tid) + 90,
+        first_observed_at_ns=int(tid) + 120,
+        error=WRAPPER_LOST_ERROR,
+    )
+    projected = store.project_control_terminal_observation(tid, observation)
+    assert projected is not None
+    assert projected.status == "failed"
+    assert projected.summary_emitted_at_ns is None
+    assert projected.first_message_id == before.first_message_id
+    assert projected.last_message_id == before.last_message_id
+    assert projected.terminal_seen is False
+    assert projected.terminal_message_id is None
+    assert projected.terminal_status is None
+    assert projected.terminal_event is None
+    assert projected.reserved_probe_needed == before.reserved_probe_needed
+    assert projected.disposition_at_ns == before.disposition_at_ns
+    assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) == start.message_id
+    corrections = store.list_summary_correction_ready_tasks(limit=10)
+    assert len(corrections) == 1
+    assert corrections[0].close_reason == "stale_open"
+    store.mark_summary_emitted(tid, int(tid) + 130)
+    replay = store.project_control_terminal_observation(
+        tid, replace(observation, first_observed_at_ns=int(tid) + 140)
+    )
+    assert replay is not None
+    assert replay.summary_emitted_at_ns == int(tid) + 130
+    assert (
+        replay.diagnostics["control_terminal_observation"]["first_observed_at_ns"]
+        == int(tid) + 120
+    )
+    store.upsert_task_event(_update(tid, int(tid) + 20))
+    running = store.get_task(tid)
+    assert running is not None
+    assert running.status == "failed"
+    assert running.state["status"] == "running"
+    assert running.summary_emitted_at_ns == int(tid) + 130
+    assert (
+        store.project_control_terminal_observation("1779000000000000999", observation)
+        is None
+    )
+
+
+def test_monitor_store_task_owned_control_and_log_supersede_manager(
+    tmp_path: Path,
+) -> None:
+    """Older task-owned proof wins and dirties the summary exactly once."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000700"
+    store.upsert_task_event(_update(tid, int(tid) + 10))
+    manager = collation_module.ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue=f"T{tid}.ctrl_out",
+        message_id=int(tid) + 100,
+        reported_at_ns=None,
+        first_observed_at_ns=int(tid) + 110,
+        error=WRAPPER_LOST_ERROR,
+    )
+    store.project_control_terminal_observation(tid, manager)
+    store.mark_summary_emitted(tid, int(tid) + 120)
+    task = replace(manager, source="task", status="completed", message_id=int(tid) + 20)
+    selected = store.project_control_terminal_observation(tid, task)
+    assert selected is not None
+    assert selected.status == "completed"
+    assert selected.summary_emitted_at_ns is None
+    store.mark_summary_emitted(tid, int(tid) + 130)
+    selected = store.project_control_terminal_observation(
+        tid, replace(manager, message_id=int(tid) + 200)
+    )
+    assert selected is not None
+    assert selected.status == "completed"
+    assert selected.summary_emitted_at_ns == int(tid) + 130
+    terminal = _update(
+        tid, int(tid) + 30, event="work_failed", status="failed", terminal=True
+    )
+    store.upsert_task_event(terminal)
+    selected = store.get_task(tid)
+    assert selected is not None
+    assert selected.status == "failed"
+    assert selected.terminal_seen is True
+    assert selected.summary_emitted_at_ns is None
+    store.mark_summary_emitted(tid, int(tid) + 140)
+    store.upsert_task_event(terminal)
+    selected = store.project_control_terminal_observation(
+        tid, replace(task, message_id=int(tid) + 300)
+    )
+    assert selected is not None
+    assert selected.status == "failed"
+    assert selected.summary_emitted_at_ns == int(tid) + 140
+    assert (
+        selected.diagnostics["control_terminal_observation"]["message_id"]
+        == task.message_id
+    )
+
+
+def test_monitor_store_retirement_respects_control_evidence_guard(
+    tmp_path: Path,
+) -> None:
+    """An old cleanup marker cannot authorize retirement of retained control evidence."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tids = ("1779000000000000750", "1779000000000000760")
+    for tid in tids:
+        update = _update(tid, int(tid) + 10)
+        store.upsert_task_event(update)
+        store.delete_task_messages_after_raw_delete(
+            (update.message_id,), deleted_at_ns=int(tid) + 11
+        )
+        store.mark_summary_emitted(tid, int(tid) + 12)
+        store.mark_family_disposed(tid, int(tid) + 13, disposition_reason="stale_open")
+        store.mark_task_control_deleted(tid, int(tid) + 14)
+    queue = ctx.queue(f"T{tids[0]}.ctrl_out")
+    queue.write("retained control")
+
+    def can_retire(record: MonitorTaskCollationRecord) -> bool:
+        return ctx.queue(f"T{record.tid}.ctrl_out").latest_pending_timestamp() is None
+
+    result = store.retire_completed_collation_families(limit=10, can_retire=can_retire)
+    assert result.families_retired == 1
+    assert store.get_task(tids[0]) is not None
+    assert store.get_task(tids[1]) is None
+    queue.delete()
+    assert (
+        store.retire_completed_collation_families(
+            limit=10, can_retire=can_retire
+        ).families_retired
+        == 1
+    )
+
+
+def test_monitor_store_old_control_cleanup_mark_still_selects_retained_open_family(
+    tmp_path: Path,
+) -> None:
+    """A prior ctrl_in-only pass cannot hide later ctrl_out from cleanup's fence."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000780"
+    start = _update(tid, int(tid) + 10)
+    store.upsert_task_event(start)
+    store.mark_summary_emitted(tid, int(tid) + 11)
+    store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
+    store.mark_task_control_deleted(tid, int(tid) + 13)
+    queue = ctx.queue(f"T{tid}.ctrl_out")
+    queue.write("later retained evidence")
+    candidates = store.list_terminal_control_cleanup_ready_tasks(
+        limit=10,
+        now_ns=int(tid) + 20,
+        retention_seconds=0.0,
+    )
+    assert tuple(record.tid for record in candidates) == (tid,)
+
+
+def _wait_for_pg_blocker(
+    ctx: WeftContext,
+    *,
+    waiter_pid: int,
+    blocker_pid: int,
+    operation_completed: threading.Event,
+) -> tuple[int, ...]:
+    """Observe an actual backend lock wait or a completed unlocked operation."""
+    blockers: tuple[int, ...] = ()
+    deadline = time.monotonic() + 10
+    with ctx.broker() as broker, broker.sidecar() as session:
+        while time.monotonic() < deadline:
+            rows = list(
+                session.run("SELECT pg_blocking_pids(?)", (waiter_pid,), fetch=True)
+            )
+            blockers = tuple(rows[0][0])
+            if blocker_pid in blockers or operation_completed.is_set():
+                break
+            time.sleep(0.01)
+    return blockers
+
+
+@pytest.mark.parametrize("first_writer", ("projection", "task_log"))
+def test_monitor_store_control_projection_serializes_with_task_log_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_writer: str
+) -> None:
+    """Both real PostgreSQL writers share the row lock and preserve terminal proof.
+
+    Pause the first writer after its real read, then prove PostgreSQL reports
+    the second blocked by that transaction before releasing either actor. A
+    stale read would lose projection provenance or overwrite task-log proof.
+    """
+    ctx = _context(tmp_path)
+    if ctx.backend_name != "postgres":
+        pytest.skip("PostgreSQL row-lock overlap regression")
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000790"
+    store.upsert_task_event(_update(tid, int(tid) + 10))
+    observation = collation_module.ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue=f"T{tid}.ctrl_out",
+        message_id=int(tid) + 100,
+        reported_at_ns=None,
+        first_observed_at_ns=int(tid) + 110,
+        error=WRAPPER_LOST_ERROR,
+    )
+    first_read = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    second_read = threading.Event()
+    pids: dict[str, int] = {}
+    original = monitor_store_module._MonitorTableAccess.fetch_task
+
+    def controlled_fetch(
+        access: monitor_store_module._MonitorTableAccess,
+        selected_tid: str,
+        *,
+        for_update: bool = False,
+    ) -> MonitorTaskCollationRecord | None:
+        if not for_update:
+            return original(access, selected_tid, for_update=for_update)
+        actor = threading.current_thread().name
+        pid_rows = list(access._session.run("SELECT pg_backend_pid()", fetch=True))
+        pids[actor] = int(pid_rows[0][0])
+        if actor == "second":
+            second_entered.set()
+        record = original(access, selected_tid, for_update=for_update)
+        if actor == "first":
+            first_read.set()
+            assert release_first.wait(10), "first writer was never released"
+        else:
+            second_read.set()
+        return record
+
+    monkeypatch.setattr(
+        monitor_store_module._MonitorTableAccess, "fetch_task", controlled_fetch
+    )
+
+    def write(actor: str, kind: str) -> None:
+        threading.current_thread().name = actor
+        if kind == "projection":
+            store.project_control_terminal_observation(tid, observation)
+        else:
+            store.upsert_task_event(
+                _update(tid, int(tid) + 20, terminal=True, status="completed")
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(write, "first", first_writer)
+        try:
+            assert first_read.wait(10), "first writer did not read its row"
+            second = workers.submit(
+                write,
+                "second",
+                "task_log" if first_writer == "projection" else "projection",
+            )
+            assert second_entered.wait(10), "second writer did not reach its read"
+            blockers = _wait_for_pg_blocker(
+                ctx,
+                waiter_pid=pids["second"],
+                blocker_pid=pids["first"],
+                operation_completed=second_read,
+            )
+            assert pids["first"] in blockers, "second writer read a stale unlocked row"
+        finally:
+            release_first.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+    result = store.get_task(tid)
+    assert result is not None
+    assert result.status == "completed"
+    assert result.terminal_seen is True
+    assert result.terminal_message_id == int(tid) + 20
+    assert ("control_terminal_observation" in result.diagnostics) is (
+        first_writer == "projection"
+    )
+
+
+def test_monitor_store_retirement_uses_final_verified_inspection_boundary(
+    tmp_path: Path,
+) -> None:
+    """A publication after the approved inspection survives collation retirement."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000800"
+    update = _update(tid, int(tid) + 10)
+    store.upsert_task_event(update)
+    store.delete_task_messages_after_raw_delete(
+        (update.message_id,), deleted_at_ns=int(tid) + 11
+    )
+    store.mark_summary_emitted(tid, int(tid) + 12)
+    store.mark_family_disposed(tid, int(tid) + 13, disposition_reason="stale_open")
+    store.mark_task_control_deleted(tid, int(tid) + 14)
+    late_message_ids: list[int] = []
+    queue_name = f"T{tid}.ctrl_out"
+
+    def inspect_then_publish(record: MonitorTaskCollationRecord) -> bool:
+        assert record.tid == tid
+        with ctx.broker() as broker:
+            assert broker.get_queue_stat(queue_name).total == 0
+            late_message_ids.append(broker.write(queue_name, "late terminal evidence"))
+        return True
+
+    result = store.retire_completed_collation_families(
+        limit=10, can_retire=inspect_then_publish
+    )
+    assert result.families_retired == 1
+    assert store.get_task(tid) is None
+    with ctx.broker() as broker:
+        retained = broker.peek_one(
+            queue_name, exact_timestamp=late_message_ids[0], with_timestamps=True
+        )
+    assert retained == ("late terminal evidence", late_message_ids[0])
+    late_observation = collation_module.ControlTerminalObservation(
+        source="task",
+        status="completed",
+        queue=queue_name,
+        message_id=late_message_ids[0],
+        reported_at_ns=None,
+        first_observed_at_ns=int(tid) + 120,
+    )
+    assert store.project_control_terminal_observation(tid, late_observation) is None
+    assert store.get_task(tid) is None
+
+
+def test_monitor_store_retirement_locks_summary_eligibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent correction waits until retirement decides the row's lifetime."""
+    ctx = _context(tmp_path)
+    if ctx.backend_name != "postgres":
+        pytest.skip("PostgreSQL retirement row-lock overlap regression")
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000810"
+    update = _update(tid, int(tid) + 10)
+    store.upsert_task_event(update)
+    store.delete_task_messages_after_raw_delete(
+        (update.message_id,), deleted_at_ns=int(tid) + 11
+    )
+    store.mark_summary_emitted(tid, int(tid) + 12)
+    store.mark_family_disposed(tid, int(tid) + 13, disposition_reason="stale_open")
+    store.mark_task_control_deleted(tid, int(tid) + 14)
+    selected = threading.Event()
+    release = threading.Event()
+    projection_entered = threading.Event()
+    projected = threading.Event()
+    pids: dict[str, int] = {}
+    selections = 0
+    original_select = (
+        monitor_store_module._MonitorTableAccess.list_retirable_task_collations
+    )
+    original_fetch = monitor_store_module._MonitorTableAccess.fetch_task
+
+    def select_and_pause(
+        access: monitor_store_module._MonitorTableAccess, **kwargs: Any
+    ) -> tuple[str, ...]:
+        nonlocal selections
+        result = original_select(access, **kwargs)
+        selections += 1
+        if selections == 2:
+            pids["retirement"] = int(
+                next(iter(access._session.run("SELECT pg_backend_pid()", fetch=True)))[
+                    0
+                ]
+            )
+            selected.set()
+            assert release.wait(10), "retirement was never released"
+        return result
+
+    def observe_projection(
+        access: monitor_store_module._MonitorTableAccess,
+        selected_tid: str,
+        *,
+        for_update: bool = False,
+    ) -> MonitorTaskCollationRecord | None:
+        if for_update:
+            pids["projection"] = int(
+                next(iter(access._session.run("SELECT pg_backend_pid()", fetch=True)))[
+                    0
+                ]
+            )
+            projection_entered.set()
+        return original_fetch(access, selected_tid, for_update=for_update)
+
+    monkeypatch.setattr(
+        monitor_store_module._MonitorTableAccess,
+        "list_retirable_task_collations",
+        select_and_pause,
+    )
+    monkeypatch.setattr(
+        monitor_store_module._MonitorTableAccess, "fetch_task", observe_projection
+    )
+    observation = collation_module.ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue=f"T{tid}.ctrl_out",
+        message_id=int(tid) + 100,
+        reported_at_ns=None,
+        first_observed_at_ns=int(tid) + 110,
+        error=WRAPPER_LOST_ERROR,
+    )
+
+    def project() -> MonitorTaskCollationRecord | None:
+        result = store.project_control_terminal_observation(tid, observation)
+        projected.set()
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        retirement = workers.submit(store.retire_completed_collation_families, limit=10)
+        try:
+            assert selected.wait(10), "retirement did not check SQL eligibility"
+            projection = workers.submit(project)
+            assert projection_entered.wait(10), "projection did not reach its read"
+            blockers = _wait_for_pg_blocker(
+                ctx,
+                waiter_pid=pids["projection"],
+                blocker_pid=pids["retirement"],
+                operation_completed=projected,
+            )
+            assert pids["retirement"] in blockers, (
+                "retirement left eligibility unlocked"
+            )
+        finally:
+            release.set()
+        assert retirement.result(timeout=10).families_retired == 1
+        assert projection.result(timeout=10) is None
+    assert store.get_task(tid) is None
+
+
+def test_monitor_store_task_log_only_terminal_update_preserves_disposed_summary(
+    tmp_path: Path,
+) -> None:
+    """Ordinary task-log updates do not open the control-correction report path."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tid = "1779000000000000820"
+    store.upsert_task_event(
+        _update(tid, int(tid) + 10, terminal=True, status="completed")
+    )
+    emitted_at_ns = int(tid) + 12
+    store.mark_summary_emitted(tid, emitted_at_ns)
+    store.mark_family_disposed(tid, int(tid) + 13, disposition_reason="terminal")
+    store.upsert_task_event(
+        _update(tid, int(tid) + 20, terminal=True, status="completed")
+    )
+    record = store.get_task(tid)
+    assert record is not None
+    assert record.terminal_message_id == int(tid) + 20
+    assert record.summary_emitted_at_ns == emitted_at_ns
+    assert record.disposition_at_ns == int(tid) + 13
+    assert store.list_summary_correction_ready_tasks(limit=10) == ()
+
+
+@pytest.mark.parametrize(
+    ("deadline_case", "expected_probes"),
+    (("none", 2), ("expired", 0), ("between_probes", 1)),
+)
+def test_monitor_store_retained_control_probes_obey_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deadline_case: str,
+    expected_probes: int,
+) -> None:
+    """Empty earlier rows cannot multiply broker probes or overrun the deadline."""
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    tids = tuple(str(1779000000000000900 + index) for index in range(4))
+    for tid in tids:
+        store.upsert_task_event(_update(tid, int(tid) + 10))
+        store.mark_summary_emitted(tid, int(tid) + 11)
+        store.mark_family_disposed(tid, int(tid) + 12, disposition_reason="stale_open")
+        store.mark_task_control_deleted(tid, int(tid) + 13)
+    queue_name = f"T{tids[-1]}.ctrl_out"
+    with ctx.broker() as broker:
+        broker.write(queue_name, "retained proof beyond this slice")
+        broker_type = type(broker)
+    probed: list[str] = []
+    clock = [2.0 if deadline_case == "expired" else 0.0]
+    original_stat = broker_type.get_queue_stat
+
+    def counted_stat(broker: Any, selected_queue: str) -> Any:
+        probed.append(selected_queue)
+        result = original_stat(broker, selected_queue)
+        if deadline_case == "between_probes":
+            clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(broker_type, "get_queue_stat", counted_stat)
+    deadline_kwargs: dict[str, float] = {}
+    if deadline_case != "none":
+        monkeypatch.setattr(
+            monitor_store_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: clock[0]),
+        )
+        deadline_kwargs["deadline_monotonic"] = 1.0
+    ready = store.list_terminal_control_cleanup_ready_tasks(
+        limit=2, now_ns=int(tids[-1]) + 20, retention_seconds=0.0, **deadline_kwargs
+    )
+    assert probed == [f"T{tid}.ctrl_out" for tid in tids[:expected_probes]]
+    assert ready == ()
+    # A larger fresh slice reaches the surviving producer row through the same
+    # real broker path, proving the empty result above is a budget boundary.
+    ready = store.list_terminal_control_cleanup_ready_tasks(
+        limit=4, now_ns=int(tids[-1]) + 20, retention_seconds=0.0
+    )
+    assert tuple(record.tid for record in ready) == (tids[-1],)

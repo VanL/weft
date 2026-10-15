@@ -5,7 +5,7 @@ queues, query Monitor tables, or decide deletion eligibility.
 
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17], [IMPL.11]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.13], [OBS.17], [IMPL.11]
 - docs/specifications/01-Core_Components.md [CC-2.2.1]
 """
 
@@ -31,6 +31,7 @@ from weft._constants import (
 )
 from weft.core.monitor.lifetime_report import (
     project_lifetime_report_for_external_json,
+    project_terminal_provenance_for_external_json,
 )
 
 
@@ -508,7 +509,7 @@ def disabled_external_task_log_status(
 def project_task_summary_for_external_json(
     task_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Return an external copy with exact Monitor message IDs formatted."""
+    """Format exact Monitor IDs, including terminal observations [MF-5]."""
 
     projected = dict(task_summary)
     for field in (
@@ -519,6 +520,11 @@ def project_task_summary_for_external_json(
         message_id = projected.get(field)
         if message_id is not None:
             projected[field] = format_message_id(message_id)
+    diagnostics = task_summary.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        projected["diagnostics"] = project_terminal_provenance_for_external_json(
+            diagnostics
+        )
     return projected
 
 

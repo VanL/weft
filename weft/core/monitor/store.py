@@ -11,7 +11,7 @@ Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.4]
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4], [SB-0.4a]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.1], [OBS.17]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.1], [OBS.13.13], [OBS.17]
 """
 
 # --- Section map ----------------------------------------------------------
@@ -34,7 +34,7 @@ import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 
 from simplebroker import BrokerSession, BrokerTarget, Queue, format_message_id
@@ -50,6 +50,7 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     INTERNAL_SERVICE_ROLES,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
+    QUEUE_CTRL_OUT_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
@@ -64,7 +65,12 @@ from weft._constants import (
 )
 from weft.context import WeftContext, service_context_key
 from weft.core.monitor import sql as monitor_sql
-from weft.core.monitor.collation import MonitorTaskEventUpdate
+from weft.core.monitor.collation import (
+    ControlTerminalObservation,
+    MonitorTaskEventUpdate,
+    select_control_terminal_observation,
+    selected_terminal_identity,
+)
 from weft.core.monitor.lifetime_report import (
     project_lifetime_report_for_external_json,
     restore_lifetime_report_from_external_json,
@@ -1564,6 +1570,7 @@ class _MonitorTableAccess:
                 )
             )
             _restore_lifecycle_message_ids(objects[2])
+            _restore_diagnostics_message_ids(objects[4])
             _restore_bookkeeping_message_ids(objects[5])
 
         for context_key, report_id, record_type, body_json in self._session.run(
@@ -1758,12 +1765,21 @@ class _MonitorTableAccess:
         )
         return len(selected)
 
-    def fetch_task(self, tid: str) -> MonitorTaskCollationRecord | None:
+    def fetch_task(
+        self,
+        tid: str,
+        *,
+        for_update: bool = False,
+    ) -> MonitorTaskCollationRecord | None:
         """Read one task collation record."""
 
         rows = list(
             self._session.run(
-                monitor_sql.select_task(self._tables.task_collations, _task_columns),
+                monitor_sql.select_task(
+                    self._tables.task_collations,
+                    _task_columns,
+                    for_update=for_update and self._backend_name != "sqlite",
+                ),
                 (self._context_key, tid),
                 fetch=True,
             )
@@ -1818,6 +1834,57 @@ class _MonitorTableAccess:
                 return int(checkpoint)
             return int(now_ns)
         return _retention_cutoff_ns(now_ns, retention_seconds)
+
+    def list_control_reconciliation_candidates(
+        self,
+        *,
+        limit: int,
+        after_tid: str | None = None,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Read the next retained control-inspection window. Spec: [OBS.13.13]."""
+
+        if limit <= 0:
+            return ()
+        parameters = (
+            (self._context_key, after_tid, int(limit))
+            if after_tid is not None
+            else (self._context_key, int(limit))
+        )
+        rows = self._session.run(
+            monitor_sql.select_control_reconciliation_candidates(
+                self._tables.task_collations,
+                _task_columns,
+                after_tid=after_tid is not None,
+            ),
+            parameters,
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
+
+    def list_summary_correction_ready_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorSummaryReadyTask, ...]:
+        """Read disposed rows with invalidated summary verification. Spec: [OBS.13.13]."""
+
+        if limit <= 0:
+            return ()
+        rows = self._session.run(
+            monitor_sql.select_summary_correction_ready_tasks(
+                self._tables.task_collations,
+                _task_columns,
+            ),
+            (self._context_key, int(limit)),
+            fetch=True,
+        )
+        return tuple(
+            MonitorSummaryReadyTask(
+                record=record,
+                close_reason=record.disposition_reason or "terminal",
+            )
+            for record in map(_record_from_row, rows)
+        )
 
     def list_summary_ready_tasks(
         self,
@@ -1936,6 +2003,25 @@ class _MonitorTableAccess:
                 _task_columns,
             ),
             (self._context_key, cutoff_ns, int(limit)),
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
+
+    def list_retained_open_control_cleanup_candidates(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Return disposed open families with an existing control-cleanup mark."""
+
+        if limit <= 0:
+            return ()
+        rows = self._session.run(
+            monitor_sql.select_retained_open_control_cleanup_candidates(
+                self._tables.task_collations,
+                _task_columns,
+            ),
+            (self._context_key, int(limit)),
             fetch=True,
         )
         return tuple(_record_from_row(row) for row in rows)
@@ -2297,6 +2383,7 @@ class _MonitorTableAccess:
         *,
         limit: int,
         older_than_ns: int | None = None,
+        for_update: bool = False,
     ) -> tuple[str, ...]:
         """Return completed Monitor collation families safe to remove."""
 
@@ -2307,6 +2394,7 @@ class _MonitorTableAccess:
                 self._tables.task_collations,
                 self._tables.task_messages,
                 apply_retention_cutoff=older_than_ns is not None,
+                for_update=for_update and self._backend_name != "sqlite",
             ),
             (
                 (self._context_key, older_than_ns, int(limit))
@@ -2591,7 +2679,7 @@ class MonitorStore:
                     updates_by_tid.setdefault(update.tid, []).append(update)
 
                 for tid, tid_updates in updates_by_tid.items():
-                    merged = access.fetch_task(tid)
+                    merged = access.fetch_task(tid, for_update=True)
                     for update in tid_updates:
                         merged = _merge_record(
                             self._context_key,
@@ -2667,6 +2755,74 @@ class MonitorStore:
                 records.extend(access.fetch_tasks(chunk))
         return tuple(records)
 
+    def project_control_terminal_observation(
+        self,
+        tid: str,
+        observation: ControlTerminalObservation,
+    ) -> MonitorTaskCollationRecord | None:
+        """Project a complete control inspection onto an exact retained collation.
+
+        Re-read within the write transaction: task-log proof committed while the
+        broker scan ran wins. Both this path and task-log merge lock the existing
+        row before reading it (SQLite serializes its write transaction). A control
+        ID never advances task-log bounds or changes terminal proof/reserved
+        cleanup authority. Retired rows stay gone.
+        Spec: [MF-5], [OBS.13.13]
+        """
+
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            current = access.fetch_task(tid, for_update=True)
+            if current is None or current.terminal_seen:
+                return current
+            previous = ControlTerminalObservation.from_dict(
+                current.diagnostics.get("control_terminal_observation")
+            )
+            selected = select_control_terminal_observation(previous, observation)
+            if previous is not None and selected.identity() == previous.identity():
+                return current
+            diagnostics = dict(current.diagnostics)
+            diagnostics["control_terminal_observation"] = selected.to_dict()
+            projected = replace(
+                current,
+                status=selected.status,
+                diagnostics=diagnostics,
+                summary_emitted_at_ns=None,
+                updated_at_ns=time.time_ns(),
+            )
+            access.upsert_record(projected)
+            return projected
+
+    def list_control_reconciliation_candidates(
+        self,
+        *,
+        limit: int,
+        after_tid: str | None = None,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Seek retained families without task-log proof. Spec: [MF-5], [OBS.13.13]."""
+
+        if limit <= 0:
+            return ()
+        with self._sidecar_session() as session:
+            return self._access(session).list_control_reconciliation_candidates(
+                limit=limit,
+                after_tid=after_tid,
+            )
+
+    def list_summary_correction_ready_tasks(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[MonitorSummaryReadyTask, ...]:
+        """Read corrections without reopening disposition. Spec: [MF-5], [OBS.13.13]."""
+
+        if limit <= 0:
+            return ()
+        with self._sidecar_session() as session:
+            return self._access(session).list_summary_correction_ready_tasks(
+                limit=limit
+            )
+
     def list_summary_ready_tasks(
         self,
         *,
@@ -2699,17 +2855,63 @@ class MonitorStore:
         limit: int,
         now_ns: int,
         retention_seconds: float,
+        deadline_monotonic: float | None = None,
     ) -> tuple[MonitorTaskCollationRecord, ...]:
-        """Return retained terminal families ready for control cleanup."""
+        """Return cleanup candidates within the family and broker-probe budgets.
+
+        A deadline bounds work between broker calls, not an individual call.
+        Spec: [MF-5], [OBS.13.13]
+        """
 
         if limit <= 0:
             return ()
         with self._sidecar_session() as session:
-            return self._access(session).list_terminal_control_cleanup_ready_tasks(
-                limit=limit,
-                now_ns=now_ns,
-                retention_seconds=retention_seconds,
+            access = self._access(session)
+            ready = list(
+                access.list_terminal_control_cleanup_ready_tasks(
+                    limit=limit,
+                    now_ns=now_ns,
+                    retention_seconds=retention_seconds,
+                )
             )
+            retained_open = (
+                access.list_retained_open_control_cleanup_candidates(
+                    limit=int(limit),
+                )
+                if len(ready) < limit
+                else ()
+            )
+        if retained_open and (
+            deadline_monotonic is None or time.monotonic() < deadline_monotonic
+        ):
+            ready_tids = {record.tid for record in ready}
+            connection = (
+                self._queue.get_connection()
+                if self._queue is not None
+                else self._context.broker()
+            )
+            with connection as broker:
+                for record in retained_open:
+                    if (
+                        deadline_monotonic is not None
+                        and time.monotonic() >= deadline_monotonic
+                    ):
+                        break
+                    if (
+                        record.tid in ready_tids
+                        or record.service_classification().is_service_record
+                    ):
+                        continue
+                    stat = broker.get_queue_stat(
+                        f"T{record.tid}.{QUEUE_CTRL_OUT_SUFFIX}"
+                    )
+                    if stat is not None and stat.total > 0:
+                        ready.append(record)
+                        ready_tids.add(record.tid)
+                        if len(ready) >= limit:
+                            break
+            ready.sort(key=lambda item: (item.last_message_id, item.tid))
+        return tuple(ready[: int(limit)])
 
     def list_stale_service_owner_candidates(
         self,
@@ -3084,6 +3286,7 @@ class MonitorStore:
         limit: int,
         retired_at_ns: int | None = None,
         retention_seconds: float = 0.0,
+        can_retire: Callable[[MonitorTaskCollationRecord], bool] | None = None,
     ) -> MonitorStoreRetirementResult:
         """Physically remove completed Monitor collation families.
 
@@ -3091,9 +3294,11 @@ class MonitorStore:
         are removed only after raw deletion, summary emission, disposition,
         task-local control cleanup, any required reserved cleanup proof
         (``reserved_cleanup_checked_at_ns`` when ``reserved_probe_needed``),
-        and the configured status-retention window are all recorded.
+        and the configured status-retention window are all recorded. The caller's
+        final ``can_retire`` inspection precedes the sidecar transaction; later
+        queue publications survive even if this derived collation is retired.
 
-        Spec: [MF-5], [OBS.13]
+        Spec: [MF-5], [OBS.13], [OBS.13.13]
         """
 
         if limit <= 0:
@@ -3102,21 +3307,39 @@ class MonitorStore:
         if retention_seconds > 0:
             now_ns = int(retired_at_ns if retired_at_ns is not None else time.time_ns())
             older_than_ns = now_ns - int(float(retention_seconds) * 1_000_000_000)
+        # The caller's final verified inspection is the retained-control boundary.
+        # Later publications may outlive this collation; this method only deletes
+        # Monitor-owned rows. Queue operations cannot join a sidecar transaction
+        # [SB-0.4a]. Recheck SQL eligibility after inspection so a committed
+        # summary invalidation still prevents retirement [OBS.13.13]. Lock the
+        # eligible rows until deletion, sharing the projection/ingest protocol.
+        with self._sidecar_session() as session:
+            access = self._access(session)
+            candidates = access.list_retirable_task_collations(
+                limit=int(limit),
+                older_than_ns=older_than_ns,
+            )
+            records = access.fetch_tasks(candidates)
+        approved = {
+            record.tid for record in records if can_retire is None or can_retire(record)
+        }
+        if not approved:
+            return MonitorStoreRetirementResult()
         retired = 0
-        remaining = int(limit)
-        while remaining > 0:
-            chunk_limit = min(remaining, self._config.write_batch_size)
-            with self._sidecar_session(transaction=True) as session:
-                access = self._access(session)
-                chunk = access.list_retirable_task_collations(
-                    limit=chunk_limit,
+        with self._sidecar_session(transaction=True) as session:
+            access = self._access(session)
+            eligible = tuple(
+                tid
+                for tid in access.list_retirable_task_collations(
+                    limit=int(limit),
                     older_than_ns=older_than_ns,
+                    for_update=True,
                 )
-                if not chunk:
-                    break
+                if tid in approved
+            )
+            for chunk in _chunks(eligible, self._config.write_batch_size):
                 access.delete_task_collations(chunk)
                 retired += len(chunk)
-            remaining -= len(chunk)
         return MonitorStoreRetirementResult(families_retired=retired)
 
     def upsert_deferred_write(
@@ -3261,7 +3484,9 @@ def _record_from_row(row: tuple[Any, ...]) -> MonitorTaskCollationRecord:
         state=_json_dict(values["state_json"]),
         lifecycle=_restore_lifecycle_message_ids(_json_dict(values["lifecycle_json"])),
         resources=_json_dict(values["resources_json"]),
-        diagnostics=_json_dict(values["diagnostics_json"]),
+        diagnostics=_restore_diagnostics_message_ids(
+            _json_dict(values["diagnostics_json"])
+        ),
         bookkeeping=_restore_bookkeeping_message_ids(
             _json_dict(values["bookkeeping_json"])
         ),
@@ -3348,11 +3573,41 @@ def _merge_record(
         terminal_event = update.terminal_event
         terminal_status = update.terminal_status
 
+    control_observation = ControlTerminalObservation.from_dict(
+        existing.diagnostics.get("control_terminal_observation")
+    )
     status = existing.status
     if latest_update:
         status = update.terminal_status or update.status or existing.status
     if terminal_status is not None:
         status = terminal_status
+    elif control_observation is not None:
+        status = control_observation.status
+
+    diagnostics = _merge_latest_dict(
+        existing.diagnostics,
+        update.diagnostics,
+        latest_update,
+    )
+    previous_identity = selected_terminal_identity(
+        terminal_seen=existing.terminal_seen,
+        terminal_status=existing.terminal_status,
+        terminal_message_id=existing.terminal_message_id,
+        diagnostics=existing.diagnostics,
+    )
+    next_identity = selected_terminal_identity(
+        terminal_seen=terminal_seen,
+        terminal_status=terminal_status,
+        terminal_message_id=terminal_message_id,
+        diagnostics=diagnostics,
+    )
+    # Only control projections introduce correction reports. Ordinary disposed
+    # task-log families keep their existing summary lifecycle [OBS.13.13].
+    summary_emitted_at_ns = (
+        None
+        if control_observation is not None and previous_identity != next_identity
+        else existing.summary_emitted_at_ns
+    )
 
     return MonitorTaskCollationRecord(
         context_key=context_key,
@@ -3395,11 +3650,7 @@ def _merge_record(
             latest_update,
         ),
         resources=_merge_resources(existing.resources, update.resources),
-        diagnostics=_merge_latest_dict(
-            existing.diagnostics,
-            update.diagnostics,
-            latest_update,
-        ),
+        diagnostics=diagnostics,
         bookkeeping=_merge_latest_dict(
             existing.bookkeeping,
             update.bookkeeping,
@@ -3408,7 +3659,7 @@ def _merge_record(
         reserved_probe_needed=(
             existing.reserved_probe_needed or update.reserved_probe_needed
         ),
-        summary_emitted_at_ns=existing.summary_emitted_at_ns,
+        summary_emitted_at_ns=summary_emitted_at_ns,
         raw_deleted_at_ns=None,
         suspect_reason=existing.suspect_reason,
         suspect_at_ns=existing.suspect_at_ns,
@@ -3450,7 +3701,7 @@ def _record_values(record: MonitorTaskCollationRecord) -> tuple[Any, ...]:
         _json(record.state),
         _json(_project_lifecycle_message_ids(record.lifecycle)),
         _json(record.resources),
-        _json(record.diagnostics),
+        _json(_project_diagnostics_message_ids(record.diagnostics)),
         _json(_project_bookkeeping_message_ids(record.bookkeeping)),
         int(record.reserved_probe_needed),
         record.summary_emitted_at_ns,
@@ -3615,6 +3866,36 @@ def _restore_lifecycle_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
             "lifecycle_json.checkpoint",
         )
         restored["checkpoint"] = checkpoint_restored
+    return restored
+
+
+def _project_diagnostics_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    projected = dict(value)
+    observation = projected.get("control_terminal_observation")
+    if isinstance(observation, Mapping):
+        owned = dict(observation)
+        _project_owned_message_id(
+            owned,
+            "message_id",
+            "diagnostics_json.control_terminal_observation",
+            required=True,
+        )
+        projected["control_terminal_observation"] = owned
+    return projected
+
+
+def _restore_diagnostics_message_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    restored = dict(value)
+    observation = restored.get("control_terminal_observation")
+    if isinstance(observation, Mapping):
+        owned = dict(observation)
+        _restore_owned_message_id(
+            owned,
+            "message_id",
+            "diagnostics_json.control_terminal_observation",
+            required=True,
+        )
+        restored["control_terminal_observation"] = owned
     return restored
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -20,7 +21,10 @@ from weft.core.monitor.lifetime_report import (
     project_lifetime_report_for_external_json,
     restore_lifetime_report_from_external_json,
 )
-from weft.core.monitor.store import MonitorTaskCollationRecord
+from weft.core.monitor.store import (
+    MonitorDeferredWriteRecord,
+    MonitorTaskCollationRecord,
+)
 from weft.core.queue_window import QueueWindowRow
 
 pytestmark = [pytest.mark.shared]
@@ -122,6 +126,137 @@ def test_collation_lifetime_report_promotes_taskspec_and_monitor_context() -> No
     assert report["monitor"]["last_message_id"] == 1779000000000000003
     assert report["monitor"]["terminal_message_id"] == 1779000000000000003
     assert report["monitor"]["collation_kind"] == "user_task"
+
+
+def _control_record() -> MonitorTaskCollationRecord:
+    """A control-only outcome retains the absence of task-log terminal proof."""
+
+    return replace(
+        _record(),
+        status="failed",
+        terminal_seen=False,
+        terminal_event=None,
+        terminal_status=None,
+        terminal_message_id=None,
+        diagnostics={
+            "control_terminal_observation": {
+                "queue": "T1779000000000000001.ctrl_out",
+                "message_id": 1779000000000000101,
+                "source": "manager",
+                "status": "failed",
+                "reported_at_ns": None,
+                "first_observed_at_ns": 1779000000000000200,
+                "error": "wrapper lost",
+            }
+        },
+    )
+
+
+def _control_report(record: MonitorTaskCollationRecord) -> dict[str, Any]:
+    return build_collation_lifetime_report(
+        record,
+        monitor_tid="1779000000000000999",
+        emitted_at_ns=1779000000000000300,
+        close_reason="stale",
+    )
+
+
+def test_control_report_preserves_history_and_identifies_task_log_supersession() -> (
+    None
+):
+    """Reporting must distinguish its verdict from superseded control history."""
+
+    projected = _control_record()
+    first = _control_report(projected)
+    corrected = _control_report(
+        replace(
+            projected,
+            status="completed",
+            terminal_seen=True,
+            terminal_event="work_completed",
+            terminal_status="completed",
+            terminal_message_id=1779000000000000003,
+        )
+    )
+
+    assert first["lifetime"]["status"] == "failed"
+    assert first["lifetime"]["terminal_seen"] is False
+    assert first["lifetime"]["terminal_status"] is None
+    observation = projected.diagnostics["control_terminal_observation"]
+    assert first["monitor"]["control_terminal_observation"] == observation
+    assert first["monitor"]["selected_terminal_evidence"] == {
+        "queue": "T1779000000000000001.ctrl_out",
+        "message_id": 1779000000000000101,
+        "source": "manager",
+        "status": "failed",
+    }
+    assert corrected["monitor"]["control_terminal_observation"] == observation
+    assert corrected["monitor"]["selected_terminal_evidence"] == {
+        "queue": "weft.log.tasks",
+        "message_id": 1779000000000000003,
+        "source": "task",
+        "status": "completed",
+    }
+    assert corrected["report_id"] != first["report_id"]
+    assert set(first["lifetime"]) == EXPECTED_LIFETIME_KEYS
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("queue", "T1779000000000000001.alternate_ctrl_out"),
+        ("message_id", 1779000000000000102),
+        ("source", "task"),
+        ("status", "completed"),
+    ],
+)
+def test_control_report_identity_changes_with_selected_evidence(
+    field: str, value: str | int
+) -> None:
+    """Control corrections cannot collide when global task-log bounds stay fixed."""
+
+    original = _control_record()
+    observation = dict(original.diagnostics["control_terminal_observation"])
+    observation[field] = value
+    changed = replace(
+        original,
+        diagnostics={"control_terminal_observation": observation},
+    )
+
+    assert (
+        _control_report(original)["report_id"] != _control_report(changed)["report_id"]
+    )
+
+
+def test_control_report_identity_excludes_observation_and_emit_times() -> None:
+    original = _control_record()
+    observation = dict(original.diagnostics["control_terminal_observation"])
+    observation["first_observed_at_ns"] = 1779000000000000900
+    retry = replace(
+        original,
+        diagnostics={"control_terminal_observation": observation},
+    )
+    first = _control_report(original)
+    second = build_collation_lifetime_report(
+        retry,
+        monitor_tid="1779000000000000998",
+        emitted_at_ns=1779000000000000901,
+        close_reason="stale",
+    )
+
+    assert first["report_id"] == second["report_id"]
+
+
+def test_control_report_retry_identity_survives_unrelated_global_log_updates() -> None:
+    """Pending report retries keep the selected evidence identity as logs advance."""
+
+    original = _control_record()
+    advanced = replace(original, last_message_id=1779000000000000004)
+    first = _control_report(original)
+    retry = _control_report(advanced)
+
+    assert first["monitor"]["last_message_id"] != retry["monitor"]["last_message_id"]
+    assert first["report_id"] == retry["report_id"]
 
 
 def test_lifetime_report_id_is_stable_across_emit_times() -> None:
@@ -251,6 +386,36 @@ def test_lifetime_salvage_projects_and_restores_nested_message_ids() -> None:
         == "1779000000000000012"
     )
     assert restored["observations"]["task_local_salvage"] == salvage
+
+
+def test_control_report_formats_exact_nested_ids_without_changing_times() -> None:
+    """Known provenance IDs use the wire format; opaque data remains untouched."""
+
+    report = _control_report(_control_record())
+    report["observations"]["opaque"] = {"message_id": 1779000000000000500}
+    projected = project_lifetime_report_for_external_json(report)
+    restored = MonitorDeferredWriteRecord(
+        context_key="test",
+        report_id=report["report_id"],
+        record_type="task_lifetime_report",
+        body_json=json.dumps(projected),
+        created_at_ns=1779000000000000300,
+        updated_at_ns=1779000000000000300,
+        first_external_error="permission denied",
+        last_external_error="permission denied",
+        attempt_count=1,
+        last_attempt_at_ns=1779000000000000300,
+    ).body()
+
+    for field in ("control_terminal_observation", "selected_terminal_evidence"):
+        assert projected["monitor"][field]["message_id"] == "1779000000000000101"
+        assert restored["monitor"][field]["message_id"] == 1779000000000000101
+        assert report["monitor"][field]["message_id"] == 1779000000000000101
+    observation = projected["monitor"]["control_terminal_observation"]
+    assert observation["reported_at_ns"] is None
+    assert observation["first_observed_at_ns"] == 1779000000000000200
+    assert projected["observations"]["opaque"]["message_id"] == 1779000000000000500
+    assert projected["report_id"] == restored["report_id"] == report["report_id"]
 
 
 def test_lifetime_salvage_row_set_participates_in_report_identity() -> None:

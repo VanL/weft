@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
-from weft.core.monitor.collation import update_from_task_log_row
+from weft._constants import (
+    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES,
+    WRAPPER_LOST_ERROR,
+)
+from weft.core.monitor.collation import (
+    ControlTerminalObservation,
+    select_control_terminal_observation,
+    selected_terminal_identity,
+    update_from_task_log_row,
+)
 from weft.core.queue_window import DecodedQueueWindowRow, QueueWindowRow
+from weft.core.task_evidence import QueueAckTarget, TaskEvidenceSnapshot
 
 pytestmark = [pytest.mark.shared]
 
@@ -121,3 +132,88 @@ def test_monitor_collation_ignores_malformed_rows() -> None:
     )
 
     assert update_from_task_log_row(row) is None
+
+
+@pytest.mark.parametrize("task_message_id", [10, 30])
+def test_control_projection_retains_task_verdict_against_supervisor_fallback(
+    task_message_id: int,
+) -> None:
+    """Persisted task evidence keeps authority even after its queue row disappears."""
+    supervisor = ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue="T1.ctrl_out",
+        message_id=20,
+        reported_at_ns=500,
+        first_observed_at_ns=1000,
+        error=WRAPPER_LOST_ERROR,
+    )
+    task = ControlTerminalObservation(
+        source="task",
+        status="completed",
+        queue="T1.ctrl_out",
+        message_id=task_message_id,
+        reported_at_ns=100,
+        first_observed_at_ns=2000,
+    )
+    assert select_control_terminal_observation(supervisor, task) == task
+    assert select_control_terminal_observation(task, supervisor) == task
+    replay = replace(task, first_observed_at_ns=3000)
+    assert (
+        select_control_terminal_observation(task, replay).first_observed_at_ns == 2000
+    )
+    newer = replace(task, message_id=40, status="failed")
+    assert select_control_terminal_observation(task, newer) == newer
+
+
+def test_selected_terminal_identity_prioritizes_task_log_over_control_history() -> None:
+    """Report correction and store invalidation share one selected evidence identity."""
+    observation = ControlTerminalObservation(
+        source="manager",
+        status="failed",
+        queue="T1.ctrl_out",
+        message_id=20,
+        reported_at_ns=None,
+        first_observed_at_ns=1000,
+        error=WRAPPER_LOST_ERROR,
+    )
+    diagnostics = {"control_terminal_observation": observation.to_dict()}
+    assert selected_terminal_identity(
+        terminal_seen=False,
+        terminal_status=None,
+        terminal_message_id=None,
+        diagnostics=diagnostics,
+    ) == ("T1.ctrl_out", 20, "manager", "failed")
+    assert selected_terminal_identity(
+        terminal_seen=True,
+        terminal_status="completed",
+        terminal_message_id=10,
+        diagnostics=diagnostics,
+    ) == (WEFT_GLOBAL_LOG_QUEUE, 10, "task", "completed")
+
+
+def test_control_observation_bounds_unicode_error_without_losing_identity() -> None:
+    """The persisted diagnostic cannot retain an unbounded producer error."""
+    observation = ControlTerminalObservation.from_snapshot(
+        TaskEvidenceSnapshot(
+            tid="1",
+            status="failed",
+            classification="terminal_ctrl_out",
+            source="ctrl_out",
+            terminal=True,
+            error="α" * WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES,
+            observed_at=123,
+            metadata={"terminal_source": "task", "terminal_reported_at_ns": 42},
+            ack_targets=(QueueAckTarget(queue="T1.ctrl_out", message_id=123),),
+        ),
+        first_observed_at_ns=1000,
+    )
+    assert observation.error is not None
+    assert (
+        len(observation.error.encode("utf-8")) <= WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES
+    )
+    assert observation.error.startswith("α")
+    assert observation.identity() == ("T1.ctrl_out", 123, "task", "failed")
+    assert observation.reported_at_ns == 42
+    assert observation.first_observed_at_ns == 1000
+    assert ControlTerminalObservation.from_dict(observation.to_dict()) == observation

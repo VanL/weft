@@ -37,7 +37,7 @@ always be rolled back from the public request queue.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
-- [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md) proposes Monitor consumption of retained supervisor evidence under [MA-1.6a]; its wording is not promoted.
+- [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md) implements Monitor projection of retained supervisor evidence under [MA-1.6a] and [MF-5].
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) is superseded by measured admission under [MA-1.8].
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements local completion proof, incremental sentinel membership, and exact pending service-request references.
@@ -338,6 +338,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    arrives later. Bounded Manager shutdown may end retries at its existing deadline; it
    leaves unresolved reserved work under the existing recovery policy rather than
    asserting successful acknowledgement. Successful-launch acknowledgement follows snapshot handoff or positive settlement under [MF-6].
+   TaskMonitor may project exact retained local terminal observations into its
+   operational collation under [MF-5] and [OBS.13.13]. This adds no Manager
+   publication or task-log lifecycle event and grants no deletion authority.
    Ordinary
    service reconciliation and leadership convergence run on the slower
    approximately one-second timer while idle. Queue activity still wakes the

@@ -622,6 +622,26 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     cached details, not new policy identities. Manager `task_spawned` row
     trimming is reported through `task_log.retention` reason counts and does
     not add a sixth policy identity.
+  - **OBS.13.13**: Exact retained terminal ctrl_out observations may update
+    operational collation status and provenance under [MF-5], including for
+    disposed families. They never create task-owned lifecycle evidence or
+    change terminal task-log proof fields, reserved deletion authority, or
+    global-log bounds. Persisted task-owned control observations outrank later
+    Manager fallback; task-log terminal proof outranks both. Changed selected
+    evidence invalidates summary verification and requires a corrected report
+    with distinct stable evidence identity before cleanup/retirement. Bounded
+    finite-horizon inspection shares the existing maintenance owner and budgets;
+    partial or failed inspection is retryable, not absence proof. For families
+    lacking task-log proof, ctrl_out deletion covers only the inspected and
+    report-verified horizon. Later publications survive the covered deletion.
+    Full cleanup and retirement use a final successful queue-stat inspection with total == 0
+    (pending and claimed rows). Queue inspection and sidecar retirement are
+    separate: publication after that boundary may outlive the collation without
+    another correction report. Preserve those rows during this retirement;
+    ordinary dead-TID retention/reporting and task-log ingestion are unchanged.
+    Control reconciliation cannot recreate retired collations. Failed inspection
+    defers retirement. Existing active-owner, launch-custody, high-water, and
+    retention gates remain mandatory.
 - **OBS.14**: claimed outbox residue is recovery evidence, not decoded result
   evidence. Status/result readers may surface
   `claimed_result_without_terminal`, but they must not delete, unclaim, or
@@ -1403,7 +1423,7 @@ doc:
 
 ## Related Documents
 
-- Proposed plan: [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md). Existing cleanup requirements remain the governing contract until promotion.
+- Implementation plan: [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md), implementing [OBS.13.13] without broadening [OBS.13.7].
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)
