@@ -681,9 +681,13 @@ Recommended prompt:
 > Look for errors, bad ideas, latent ambiguities, and performative
 > overengineering — process, abstraction, or ceremony that does not
 > address a real risk or improve correctness; recommending removal is as
-> valuable as recommending additions. Don't do any implementation, but
-> answer carefully: Could you implement this confidently and correctly
-> against the delta as promoted, if asked?
+> valuable as recommending additions. Analyze the plan as a whole,
+> including all amendments, with two lenses: (1) is this what an expert
+> developer would do and think well-crafted or elegant? (2) is there a
+> known algorithm or computer science principle that should be applied
+> here? Don't do any implementation, but answer carefully: Could you
+> implement this confidently and correctly against the delta as promoted,
+> if asked?
 
 The author must then consider each review point explicitly and either update
 the plan, explain why the current path is still the best choice, or record why
@@ -698,11 +702,15 @@ creep during implementation.
 
 ### 10. Fresh-Eyes Review
 
-Before considering the plan complete, re-read it as if you are a new engineer
-who knows Python but not Weft.
+Before considering the plan complete, re-read the plan as a whole — including
+all amendments — as if you are a new engineer who knows Python but not Weft.
 
 Check for:
 
+- whether this is what an expert developer would do and think well-crafted or
+  elegant
+- whether there is a known algorithm or computer science principle that should
+  be applied here
 - missing file paths
 - ambiguous phrases like "update the flow" or "adjust the logic"
 - unstated invariants

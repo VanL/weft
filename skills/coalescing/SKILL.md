@@ -236,14 +236,18 @@ For each tripped or requested fold:
    it exists, as metadata.
 5. **Archive phase — remove raw entries from the working file once git
    history holds the verified source cue.** Only after the distillation is
-   written, its links resolve, and `source_sha` is verified reachable
-   from a retained ref (`git show <source_sha>:docs/lessons.md`), remove
-   the folded raw entries from `docs/lessons.md` and advance the lessons
-   watermark (or append to `## Fold Records` / `### Noncontiguous Lesson
-   Fold Records`). Git history + the verified `source_sha` cue is the
-   archive. In an uncommitted-review session where the raw entries are
-   not yet in a committed `source_sha`, stop after step 4: present the
-   drafts and candidates, remove nothing, advance nothing.
+   written, its links resolve, and `source_sha` is verified as a commit
+   object (`git cat-file -e <source_sha>^{commit}`), verified to contain
+   the raw material (`git show <source_sha>:docs/lessons.md`), and
+   verified reachable from a retained ref
+   (`git merge-base --is-ancestor <source_sha> HEAD`, with remote ancestry
+   reported by `bin/coalesce-check`), remove the folded raw entries from
+   `docs/lessons.md` and advance the lessons watermark (or append to
+   `## Fold Records` / `### Noncontiguous Lesson Fold Records`). Git
+   history + the verified `source_sha` cue is the archive. In an
+   uncommitted-review session where the raw entries are not yet in a
+   committed `source_sha`, stop after step 4: present the drafts and
+   candidates, remove nothing, advance nothing.
 6. Decay evidence is multi-signal: absence of citation alone never
    justifies a fold — agents follow rules without citing them. Weigh
    recent incidents, test coverage, review recurrence, last validation,

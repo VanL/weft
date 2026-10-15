@@ -75,6 +75,10 @@ finding regardless of how reasonable the surrounding paragraph sounds.
    If the work or a review suggestion reverses a standing invariant or refused
    alternative, flag `RECONSIDERATION REQUESTED` for human decision rather than
    treating it as a routine edit.
+4. **Whole-plan craft and CS/algorithmic principle** — analyze the plan as a
+   whole, including all amendments, with two lenses: (1) is this what an expert
+   developer would do and think well-crafted or elegant? (2) is there a known
+   algorithm or computer science principle that should be applied here?
 
 ## Planning Review Prompt
 
@@ -86,6 +90,12 @@ Recommended prompt:
 > Watch out for performative overengineering — tests or processes that
 > add ceremony without meaningfully addressing a real-world risk
 > identified in the code.
+>
+> Analyze the plan as a whole, including all amendments, with two lenses:
+> 1. Is this what an expert developer would do and think well-crafted or
+>    elegant?
+> 2. Is there a known algorithm or computer science principle that should be
+>    applied here?
 >
 > Verify the plan's causal premise against the live code and check that
 > every planned test is falsifiable (would fail without the fix and does

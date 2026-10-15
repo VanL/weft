@@ -1,16 +1,16 @@
 # Crystallize Program Theory
 
-Status: Active — adopted from agent-theory @ `8f41a9d` via
-`docs/plans/2026-10-14-agent-theory-delta-wave-plan.md`.
+Status: Active — adopted from agent-theory @ `8f41a9d` and updated to
+`296a7cd` via `docs/plans/2026-10-14-agent-theory-delta-wave-plan.md`.
 
 ## Purpose
 
-Distill the live mental model of the program — its core concepts, authority and
-ownership boundaries, key invariants, refused alternatives, and open
-uncertainties — into `docs/program-theory.md` and, where warranted, local module
-theory notes. This skill turns scattered explanations from plans, reviews,
-specs, and conversations into a concise, citation-backed account that guides
-product-scope judgment and prevents design drift.
+Distill the live mental model of the program — its core concepts, desired feel
+("taste up front"), authority and ownership boundaries, key invariants, refused
+alternatives, and open uncertainties — into `docs/program-theory.md` and, where
+warranted, local module theory notes. This skill turns scattered explanations
+from plans, reviews, specs, and conversations into a concise, citation-backed
+account that guides product-scope judgment and prevents design drift.
 
 ## When To Use
 
@@ -53,8 +53,9 @@ product-scope judgment and prevents design drift.
 ## Workflow
 
 1. **Identify the conceptual gap or drift.** State in one sentence what question
-   about system purpose, authority, ownership, or refused design shapes a reader
-   cannot currently answer from `docs/program-theory.md` alone.
+   about system purpose, desired feel ("taste up front" — what makes a surface
+   feel native to Weft vs. bolted on), authority, ownership, or refused design
+   shapes a reader cannot currently answer from `docs/program-theory.md` alone.
 2. **Gather the evidence from the live tree.** Read the governing spec sections
    in `docs/specifications/`, the load-bearing modules in `weft/`, and the plans
    or review logs that established the boundary. Every claim in
@@ -76,7 +77,8 @@ product-scope judgment and prevents design drift.
    reopening it.
 4. **Keep the theory distinct from the spec and implementation narration.**
    - `docs/program-theory.md` explains *why the system is shaped this way*, what
-     each boundary owns, and what it refuses to become.
+     using it should feel like (taste up front, not big design up front —
+     `[REV-AT-005]`), what each boundary owns, and what it refuses to become.
    - `docs/specifications/` owns exact wire formats, state tables, CLI flags, and
      normative behavior.
    - Module docstrings own local realization details. If a subsystem has a non-obvious

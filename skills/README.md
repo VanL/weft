@@ -3,6 +3,10 @@
 This directory contains reusable task-scoped instructions for recurring work in
 this repository.
 
+Current skills: `brainstorming-to-plan/`, `call-agent/`, `coalescing/`,
+`crystallize-program-theory/`, `debugging/`, `interface-review/`, and
+`test-audit/`.
+
 ## When To Add a Skill
 
 Add a skill when:

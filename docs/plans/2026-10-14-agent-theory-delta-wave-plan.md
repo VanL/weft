@@ -1,9 +1,10 @@
 # Agent-Theory Propagation Plan (2026-10-14 delta wave)
 
 Status: completed
-Source specs: none — process/guidance adoption from agent-theory @ `8f41a9d`; no governing product spec (weft carries its operating model in runbooks, `docs/agent-context/`, and `docs/coalescing.md`)
+Source specs: none — process/guidance adoption from agent-theory @ `296a7cd`; no governing product spec (weft carries its operating model in runbooks, `docs/agent-context/`, and `docs/coalescing.md`)
 Superseded by: none
 
+Reviewed baseline: `15e14a5c`
 Class: 3+P. Per this repo's `+P` semantics
 (`docs/agent-context/decision-hierarchy.md`, Task Classification `[DOM-15]`),
 `+P` combines as `max(base, 5)` plus pre-landing review — so this wave is
@@ -18,22 +19,25 @@ Land the `agent-theory` delta since Weft's last propagation pin (`e42762c`,
 2026-07-28), covering both the August 2026 wave (`e42762c..bc684fe`: program
 theory integration, `skills/crystallize-program-theory/SKILL.md`, coalescing
 archive-phase rules, and `[DOM-15]` maintenance classification) and the October
-2026 wave (`bc684fe..8f41a9d`: Tier-1 cross-family vs Tier-2 native-subagent
-review hierarchy, empirical premise/falsifiability review checks, `fixed in
-plan` body sync, `RECONSIDERATION REQUESTED` escalation, release stop-gates,
-test-design rules 7–10 and failure patterns 11–12, static complexity (`C901`)
-visibility-signal rules, and hardened `bin/` gates with `--self-test`).
+2026 wave (`bc684fe..296a7cd`: Tier-1 cross-family vs Tier-2 native-subagent
+review hierarchy, empirical premise/falsifiability review checks, whole-plan
+review lenses, `fixed in plan` body sync, `RECONSIDERATION REQUESTED`
+escalation, release stop-gates, test-design rules 7–10 and failure patterns
+11–12, promoted `skills/test-audit/` skill and `SWEEP.md`, `[REV-AT-005]`
+taste-up-front boundary, static complexity (`C901`) visibility-signal rules, and
+hardened `bin/` gates with `--self-test`).
 
 ## Source Pin
 
-- Hub repository: `agent-theory` at commit `8f41a9d` (`8f41a9d` verified via
-  `git -C /Users/van/Developer/agent-theory rev-parse --short HEAD`).
+- Hub repository: `agent-theory` at commit `296a7cd` (`296a7cd` verified via
+  `git -C /Users/van/Developer/agent-theory rev-parse --short HEAD`; initial
+  2026-10-14 wave landed at `15e14a5c` from `8f41a9d`).
 - Previous Weft propagation pin: `e42762c` (landed in Weft `4e69784a` via
   `docs/plans/2026-07-28-agent-guidance-propagation-plan.md`, plus the
   2026-08-06 program-theory adoption in Weft `265a37ff` and the 2026-10-14
   contention stop-condition slice in Weft `5ac21258`).
 - Extraction rule: all hub payloads were read from the end-state at
-  `git show 8f41a9d:<path>`, never from intermediate commits.
+  `git show 296a7cd:<path>`, never from intermediate commits.
 
 ## Payload Checklist (grep-verifiable)
 
@@ -161,6 +165,18 @@ visibility-signal rules, and hardened `bin/` gates with `--self-test`).
      `resolve_remote_ref()`, `retired_plan_cues()`, and loud shallow-clone skip,
      preserving Weft's `LESSON_RE` (`^## 20[0-9]{2}-`) and governed `# noqa:
      C901 approved [TS-3.1] [RUFF-SUP-224] exception` on `main()`.
+9. **Follow-on `8f41a9d..296a7cd` delta**:
+   - Whole-plan review lenses (expert-developer craft + CS/algorithmic
+     principle) in `engineering-principles.md` §7.5,
+     `review-loops-and-agent-bootstrap.md`, `writing-plans.md` §8 & §10, and
+     `skills/call-agent/SKILL.md` §2.
+   - Promoted `skills/test-audit/SKILL.md` (adapted to Weft's
+     `docs/agent-context/` paths and `engineering-principles.md` §4.1/§7.5/§9/§11
+     numbering) and `skills/test-audit/SWEEP.md`, registered in
+     `skills/README.md` and `docs/agent-context/runbooks/external-skill-suites.md`.
+   - Communicating program feel ("taste up front") vs. BDUF (`[REV-AT-005]`) in
+     `skills/crystallize-program-theory/SKILL.md`, plus `skills/coalescing/SKILL.md`
+     step 2.5 archive-phase reachability clarification.
 
 ## Weft Adaptations and Invariants Preserved
 
@@ -211,7 +227,7 @@ reverted:
 
 ## Review Findings and Dispositions
 
-- **Author fresh-eyes review**: Completed across all 21 touched/created files.
+- **Author fresh-eyes review**: Completed across all touched/created files.
   Verified that no foreign `docs/specs/...` or `docs/plans/...` paths appear in
   backticks inside scanned guidance surfaces, all `bin/` scripts pass Ruff,
   `bin/check-doc-paths --self-test` and `bin/check-dom15-fixtures --self-test`
@@ -236,6 +252,14 @@ reverted:
     Non-blocking):** Update wave file count from `19` to `21` (19 modified
     tracked files + 2 new files). **Disposition:** Fixed in plan.
 
+## Revision Log
+
+- 2026-10-15 (baseline `15e14a5c`): Extended wave from hub pin `8f41a9d` to
+  `296a7cd` (whole-plan review lenses, promoted `skills/test-audit/` skill and
+  `SWEEP.md`, `[REV-AT-005]` taste-up-front boundary in
+  `skills/crystallize-program-theory/SKILL.md`, and `skills/coalescing/SKILL.md`
+  step 2.5 archive-phase reachability clarification).
+
 ## Verification and Gates
 
 ```bash
@@ -250,6 +274,6 @@ python3 bin/coalesce-check
 
 ## Landing Notes
 
-Stage only the 21 files belonging to this propagation wave (explicit file-list
-staging) so the 17 pre-existing monitor/supervisor WIP files in the working tree
-remain untouched.
+Stage only the files belonging to this propagation wave (explicit file-list
+staging / `git commit --only`) so pre-existing WIP files in the working tree or
+index remain untouched.

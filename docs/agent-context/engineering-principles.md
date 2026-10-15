@@ -224,6 +224,14 @@ against the live tree rather than taking the plan's prose on trust:
 3. **Empirical identifiers by command** — verify file paths, symbols, spec
    codes, commit SHAs, and numeric counts by inspection, not plausibility.
 
+When reviewing a plan, analyze the plan as a whole, including all amendments,
+with two lenses:
+
+1. **Expert-developer craft** — is this what an expert developer would do and
+   think well-crafted or elegant?
+2. **Known algorithm or CS principle** — is there a known algorithm or computer
+   science principle that should be applied here?
+
 Every review finding must receive an explicit disposition (`accept`, `modify`,
 or `reject` with rationale), and any finding marked `fixed in plan` must modify
 the operative plan body (tasks, invariants, file list, or verification block) in
