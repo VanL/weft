@@ -432,6 +432,26 @@ def test_opencode_failure_preserves_structured_api_error_detail() -> None:
         )
 
 
+def test_provider_failure_preserves_actionable_stderr_tail() -> None:
+    provider = get_provider_cli_provider("gemini")
+    completed = subprocess.CompletedProcess(
+        args=["gemini"],
+        returncode=1,
+        stdout="",
+        stderr=(
+            "Warning: terminal capability is limited. "
+            + ("startup detail " * 20)
+            + "API error: prepayment credits are depleted"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="prepayment credits are depleted"):
+        provider.parse_result(
+            completed=completed,
+            invocation=ProviderCLIInvocation(command=("gemini",)),
+        )
+
+
 def _write_agent_settings(path: Path, *, provider_name: str, executable: str) -> None:
     path.write_text(
         json.dumps(

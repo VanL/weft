@@ -26,6 +26,8 @@
 - PostgreSQL admission now defaults to its current `max_connections` minus the
   global reserve and measured usage; a positive configured ceiling overrides
   it. Remove `WEFT_SCHEDULER_MAX_FRONTIERS` before a coordinated process upgrade.
+- Provider CLI failures now retain both the start and actionable tail of bounded
+  stdout/stderr diagnostics, so startup warnings cannot hide terminal API errors.
 - First-party extension packages were bumped for this release:
   `weft-django 0.9.47`, `weft-docker 0.9.87`,
   `weft-macos-sandbox 0.6.16`, and `weft-microsandbox 0.5.17`.

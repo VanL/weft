@@ -77,10 +77,18 @@ def _compact_process_detail(completed: subprocess.CompletedProcess[str]) -> str:
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
     if stdout:
-        parts.append(f"stdout={stdout[:200]}")
+        parts.append(f"stdout={_compact_output_text(stdout)}")
     if stderr:
-        parts.append(f"stderr={stderr[:200]}")
+        parts.append(f"stderr={_compact_output_text(stderr)}")
     return "; ".join(parts)
+
+
+def _compact_output_text(text: str) -> str:
+    """Keep bounded process context and the usually actionable output tail."""
+
+    if len(text) <= 200:
+        return text
+    return f"{text[:96]} ... {text[-96:]}"
 
 
 __all__ = [
