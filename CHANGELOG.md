@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.9.113] - 2026-10-16
+
 ### Changed
 
 - Leave filesystem permissions to the OS and operator policy. Remove forced
@@ -10,6 +12,9 @@
   new-file creation defaults and can broaden access when replacing older
   restricted files under permissive operator policy. No migration changes modes;
   restart existing Weft processes to stop their previous permission policy.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.48`, `weft-docker 0.9.88`,
+  `weft-macos-sandbox 0.6.17`, and `weft-microsandbox 0.5.18`.
 
 ## [0.9.112] - 2026-10-15
 
