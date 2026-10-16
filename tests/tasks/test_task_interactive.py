@@ -543,6 +543,7 @@ def test_interactive_parent_exit_finishes_while_descendant_holds_pipes(
     psutil = pytest.importorskip("psutil")
     db_path, make_queue = broker_env
     pidfile = tmp_path / "interactive-descendant.pid"
+    pidfile_pending = tmp_path / "interactive-descendant.pid.pending"
     script = tmp_path / "interactive_parent_exit.py"
     script.write_text(
         (
@@ -550,7 +551,9 @@ def test_interactive_parent_exit_finishes_while_descendant_holds_pipes(
             "from pathlib import Path\n"
             "child = subprocess.Popen("
             "[sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-            f"Path({str(pidfile)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+            f"pending = Path({str(pidfile_pending)!r})\n"
+            "pending.write_text(str(child.pid), encoding='utf-8')\n"
+            f"pending.replace(Path({str(pidfile)!r}))\n"
         ),
         encoding="utf-8",
     )
