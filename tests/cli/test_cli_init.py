@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Never
 
@@ -510,3 +511,20 @@ def test_cmd_init_passes_isolated_config_to_simplebroker(
     broker_config = captured["config"]
     assert isinstance(broker_config, Config)
     assert broker_config["CACHE_MB"] == 10
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_init_preserves_existing_broker_config_permissions(workdir: Path) -> None:
+    # The harness owns backend schema setup and cleanup on both backends.
+    root = workdir
+    path = root / ".weft" / "broker.toml"
+    if not path.exists():
+        path = _write_broker_project_config(root, backend="sqlite", target="broker.db")
+    path.chmod(0o640)
+    original = path.read_bytes()
+
+    result = cmd_init(root)
+
+    assert result.created is False
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640

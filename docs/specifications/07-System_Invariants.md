@@ -1172,21 +1172,26 @@ _Plan backlinks_: [AdmissionController: Progress-Aware Admission Waiting](../pla
 
 ### Context Invariants
 
-_Implementation mapping_: `weft/context.py` (`build_context` directory
-creation), `weft/_constants.py`, `weft/commands/tidy.py`,
-`weft/helpers/__init__.py` (`ensure_owner_only_dir`).
+_Implementation mapping_: `weft/context.py` (`build_context`,
+`resolve_context_broker_target`), `weft/_constants.py`, `weft/commands/tidy.py`,
+`weft/commands/init.py` (`cmd_init`), `weft/helpers/__init__.py`
+(`write_file_atomically`).
 
 - **CTX.1**: one Weft project context resolves to one broker target
 - **CTX.2**: contexts are isolated by default
 - **CTX.3**: cleanup commands operate within the selected context boundary
 - **CTX.4**: `.weft/` remains the Weft-owned project home even when the broker
   backend is not file-backed
-- **CTX.5**: Weft-created metadata directories (the `.weft/` project home,
-  its `outputs/` child, and the autostart directory) are owner-only (0700),
-  including tightening of pre-existing looser directories at context build.
-  The default logs directory is protected by its 0700 parent rather than
-  its own mode; custom `WEFT_LOGS_DIR` and custom database locations keep
-  caller-owned modes.
+- **CTX.5**: Filesystem permissions belong to the OS and operator policy.
+  Weft uses ordinary creation defaults for persistent files and directories,
+  subject to umask and inherited ACLs; it does not chmod, tighten, repair, or
+  preflight their permissions. Context discovery and initialization leave
+  existing directory and broker configuration permissions unchanged. In-place
+  writes retain existing file permissions. Atomic writes replace the inode
+  using umask plus the parent directory's inherited/default ACLs; they do not
+  copy the previous inode's mode or ACL. No migration changes existing
+  permissions; an atomic rewrite of an older restricted file may produce
+  broader access under current operator policy.
 
 ## Validation and Enforcement
 
@@ -1353,6 +1358,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 

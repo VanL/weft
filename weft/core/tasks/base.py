@@ -92,12 +92,10 @@ from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
-    ensure_owner_only_dir,
     process_create_time,
     redact_taskspec_dump,
     terminate_verified_process_tree,
     tid_short_form,
-    write_owner_only_bytes,
 )
 
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
@@ -701,11 +699,12 @@ class BaseTask(MultiQueueWatcher, ABC):
         return Path(tempfile.gettempdir()) / "weft" / "outputs"
 
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:
+        """Write a spill reference under OS policy (Large Output Handling, [CTX.5])."""
         assert self.tid is not None
         output_dir = self._outputs_base_dir() / self.tid
-        ensure_owner_only_dir(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "output.dat"
-        write_owner_only_bytes(output_path, encoded)
+        output_path.write_bytes(encoded)
 
         sha = hashlib.sha256(encoded).hexdigest()
         preview = encoded[:1024].decode("utf-8", errors="replace")

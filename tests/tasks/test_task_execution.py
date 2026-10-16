@@ -4790,8 +4790,9 @@ def test_command_target_executes_process(
     assert outbox.read_one() == "command-done"
 
 
+@pytest.mark.parametrize("existing", [False, True])
 def test_large_output_spills_to_disk(
-    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str, existing: bool
 ) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"
@@ -4803,6 +4804,21 @@ def test_large_output_spills_to_disk(
         weft_context=str(context_root),
         output_size_limit_mb=1,
     )
+
+    output_dir = context_root / ".weft" / "outputs" / unique_tid
+    control_dir = tmp_path / "ordinary-directory"
+    control_dir.mkdir()
+    control_file = control_dir / "ordinary-file"
+    control_file.write_bytes(b"control")
+    expected_dir_mode = stat.S_IMODE(control_dir.stat().st_mode)
+    expected_file_mode = stat.S_IMODE(control_file.stat().st_mode)
+    if existing:
+        output_dir.mkdir(parents=True)
+        (output_dir / "output.dat").write_bytes(b"stale")
+        if os.name == "posix":
+            output_dir.chmod(0o750)
+            (output_dir / "output.dat").chmod(0o640)
+            expected_dir_mode, expected_file_mode = 0o750, 0o640
 
     task = Consumer(db_path, spec)
 
@@ -4832,8 +4848,8 @@ def test_large_output_spills_to_disk(
     assert any(event["event"] == "output_spilled" for event in events)
 
     if sys.platform != "win32":
-        assert stat.S_IMODE(Path(output_path).stat().st_mode) == 0o600
-        assert stat.S_IMODE(Path(output_path).parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(output_path.stat().st_mode) == expected_file_mode
+        assert stat.S_IMODE(output_path.parent.stat().st_mode) == expected_dir_mode
 
 
 def test_large_output_spills_to_custom_weft_directory_name(

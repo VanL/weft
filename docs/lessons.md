@@ -825,3 +825,15 @@ Waiting parents still retain resources, so arbitrary future descendants have no
 unconditional progress guarantee. See the [plan](plans/2026-10-15-work-conserving-family-scheduling.md),
 [MA-1.8](specifications/03-Manager_Architecture.md), and
 `tests/system/test_measured_admission_pg.py`.
+
+## 2026-10-15 Filesystem permissions belong to the operator
+
+Weft's single-operator trust model does not grant it ownership of filesystem
+access policy. Creating a project directory or artifact is not authority to
+chmod existing paths or impose private creation modes. Use ordinary OS creation
+policy, including for durable atomic-write staging; atomic replacement creates a
+new inode and does not retain the previous inode's individual mode or ACL.
+Report actual access failures through existing error boundaries. Do not add
+permission probes, repairs, or a migration that widens previously restricted
+paths. Owner correction and implementation: [permission plan](plans/2026-10-15-operator-owned-permissions.md),
+[CTX.5](specifications/07-System_Invariants.md).

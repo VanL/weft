@@ -7,7 +7,8 @@ Weft (environment overrides, the Weft metadata directory, and project
 metadata).
 
 Spec references: docs/specifications/04-SimpleBroker_Integration.md [SB-0], [SB-0.4]
-and docs/specifications/03-Manager_Architecture.md [MA-3].
+and docs/specifications/03-Manager_Architecture.md [MA-3];
+docs/specifications/07-System_Invariants.md [CTX.5].
 
 Key behaviours
 --------------
@@ -65,9 +66,6 @@ from simplebroker import (
 from simplebroker.ext import (
     find_project_config as find_broker_project_config,
 )
-from simplebroker.ext import (
-    project_config_path_for_directory,
-)
 from weft._constants import (
     WEFT_AUTOSTART_DIRECTORY_NAME,
     WEFT_AUTOSTART_TASKS_DEFAULT,
@@ -76,7 +74,7 @@ from weft._constants import (
     resolve_runtime_config,
 )
 from weft.core.runtime_identity import get_runtime_identity
-from weft.helpers import ensure_owner_only_dir, write_json_atomically
+from weft.helpers import write_json_atomically
 
 __all__ = [
     "WeftContext",
@@ -335,17 +333,14 @@ def build_context(
     broker_config = resolve_runtime_config(resolved_config)
 
     if create_dirs:
-        # Weft-owned metadata dirs are owner-only. User-relocatable paths
-        # (custom logs dir, custom database parent) keep default modes:
-        # Weft does not own their permission policy, and the default logs
-        # dir sits inside the 0700 weft_dir.
-        ensure_owner_only_dir(weft_dir)
-        ensure_owner_only_dir(outputs_dir)
+        # Filesystem access policy belongs to the OS/operator [CTX.5].
+        weft_dir.mkdir(parents=True, exist_ok=True)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
         if database_path is not None:
             database_path.parent.mkdir(parents=True, exist_ok=True)
         if autostart_enabled:
-            ensure_owner_only_dir(autostart_dir)
+            autostart_dir.mkdir(parents=True, exist_ok=True)
 
     if create_database:
         _ensure_database(broker_target, broker_config, database_path=database_path)
@@ -380,9 +375,6 @@ def resolve_context_broker_target(
 
     resolved_root = Path(root).expanduser().resolve()
     broker_config = resolve_runtime_config(config)
-    _tighten_project_broker_config_path(
-        project_config_path_for_directory(resolved_root, config=broker_config)
-    )
     target = target_for_directory(resolved_root, config=broker_config)
     return _with_project_root(target, resolved_root)
 
@@ -421,17 +413,6 @@ def find_existing_weft_dir(
 # ---------------------------------------------------------------------------
 
 
-def _tighten_project_broker_config_path(config_path: Path | None) -> None:
-    """Best-effort owner-only mode repair for Weft-owned broker config files."""
-
-    if config_path is None or not config_path.is_file() or os.name != "posix":
-        return
-    try:
-        os.chmod(config_path, 0o600)
-    except OSError:
-        return
-
-
 def _resolve_root_and_target(
     spec_context: str | os.PathLike[str] | None,
     config: Mapping[str, Any],
@@ -454,7 +435,6 @@ def _resolve_root_and_target(
         start_dir,
         config=resolve_runtime_config(config),
     )
-    _tighten_project_broker_config_path(project_config_path)
     if project_config_path is not None:
         root = _root_for_discovered_project_config(
             project_config_path,

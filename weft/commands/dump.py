@@ -16,7 +16,6 @@ from weft._constants import WEFT_STATE_QUEUE_PREFIX
 from weft._exceptions import CommandExecutionError
 from weft.commands.types import SystemDumpResult
 from weft.context import WeftContext, build_context
-from weft.helpers import open_owner_only_text
 
 from ._boundary import typed_command_errors
 
@@ -101,7 +100,7 @@ def _dump_resolved_context(
             output_path = Path.cwd() / output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with context.broker() as db:
-            with open_owner_only_text(output_path) as output_file:
+            with output_path.open("w", encoding="utf-8") as output_file:
                 aliases, messages, queues = _write_dump(output_file, db)
             omitted_queues, omitted_messages = _claimed_summary(db)
     except Exception as exc:  # public command boundary [PY-2]

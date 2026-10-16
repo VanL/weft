@@ -9,7 +9,7 @@ Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-5], [MF-6]
 - docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2.3]
-- docs/specifications/07-System_Invariants.md [OBS.5]
+- docs/specifications/07-System_Invariants.md [OBS.5], [CTX.5]
 """
 
 from __future__ import annotations
@@ -17,17 +17,17 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import sys
-import tempfile
 import threading
 import time
+import uuid
 from _thread import LockType
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
+from io import TextIOWrapper
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, cast
 
 import psutil
 
@@ -793,6 +793,11 @@ def write_file_atomically(
     is either completely written or not written at all, preventing corruption
     from concurrent access or interruption.
 
+    Staging uses ordinary creation defaults under OS/operator policy. Replacing
+    an existing file installs a new inode; its old mode and ACL are not copied.
+
+    Spec: docs/specifications/07-System_Invariants.md [CTX.5]
+
     The approach is inspired by SimpleBroker's atomic operations but simplified
     for weft's needs. It's useful for any critical files that multiple processes
     might try to create simultaneously.
@@ -820,18 +825,18 @@ def write_file_atomically(
     retry_sleep_seconds = ATOMIC_WRITE_RETRY_INTERVAL
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_path = tempfile.mkstemp(
-        suffix=".tmp", prefix=f".{target_path.name}_", dir=target_path.parent
-    )
-    temp_file = Path(temp_path)
+    temp_file = target_path.with_name(f".{target_path.name}_{uuid.uuid4().hex}.tmp")
+    # Exclusive creation establishes cleanup ownership and uses ordinary file
+    # defaults. A collision must fail before entering the cleanup block.
+    handle = temp_file.open("xb")
     try:
-        if data is not None:
-            with os.fdopen(temp_fd, "wb") as f:
-                f.write(data)
-        else:
-            assert content is not None
-            with os.fdopen(temp_fd, "w", encoding=encoding) as f:
-                f.write(content)
+        with handle:
+            if data is not None:
+                handle.write(data)
+            else:
+                assert content is not None
+                with TextIOWrapper(handle, encoding=encoding) as text_handle:
+                    text_handle.write(content)
 
         for attempt in range(retry_attempts):
             try:
@@ -871,83 +876,6 @@ def write_json_atomically(file_path: Path | str, data: dict[str, Any]) -> None:
     """
     json_content = json.dumps(data, indent=2)
     write_file_atomically(file_path, content=json_content)
-
-
-def ensure_owner_only_dir(path: Path | str) -> Path:
-    """Create *path* (and parents) and restrict it to the owner (0700).
-
-    The mode is passed to mkdir at creation time, so a newly created leaf
-    directory is never wider open than the process umask allows, even for
-    the instant between creation and the follow-up chmod. mkdir's mode is
-    itself masked by umask (POSIX semantics), so the chmod below still runs
-    unconditionally to guarantee 0700 regardless of umask. Pre-existing
-    directories are tightened with chmod as well, so upgrades repair
-    directories created by older Weft versions with default umask. Only the
-    leaf directory is tightened: intermediate parents created by
-    mkdir(parents=True) keep default modes deliberately, because callers own
-    the policy for paths above the Weft-owned leaf. On Windows, chmod only
-    affects the read-only bit; this is best-effort there by design.
-
-    Args:
-        path: Directory to create or tighten.
-
-    Returns:
-        The directory as a Path.
-
-    Spec: docs/specifications/07-System_Invariants.md (Context Invariants)
-    """
-    target = Path(path)
-    target.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(target, 0o700)
-    return target
-
-
-def write_owner_only_bytes(path: Path | str, data: bytes) -> None:
-    """Write *data* to *path* readable only by the owner (0600).
-
-    The 0600 mode is applied at open time for new files and re-applied with
-    chmod so pre-existing looser files are tightened before content lands.
-
-    Spec: docs/specifications/05-Message_Flow_and_State.md
-    (Large Output Handling)
-    """
-    target = Path(path)
-    fd = os.open(os.fspath(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        # chmod by path (os.fchmod does not exist on Windows); the brief
-        # path/fd window is acceptable under the user-level trust model.
-        os.chmod(target, 0o600)
-        handle = os.fdopen(fd, "wb")
-    except BaseException:
-        os.close(fd)
-        raise
-    with handle:
-        handle.write(data)
-
-
-@contextmanager
-def open_owner_only_text(
-    path: Path | str, *, encoding: str = "utf-8"
-) -> Iterator[TextIO]:
-    """Open *path* for text writing with owner-only (0600) permissions.
-
-    Same tightening semantics as write_owner_only_bytes, for streaming
-    writers such as `weft system dump`.
-
-    Spec: docs/specifications/10-CLI_Interface.md [CLI-6]
-    """
-    target = Path(path)
-    fd = os.open(os.fspath(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        # chmod by path (os.fchmod does not exist on Windows); the brief
-        # path/fd window is acceptable under the user-level trust model.
-        os.chmod(target, 0o600)
-        handle = os.fdopen(fd, "w", encoding=encoding)
-    except BaseException:
-        os.close(fd)
-        raise
-    with handle:
-        yield handle
 
 
 def redact_taskspec_dump(

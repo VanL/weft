@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -327,6 +329,12 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(
         payload = json.loads(checkpoint.read_text(encoding="utf-8"))
         assert payload["last_task_log_timestamp"] == message_id
         assert result.checkpoint_timestamp == message_id
+        if os.name == "posix":
+            control = workdir / "ordinary-file"
+            control.write_text("control", encoding="utf-8")
+            assert stat.S_IMODE(checkpoint.stat().st_mode) == stat.S_IMODE(
+                control.stat().st_mode
+            )
     summaries = [
         record for record in observed if record["record_type"] == "task_summary"
     ]

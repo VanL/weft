@@ -997,10 +997,10 @@ Current behavior:
 - `system dump` exports visible pending broker messages. If an included queue
   has claimed rows, the command reports the omitted claimed-message count
   instead of pretending the dump is a complete in-flight broker image.
-- `system dump` writes its output file owner-only (0600), tightening
-  pre-existing looser files; dump content (TaskSpec command arguments and
-  `spec.env` values) is written verbatim and unredacted, so dump files should
-  be treated like secret material.
+- `system dump` uses ordinary file creation and truncation under OS and operator
+  policy ([CTX.5]), preserving an existing output file's permissions. Dump
+  content (TaskSpec command arguments and `spec.env` values) is written verbatim
+  and unredacted, so operators control access to dump files as secret material.
 - `system load --dry-run -i FILE` validates a dump without writing. Plain
   `system load -i FILE` imports the dump.
 - dump header `last_ts` and message `id` use the [SB-0.2] canonical string
@@ -1041,7 +1041,9 @@ Current behavior:
   numeric/current
 - task-monitor checkpoints under `.weft/state/task-monitor/` are
   operational cursors only and are not read by `status`, `task status`, or
-  `result`
+  `result`. Checkpoints use atomic replacement with ordinary file creation
+  defaults ([CTX.5]); filesystem errors retain the command's existing failure
+  behavior.
 - `system prune` scans selected prune families and reports candidates. It
   requires at least one explicit `--family` value and remains dry-run unless
   `--apply` is supplied. There is no implicit family.
@@ -1090,6 +1092,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 

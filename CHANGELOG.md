@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Leave filesystem permissions to the OS and operator policy. Remove forced
+  modes and permission repair for project directories, broker configuration,
+  output spills and dumps. Atomic config/checkpoint writes use ordinary
+  new-file creation defaults and can broaden access when replacing older
+  restricted files under permissive operator policy. No migration changes modes;
+  restart existing Weft processes to stop their previous permission policy.
+
 ## [0.9.112] - 2026-10-15
 
 ### Changed

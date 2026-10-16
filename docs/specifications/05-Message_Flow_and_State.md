@@ -1616,9 +1616,9 @@ file integrity after dereferencing.
 
 _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 `_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`;
-`weft/commands/result.py` result rendering. Spill files are written
-owner-only (0600) inside an owner-only (0700) per-tid directory via the
-shared helpers in `weft/helpers/__init__.py`.
+`weft/commands/result.py` result rendering. Spill files and per-tid directories
+use ordinary filesystem creation defaults under OS and operator policy ([CTX.5]);
+existing permissions are not changed.
 
 ### Cleanup Boundary
 
@@ -2044,6 +2044,8 @@ A coordinated upgrade quiesces old producers and runtimes before migration. The 
 _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigration`, `weft/commands/_spawn_submission.py::prepare_legacy_child_migration`, `weft/commands/_spawn_submission.py::LegacyChildMigrationManager`, `tests/commands/test_family_migration.py`.
 
 ## Related Plans
+
+- [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 

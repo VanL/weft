@@ -7,7 +7,6 @@ Spec references:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -44,14 +43,6 @@ def _project_config_path(root: Path, config: Mapping[str, Any]) -> Path:
     return root / path_prefix / config_name
 
 
-def _tighten_existing_project_broker_config(path: Path) -> None:
-    """Restrict an existing Weft-owned SimpleBroker project config to 0600."""
-
-    if not path.is_file():
-        return
-    os.chmod(path, 0o600)
-
-
 @typed_command_errors
 def cmd_init(
     directory: Path | None = None,
@@ -62,14 +53,14 @@ def cmd_init(
 
     Returns a structured project-initialization outcome.
 
-    Spec: [SB-0] (Project Context and Directory Scoping)
+    Spec: [SB-0] (Project Context and Directory Scoping);
+    docs/specifications/07-System_Invariants.md [CTX.5]
     """
     config = load_config()
     root = Path(directory or Path.cwd()).expanduser().resolve()
     project_broker_config_path = _project_config_path(root, config)
     created = not project_broker_config_path.is_file()
     try:
-        _tighten_existing_project_broker_config(project_broker_config_path)
         broker_target = resolve_context_broker_target(root, config=config)
         result = int(
             sb_cmd_init(

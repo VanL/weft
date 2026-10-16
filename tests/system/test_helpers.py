@@ -14,7 +14,9 @@ import time
 from collections.abc import Generator, Iterator
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 import pytest
 
@@ -30,7 +32,6 @@ from tests.conftest import (
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.helpers import (
     debug_print,
-    ensure_owner_only_dir,
     is_debug_enabled,
     is_logging_enabled,
     iter_queue_entries,
@@ -40,7 +41,6 @@ from weft.helpers import (
     log_exception,
     log_info,
     log_warning,
-    open_owner_only_text,
     pid_is_live,
     reload_config,
     resolve_broker_max_message_size,
@@ -48,7 +48,6 @@ from weft.helpers import (
     send_log,
     write_file_atomically,
     write_json_atomically,
-    write_owner_only_bytes,
 )
 
 
@@ -404,7 +403,7 @@ class TestAtomicFileWriting:
 
         assert replace_calls == 1
         assert target.read_bytes() == original
-        assert not list(tmp_path.glob("*.tmp"))
+        assert set(tmp_path.iterdir()) == {target}
 
     def test_write_file_atomically_preserves_replace_error_when_cleanup_fails(
         self,
@@ -459,8 +458,7 @@ class TestAtomicFileWriting:
         with pytest.raises(RuntimeError, match="replace defect"):
             write_file_atomically(target, content="must not use fallback")
 
-        assert not target.exists()
-        assert not list(tmp_path.glob("*.tmp"))
+        assert list(tmp_path.iterdir()) == []
 
     def test_write_file_atomically_invalid_args(self, tmp_path: Path) -> None:
         target = tmp_path / "invalid.txt"
@@ -504,7 +502,7 @@ class TestWriteJsonAtomically:
             write_json_atomically(target, {"status": "replacement"})
 
         assert target.read_bytes() == original
-        assert not list(tmp_path.glob("*.tmp"))
+        assert set(tmp_path.iterdir()) == {target}
 
     def test_write_json_atomically_retries_permission_error(
         self,
@@ -552,7 +550,7 @@ class TestWriteJsonAtomically:
 
         assert calls == helpers_module.ATOMIC_WRITE_RETRY_ATTEMPTS
         assert target.read_bytes() == original
-        assert not list(tmp_path.glob("*.tmp"))
+        assert set(tmp_path.iterdir()) == {target}
 
     def test_write_json_atomically_handles_concurrent_writes(
         self, tmp_path: Path
@@ -794,38 +792,70 @@ class TestFixtureCleanupDiagnostics:
         assert any("broker queue snapshot" in note for note in notes)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_ensure_owner_only_dir_creates_and_tightens(tmp_path: Path) -> None:
-    target = tmp_path / "a" / "b"
-    ensure_owner_only_dir(target)
-    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+@pytest.mark.skipif(os.name != "posix", reason="POSIX umask")
+@pytest.mark.parametrize("mask", [0o002, 0o077])
+@pytest.mark.parametrize("binary", [False, True])
+def test_atomic_write_uses_os_creation_policy(
+    tmp_path: Path, mask: int, binary: bool
+) -> None:
+    # A child owns umask; no shared pytest thread sees a process-global change.
+    script = """
+import sys
+from pathlib import Path
+from weft.helpers import write_file_atomically
+root = Path(sys.argv[1])
+kwargs = {"data": b"payload"} if sys.argv[2] == "True" else {"content": "payload"}
+write_file_atomically(root / "fresh", **kwargs)
+existing = root / "replacement"
+existing.write_text("old")
+existing.chmod(0o400)
+write_file_atomically(existing, **kwargs)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(binary)],
+        check=False,
+        capture_output=True,
+        text=True,
+        umask=mask,
+    )
+    assert completed.returncode == 0, completed.stderr
+    for name in ("fresh", "replacement"):
+        target = tmp_path / name
+        assert target.read_bytes() == b"payload"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o666 & ~mask
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["fresh", "replacement"]
 
-    # Pre-existing loose directory gets tightened, not just created.
-    loose = tmp_path / "loose"
-    loose.mkdir()
-    os.chmod(loose, 0o775)
-    ensure_owner_only_dir(loose)
-    assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+
+def test_atomic_write_collision_preserves_unowned_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("old", encoding="utf-8")
+    identity = UUID(int=0)
+    staging = tmp_path / f".target_{identity.hex}.tmp"
+    staging.write_text("other writer", encoding="utf-8")
+    monkeypatch.setattr(helpers_module, "uuid", SimpleNamespace(uuid4=lambda: identity))
+
+    with pytest.raises(FileExistsError):
+        write_file_atomically(target, content="new")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert staging.read_text(encoding="utf-8") == "other writer"
+    assert set(tmp_path.iterdir()) == {target, staging}
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_write_owner_only_bytes_is_0600(tmp_path: Path) -> None:
-    target = tmp_path / "secret.dat"
-    write_owner_only_bytes(target, b"payload")
-    assert target.read_bytes() == b"payload"
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+@pytest.mark.parametrize(
+    ("encoding", "error"),
+    [("ascii", UnicodeEncodeError), ("invalid-codec-name", LookupError)],
+)
+def test_atomic_write_encoding_failure_preserves_target_and_cleans_staging(
+    tmp_path: Path, encoding: str, error: type[Exception]
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("old", encoding="utf-8")
 
-    # Overwriting a pre-existing loose file tightens it.
-    os.chmod(target, 0o644)
-    write_owner_only_bytes(target, b"payload2")
-    assert target.read_bytes() == b"payload2"
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    with pytest.raises(error):
+        write_file_atomically(target, content="snowman: ☃", encoding=encoding)
 
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_open_owner_only_text_is_0600(tmp_path: Path) -> None:
-    target = tmp_path / "export.jsonl"
-    with open_owner_only_text(target) as handle:
-        handle.write("line1\n")
-    assert target.read_text(encoding="utf-8") == "line1\n"
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert target.read_text(encoding="utf-8") == "old"
+    assert set(tmp_path.iterdir()) == {target}

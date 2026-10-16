@@ -761,26 +761,57 @@ def test_build_context_empty_config_ignores_root_simplebroker_config(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_build_context_creates_owner_only_metadata_dirs(tmp_path: Path) -> None:
+def test_build_context_uses_directory_creation_policy(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
+    control = root / "ordinary-directory"
+    control.mkdir()
+    expected = stat.S_IMODE(control.stat().st_mode)
     ctx = build_context(spec_context=root, autostart=True)
-    assert stat.S_IMODE(ctx.weft_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE(ctx.outputs_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE(ctx.autostart_dir.stat().st_mode) == 0o700
-    # Decision under test: the DEFAULT logs dir is protected by its 0700
-    # parent rather than its own mode (custom WEFT_LOGS_DIR locations keep
-    # caller-owned modes). Pin the placement premise that protection rests on:
+    for directory in (ctx.weft_dir, ctx.outputs_dir, ctx.autostart_dir, ctx.logs_dir):
+        assert stat.S_IMODE(directory.stat().st_mode) == expected
     assert ctx.logs_dir == ctx.weft_dir / "logs"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_build_context_tightens_preexisting_loose_weft_dir(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [0o750, 0o775])
+def test_build_context_preserves_existing_directory_permissions(
+    tmp_path: Path, mode: int
+) -> None:
     root = prepare_project_root(tmp_path)
-    loose = root / ".weft"
-    loose.mkdir(exist_ok=True)
-    os.chmod(loose, 0o775)
-    build_context(spec_context=root)
-    assert stat.S_IMODE(loose.stat().st_mode) == 0o700
+    ctx = build_context(spec_context=root, autostart=True)
+    directories = (ctx.weft_dir, ctx.outputs_dir, ctx.autostart_dir, ctx.logs_dir)
+    for directory in directories:
+        directory.chmod(mode)
+    build_context(spec_context=root, autostart=True)
+    assert [stat.S_IMODE(path.stat().st_mode) for path in directories] == [mode] * len(
+        directories
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+@pytest.mark.parametrize("operation", ["explicit", "discovery", "target"])
+def test_context_resolution_preserves_broker_config_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    config_path = _write_broker_project_config(
+        tmp_path, backend="sqlite", target="broker.db"
+    )
+    config_path.chmod(0o640)
+    original = config_path.read_bytes()
+    config = load_config({})
+    if operation == "target":
+        context_module.resolve_context_broker_target(tmp_path, config=config)
+    else:
+        monkeypatch.chdir(tmp_path)
+        ctx = build_context(
+            spec_context=tmp_path if operation == "explicit" else None,
+            config=config,
+            create_dirs=False,
+            create_database=False,
+        )
+        assert ctx.root == tmp_path
+    assert config_path.read_bytes() == original
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
 
 
 def test_manual_context_normalizes_plain_broker_config_without_ambient_reads(

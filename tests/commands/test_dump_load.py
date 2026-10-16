@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import sys
 import time
@@ -171,8 +170,6 @@ def test_client_dump_preserves_resolved_directory_and_broker(
     assert [row["body"] for row in rows if row["type"] == "message"] == [
         "supplied-context-only"
     ]
-    if os.name != "nt":
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize("explicit_input", [False, True])
@@ -1540,13 +1537,22 @@ def test_export_large_message_data(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
-def test_cmd_dump_output_file_is_owner_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing", [False, True])
+def test_cmd_dump_respects_output_file_permissions(
+    tmp_path: Path, existing: bool
+) -> None:
     root = prepare_project_root(tmp_path)  # the module's fixtures already use this
     out_path = tmp_path / "export.jsonl"
-    out_path.write_text("stale", encoding="utf-8")
-    os.chmod(out_path, 0o644)
+    control = tmp_path / "ordinary-file"
+    control.write_text("control", encoding="utf-8")
+    expected = stat.S_IMODE(control.stat().st_mode)
+    if existing:
+        out_path.write_text("stale", encoding="utf-8")
+        out_path.chmod(0o640)
+        expected = 0o640
 
     exit_result = cmd_system_dump(output=str(out_path), context=root)
 
     assert isinstance(exit_result, SystemDumpResult)
-    assert stat.S_IMODE(out_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(out_path.stat().st_mode) == expected
+    assert json.loads(out_path.read_text().splitlines()[0])["type"] == "header"

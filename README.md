@@ -1028,8 +1028,13 @@ through SimpleBroker's import path. Claimed in-flight rows are omitted and
 reported in the dump summary. `weft system load --input FILE` mutates the target
 context; use `--dry-run` for validation only. Dump files contain TaskSpec
 command arguments and `spec.env` values verbatim (dump/load is a
-fidelity-preserving surface, so nothing is redacted); the file is created
-owner-only (0600). Treat dump files like secret material.
+fidelity-preserving surface, so nothing is redacted). Files and directories use
+OS and operator permission policy, including umask and inherited ACLs; Weft does
+not tighten or repair permissions. Existing dump files retain their permissions.
+Atomic config/checkpoint replacements use new-file creation policy, so rewriting
+an older restricted file can broaden access under a permissive umask or default
+ACL. Treat dump files like secret material and configure access through the
+operating system.
 
 ### Task Execution
 

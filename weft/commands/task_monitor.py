@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -41,7 +40,7 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
-from weft.helpers import tid_short_form
+from weft.helpers import tid_short_form, write_file_atomically
 
 from ._boundary import typed_command_errors
 
@@ -253,25 +252,16 @@ def _load_checkpoint(path: Path, monitor_name: str) -> TaskMonitorCheckpoint | N
 
 
 def _write_checkpoint(path: Path, checkpoint: TaskMonitorCheckpoint) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Replace checkpoint atomically under OS policy ([CLI-6], [CTX.5])."""
     payload = {
         "schema_version": checkpoint.schema_version,
         "monitor_name": checkpoint.monitor_name,
         "updated_at": checkpoint.updated_at,
         "last_task_log_timestamp": checkpoint.last_task_log_timestamp,
     }
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
-        handle.write("\n")
-        temp_path = Path(handle.name)
-    temp_path.replace(path)
+    write_file_atomically(
+        path, content=json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    )
 
 
 def _reduce_task_log(
