@@ -103,3 +103,35 @@ def test_registry_rejects_blank_key_and_replaces_existing_probe(
         "example", lambda _handle, _budget: "stale"
     )
     assert registry.runtime_liveness_from_registered_probe(_handle()) == "stale"
+
+
+@pytest.mark.parametrize("registered_runner_only", [False, True])
+def test_raw_registry_presence_alias_routing_and_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    registered_runner_only: bool,
+) -> None:
+    """Cold loading must distinguish an absent callback from completed unknown."""
+    monkeypatch.setattr(registry, "_runtime_liveness_probes", {})
+    handle = _handle(runner="manager-supervisor", provider=" docker ")
+    if registered_runner_only:
+        registry.register_runtime_liveness_probe(
+            "manager-supervisor", lambda *_args: "live"
+        )
+    assert registry.has_runtime_liveness_probe(handle) is False
+    missing = registry.probe_registered_runtime(handle, 1.25)
+    assert (missing.evidence, missing.outcome) == ("unknown", "unavailable")
+    observed: list[tuple[RunnerHandle, float]] = []
+
+    def probe(selected: RunnerHandle, budget: float) -> registry.RuntimeLiveness:
+        observed.append((selected, budget))
+        return "unknown"
+
+    registry.register_runtime_liveness_probe("docker", probe)
+    assert registry.has_runtime_liveness_probe(handle) is True
+    result = registry.probe_registered_runtime(handle, 1.25)
+    assert (result.evidence, result.outcome, result.reason) == (
+        "unknown",
+        "completed",
+        "extension_unknown",
+    )
+    assert observed == [(handle, 1.25)]

@@ -613,6 +613,17 @@ untouched. An unknown future schema fails bootstrap. Normal service-owner
 parsing accepts v2 only. Running managers and services rebuild discarded state
 by publishing their own current v2 heartbeats.
 
+Full-TID public submission-custody observation under [MF-5] is a read-only exception to this bootstrap requirement. It may inspect retained service records without deleting v1 rows. It folds the latest valid v2 record per owner for the resolved context's manager service key before canonical filtering; a newer malformed row does not displace a valid one. It uses the resulting canonical records as reserved-route evidence, ignoring malformed and unsupported-schema rows, including future schemas. It does not claim registry compatibility or manager readiness. Broker read failures remain errors. This exception does not change private submission reconciliation, manager/service bootstrap, system status or Monitor bootstrap, including their existing future-schema rejection and legacy-row cleanup.
+
+Implementation mapping: `weft/core/spawn_requests.py::iter_spawn_reserved_routes`
+owns read-only latest-valid registry folding and retained route discovery.
+`weft/commands/_spawn_submission.py::_reserved_spawn_request_queue_names`
+retains private compatibility bootstrap. Coverage:
+`tests/commands/test_submission.py` and
+`tests/commands/test_submission_observation.py`.
+
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
+
 Current leadership-view rules:
 
 - `self` means this manager is the lowest live canonical registry claimant

@@ -12,12 +12,16 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from weft._constants import TASK_PING_TIMEOUT_SECONDS
+from weft._constants import (
+    LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+    TASK_PING_TIMEOUT_SECONDS,
+)
 from weft.commands import events
 from weft.commands import result as result_cmd
 from weft.commands import tasks as task_ops
 from weft.commands.submission import TaskSpec
 from weft.commands.types import (
+    RuntimeLivenessSnapshot,
     TaskEvent,
     TaskResult,
     TaskSnapshot,
@@ -44,11 +48,20 @@ class Task:
         return task_ops._task_snapshot(
             self.tid,
             context=self._context,
+            include_submission_custody=True,
             accepted_taskspec_payload=(
                 self._accepted_taskspec.model_dump(mode="json")
                 if self._accepted_taskspec is not None
                 else None
             ),
+        )
+
+    def runtime_liveness(
+        self, *, timeout: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS
+    ) -> RuntimeLivenessSnapshot:
+        """Explicitly probe the published runtime identity [PY-2]."""
+        return task_ops.task_runtime_liveness(
+            self.tid, timeout=timeout, context=self._context
         )
 
     def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:

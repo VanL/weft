@@ -1043,6 +1043,81 @@ unresolved. Empty, malformed, permission-denied, or ambiguous identity is
 is authoritative and host wrappers corroborate only. Process titles
 corroborate and never prove a full TID.
 
+Explicit public runtime observation uses raw runtime evidence under
+`RunnerHandle.control.authority`, before terminal-hint retirement policy.
+The existing CC-3.2 authority paragraph governs host identity reduction and
+extension authority; this addition does not create a second host truth table.
+First validate the runtime handle: a missing or invalid handle gives
+`unknown` / `runtime_handle_unavailable`, with source `none` and absent identity
+and provider, even on a foreign-host row. For a valid handle, apply the
+publication's host scope: a nonempty
+`hostname` string different from `socket.gethostname()` gives `unknown` /
+`runtime_unresolved` for every authority, without loading a provider or invoking
+any probe. A hostname that is not a nonempty string counts as absent. Derive
+the provider key without loading it even when this gate stops an extension
+check, so provenance still describes the selected evidence. For host-pid
+authority, absent hostname also leaves scope
+unproven and gives that same unknown result without a probe. For extension
+authorities with no published hostname, the selected provider remains the
+scope authority. Keep these public preconditions in the command owner; do not
+change the monitor's existing missing-hostname interpretation or move this new
+restriction into legacy analysis.
+
+Subject to scope, map raw `live`, `stale`, `unknown` respectively to public
+`live` / `runtime_live`, `dead` / `runtime_dead`, and `unknown` /
+`runtime_unresolved`. Missing/malformed identity cannot become dead, a reused
+PID is not the original identity, and a terminal lifecycle hint alone never
+gives dead. For extension authority a live wrapper cannot override the provider.
+Use `liveness_provider_key(handle)` for routing and provenance. When its callback
+is not registered, the command calls `weft._runner_plugins.get_runner_plugin`
+once with that key, then checks registration again. This is the same installed
+entry-point loading/registration mechanism used by the monitor; no service,
+runtime, SDK preflight or unrelated plugin is started. Preserve already
+registered callbacks without loading a factory over them. Any `Exception` raised while loading the provider, or a
+still-missing callback, gives `unknown` / `probe_unavailable`; do not catch `BaseException` or convert
+interrupt/exit signals to observations. Callback failure or invalid return gives `unknown` / `probe_failed`. No valid runtime handle gives
+`unknown` / `runtime_handle_unavailable`; unsupported authority gives `unknown` /
+`authority_unsupported`. The public result has no `attempted` flag: absence,
+failure and timing are expressed by reason codes, without repurposing the
+private retirement-policy flag.
+The private liveness analysis, retirement deadlines and deletion policy retain
+their existing terminal-hint and attempted semantics.
+
+Timeout is a cooperative probe budget measured monotonically from method entry.
+Check the remaining budget before provider loading and again before starting a
+host batch or extension callback; pass only the remaining budget to a callback.
+Do not start that phase when the budget is exhausted; return `unknown` /
+`probe_timeout`, still subject to final revalidation and snapshot_changed
+precedence. After a probe batch returns
+or raises, compare elapsed monotonic time against the original budget: expiry
+gives `unknown` / `probe_timeout` regardless of the raw result or exception.
+Apply this rule to host batches as well as extensions; do not introduce a
+per-identity retry or budget loop. Within budget, exceptions (including an early
+provider-specific timeout exception) give `probe_failed`; do not parse exception
+text or guess SDK timeout types. An unavailable provider that finishes loading
+after the budget is also `probe_timeout`. This is measured at completion of the
+probe/preparation phase, before final broker revalidation. With no initial valid
+row, return `runtime_handle_unavailable` immediately without a probe. Other
+no-probe branches with a selected row still receive final revalidation.
+
+Result precedence is: a final broker failure raises a typed command error;
+otherwise `snapshot_changed` overrides `probe_timeout`, which overrides probe
+failure or raw runtime evidence. Final broker I/O alone does not retroactively
+expire an in-budget probe. Synchronous OS/provider calls and final broker reads
+may overrun the budget; there is no hard wall-time guarantee or thread/process
+introduced to enforce one. Execute at most one probe batch without polling or
+retries. Provider registration remains process-local.
+
+Implementation mapping: `weft/liveness/analysis.py::probe_runtime_liveness`
+and `weft/liveness/registry.py::probe_registered_runtime` own raw evidence;
+`weft/liveness/analysis.py::analyze_liveness` retains private retirement policy.
+`weft/commands/tasks.py::task_runtime_liveness` owns public scope, budget,
+provenance and selected-row revalidation. Coverage:
+`tests/liveness/test_analysis.py`, `tests/liveness/test_registry.py`, and
+`tests/commands/test_runtime_liveness_observation.py`.
+
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md), runtime-liveness slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
+
 The runtime-generation fingerprint is the SHA-256 of canonical JSON containing
 exactly `runner`, `kind`, `id`, `control.authority`, normalized
 `observations.host_processes` pairs, optional

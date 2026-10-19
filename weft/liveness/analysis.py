@@ -16,8 +16,8 @@ from weft._constants import LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS
 from weft.ext import RunnerHandle
 
 from .host import inspect_host_process
-from .models import LivenessObservation, RuntimeLiveness
-from .registry import attempt_runtime_liveness_from_registered_probe
+from .models import LivenessObservation, RuntimeLiveness, RuntimeProbeResult
+from .registry import probe_registered_runtime
 
 
 def _handle_from_snapshot(snapshot: Mapping[str, Any]) -> RunnerHandle | None:
@@ -88,26 +88,15 @@ def _observation(
     )
 
 
-def analyze_liveness(
+def probe_runtime_liveness(
     tid: str,
-    snapshot: Mapping[str, Any],
+    handle: RunnerHandle,
     *,
     timeout_seconds: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
-) -> LivenessObservation:
-    """Reduce one mapping snapshot into authority-aware liveness evidence."""
-
-    terminal = snapshot.get("terminal") is True
-    handle = _handle_from_snapshot(snapshot)
-    if handle is None:
-        return _observation(
-            tid,
-            snapshot,
-            "stale" if terminal else "unknown",
-            "terminal_hint" if terminal else "missing_or_invalid_runtime_handle",
-        )
+) -> RuntimeProbeResult:
+    """Inspect one runtime authority without terminal hints [CC-3.2]."""
 
     authority = handle.control.get("authority")
-    attempted = True
     if authority == "host-pid":
         identities = handle.scoped_host_processes()
         if not identities:
@@ -128,22 +117,34 @@ def analyze_liveness(
                 evidence = "stale"
                 reason = "host_identities_stale"
     elif authority in {"runner", "external-supervisor"}:
-        probe_evidence = attempt_runtime_liveness_from_registered_probe(
-            handle,
-            timeout_seconds=timeout_seconds,
-        )
-        if probe_evidence is None:
-            evidence = "unknown"
-            reason = "extension_probe_failed"
-            attempted = False
-        else:
-            evidence = probe_evidence
-            reason = f"extension_{evidence}"
-            attempted = True
+        return probe_registered_runtime(handle, timeout_seconds=timeout_seconds)
     else:
-        evidence = "unknown"
-        reason = "unknown_control_authority"
-        attempted = True
+        return RuntimeProbeResult("unknown", "unknown_control_authority", "unsupported")
+    return RuntimeProbeResult(evidence, reason)
+
+
+def analyze_liveness(
+    tid: str,
+    snapshot: Mapping[str, Any],
+    *,
+    timeout_seconds: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+) -> LivenessObservation:
+    """Reduce one mapping snapshot into authority-aware liveness evidence."""
+
+    terminal = snapshot.get("terminal") is True
+    handle = _handle_from_snapshot(snapshot)
+    if handle is None:
+        return _observation(
+            tid,
+            snapshot,
+            "stale" if terminal else "unknown",
+            "terminal_hint" if terminal else "missing_or_invalid_runtime_handle",
+        )
+
+    raw = probe_runtime_liveness(tid, handle, timeout_seconds=timeout_seconds)
+    evidence = raw.evidence
+    reason = "extension_unknown" if raw.outcome == "unavailable" else raw.reason
+    attempted = raw.outcome != "failed"
 
     if evidence != "live" and terminal:
         evidence = "stale"

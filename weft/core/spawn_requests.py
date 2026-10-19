@@ -1,6 +1,7 @@
 """Shared spawn-request helpers for manager-launched task processes.
 
 Spec references:
+- docs/specifications/03-Manager_Architecture.md [MA-1.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-1], [MF-5], [MF-6]
 - docs/specifications/07-System_Invariants.md [MANAGER.4]
 """
@@ -10,8 +11,9 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from simplebroker import BrokerSession, BrokerTarget, Queue
 from simplebroker.ext import BrokerError
@@ -21,16 +23,25 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PUBLIC_RESERVED_SERVICE_METADATA_KEYS,
+    QUEUE_INTERNAL_RESERVED_SUFFIX,
+    QUEUE_RESERVED_SUFFIX,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
     WORK_ENVELOPE_START,
     resolve_runtime_config,
 )
+from weft.context import WeftContext
 from weft.core.endpoints import is_reserved_internal_endpoint_name
+from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.runtime_identity import (
     canonical_runtime_context,
     get_runtime_identity,
     submission_lineage,
+)
+from weft.core.service_convergence import (
+    manager_service_key,
+    project_manager_service_record,
 )
 from weft.core.taskspec import (
     TaskSpec,
@@ -38,6 +49,95 @@ from weft.core.taskspec import (
     encode_taskspec_transport_payload,
     validate_taskspec_payload,
 )
+from weft.helpers import closing_queue_iterator, is_canonical_manager_record
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnRequestCustody:
+    """Exact pending-request evidence, independent of task lifecycle [MF-5]."""
+
+    state: Literal["queued", "reserved", "absent"]
+    reserved_queue: str | None = None
+
+
+def iter_spawn_reserved_routes(
+    context: WeftContext, *, broker: Any | None = None
+) -> Iterator[str]:
+    """Read retained canonical manager routes without bootstrap effects.
+
+    Fold valid records before canonical filtering so a newer noncanonical
+    publication cannot revive an older route. Stopped and superseded owners
+    remain potential custodians. Unsupported schemas are ignored.
+
+    Spec: [MA-1.4], [MF-5].
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    service_key = manager_service_key(context)
+    with (
+        queue_broker(context, WEFT_SERVICES_REGISTRY_QUEUE, broker=broker) as db,
+        closing_queue_iterator(
+            iter_broker_queue_json_entries(
+                db, WEFT_SERVICES_REGISTRY_QUEUE, strict=True
+            )
+        ) as entries,
+    ):
+        for payload, timestamp in entries:
+            record = project_manager_service_record(
+                payload, timestamp=timestamp, service_key=service_key
+            )
+            if record is None:
+                continue
+            owner = str(record["tid"])
+            previous = latest.get(owner)
+            if previous is None or previous["timestamp"] < timestamp:
+                latest[owner] = record
+    seen: set[str] = set()
+    for owner, record in latest.items():
+        if not is_canonical_manager_record(record):
+            continue
+        for suffix in (QUEUE_RESERVED_SUFFIX, QUEUE_INTERNAL_RESERVED_SUFFIX):
+            route = f"T{owner}.{suffix}"
+            if route not in seen:
+                seen.add(route)
+                yield route
+
+
+def observe_spawn_request_custody(
+    context: WeftContext,
+    tid: str,
+    *,
+    reserved_routes: Iterable[str],
+    broker: Any | None = None,
+) -> SpawnRequestCustody:
+    """Observe exact pending custody, inspecting reserved routes lazily.
+
+    Source queues precede reserved queues in the manager handoff direction.
+    This neither inspects request payloads nor claims an atomic queue snapshot.
+    The caller owns task-evidence precedence and any registry bootstrap policy.
+
+    Spec: [MF-5], [MF-6].
+    """
+    message_timestamp = int(tid)
+    with queue_broker(context, WEFT_SPAWN_REQUESTS_QUEUE, broker=broker) as db:
+        for source in (WEFT_SPAWN_REQUESTS_QUEUE, WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE):
+            if (
+                db.peek_one(
+                    source, exact_timestamp=message_timestamp, with_timestamps=True
+                )
+                is not None
+            ):
+                return SpawnRequestCustody("queued")
+    # Release an owned source lease before a lazy iterator opens registry I/O.
+    for route in reserved_routes:
+        with queue_broker(context, route, broker=broker) as db:
+            if (
+                db.peek_one(
+                    route, exact_timestamp=message_timestamp, with_timestamps=True
+                )
+                is not None
+            ):
+                return SpawnRequestCustody("reserved", route)
+    return SpawnRequestCustody("absent")
 
 
 class _ExactSpawnInserter(Protocol):

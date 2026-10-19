@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## [0.9.114] - 2026-10-19
+
+### Added
+
+- Explicit Python runtime observations through `Task.runtime_liveness()` and
+  `client.tasks.runtime_liveness()`, returning a frozen `RuntimeLivenessSnapshot`
+  with live/dead/unknown evidence, provenance, freshness, and cooperative budgets.
+
+### Changed
+
+- Known-TID point status and task snapshots expose accepted spawn requests as
+  nonterminal `queued` or `reserved` custody before task metadata appears.
+  These are observation values, not new TaskSpec states. Bulk lists and watches
+  retain their existing behavior; unknown is not proof that submission failed.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.49`, `weft-docker 0.9.89`,
+  `weft-macos-sandbox 0.6.18`, and `weft-microsandbox 0.5.19`.
 
 ## [0.9.113] - 2026-10-16
 

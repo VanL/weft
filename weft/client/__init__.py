@@ -49,6 +49,7 @@ from ._prepared import PreparedSubmission
 from ._task import Task
 from ._types import (
     QueueAckTarget,
+    RuntimeLivenessSnapshot,
     TaskEvent,
     TaskResult,
     TaskSnapshot,
@@ -78,6 +79,7 @@ __all__ = [
     "RunInputSection",
     "RunInputStdinSection",
     "RunnerSection",
+    "RuntimeLivenessSnapshot",
     "SpecNotFound",
     "SpecSection",
     "StateSection",

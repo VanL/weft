@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import socket
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path
+from time import monotonic as _runtime_liveness_monotonic
+from time import time_ns as _runtime_liveness_time_ns
 from typing import Any, Literal, cast
 
 import weft.commands.system as system_cmd
@@ -30,6 +34,7 @@ from weft._constants import (
     CONTROL_STOP,
     CONTROL_SURFACE_WAIT_INTERVAL,
     CONTROL_SURFACE_WAIT_TIMEOUT,
+    LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
     TASK_HISTORY_MAX_MESSAGE_ID,
     TASK_PID_EXIT_POLL_INTERVAL,
     TASK_PING_TIMEOUT_SECONDS,
@@ -42,9 +47,10 @@ from weft._exceptions import (
     InvalidTID,
     TaskNotFound,
 )
-from weft._runner_plugins import require_runner_plugin
+from weft._runner_plugins import get_runner_plugin, require_runner_plugin
 from weft.commands.types import (
     CommandStream,
+    RuntimeLivenessSnapshot,
     TaskControlFailure,
     TaskControlResult,
     TaskEvent,
@@ -59,18 +65,26 @@ from weft.core.control_probe import send_keyed_ping_probe
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.runner_diagnostics import diagnostic_summary
+from weft.core.spawn_requests import (
+    iter_spawn_reserved_routes,
+    observe_spawn_request_custody,
+)
 from weft.core.task_state import (
     latest_task_state_rows,
     read_task_state_snapshot,
     task_state_queue_name,
 )
+from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
     pid_is_live,
     terminate_verified_process_tree,
     tid_short_form,
 )
-from weft.helpers.message_ids import is_task_tid
+from weft.helpers.message_ids import is_task_tid, normalize_exact_message_id
+from weft.liveness.analysis import probe_runtime_liveness
+from weft.liveness.models import RuntimeProbeResult
+from weft.liveness.registry import has_runtime_liveness_probe, liveness_provider_key
 
 from ._boundary import typed_command_errors
 from ._result_wait import _is_completion_record, result_observation
@@ -82,12 +96,14 @@ from ._task_snapshot_reducer import (
     RuntimeObservation,
     _reconciliation_diagnostic,
     _stale_liveness_reconciliation,
+    reduce_task_state_snapshot,
 )
 from .control_convergence import (
     ControlConvergenceEvidence,
     reduce_control_convergence,
 )
 
+# The runtime-liveness clock aliases isolate observation tests from broker/harness clocks.
 logger = logging.getLogger(__name__)
 
 
@@ -408,6 +424,308 @@ def _terminal_observation_snapshot(
     return TaskTerminalSnapshot(tid=tid, status="unknown", source="observer")
 
 
+def _public_runtime_probe_result(
+    result: RuntimeProbeResult,
+) -> tuple[Literal["live", "dead", "unknown"], str]:
+    """Project raw evidence without exposing retirement hints [CC-3.2]."""
+    if result.outcome != "completed":
+        return "unknown", {
+            "unavailable": "probe_unavailable",
+            "failed": "probe_failed",
+            "unsupported": "authority_unsupported",
+        }[result.outcome]
+    states: dict[str, Literal["live", "dead", "unknown"]] = {
+        "live": "live",
+        "stale": "dead",
+        "unknown": "unknown",
+    }
+    state = states[result.evidence]
+    return state, "runtime_unresolved" if state == "unknown" else f"runtime_{state}"
+
+
+def _run_runtime_probe(
+    tid: str,
+    handle: RunnerHandle,
+    *,
+    deadline: float,
+) -> tuple[Literal["live", "dead", "unknown"], str]:
+    """Load only the selected provider and enforce a cooperative budget [CC-3.2]."""
+    if _runtime_liveness_monotonic() >= deadline:
+        return "unknown", "probe_timeout"
+    extension = handle.control.get("authority") in {"runner", "external-supervisor"}
+    if extension and not has_runtime_liveness_probe(handle):
+        try:
+            get_runner_plugin(liveness_provider_key(handle))
+        except Exception:  # External entry-point imports and factories may fail.
+            logger.debug("Runtime liveness provider unavailable", exc_info=True)
+            return "unknown", (
+                "probe_timeout"
+                if _runtime_liveness_monotonic() >= deadline
+                else "probe_unavailable"
+            )
+    remaining = deadline - _runtime_liveness_monotonic()
+    if remaining <= 0:
+        return "unknown", "probe_timeout"
+    try:
+        result = _public_runtime_probe_result(
+            probe_runtime_liveness(tid, handle, timeout_seconds=remaining)
+        )
+    except Exception:  # Host/extension probe boundary; never infer death on failure.
+        logger.debug("Runtime liveness probe failed", exc_info=True)
+        result = ("unknown", "probe_failed")
+    if _runtime_liveness_monotonic() >= deadline:
+        return "unknown", "probe_timeout"
+    return result
+
+
+def _runtime_liveness_from_row(
+    tid: str,
+    payload: Mapping[str, Any],
+    observation: RuntimeLivenessSnapshot,
+    *,
+    deadline: float,
+) -> RuntimeLivenessSnapshot:
+    """Bind public provenance and host scope before invoking raw evidence [MF-5]."""
+    raw_handle = payload.get("runtime_handle")
+    if not isinstance(raw_handle, Mapping):
+        return observation
+    try:
+        handle = RunnerHandle.from_dict(raw_handle)
+    except (TypeError, ValueError):
+        return observation
+    authority = handle.control.get("authority")
+    source = cast(
+        Literal["host-pid", "runner", "external-supervisor", "none"],
+        authority
+        if authority in {"host-pid", "runner", "external-supervisor"}
+        else "none",
+    )
+    observation = replace(
+        observation,
+        source=source,
+        runner=handle.runner,
+        runtime_id=handle.id,
+        provider=liveness_provider_key(handle)
+        if source in {"runner", "external-supervisor"}
+        else None,
+    )
+    hostname = payload.get("hostname")
+    scoped = isinstance(hostname, str) and bool(hostname)
+    if (scoped and hostname != socket.gethostname()) or (
+        source == "host-pid" and not scoped
+    ):
+        return replace(observation, reason="runtime_unresolved")
+    state, reason = _run_runtime_probe(tid, handle, deadline=deadline)
+    return replace(observation, state=state, reason=reason)
+
+
+@typed_command_errors
+def task_runtime_liveness(
+    tid: str,
+    *,
+    timeout: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+    context: WeftContext | None = None,
+    context_path: str | os.PathLike[str] | None = None,
+) -> RuntimeLivenessSnapshot:
+    """Explicitly check a runtime, with provenance and a final row fence.
+
+    Runtime evidence cannot change task lifecycle or authorize cleanup. The
+    cooperative budget covers preparation and probing; final broker revalidation
+    can take additional time. Connection loans end before the external callback.
+
+    Spec: docs/specifications/01-Core_Components.md [CC-3.2];
+    docs/specifications/05-Message_Flow_and_State.md [MF-5];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+    started_at = _runtime_liveness_time_ns()
+    started = _runtime_liveness_monotonic()
+    if not is_task_tid(tid):
+        raise InvalidTID("Runtime liveness requires a canonical full task ID")
+    try:
+        valid_tid = normalize_exact_message_id(tid)
+    except (TypeError, ValueError) as exc:
+        raise InvalidTID("Runtime liveness requires a canonical full task ID") from exc
+    if valid_tid <= 0:
+        raise InvalidTID("Runtime liveness requires a positive task ID")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, int | float)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise CommandUsageError("Runtime liveness timeout must be finite and positive")
+    ctx = _coerce_context(context=context, context_path=context_path)
+    selected = read_task_state_snapshot(ctx, tid)
+    observation = RuntimeLivenessSnapshot(
+        tid=tid,
+        state="unknown",
+        source="none",
+        runner=None,
+        runtime_id=None,
+        provider=None,
+        reason="runtime_handle_unavailable",
+        snapshot_message_id=selected[0] if selected else None,
+        check_started_at_ns=started_at,
+        check_completed_at_ns=started_at,
+    )
+    if selected is not None:
+        observation = _runtime_liveness_from_row(
+            tid,
+            selected[1],
+            observation,
+            deadline=started + timeout,
+        )
+        current = read_task_state_snapshot(ctx, tid, previous=selected)
+        if current is None or current[0] != selected[0]:
+            observation = replace(
+                observation, state="unknown", reason="snapshot_changed"
+            )
+    return replace(observation, check_completed_at_ns=_runtime_liveness_time_ns())
+
+
+@dataclass(frozen=True, slots=True)
+class _PointObservation:
+    """One task-local generation and its point-observation evidence [MF-5]."""
+
+    base: CollectedTaskSnapshot | None
+    row: tuple[int, dict[str, Any]] | None
+    config: task_evidence.TaskObservationConfig | None
+    evidence: task_evidence.TaskEvidenceSnapshot | None
+    custody: Literal["queued", "reserved"] | None = None
+
+
+def _read_point_observation(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    broker: Any,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+    observation_config: task_evidence.TaskObservationConfig | None = None,
+    ping: bool = False,
+    probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+) -> _PointObservation:
+    """Acquire projection, routing and evidence from the same current row [MF-5]."""
+    row = read_task_state_snapshot(ctx, tid, broker=broker)
+    mapping = {**row[1], "timestamp": row[0]} if row else None
+    base = (
+        reduce_task_state_snapshot(tid, mapping, now_ns=time.time_ns())
+        if mapping is not None
+        else None
+    )
+    config = (
+        observation_config
+        or task_evidence.observation_config_from_taskspec_payload(
+            accepted_taskspec_payload
+        )
+    )
+    if config is None:
+        config = task_evidence.discover_task_observation(
+            ctx, tid, mapping_entry=mapping, broker=broker
+        )
+    evidence = task_evidence.known_tid_evidence(
+        ctx,
+        tid=tid,
+        taskspec_payload=accepted_taskspec_payload,
+        observation_config=config,
+        mapping_entry=mapping,
+        ping=ping,
+        probe_timeout=probe_timeout,
+        discover_observation=False,
+        broker=broker,
+    )
+    return _PointObservation(base, row, config, evidence)
+
+
+def _submission_point_observation(
+    ctx: WeftContext,
+    tid: str,
+    *,
+    broker: Any,
+    accepted_taskspec_payload: dict[str, Any] | None = None,
+    observation_config: task_evidence.TaskObservationConfig | None = None,
+    ping: bool = False,
+    probe_timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+) -> _PointObservation:
+    """Share custody acquisition and handoff refresh for both point views.
+
+    Call only after the initial task-local read has no evidence. Source,
+    registry and reserved acquisition precede one fresh task-local read, even
+    on a custody miss. This is an ordered observation, not an absence proof.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5].
+    """
+    try:
+        canonical = is_task_tid(tid) and normalize_exact_message_id(tid) > 0
+    except (TypeError, ValueError):
+        canonical = False
+    if not canonical:
+        return _read_point_observation(
+            ctx,
+            tid,
+            broker=broker,
+            accepted_taskspec_payload=accepted_taskspec_payload,
+            observation_config=observation_config,
+            ping=ping,
+            probe_timeout=probe_timeout,
+        )
+    custody = observe_spawn_request_custody(
+        ctx,
+        tid,
+        reserved_routes=iter_spawn_reserved_routes(ctx, broker=broker),
+        broker=broker,
+    )
+    fresh = _read_point_observation(
+        ctx,
+        tid,
+        broker=broker,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+        observation_config=observation_config,
+        ping=ping,
+        probe_timeout=probe_timeout,
+    )
+    if (
+        fresh.base is not None
+        or fresh.evidence is not None
+        or custody.state == "absent"
+    ):
+        return fresh
+    classification = f"submission_{custody.state}"
+    evidence = task_evidence.TaskEvidenceSnapshot(
+        tid=tid,
+        status=custody.state,
+        classification=classification,
+        source="spawn_queue" if custody.state == "queued" else "manager_reserved",
+        event=classification,
+        terminal=False,
+        reconciliation={"classification": classification},
+    )
+    return replace(fresh, evidence=evidence, custody=custody.state)
+
+
+def _terminal_snapshot_with_custody(
+    ctx: WeftContext,
+    tid: str,
+    snapshot: TaskTerminalSnapshot,
+    *,
+    broker: Any,
+    accepted_taskspec_payload: dict[str, Any] | None,
+    observation_config: task_evidence.TaskObservationConfig | None,
+) -> TaskTerminalSnapshot:
+    """Enrich only an otherwise unknown public terminal return [MF-5]."""
+    if snapshot.status != "unknown":
+        return snapshot
+    observed = _submission_point_observation(
+        ctx,
+        tid,
+        broker=broker,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+        observation_config=observation_config,
+    )
+    if observed.evidence is not None:
+        return task_evidence.terminal_snapshot_from_evidence(observed.evidence)
+    return snapshot
+
+
 @typed_command_errors
 def _task_terminal_snapshot(
     tid: str,
@@ -424,12 +742,20 @@ def _task_terminal_snapshot(
     )
     if timeout <= 0:
         with ctx.broker() as broker:
-            return _terminal_observation_snapshot(
+            snapshot = _terminal_observation_snapshot(
                 ctx,
                 tid,
                 routing_payload=accepted_taskspec_payload,
                 observation_config=config,
                 broker=broker,
+            )
+            return _terminal_snapshot_with_custody(
+                ctx,
+                tid,
+                snapshot,
+                broker=broker,
+                accepted_taskspec_payload=accepted_taskspec_payload,
+                observation_config=config,
             )
     deadline = time.monotonic() + timeout if timeout > 0 else None
     names = _terminal_observation_queue_names(tid, config)
@@ -459,8 +785,19 @@ def _task_terminal_snapshot(
                     observation_config=config,
                     broker=broker,
                 )
-            if snapshot.terminal or deadline is None or time.monotonic() >= deadline:
-                return snapshot
+                if (
+                    snapshot.terminal
+                    or deadline is None
+                    or time.monotonic() >= deadline
+                ):
+                    return _terminal_snapshot_with_custody(
+                        ctx,
+                        tid,
+                        snapshot,
+                        broker=broker,
+                        accepted_taskspec_payload=accepted_taskspec_payload,
+                        observation_config=config,
+                    )
             monitor.wait(max(0.0, deadline - time.monotonic()))
 
 
@@ -487,6 +824,7 @@ def ack_terminal_snapshot(
     return deleted_any
 
 
+@typed_command_errors
 def task_status(
     tid: str,
     *,
@@ -503,6 +841,7 @@ def task_status(
         probe_timeout=probe_timeout,
         context=context,
         context_path=context_path,
+        include_submission_custody=True,
     )
 
 
@@ -516,6 +855,7 @@ def _task_status(
     context_path: str | os.PathLike[str] | None = None,
     broker: Any | None = None,
     observation_config: task_evidence.TaskObservationConfig | None = None,
+    include_submission_custody: bool = False,
 ) -> system_cmd.TaskSnapshot | None:
     """Project the shared fresh status record [MF-5]."""
     record = _task_status_record(
@@ -527,6 +867,7 @@ def _task_status(
         context_path=context_path,
         broker=broker,
         observation_config=observation_config,
+        include_submission_custody=include_submission_custody,
     )
     return record.snapshot if record is not None else None
 
@@ -542,6 +883,7 @@ def _task_status_record(
     broker: Any | None = None,
     observation_config: task_evidence.TaskObservationConfig | None = None,
     accepted_taskspec_payload: dict[str, Any] | None = None,
+    include_submission_custody: bool = False,
 ) -> CollectedTaskSnapshot | None:
     """Read known-TID queues and overlay locally acquired terminal proof [MF-5]."""
     ctx = _coerce_context(context=context, context_path=context_path)
@@ -564,6 +906,7 @@ def _task_status_record(
             broker=connected,
             accepted_taskspec_payload=accepted_taskspec_payload,
             observation_config=observation_config,
+            include_submission_custody=include_submission_custody,
         )
 
 
@@ -577,27 +920,37 @@ def _known_status_record(
     broker: Any,
     accepted_taskspec_payload: dict[str, Any] | None,
     observation_config: task_evidence.TaskObservationConfig | None = None,
+    include_submission_custody: bool = False,
 ) -> CollectedTaskSnapshot | None:
     """Project current snapshot then apply the known-TID evidence ordering [MF-5]."""
-    base = system_cmd.collect_known_tid_record(ctx, tid, broker=broker)
-    config = (
-        observation_config
-        or task_evidence.observation_config_from_taskspec_payload(
-            accepted_taskspec_payload
-        )
-    )
-    if config is None:
-        config = task_evidence.discover_task_observation(ctx, tid, broker=broker)
-    row = read_task_state_snapshot(ctx, tid, broker=broker)
-    evidence = task_evidence.known_tid_evidence(
+    observed = _read_point_observation(
         ctx,
-        tid=tid,
-        taskspec_payload=accepted_taskspec_payload,
-        observation_config=config,
-        mapping_entry={**row[1], "timestamp": row[0]} if row else None,
+        tid,
+        broker=broker,
+        accepted_taskspec_payload=accepted_taskspec_payload,
+        observation_config=observation_config,
         ping=ping,
         probe_timeout=probe_timeout,
-        broker=broker,
+    )
+    if (
+        include_submission_custody
+        and observed.base is None
+        and observed.evidence is None
+    ):
+        observed = _submission_point_observation(
+            ctx,
+            tid,
+            broker=broker,
+            accepted_taskspec_payload=accepted_taskspec_payload,
+            observation_config=observation_config,
+            ping=ping,
+            probe_timeout=probe_timeout,
+        )
+    base, row, config, evidence = (
+        observed.base,
+        observed.row,
+        observed.config,
+        observed.evidence,
     )
     snapshot = base.snapshot if base is not None else None
     if evidence is not None and (
@@ -611,12 +964,17 @@ def _known_status_record(
         )
         snapshot = replace(snapshot, event=evidence.event or evidence.classification)
     if snapshot is None:
+        classification = (
+            f"submission_{observed.custody}"
+            if observed.custody
+            else "observation_metadata_unavailable"
+        )
         snapshot = system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=tid_short_form(tid),
             name=tid,
-            status="unknown",
-            event="observation_metadata_unavailable",
+            status=observed.custody or "unknown",
+            event=classification,
             activity=None,
             waiting_on=None,
             started_at=None,
@@ -627,7 +985,7 @@ def _known_status_record(
             runtime_handle=None,
             runtime=None,
             metadata={},
-            reconciliation={"classification": "observation_metadata_unavailable"},
+            reconciliation={"classification": classification},
         )
     snapshot = _enrich_known_snapshot(
         ctx,
@@ -969,9 +1327,11 @@ def task_snapshot(
         include_terminal=include_terminal,
         context=context,
         context_path=context_path,
+        include_submission_custody=True,
     )
 
 
+@typed_command_errors
 def _task_snapshot(
     tid: str,
     *,
@@ -981,6 +1341,7 @@ def _task_snapshot(
     broker: Any | None = None,
     observation_config: task_evidence.TaskObservationConfig | None = None,
     accepted_taskspec_payload: dict[str, Any] | None = None,
+    include_submission_custody: bool = False,
 ) -> TaskSnapshot | None:
     """Project fresh public fields using an observation owner's loans [MF-5]."""
 
@@ -991,6 +1352,7 @@ def _task_snapshot(
         context=ctx,
         broker=broker,
         observation_config=observation_config,
+        include_submission_custody=include_submission_custody,
         accepted_taskspec_payload=accepted_taskspec_payload,
     )
     if record is None:
@@ -2093,7 +2455,7 @@ def cmd_task_status(
     ctx = _coerce_context(context_path=context)
     full_tid = _command_tid(tid, context=ctx, allow_unknown_full=True)
     if ping:
-        internal_snapshot = task_status(
+        internal_snapshot = (_task_status if watch else task_status)(
             full_tid,
             include_terminal=True,
             ping=True,
@@ -2108,7 +2470,7 @@ def cmd_task_status(
             else None
         )
     else:
-        snapshot = task_snapshot(full_tid, context=ctx)
+        snapshot = (_task_snapshot if watch else task_snapshot)(full_tid, context=ctx)
     if snapshot is None:
         raise TaskNotFound(f"Task {tid} not found")
     if watch:

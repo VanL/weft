@@ -1066,7 +1066,7 @@ Without timeout, unresolved result acquisition returns unknown with
 `observation_metadata_unavailable` reconciliation (CLI exit 1). With finite
 timeout, discovery waits until the original caller deadline and raises the
 existing observation-timeout error (CLI exit 124), without publishing synthetic
-task timeout. Full-TID snapshot absence is unknown evidence. Unresolved task
+task timeout. Unresolved task
 control routes produce a typed error before any write (CLI exit 1).
 
 The observation owner registers interest in its exact result and completion
@@ -1086,6 +1086,39 @@ outbox and `ctrl_out`, plus the existing task-local runtime wake/evidence surfac
 do not subscribe to or scan `weft.log.tasks` for live completion. Task-local completion
 records carry the same lifecycle fact as global history; existing terminal precedence,
 persistent work boundaries, output grace, and claim settlement apply.
+
+Full-TID snapshot absence alone does not establish absence of an accepted request. When task-state metadata and positive task-local evidence are absent, known-TID point status and non-consuming terminal snapshots read the exact pending spawn-request ID in ordinary/internal source queues and canonical manager ordinary/internal reserved queues in the resolved context. Source custody reports `queued`; reserved custody reports `reserved`. These are nonterminal observations of broker custody, not TaskSpec lifecycle states or proof that execution has not started. Task-local evidence retains precedence; invalid projection inside a valid row and stale valid task-state metadata retain their existing interpretation. Malformed task-state rows retain [OBS.6] semantics and do not create a new custody suppression rule. Claimed residue and manager liveness alone do not establish submission custody.
+
+Custody reads do not mutate registry or queue state, start services, reconstruct task configuration from spawn payloads, or acquire global task history or Monitor data. Discovery includes retained stopped/superseded canonical manager owners. Source queues are checked before reserved queues. One observation checks task-local evidence, then source queues, then (on source miss) the registry and reserved queues, then rechecks task-local evidence and current projection after the custody lookup whether custody was found or not. Fresh task evidence/current projection wins over custody. There is no second registry/custody pass. Reads do not promise an atomic cross-queue snapshot. Without positive evidence the observation remains unknown, which does not authorize resubmission or imply terminal failure. Database failures remain typed errors.
+
+Positive-timeout terminal observation continues to wait for terminal evidence or the original caller deadline using existing task-local subscriptions. Intermediate custody transitions do not require a wakeup. At the original deadline an otherwise unknown snapshot receives a fresh custody observation. The timeout bounds terminal waiting, not total call duration; the final custody observation and task-evidence refresh may require additional backend I/O, with no fixed overrun bound. Intermediate wait iterations do not acquire custody. Pure point reads create no activity subscription. Control-decision loops, interactive STOP, bulk inventory and status/event watch retain their existing acquisition and output semantics; these paths do not gain custody lookups. One-shot public snapshots attached to ping/stop/kill results inherit the point-snapshot contract without changing command acknowledgement, success or failure decisions. Result acquisition, controls, settlement, liveness and cleanup keep their existing contracts.
+
+The explicit runtime-liveness command reads the newest valid task-state row
+through `read_task_state_snapshot`, probes its validated runtime identity, then
+re-reads once using `read_task_state_snapshot(..., previous=selected)`. Use two
+`broker=None` reader calls so their existing scopes release connection leases
+before the potentially slow probe, preserving any caller-owned session. Do not
+wrap both reads and the callback in one broker loan. Use the existing
+`@typed_command_errors` boundary for the command owner. Compare selected rows by message ID, never tuple/object identity: changed means
+the re-read returns `None` or a different message ID. A changed or removed row
+invalidates the result: return `unknown` / `snapshot_changed`, retaining the
+original input row ID and identity as provenance. This rule takes precedence
+over the probe outcome, including timeout or death. Do not re-probe a replacement
+or fall back to an older runtime identity; malformed tails retain [OBS.6]
+reader semantics. With no initial valid row, return `unknown` /
+`runtime_handle_unavailable` without a probe. A final read cannot provide
+linearizability: a subsequent change is outside this point observation.
+Broker/read failures remain typed command errors rather than unknown values.
+
+The reason-code vocabulary is exactly `runtime_live`, `runtime_dead`,
+`runtime_unresolved`, `probe_unavailable`, `probe_failed`,
+`runtime_handle_unavailable`, `authority_unsupported`, `probe_timeout`, and
+`snapshot_changed`. The operation does not read spawn custody, service registry,
+global lifecycle history or Monitor state; it writes no queue, sends no signal
+or control message, and cannot authorize resubmission, cleanup or result
+acknowledgement. It never rewrites task lifecycle status. Public custody
+acquisition and handoff ordering remain shared as specified for slices 1–4;
+this separate runtime probe does not enter that fallback or broaden its callers.
 
 Bulk status/list/stats default to current nonterminal projections. Explicit
 `--all` / `include_terminal=True` adds retained terminal projections. Explicit
@@ -2044,6 +2077,17 @@ A coordinated upgrade quiesces old producers and runtimes before migration. The 
 _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigration`, `weft/commands/_spawn_submission.py::prepare_legacy_child_migration`, `weft/commands/_spawn_submission.py::LegacyChildMigrationManager`, `tests/commands/test_family_migration.py`.
 
 ## Related Plans
+
+Implementation mapping: `weft/core/spawn_requests.py::observe_spawn_request_custody`
+owns source-before-reserved acquisition;
+`weft/commands/tasks.py::_submission_point_observation` owns the shared final
+task-evidence refresh for both public projections.
+`weft/commands/tasks.py::task_runtime_liveness` owns explicit runtime probing
+and selected-message-ID revalidation. Coverage:
+`tests/commands/test_submission_observation.py` and
+`tests/commands/test_runtime_liveness_observation.py`.
+
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
 
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 

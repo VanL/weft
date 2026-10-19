@@ -967,6 +967,7 @@ COMMAND_ERRORS = {
                 "TaskResult",
                 "TaskSnapshot",
                 "TaskTerminalSnapshot",
+                "RuntimeLivenessSnapshot",
                 "WeftClient",
                 "WeftError",
                 "connect",

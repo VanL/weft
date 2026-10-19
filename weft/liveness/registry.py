@@ -14,7 +14,7 @@ from threading import RLock
 from weft._constants import LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS
 from weft.ext import RunnerHandle
 
-from .models import RuntimeLiveness
+from .models import RuntimeLiveness, RuntimeProbeResult
 
 RuntimeLivenessProbe = Callable[[RunnerHandle, float], RuntimeLiveness]
 
@@ -45,28 +45,47 @@ def register_runtime_liveness_probe(key: str, probe: RuntimeLivenessProbe) -> No
         _runtime_liveness_probes[normalized] = probe
 
 
+def has_runtime_liveness_probe(handle: RunnerHandle) -> bool:
+    """Return whether the selected provider has a process-local callback."""
+
+    with _runtime_liveness_lock:
+        return liveness_provider_key(handle) in _runtime_liveness_probes
+
+
+def probe_registered_runtime(
+    handle: RunnerHandle,
+    timeout_seconds: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+) -> RuntimeProbeResult:
+    """Observe one provider, preserving absence and failure [CC-3.2]."""
+
+    key = liveness_provider_key(handle)
+    with _runtime_liveness_lock:
+        probe = _runtime_liveness_probes.get(key)
+    if probe is None:
+        return RuntimeProbeResult(
+            "unknown", "extension_probe_unavailable", "unavailable"
+        )
+    try:
+        result = probe(handle, timeout_seconds)
+    except Exception:  # extension boundary guard
+        logger.debug("Runtime liveness probe for %s failed", key, exc_info=True)
+        return RuntimeProbeResult("unknown", "extension_probe_failed", "failed")
+    if not isinstance(result, str) or result not in {"live", "stale", "unknown"}:
+        logger.debug(
+            "Runtime liveness probe for %s returned invalid value %r", key, result
+        )
+        return RuntimeProbeResult("unknown", "extension_probe_failed", "failed")
+    return RuntimeProbeResult(result, f"extension_{result}")
+
+
 def attempt_runtime_liveness_from_registered_probe(
     handle: RunnerHandle,
     timeout_seconds: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
 ) -> RuntimeLiveness | None:
     """Attempt one extension probe, returning ``None`` when it does not complete."""
 
-    key = liveness_provider_key(handle)
-    with _runtime_liveness_lock:
-        probe = _runtime_liveness_probes.get(key)
-    if probe is None:
-        return "unknown"
-    try:
-        result = probe(handle, timeout_seconds)
-    except Exception:  # pragma: no cover - extension boundary guard
-        logger.debug("Runtime liveness probe for %s failed", key, exc_info=True)
-        return None
-    if result not in {"live", "stale", "unknown"}:
-        logger.debug(
-            "Runtime liveness probe for %s returned invalid value %r", key, result
-        )
-        return None
-    return result
+    result = probe_registered_runtime(handle, timeout_seconds)
+    return None if result.outcome == "failed" else result.evidence
 
 
 def runtime_liveness_from_registered_probe(

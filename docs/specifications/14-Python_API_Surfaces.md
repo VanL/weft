@@ -141,6 +141,20 @@ _Implementation mapping_: `weft/client/_client.py::WeftClient.__init__`,
 `tests/core/test_public_extension_contracts.py`, and
 `tests/fixtures/public_extension_contract.py`.
 
+The public client exports the frozen `RuntimeLivenessSnapshot` result type
+under the same shared-type ownership as its task snapshots; its exact contract
+is specified in [PY-2]. Implementation mapping: `weft/commands/types.py::RuntimeLivenessSnapshot`
+owns the frozen value; `weft/client/_types.py` and `weft/client/__init__.py`
+re-export it. `weft/client/_task.py::Task.runtime_liveness` and
+`weft/client/_namespaces.py::TasksNamespace.runtime_liveness` delegate to
+`weft/commands/tasks.py::task_runtime_liveness`. Custody projections share
+`weft/commands/tasks.py::_submission_point_observation`. Coverage:
+`tests/architecture/test_import_boundaries.py`,
+`tests/commands/test_submission_observation.py`, and
+`tests/commands/test_runtime_liveness_observation.py`.
+
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md), slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
+
 ## Commands surface contract [PY-2]
 
 Task observations use task-owned per-TID snapshots and bound observation
@@ -197,6 +211,44 @@ lifecycle snapshot. Python and CLI callers observe and retrieve task results
 directly through that capability; result meaning and errors remain shared.
 Bare-TID callers use the task-specific discovery boundary in [MF-5].
 
+Full-TID `client.tasks.status(tid)` and `client.task(tid).snapshot()` (including retained accepted handles), and their command/CLI point-status adapters, expose submission custody under [MF-5] before task-state publication. `client.tasks.terminal_snapshot(tid, timeout=...)` and `Task.terminal_snapshot(timeout=...)` expose the same custody through their existing return types. Their timeout bounds terminal waiting; final observation may require additional backend I/O under [MF-5]. No new submission or observation method is required.
+
+Custody-only point snapshots use status `queued`/`reserved`, event and reconciliation classification `submission_queued`/`submission_reserved`, the TID as fallback name, empty metadata, absent optional runtime/lifecycle fields and `last_timestamp=0`. Custody-only terminal snapshots use the same status, source `spawn_queue`/`manager_reserved`, metadata classification `submission_queued`/`submission_reserved`, `terminal=False`, `observed_at=None`, empty acknowledgement targets and no result/error fields. They expose neither spawn payload nor reserved queue names. These statuses are additive public observation values, not new TaskSpec states. A point query may see an accepted request before bulk inventory sees a task publication.
+
+`client.tasks.runtime_liveness(tid, *, timeout=2.0)` and
+`Task.runtime_liveness(*, timeout=2.0)` explicitly request one runtime-liveness
+check and return a frozen `RuntimeLivenessSnapshot`, exported from `weft.client`
+and backed by `weft.commands.types`. Both delegate to one typed-error command
+owner, `weft/commands/tasks.py::task_runtime_liveness`. The default uses
+`LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS`, not a new constant. Only an unprefixed canonical 19-character ASCII decimal full TID is accepted;
+whitespace, a leading `T`, short IDs and zero are rejected. Validate spelling
+with `is_task_tid` and range with `normalize_exact_message_id`, requiring a
+positive value; translate failure to `InvalidTID` before any probe, without
+short-TID lookup. Unlike terminal-snapshot normalization, invalid input raises
+rather than returning a synthetic missing result. Timeout must be finite and positive (booleans are
+invalid), otherwise raise `CommandUsageError`. Calling this method is the
+explicit opt-in; there is no passive mode, automatic PING, new CLI verb, or new
+probe flag on existing snapshot methods. Existing observation methods keep
+their behavior and gain no extra probes. Accepted TaskSpecs cannot supply
+runtime identity; fresh and retained handles read the same task-state owner.
+
+| Field | Type and meaning |
+| --- | --- |
+| `tid` | `str`: requested canonical full TID. |
+| `state` | `Literal["live", "dead", "unknown"]`: observation of the selected runtime identity, not task lifecycle, progress or readiness. `dead` means positively not live at this check; it does not promise that a restartable runtime can never run again. |
+| `source` | `Literal["host-pid", "runner", "external-supervisor", "none"]`: selected authority, or `none` when no supported authority is available. |
+| `runner`, `runtime_id` | `str | None`: identity from the validated selected runtime handle; both absent without a valid handle. No complete handle or arbitrary provider payload is copied. |
+| `provider` | `str | None`: normalized liveness-provider key selected for runner/external-supervisor authority, including when loading fails or host scoping prevents a probe; absent for host-pid or unsupported/missing authority. This can differ from the runner name for aliased providers. |
+| `reason` | `str`: one of the stable reason codes enumerated below; no exception text or provider secrets. |
+| `snapshot_message_id` | `int | None`: exact selected task-state row ID, absent when no valid row exists. It identifies the input evidence; it is not the time this check ran. |
+| `check_started_at_ns`, `check_completed_at_ns` | `int`: observer wall-clock Unix nanoseconds bracketing the check. These are new per-call measurements, not a persisted last-seen timestamp or liveness lease. Use monotonic time for budgets; clock adjustment may invert wall-clock ordering. |
+
+Freshness means only that a check occurred within the reported interval against
+the selected evidence. There is no freshness TTL, health score, or guarantee
+past the observation. An old task-state publication is not proof of inactivity:
+publication remains edge-triggered. No new durable observation store or periodic
+republishing is introduced.
+
 _Implementation mapping_: `weft/core/spawn_requests.py::_submit_spawn_request_with_payload`
 retains the committed transport; `weft/commands/submission.py::_bind_accepted_taskspec`
 binds it after acceptance/recovery; `weft/client/_task.py::_task_with_configuration`
@@ -214,6 +266,8 @@ shape for consuming follow and stream adapters.
 Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
 Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).
 Related plan: [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md).
+
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
 
 The exact signature exceptions are: `cmd_run` has `spec_args=()`,
 `describe=False`, and `stdin_text=None`;

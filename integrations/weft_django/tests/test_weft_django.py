@@ -890,16 +890,17 @@ def _pipeline_reference_path(
     )
 
 
-def _wait_for_snapshot(tid: str, *, timeout: float = 10.0) -> None:
+def _wait_for_published_task_snapshot(tid: str, *, timeout: float = 10.0) -> None:
+    """Wait for task metadata; accepted broker custody is not publication."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if (
             snapshot := get_core_client().task(tid).snapshot()
-        ) is not None and snapshot.status != "unknown":
+        ) is not None and snapshot.status not in {"unknown", "queued", "reserved"}:
             return
         time.sleep(0.05)
     raise AssertionError(
-        f"Timed out waiting for snapshot for task {tid}\n"
+        f"Timed out waiting for published task snapshot for task {tid}\n"
         f"{_HARNESS.dump_completion_timeout_state(tid)}"
     )
 
@@ -1593,7 +1594,7 @@ def test_django_postgres_environment_target_keeps_base_dir(
 @pytest.mark.shared
 def test_http_detail_and_sse_views_are_read_only_diagnostics() -> None:
     task = echo_task.enqueue("http")
-    _wait_for_snapshot(task.tid)
+    _wait_for_published_task_snapshot(task.tid)
     client = Client()
 
     detail_response = client.get(f"/weft/tasks/{task.tid}/")
@@ -1613,7 +1614,7 @@ def test_http_detail_and_sse_views_are_read_only_diagnostics() -> None:
 @pytest.mark.shared
 def test_asgi_sse_uses_async_streaming_content() -> None:
     task = echo_task.enqueue("asgi-http")
-    _wait_for_snapshot(task.tid)
+    _wait_for_published_task_snapshot(task.tid)
 
     async def collect() -> tuple[bool, bytes]:
         response = await AsyncClient().get(f"/weft/tasks/{task.tid}/events/")
@@ -1736,7 +1737,7 @@ def test_sse_stream_emits_stdout_and_stderr_events_without_consuming_result() ->
         ],
         stream_output=True,
     )
-    _wait_for_snapshot(core_task.tid)
+    _wait_for_published_task_snapshot(core_task.tid)
 
     client = Client()
     stream_response = client.get(f"/weft/tasks/{core_task.tid}/events/")
@@ -1776,7 +1777,7 @@ def test_http_views_handle_invalid_and_unknown_tids_cleanly() -> None:
 @pytest.mark.shared
 def test_http_views_enforce_authorization(monkeypatch: pytest.MonkeyPatch) -> None:
     task = echo_task.enqueue("authz")
-    _wait_for_snapshot(task.tid)
+    _wait_for_published_task_snapshot(task.tid)
     monkeypatch.setattr(fixture_authz, "authorize", lambda request, tid, action: False)
 
     client = Client()
@@ -1787,7 +1788,7 @@ def test_http_views_enforce_authorization(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.shared
 def test_task_events_view_respects_transport_setting() -> None:
     task = echo_task.enqueue("transport")
-    _wait_for_snapshot(task.tid)
+    _wait_for_published_task_snapshot(task.tid)
 
     with override_settings(
         WEFT_DJANGO=_fixture_weft_settings(REALTIME={"TRANSPORT": "none"})

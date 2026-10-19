@@ -14,6 +14,15 @@ RuntimeLiveness = Literal["live", "stale", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeProbeResult:
+    """Raw runtime evidence, before terminal-hint retirement policy [CC-3.2]."""
+
+    evidence: RuntimeLiveness
+    reason: str
+    outcome: Literal["completed", "unavailable", "failed", "unsupported"] = "completed"
+
+
+@dataclass(frozen=True, slots=True)
 class HostProcessObservation:
     """One exact host-process identity observation."""
 

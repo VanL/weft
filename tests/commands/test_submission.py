@@ -13,6 +13,7 @@ from typing import Any, Never
 
 import pytest
 
+import weft.commands._spawn_submission as spawn_submission
 import weft.commands.submission as submission_mod
 from simplebroker import BrokerSession
 from simplebroker.ext import IntegrityError
@@ -36,6 +37,10 @@ from weft.context import WeftContext
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core import runtime_identity
 from weft.core.service_convergence import build_manager_service_payload
+from weft.core.spawn_requests import (
+    iter_spawn_reserved_routes,
+    observe_spawn_request_custody,
+)
 from weft.core.taskspec import (
     TaskSpec,
     resolve_taskspec_payload,
@@ -1662,3 +1667,212 @@ def test_manager_availability_backlog_includes_primary_accepted_work(
             assert not core_manager_runtime._read_public_spawn_backlog(
                 context, broker=lent_broker
             )
+
+
+@pytest.mark.parametrize("schema", ["weft.service_owner.v1", "weft.service_owner.v3"])
+def test_read_only_reserved_route_discovery_preserves_legacy_registry_rows(
+    weft_harness: WeftTestHarness,
+    schema: str,
+) -> None:
+    """Custody route discovery must not take bootstrap's registry-delete custody."""
+    context = weft_harness.context
+    manager_tid = "1776000000000000001"
+    payload = build_manager_service_payload(
+        context=context,
+        tid=manager_tid,
+        name="manager",
+        status="stopped",
+        queues={"requests": WEFT_SPAWN_REQUESTS_QUEUE},
+        runtime_handle={},
+    )
+    legacy = json.dumps({"schema": schema})
+    with context.queue("weft.state.services", persistent=True) as registry:
+        legacy_id = registry.write(legacy)
+        registry.write(json.dumps(payload))
+        routes = tuple(iter_spawn_reserved_routes(context))
+        assert f"T{manager_tid}.reserved" in routes
+        assert registry.peek_one(exact_timestamp=legacy_id) == legacy
+
+
+@pytest.mark.parametrize("newer", ["noncanonical", "malformed"])
+def test_reserved_custody_folds_latest_valid_owner_before_canonical_filter(
+    weft_harness: WeftTestHarness,
+    newer: str,
+) -> None:
+    """A newer valid route supersedes old authority; malformed data cannot."""
+    context = weft_harness.context
+    owner = "1776000000000000001"
+    reserved = f"T{owner}.reserved"
+    payload = build_manager_service_payload(
+        context=context,
+        tid=owner,
+        name="manager",
+        status="stopped",
+        queues={"requests": WEFT_SPAWN_REQUESTS_QUEUE},
+        runtime_handle={},
+    )
+    with context.queue(WEFT_SPAWN_REQUESTS_QUEUE) as requests:
+        tid = str(requests.write("retained request"))
+        assert requests.move_one(reserved, exact_timestamp=int(tid)) is not None
+    with context.queue("weft.state.services") as registry:
+        registry.write(json.dumps(payload))
+        update = json.loads(json.dumps(payload))
+        if newer == "noncanonical":
+            update["queues"]["requests"] = "other.requests"
+        else:
+            update["name"] = None
+        registry.write(json.dumps(update))
+    custody = observe_spawn_request_custody(
+        context, tid, reserved_routes=iter_spawn_reserved_routes(context)
+    )
+    assert custody.state == ("absent" if newer == "noncanonical" else "reserved")
+    with context.queue(reserved) as queue:
+        assert queue.peek_one(exact_timestamp=int(tid)) == "retained request"
+
+
+@pytest.mark.parametrize("lane", ["ordinary", "internal"])
+@pytest.mark.parametrize("reserved", [False, True])
+def test_custody_reads_only_exact_pending_id_and_defers_registry(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+    reserved: bool,
+) -> None:
+    """Backlog and claimed residue cannot replace the requested pending row."""
+    context = weft_harness.context
+    source = WEFT_SPAWN_REQUESTS_QUEUE if lane == "ordinary" else "weft.spawn.internal"
+    suffix = "reserved" if lane == "ordinary" else "internal_reserved"
+    owner = "1776000000000000001"
+    route = f"T{owner}.{suffix}"
+    with context.queue(source) as queue:
+        tid = str(queue.write("wanted"))
+        for _ in range(40):
+            queue.write("distractor")
+        if reserved:
+            assert queue.move_one(route, exact_timestamp=int(tid)) is not None
+    payload = build_manager_service_payload(
+        context=context,
+        tid=owner,
+        name="manager",
+        status="superseded",
+        queues={"requests": WEFT_SPAWN_REQUESTS_QUEUE},
+        runtime_handle={},
+    )
+    with context.queue("weft.state.services") as registry:
+        registry.write(json.dumps(payload))
+    calls: list[str] = []
+    with context.broker() as broker:
+        original_peek = type(broker).peek_one
+        original_scan = type(broker).peek_generator
+        original_many = type(broker).peek_many
+
+        def exact_peek(db: Any, queue: str, **kwargs: Any) -> Any:
+            if queue != "weft.state.services":
+                assert kwargs.get("exact_timestamp") == int(tid)
+                calls.append(queue)
+            return original_peek(db, queue, **kwargs)
+
+        def registry_scan(db: Any, queue: str, **kwargs: Any) -> Any:
+            assert queue == "weft.state.services", "custody must never scan requests"
+            assert reserved, "source hit must not acquire registry evidence"
+            return original_scan(db, queue, **kwargs)
+
+        def registry_many(db: Any, queue: str, *args: Any, **kwargs: Any) -> Any:
+            assert queue == "weft.state.services", "custody must never batch requests"
+            return original_many(db, queue, *args, **kwargs)
+
+        with monkeypatch.context() as patches:
+            patches.setattr(type(broker), "peek_one", exact_peek)
+            patches.setattr(type(broker), "peek_generator", registry_scan)
+            patches.setattr(type(broker), "peek_many", registry_many)
+            custody = observe_spawn_request_custody(
+                context,
+                tid,
+                reserved_routes=iter_spawn_reserved_routes(context, broker=broker),
+                broker=broker,
+            )
+        assert custody.state == ("reserved" if reserved else "queued")
+        expected_calls = (
+            (3 if lane == "ordinary" else 4)
+            if reserved
+            else (1 if lane == "ordinary" else 2)
+        )
+        assert len(calls) == expected_calls
+        location = route if reserved else source
+        assert broker.claim_one(location, exact_timestamp=int(tid)) is not None
+        claimed = observe_spawn_request_custody(
+            context,
+            tid,
+            reserved_routes=iter_spawn_reserved_routes(context, broker=broker),
+            broker=broker,
+        )
+        assert claimed.state == "absent"
+        # Borrowed connection ownership survives both lookup and exhausted routes.
+        assert broker.write("borrowed.connection.still.usable", "ok") > 0
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+@pytest.mark.parametrize("future_claimed", [False, True])
+def test_private_reserved_routes_preserve_bootstrap_schema_rules(
+    weft_harness: WeftTestHarness,
+    borrowed: bool,
+    future_claimed: bool,
+) -> None:
+    """Private recovery rejects future rows, even claimed, before deleting v1."""
+    context = weft_harness.context
+    with context.broker() as broker:
+        legacy = json.dumps({"schema": "weft.service_owner.v1"})
+        future = json.dumps({"schema": "weft.service_owner.v3"})
+        legacy_id = broker.write("weft.state.services", legacy)
+        future_id = broker.write("weft.state.services", future)
+        if future_claimed:
+            assert broker.claim_one("weft.state.services", exact_timestamp=future_id)
+        with pytest.raises(ValueError, match="future service-owner schema v3"):
+            spawn_submission._reserved_spawn_request_queue_names(
+                context, broker=broker if borrowed else None
+            )
+        assert (
+            broker.peek_one(
+                "weft.state.services", exact_timestamp=legacy_id, with_timestamps=False
+            )
+            == legacy
+        )
+        broker.delete_message_ids("weft.state.services", [future_id])
+        assert (
+            spawn_submission._reserved_spawn_request_queue_names(
+                context, broker=broker if borrowed else None
+            )
+            == ()
+        )
+        assert broker.peek_one("weft.state.services", exact_timestamp=legacy_id) is None
+
+
+@pytest.mark.parametrize("failure_at", ["source", "registry"])
+def test_custody_propagates_broker_failures_without_closing_borrowed_connection(
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: str,
+) -> None:
+    """An unavailable evidence read is an error, never absent custody."""
+    context = weft_harness.context
+    with context.broker() as broker:
+        operation = "peek_one" if failure_at == "source" else "peek_generator"
+        original = getattr(type(broker), operation)
+
+        def fail(db: Any, queue: str, *args: Any, **kwargs: Any) -> Any:
+            if (failure_at == "source" and queue == WEFT_SPAWN_REQUESTS_QUEUE) or (
+                failure_at == "registry" and queue == "weft.state.services"
+            ):
+                raise OSError("evidence read unavailable")
+            return original(db, queue, *args, **kwargs)
+
+        with monkeypatch.context() as patches:
+            patches.setattr(type(broker), operation, fail)
+            with pytest.raises(OSError, match="evidence read unavailable"):
+                observe_spawn_request_custody(
+                    context,
+                    "1777000000000000821",
+                    reserved_routes=iter_spawn_reserved_routes(context, broker=broker),
+                    broker=broker,
+                )
+        assert broker.write("borrowed.after.failure", "ok") > 0

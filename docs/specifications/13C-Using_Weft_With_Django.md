@@ -1008,6 +1008,15 @@ returns HTTP 200 with unknown status in detail and realtime snapshots. A
 syntactically invalid TID remains HTTP 404. This follows the core [MF-5]
 observation contract and does not imply the task exists or has failed.
 
+Point detail and Python snapshots inherit submission custody from [PY-2]:
+`queued` and `reserved` can precede task metadata, with a TID fallback name.
+Snapshot availability alone is not execution or metadata readiness. Realtime
+streams retain their task-owned evidence contract; custody adds no stream wait
+or probe. Compatibility coverage in
+`integrations/weft_django/tests/test_weft_django.py` waits for published task
+metadata before asserting task names and output events.
+Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md).
+
 The URLs are convenience views over the Python client. They are not a second
 source of truth and should not have their own persistence.
 

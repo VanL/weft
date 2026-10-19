@@ -166,6 +166,29 @@ assert result.status == "completed"
 assert "hello" in (result.stdout or str(result.value))
 ```
 
+Point status and task snapshots can report `queued` or `reserved` while an
+accepted request waits for task metadata. These describe broker custody, not
+TaskSpec lifecycle states or runtime health. Bulk lists and watches keep their
+existing task-state view. An `unknown` observation does not establish loss or
+justify submitting the same work again.
+
+Probe runtime liveness explicitly when needed:
+
+```python
+observation = task.runtime_liveness(timeout=2.0)
+# Also: client.tasks.runtime_liveness(task.tid, timeout=2.0)
+print(observation.state, observation.source, observation.reason)
+print(observation.check_started_at_ns, observation.check_completed_at_ns)
+```
+
+The frozen `RuntimeLivenessSnapshot` reports `live`, `dead`, or `unknown`, with
+runtime identity, provider provenance, and the selected snapshot message ID.
+Unknown stays distinct from dead. A runtime probe does not establish task
+progress or success. Results are observations during the recorded interval,
+not a retained health verdict. The timeout is a cooperative budget; a provider
+callback cannot be forcibly interrupted. A changed selected task row invalidates
+the probe result. Ordinary status and snapshot reads do not add these probes.
+
 Task definitions and resolved contexts also have public imports. Use template
 validation to construct a definition without assigning a task ID:
 

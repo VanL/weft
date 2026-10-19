@@ -21,8 +21,6 @@ from typing import Any, Final, Literal
 from simplebroker import Queue
 from weft._constants import (
     CONTROL_SURFACE_WAIT_INTERVAL,
-    QUEUE_INTERNAL_RESERVED_SUFFIX,
-    QUEUE_RESERVED_SUFFIX,
     SPAWN_SUBMISSION_RECONCILIATION_TIMEOUT,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -35,6 +33,11 @@ from weft.core.manager import Manager
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
 from weft.core.runtime_identity import RuntimeIdentity, canonical_runtime_context
+from weft.core.service_convergence import discard_v1_service_registry_rows
+from weft.core.spawn_requests import (
+    iter_spawn_reserved_routes,
+    observe_spawn_request_custody,
+)
 from weft.core.task_evidence import TASK_HISTORY_MAX_MESSAGE_ID
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.tasks.base import QueueMessageContext
@@ -63,24 +66,6 @@ class SpawnSubmissionReconciliation:
     tid: str
     error: str | None = None
     reserved_queue: str | None = None
-
-
-def _queue_contains_exact_message(
-    context: WeftContext,
-    queue_name: str,
-    *,
-    message_timestamp: int,
-    broker: Any | None = None,
-) -> bool:
-    with queue_broker(context, queue_name, broker=broker) as db:
-        return (
-            db.peek_one(
-                queue_name,
-                exact_timestamp=message_timestamp,
-                with_timestamps=True,
-            )
-            is not None
-        )
 
 
 def _mapping_exists_for_tid(
@@ -159,45 +144,26 @@ def _inspect_task_log_for_tid(
     return SpawnSubmissionReconciliation(outcome="rejected", tid=tid, error=error)
 
 
-def _find_reserved_spawn_request_queue(
-    context: WeftContext,
-    *,
-    message_timestamp: int,
-    broker: Any | None = None,
-) -> str | None:
-    for reserved_queue in _reserved_spawn_request_queue_names(context, broker=broker):
-        if _queue_contains_exact_message(
-            context,
-            reserved_queue,
-            message_timestamp=message_timestamp,
-            broker=broker,
-        ):
-            return reserved_queue
-    return None
-
-
 def _reserved_spawn_request_queue_names(
     context: WeftContext, *, broker: Any | None = None
 ) -> tuple[str, ...]:
-    queue_names: list[str] = []
-    for record in manager_runtime.list_manager_records(
-        context,
-        include_stopped=True,
-        canonical_only=True,
-        prune_stale=False,
-        broker=broker,
+    """Bootstrap private registry compatibility, then read retained routes [MF-6]."""
+    if broker is not None:
+        discard_v1_service_registry_rows(broker=broker)
+        return tuple(sorted(set(iter_spawn_reserved_routes(context, broker=broker))))
+    with (
+        context.session(),
+        manager_runtime._registry_queue(context) as registry,
+        registry.get_connection() as db,
     ):
-        manager_tid = record.get("tid")
-        if not isinstance(manager_tid, str) or not manager_tid:
-            continue
-        queue_names.extend(
-            f"T{manager_tid}.{suffix}"
-            for suffix in (
-                QUEUE_RESERVED_SUFFIX,
-                QUEUE_INTERNAL_RESERVED_SUFFIX,
-            )
-        )
-    return tuple(sorted(set(queue_names)))
+        return tuple(sorted(set(iter_spawn_reserved_routes(context, broker=db))))
+
+
+def _private_reserved_spawn_routes(
+    context: WeftContext, *, broker: Any | None = None
+) -> Iterator[str]:
+    """Defer private bootstrap until both source queues miss."""
+    yield from _reserved_spawn_request_queue_names(context, broker=broker)
 
 
 def _spawn_reconciliation_queue_specs(
@@ -241,8 +207,6 @@ def _reconcile_submitted_spawn_once(
     broker: Any | None = None,
     observation: _SpawnLogObservation | None = None,
 ) -> SpawnSubmissionReconciliation:
-    message_timestamp = int(tid)
-
     if _mapping_exists_for_tid(context, tid, broker=broker):
         return SpawnSubmissionReconciliation(outcome="spawned", tid=tid)
 
@@ -252,28 +216,17 @@ def _reconcile_submitted_spawn_once(
     if log_result is not None:
         return log_result
 
-    for source_queue in (
-        WEFT_SPAWN_REQUESTS_QUEUE,
-        WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
-    ):
-        if _queue_contains_exact_message(
-            context,
-            source_queue,
-            message_timestamp=message_timestamp,
-            broker=broker,
-        ):
-            return SpawnSubmissionReconciliation(outcome="queued", tid=tid)
-
-    reserved_queue = _find_reserved_spawn_request_queue(
+    custody = observe_spawn_request_custody(
         context,
-        message_timestamp=message_timestamp,
+        tid,
+        reserved_routes=_private_reserved_spawn_routes(context, broker=broker),
         broker=broker,
     )
-    if reserved_queue is not None:
+    if custody.state == "queued":
+        return SpawnSubmissionReconciliation(outcome="queued", tid=tid)
+    if custody.state == "reserved":
         return SpawnSubmissionReconciliation(
-            outcome="reserved",
-            tid=tid,
-            reserved_queue=reserved_queue,
+            outcome="reserved", tid=tid, reserved_queue=custody.reserved_queue
         )
 
     return SpawnSubmissionReconciliation(outcome="unknown", tid=tid)

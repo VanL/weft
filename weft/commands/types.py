@@ -23,6 +23,7 @@ __all__ = [
     "QueueAckTarget",
     "QueueEntry",
     "RunExecutionResult",
+    "RuntimeLivenessSnapshot",
     "ServiceSnapshot",
     "SpecRecord",
     "SpecValidationResult",
@@ -35,6 +36,22 @@ __all__ = [
     "TaskSnapshot",
     "TaskTerminalSnapshot",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeLivenessSnapshot:
+    """Explicit runtime evidence with input provenance and check freshness [PY-2]."""
+
+    tid: str
+    state: Literal["live", "dead", "unknown"]
+    source: Literal["host-pid", "runner", "external-supervisor", "none"]
+    runner: str | None
+    runtime_id: str | None
+    provider: str | None
+    reason: str
+    snapshot_message_id: int | None
+    check_started_at_ns: int
+    check_completed_at_ns: int
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Namespace adapters for the public Python client.
 
 Spec references:
+- docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-2]
 - docs/specifications/09-Implementation_Plan.md [IP-1]
 - docs/specifications/10-CLI_Interface.md [CLI-1.2], [CLI-4], [CLI-6]
 """
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from weft._constants import (
+    LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     TASK_PING_TIMEOUT_SECONDS,
 )
@@ -29,6 +31,7 @@ from weft.commands.types import (
     QueueInfo,
     QueueMoveReceipt,
     QueueWriteReceipt,
+    RuntimeLivenessSnapshot,
     SpecRecord,
     SpecValidationResult,
     SystemLoadResult,
@@ -81,6 +84,17 @@ class TasksNamespace:
         return tasks.task_snapshot(
             tid,
             context=self.client.context,
+        )
+
+    def runtime_liveness(
+        self,
+        tid: str,
+        *,
+        timeout: float = LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+    ) -> RuntimeLivenessSnapshot:
+        """Explicitly probe runtime identity and preserve unknown evidence [PY-2]."""
+        return tasks.task_runtime_liveness(
+            tid, timeout=timeout, context=self.client.context
         )
 
     def terminal_snapshot(
