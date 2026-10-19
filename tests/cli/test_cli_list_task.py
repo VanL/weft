@@ -81,7 +81,7 @@ def test_task_ping_outputs_extended_pong_json(
         "--function",
         "tests.tasks.sample_targets:simulate_work",
         "--kw",
-        "duration=2",
+        "duration=30",
         "--kw",
         "result=done",
         cwd=workdir,
@@ -95,7 +95,7 @@ def test_task_ping_outputs_extended_pong_json(
 
     rc, out, err = run_cli("task", "ping", tid, "--timeout", "10", cwd=workdir)
 
-    assert rc == 0
+    assert rc == 0, err
     assert err == ""
     payload = json.loads(out)
     assert payload["timed_out"] is False
