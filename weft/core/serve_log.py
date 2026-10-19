@@ -22,6 +22,7 @@ from weft._constants import (
     MANAGER_SERVE_LOG_CANDIDATE_LIMIT,
     MANAGER_SERVE_LOG_COMPONENTS,
     MANAGER_SERVE_LOG_EVENT_MAX_CHARS,
+    MANAGER_SERVE_LOG_FLUSH_TIMEOUT_SECONDS,
     MANAGER_SERVE_LOG_LEVEL_ORDER,
     MANAGER_SERVE_LOG_QUEUE_SIZE,
     MANAGER_SERVE_LOG_SCHEMA,
@@ -30,7 +31,7 @@ from weft._constants import (
 )
 
 _LOG_QUEUE_LOCK = threading.Lock()
-_LOG_QUEUE: queue.Queue[bytes] | None = None
+_LOG_QUEUE: queue.Queue[bytes | threading.Event] | None = None
 _LOG_WRITER_FD: int | None = None
 
 
@@ -185,13 +186,32 @@ def _stderr_fd() -> int | None:
         return None
 
 
-def _ensure_log_queue(fd: int) -> queue.Queue[bytes]:
+def flush_serve_log_records(
+    *, timeout: float = MANAGER_SERVE_LOG_FLUSH_TIMEOUT_SECONDS
+) -> bool:
+    """Wait boundedly for records accepted before this call to reach stderr."""
+
+    with _LOG_QUEUE_LOCK:
+        log_queue = _LOG_QUEUE
+    if log_queue is None:
+        return True
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    flushed = threading.Event()
+    try:
+        log_queue.put(flushed, timeout=max(0.0, deadline - time.monotonic()))
+    except queue.Full:
+        return False
+    return flushed.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _ensure_log_queue(fd: int) -> queue.Queue[bytes | threading.Event]:
     global _LOG_QUEUE
     global _LOG_WRITER_FD
     with _LOG_QUEUE_LOCK:
         if _LOG_QUEUE is not None and _LOG_WRITER_FD == fd:
             return _LOG_QUEUE
-        log_queue: queue.Queue[bytes] = queue.Queue(
+        log_queue: queue.Queue[bytes | threading.Event] = queue.Queue(
             maxsize=MANAGER_SERVE_LOG_QUEUE_SIZE
         )
         writer = threading.Thread(
@@ -206,9 +226,12 @@ def _ensure_log_queue(fd: int) -> queue.Queue[bytes]:
         return log_queue
 
 
-def _serve_log_writer(fd: int, log_queue: queue.Queue[bytes]) -> None:
+def _serve_log_writer(fd: int, log_queue: queue.Queue[bytes | threading.Event]) -> None:
     while True:
         payload = log_queue.get()
+        if isinstance(payload, threading.Event):
+            payload.set()
+            continue
         try:
             view = memoryview(payload)
             while view:

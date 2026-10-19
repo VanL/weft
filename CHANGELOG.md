@@ -10,6 +10,8 @@
 
 ### Changed
 
+- Flush accepted foreground Manager operational-log records during clean
+  process shutdown so the deliberate hard exit cannot discard queued diagnostics.
 - Known-TID point status and task snapshots expose accepted spawn requests as
   nonterminal `queued` or `reserved` custody before task metadata appears.
   These are observation values, not new TaskSpec states. Bulk lists and watches

@@ -1242,6 +1242,9 @@ The serve log is diagnostic. When stderr stops draining, the manager must keep
 converging and may drop diagnostic records instead of blocking the control loop.
 """
 
+MANAGER_SERVE_LOG_FLUSH_TIMEOUT_SECONDS: Final[float] = 1.0
+"""Maximum clean-shutdown wait for accepted foreground serve log records."""
+
 MANAGER_SERVE_LOG_CANDIDATE_LIMIT: Final[int] = 8
 """Maximum service candidates included in one manager operational-log event."""
 

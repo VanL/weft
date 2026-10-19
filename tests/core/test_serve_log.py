@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 from typing import Never
 
 import pytest
@@ -12,6 +13,24 @@ from weft.core import serve_log
 from weft.helpers import tid_short_form
 
 pytestmark = [pytest.mark.shared]
+
+
+def test_flush_serve_log_records_waits_for_accepted_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(serve_log, "_LOG_QUEUE", None)
+    monkeypatch.setattr(serve_log, "_LOG_WRITER_FD", None)
+    monkeypatch.setattr(serve_log, "_stderr_fd", lambda: write_fd)
+
+    try:
+        serve_log.emit_serve_log_record({"event": "before-clean-exit"})
+
+        assert serve_log.flush_serve_log_records(timeout=1.0) is True
+        assert b'"event": "before-clean-exit"' in os.read(read_fd, 4096)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_build_serve_log_record_formats_only_owned_broker_message_ids() -> None:

@@ -35,6 +35,7 @@ from .runtime_identity import (
     install_runtime_identity,
     runtime_identity_for_task,
 )
+from .serve_log import flush_serve_log_records
 from .taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
@@ -160,6 +161,8 @@ def _task_process_entry(
     task.run_until_stopped(poll_interval=poll_interval)
 
     if hard_exit_on_return and os.name != "nt":
+        if stop_with_parent:
+            flush_serve_log_records()
         os._exit(0)
 
 
