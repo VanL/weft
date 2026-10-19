@@ -49,10 +49,12 @@ def _start_pong_responder(
     rows_before_pong: tuple[str, ...] = (),
 ) -> tuple[threading.Thread, list[dict[str, Any]]]:
     observed: list[dict[str, Any]] = []
+    ready = threading.Event()
 
     def respond() -> None:
         ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
         try:
+            ready.set()
             deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline:
                 raw = ctrl_in.read_one()
@@ -86,6 +88,7 @@ def _start_pong_responder(
 
     thread = threading.Thread(target=respond, daemon=True)
     thread.start()
+    assert ready.wait(timeout=10.0), "PONG responder did not open its control queue"
     return thread, observed
 
 
