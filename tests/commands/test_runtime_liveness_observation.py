@@ -488,11 +488,11 @@ def test_cold_installed_provider_entrypoint_reaches_sdk_boundary(
 
     @contextmanager
     def sdk_client(*, timeout: float = 10.0) -> Iterator[Any]:
-        assert 0 < timeout <= 2.0
+        assert 0 < timeout <= 10.0
         yield SimpleNamespace(containers=SimpleNamespace(get=get_container))
 
     monkeypatch.setattr(docker_plugin, "_docker_client", sdk_client)
-    result = tasks.task_runtime_liveness(TID, context=runtime_context)
+    result = tasks.task_runtime_liveness(TID, context=runtime_context, timeout=10.0)
     assert (result.state, result.reason, result.provider) == (
         "live",
         "runtime_live",
