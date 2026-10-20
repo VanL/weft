@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.115] - 2026-10-20
+
+### Fixed
+
+- Resume dispatch of already-known public spawn backlog as soon as a child
+  startup handoff clears the inter-launch gate, without waiting for periodic
+  inactive-queue rediscovery.
+
+### Changed
+
+- Add opt-in trace-level Manager phase timings for reactor turns, activity
+  waits, admission, dispatch, launch, checkpoint, and maintenance work. Records
+  include correlation and dispatch-state context without task payloads or
+  brittle performance thresholds.
+- First-party extension packages were bumped for this release:
+  `weft-django 0.9.50`, `weft-docker 0.9.90`,
+  `weft-macos-sandbox 0.6.19`, and `weft-microsandbox 0.5.20`.
+
 ## [0.9.114] - 2026-10-19
 
 ### Added

@@ -252,6 +252,61 @@ def _publish_waiting_task(
         task.cleanup()
 
 
+def test_startup_handoff_reactivates_pending_public_queue(manager: Manager) -> None:
+    """Startup evidence makes known backlog runnable without rediscovery."""
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    reserved = manager._queue_names["reserved"]
+    first_id = int(source.write(request_body()))
+    assert source.move_one(reserved, exact_timestamp=first_id) is not None
+    spec = manager._build_child_spec(json.loads(request_body()), first_id)
+    assert spec is not None
+    identity = runtime_identity_for_task(
+        spec, manager._db_path, config=manager._manager_context().config
+    )
+    request = _ManagerChildLaunchRequest(
+        spec,
+        Consumer,
+        None,
+        None,
+        None,
+        True,
+        source.name,
+        reserved,
+        first_id,
+        identity,
+    )
+    manager._checkpoint_admission_launch(request)
+    next_id = int(source.write(request_body()))
+    manager._remove_inactive_queues({source.name})
+    manager._pending_messages_precheck_confirmed = False
+    manager._next_inactive_probe_at = time.monotonic() + 60.0
+    spawn = multiprocessing.get_context("spawn")
+    ready, release = spawn.Event(), spawn.Event()
+    process = spawn.Process(
+        target=_publish_waiting_task,
+        args=(spec.model_dump(mode="json"), identity.to_dict(), ready, release),
+    )
+    try:
+        process.start()
+        assert ready.wait(timeout=30.0)
+        manager._checkpoint_spawned_admission(
+            _ManagerChildLaunchResult(request=request, process=process)
+        )
+        manager._admission_refresh_after = 0.0
+        manager._refresh_scheduler_evidence()
+        assert manager._startup_feedback_tid is None
+        manager.process_once()
+        assert source.peek_one(exact_timestamp=next_id) is None
+        assert manager._queue(reserved).peek_one(exact_timestamp=next_id) is not None
+    finally:
+        release.set()
+        process.join(timeout=30.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=30.0)
+
+
 @pytest.mark.parametrize(
     "persistent,invalid_first,publish_before_interest",
     [

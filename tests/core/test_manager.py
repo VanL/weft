@@ -1919,6 +1919,53 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
     assert isinstance(event["timestamp_ns"], int)
 
 
+@pytest.mark.parametrize("level", ["trace", "off"])
+def test_manager_turn_timings_are_opt_in_and_correlatable(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    capsys: pytest.CaptureFixture[str],
+    level: str,
+) -> None:
+    """Operators can locate turn costs without task contents or a timing budget."""
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
+            "WEFT_AUTOSTART_TASKS": "0",
+            "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": level,
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    capsys.readouterr()
+    started = time.time_ns()
+    try:
+        manager.process_once()
+        manager.wait_for_activity(timeout=0)
+        finished = time.time_ns()
+        events = serve_log_events(capsys)
+    finally:
+        manager.cleanup()
+    timings = [event for event in events if event["event"] == "manager_phase_timing"]
+    if level == "off":
+        assert timings == []
+        return
+    assert any(event["phase"] == "turn" for event in timings)
+    assert any(event["phase"] == "activity_wait" for event in timings)
+    for event in timings:
+        assert event["manager_tid"] == unique_tid
+        assert isinstance(event["loop_iteration"], int)
+        phase_started = event["started_at_ns"]
+        published = event["timestamp_ns"]
+        elapsed = event["elapsed_seconds"]
+        assert isinstance(phase_started, int)
+        assert isinstance(published, int)
+        assert isinstance(elapsed, float)
+        assert started <= phase_started <= published <= finished
+        assert elapsed >= 0
+
+
 def test_manager_operational_log_off_is_silent(
     broker_env: BrokerEnv,
     unique_tid: str,

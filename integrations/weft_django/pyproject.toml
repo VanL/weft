@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft-django"
-version = "0.9.49"
+version = "0.9.50"
 description = "Django integration layer for Weft"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
     "django>=6.1.2,<7",
-    "weft>=0.9.114",
+    "weft>=0.9.115",
 ]
 
 [project.optional-dependencies]

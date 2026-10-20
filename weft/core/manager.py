@@ -310,6 +310,8 @@ class _ManagerChildLaunchResult:
     process: BaseProcess | None = None
     launched_ns: int = 0
     error: BaseException | None = None
+    launch_started_at_ns: int = 0
+    launch_elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,6 +807,69 @@ class Manager(ServiceTask):
             emit_serve_log_record(record)
         except Exception:  # pragma: no cover - diagnostics must not affect runtime
             logger.debug("Failed to emit manager operational log", exc_info=True)
+
+    def _timed_manager_call[T](
+        self, phase: str, operation: Callable[[], T], *, child_tid: str | None = None
+    ) -> T:
+        """Time existing work only at trace level; never publish queue state [MA-3].
+
+        Spans may nest (for example checkpoint inside dispatch). Compare their
+        wall-clock boundaries, not the sum of inclusive elapsed times. Time
+        between spans remains visible rather than being called manager work.
+        """
+        if not self._manager_log_allows("trace"):
+            return operation()
+        started_at_ns = time.time_ns()
+        started = time.perf_counter()
+        try:
+            return operation()
+        finally:
+            self._emit_manager_phase_timing(
+                phase=phase,
+                started_at_ns=started_at_ns,
+                elapsed_seconds=time.perf_counter() - started,
+                child_tid=child_tid,
+            )
+
+    def _emit_manager_phase_timing(
+        self,
+        *,
+        phase: str,
+        started_at_ns: int,
+        elapsed_seconds: float,
+        child_tid: str | None = None,
+    ) -> None:
+        """Publish one trace span from the reactor-owned Manager state."""
+
+        if not self._manager_log_allows("trace"):
+            return
+        try:
+            self._emit_serve_log(
+                "manager_phase_timing",
+                component="spawn",
+                required_level="trace",
+                phase=phase,
+                started_at_ns=started_at_ns,
+                elapsed_seconds=elapsed_seconds,
+                public_inbox_active=(self._queue_names["inbox"] in self._active_queues),
+                precheck_confirmed=self._pending_messages_precheck_confirmed,
+                inactive_probe_due_in_seconds=max(
+                    0.0, self._next_inactive_probe_at - time.monotonic()
+                ),
+                child_tid=child_tid,
+                startup_feedback_tid=self._startup_feedback_tid,
+                candidate_request_id=(
+                    str(self._family_candidate.request_id)
+                    if self._family_candidate is not None
+                    else None
+                ),
+                active_launches=len(self._active_child_launches),
+                launch_started_this_turn=self._child_launch_started_this_turn,
+                admission_blocked=bool(self._admission_blocked_lanes),
+                undurable_launches=len(self._scheduler_undurable),
+            )
+        except Exception:  # pragma: no cover - diagnostics must not affect runtime
+            logger.debug("Failed to emit manager phase timing", exc_info=True)
 
     def _emit_serve_log_rate_limited(
         self,
@@ -1404,7 +1469,11 @@ class Manager(ServiceTask):
         self._child_launch_started_ns[child_spec.tid] = time.time_ns()
         self._child_launch_started_this_turn = True
         try:
-            self._checkpoint_admission_launch(request)
+            self._timed_manager_call(
+                "launch_checkpoint",
+                lambda: self._checkpoint_admission_launch(request),
+                child_tid=child_spec.tid,
+            )
             self._start_service_worker(
                 MANAGER_CHILD_LAUNCH_WORKER_LANE,
                 request_id=child_spec.tid,
@@ -1420,7 +1489,9 @@ class Manager(ServiceTask):
 
     def _publish_scheduler_checkpoint(self) -> bool:
         """Publish all current obligations; retry failures without releasing custody."""
-        written = self._register_tid_state()
+        written = self._timed_manager_call(
+            "scheduler_checkpoint", self._register_tid_state
+        )
         self._scheduler_checkpoint_dirty = not written
         if written:
             self._scheduler_undurable.difference_update(
@@ -1531,6 +1602,8 @@ class Manager(ServiceTask):
     ) -> _ManagerChildLaunchResult:
         """Launch the child process without touching broker queues."""
 
+        started_at_ns = time.time_ns()
+        started = time.perf_counter()
         try:
             process = launch_task_process(
                 request.task_cls,
@@ -1541,11 +1614,18 @@ class Manager(ServiceTask):
                 runtime_identity=request.runtime_identity,
             )
         except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-347] exception
-            return _ManagerChildLaunchResult(request=request, error=exc)
+            return _ManagerChildLaunchResult(
+                request=request,
+                error=exc,
+                launch_started_at_ns=started_at_ns,
+                launch_elapsed_seconds=time.perf_counter() - started,
+            )
         return _ManagerChildLaunchResult(
             request=request,
             process=process,
             launched_ns=time.time_ns(),
+            launch_started_at_ns=started_at_ns,
+            launch_elapsed_seconds=time.perf_counter() - started,
         )
 
     def _register_launched_frontier(self, identity: RuntimeIdentity) -> None:
@@ -1735,6 +1815,13 @@ class Manager(ServiceTask):
     def _handle_child_launch_result(self, result: _ManagerChildLaunchResult) -> None:
         """Commit launch, preserving reservation until task-state handoff [MANAGER.11]."""
         tid = result.request.child_spec.tid
+        if result.launch_started_at_ns > 0:
+            self._emit_manager_phase_timing(
+                phase="process_launch",
+                started_at_ns=result.launch_started_at_ns,
+                elapsed_seconds=result.launch_elapsed_seconds,
+                child_tid=tid,
+            )
         if tid is not None:
             self._clear_active_child_launch(tid)
         self._child_launch_started_this_turn = True
@@ -2292,6 +2379,9 @@ class Manager(ServiceTask):
             self._clear_startup_notification_interest()
             self._family_scheduler.release_background(tid)
             self._family_candidate = None
+            # Startup may have deactivated known backlog. Re-enter normal
+            # dispatch (including admission) without waiting for rediscovery.
+            self._mark_queue_active(self._queue_names["inbox"])
             self._scheduler_checkpoint_dirty = True
 
     @staticmethod
@@ -5028,7 +5118,9 @@ class Manager(ServiceTask):
             invalid_only = queue_name == self._queue_names["inbox"] and bool(
                 self._family_invalid
             )
-            if not invalid_only and not self._admission_allows_queue(queue_name):
+            if not invalid_only and not self._timed_manager_call(
+                "admission", lambda: self._admission_allows_queue(queue_name)
+            ):
                 return False
         return super()._process_queue_message(queue_name, inactive_candidates)
 
@@ -8163,7 +8255,16 @@ class Manager(ServiceTask):
         """Run one Manager reactor turn."""
 
         self._drain_child_sentinel_events()
-        self._process_manager_reactor_turn()
+        self._timed_manager_call("turn", self._process_manager_reactor_turn)
+
+    def _wait_for_reactor_activity(self, timeout: float | None) -> None:
+        """Measure the existing arbiter wait, without adding a deadline [MA-3]."""
+        wait = super()._wait_for_reactor_activity
+        self._timed_manager_call("activity_wait", lambda: wait(timeout))
+
+    def _ensure_wait_strategy_started(self) -> None:
+        """Separate notification-interest setup from blocking in the arbiter."""
+        self._timed_manager_call("wait_setup", super()._ensure_wait_strategy_started)
 
     def _process_manager_reactor_turn(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-014] exception
         """Run one Manager turn behind the owner-enforcing template.
@@ -8178,12 +8279,16 @@ class Manager(ServiceTask):
         self._leader_probe_used_this_turn = False
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
-        self._drain_worker_results()
+        self._timed_manager_call("worker_results", self._drain_worker_results)
         if self._startup_publication_pending:
             tid = self._startup_notification_tid
             self._startup_publication_pending = False
             if tid is not None and tid == self._startup_feedback_tid:
-                self._reconcile_launch_now(tid)
+                self._timed_manager_call(
+                    "startup_handoff",
+                    lambda: self._reconcile_launch_now(tid),
+                    child_tid=tid,
+                )
         self._retry_stale_child_launches()
         self._drain_control_queue_first()
         if self._draining:
@@ -8193,15 +8298,19 @@ class Manager(ServiceTask):
             self._continue_shutdown_drain()
             self._drain_worker_results()
             return
-        self._refresh_scheduler_evidence()
-        self._classify_family_requests()
+        self._timed_manager_call("evidence_refresh", self._refresh_scheduler_evidence)
+        self._timed_manager_call(
+            "family_classification", self._classify_family_requests
+        )
         self._emit_manager_loop_summary()
-        self._refresh_manager_registration()
-        self._cleanup_stale_internal_reserved_queues()
-        if self._maybe_yield_leadership():
+        self._timed_manager_call("registration", self._refresh_manager_registration)
+        self._timed_manager_call(
+            "stale_reservations", self._cleanup_stale_internal_reserved_queues
+        )
+        if self._timed_manager_call("leadership", self._maybe_yield_leadership):
             self._drain_worker_results()
             return
-        if self._cleanup_children():
+        if self._timed_manager_call("child_cleanup", self._cleanup_children):
             self._run_managed_service_convergence(
                 include_autostart=False,
                 force=True,
@@ -8211,7 +8320,7 @@ class Manager(ServiceTask):
                 self._drain_worker_results()
                 return
         if not self._has_active_child_launches():
-            super()._process_reactor_turn()
+            self._timed_manager_call("queue_dispatch", super()._process_reactor_turn)
         else:
             self._drain_worker_results()
             self._maybe_emit_poll_report()
@@ -8225,7 +8334,9 @@ class Manager(ServiceTask):
                 name in self._active_queues for name in self._spawn_inbox_queue_names()
             )
         ):
-            public_drained += self._drain_public_spawn_requests()
+            public_drained += self._timed_manager_call(
+                "public_dispatch", self._drain_public_spawn_requests
+            )
         if public_drained:
             self._last_activity_ns = time.time_ns()
         if self._draining:
@@ -8235,7 +8346,9 @@ class Manager(ServiceTask):
         if self._maybe_yield_leadership():
             self._drain_worker_results()
             return
-        self._run_managed_service_convergence()
+        self._timed_manager_call(
+            "service_convergence", self._run_managed_service_convergence
+        )
         if self._draining:
             self._continue_shutdown_drain()
             self._drain_worker_results()
