@@ -25,6 +25,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import cache, partial
 from heapq import nsmallest
 from itertools import islice
 from multiprocessing.connection import Connection
@@ -91,6 +92,7 @@ from weft._constants import (
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
+    MANAGER_STARTUP_FAST_PATH_WINDOW,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
@@ -157,6 +159,7 @@ from .admission import (
     AdmissionController,
     AdmissionDecision,
     AdmissionLane,
+    _startup_window_allows_launch,
 )
 from .control_messages import (
     ControlRequest,
@@ -323,6 +326,15 @@ class _ManagerPendingPongProbe:
     request_id: str
     created_turn: int
     pong: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _ManagerStartupFeedback:
+    """Transient per-launch observation, separate from durable custody [MA-1.8]."""
+
+    queue: Queue | None = None
+    publication_id: int | None = None
+    publication_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,10 +605,8 @@ class Manager(ServiceTask):
                 target=self._run_child_launch_service_worker,
             )
         )
-        self._startup_notification_tid: str | None = None
-        self._startup_notification_queue: Queue | None = None
-        self._startup_publication_id: int | None = None
-        self._startup_publication_pending = False
+        self._startup_feedback: dict[str, _ManagerStartupFeedback] = {}
+        self._startup_blocked = False
         self._child_processes: dict[str, ManagedChild] = {}
         self._child_sentinel_adapter = _ManagerChildSentinelAdapter(
             self._strategy.notify_activity
@@ -614,7 +624,6 @@ class Manager(ServiceTask):
         self._scheduler_checkpoint_dirty = False
         self._scheduler_undurable: set[str] = set()
         self._family_index_retry_after = 0.0
-        self._startup_feedback_tid: str | None = None
         self._family_classify_after = 0
         self._family_repair_after = 0
         self._family_repair_due = 0.0
@@ -857,7 +866,8 @@ class Manager(ServiceTask):
                     0.0, self._next_inactive_probe_at - time.monotonic()
                 ),
                 child_tid=child_tid,
-                startup_feedback_tid=self._startup_feedback_tid,
+                startup_feedback_tids=list(self._startup_feedback),
+                startup_blocked=self._startup_dispatch_blocked(),
                 candidate_request_id=(
                     str(self._family_candidate.request_id)
                     if self._family_candidate is not None
@@ -1207,7 +1217,7 @@ class Manager(ServiceTask):
             if scheduler
             else [],
             "residents": copy.deepcopy(getattr(self, "_scheduler_residents", {})),
-            "startup_feedback_tid": getattr(self, "_startup_feedback_tid", None),
+            "startup_feedback_tids": list(getattr(self, "_startup_feedback", {})),
             "source_queue": self._queue_names["inbox"],
             "reserved_queue": self._queue_names["reserved"],
         }
@@ -1284,7 +1294,7 @@ class Manager(ServiceTask):
                     request.runtime_identity is not None
                     and request.runtime_identity.scheduling_class != "internal"
                 ):
-                    self._startup_feedback_tid = tid
+                    self._startup_feedback.setdefault(tid, _ManagerStartupFeedback())
             self._reconcile_launch_now(tid)
             logger.warning(
                 "Launch result missing for %s; retained reservation requires reconciliation",
@@ -1521,8 +1531,11 @@ class Manager(ServiceTask):
                 request_id=request.message_timestamp,
             )
         self._scheduler_residents[identity.tid] = evidence
+        if identity.scheduling_class != "internal":
+            self._startup_feedback.setdefault(identity.tid, _ManagerStartupFeedback())
         if not self._publish_scheduler_checkpoint():
             self._scheduler_residents.pop(identity.tid)
+            self._release_startup_feedback(identity.tid)
             raise RuntimeError("unable to publish launch custody checkpoint")
 
     def _checkpoint_spawned_admission(
@@ -1542,7 +1555,7 @@ class Manager(ServiceTask):
         evidence["launched_ns"] = result.launched_ns or time.time_ns()
         self._scheduler_undurable.add(identity.tid)
         if identity.scheduling_class != "internal":
-            self._startup_feedback_tid = identity.tid
+            self._startup_feedback.setdefault(identity.tid, _ManagerStartupFeedback())
         self._publish_scheduler_checkpoint()
         return {
             key: copy.deepcopy(value)
@@ -1756,9 +1769,7 @@ class Manager(ServiceTask):
                 tid = str(child_spec.tid)
                 self._scheduler_residents.pop(tid, None)
                 self._scheduler_undurable.discard(tid)
-                if self._startup_feedback_tid == tid:
-                    self._startup_feedback_tid = None
-                    self._clear_startup_notification_interest()
+                self._release_startup_feedback(tid)
                 self._register_tid_state()
             else:
                 self._checkpoint_spawned_admission(result)
@@ -1830,31 +1841,56 @@ class Manager(ServiceTask):
             return
         self._commit_child_launch_success(result)
         self._reconcile_launch_now(str(tid))
+        self._resume_startup_dispatch()
 
-    def _clear_startup_notification_interest(self) -> None:
-        """Release the one transient reactor-owned observation handle [MA-1.8]."""
-        queue = getattr(self, "_startup_notification_queue", None)
-        self._startup_notification_tid = None
-        self._startup_notification_queue = None
-        self._startup_publication_id = None
-        self._startup_publication_pending = False
-        if queue is not None:
-            queue.close()
+    def _startup_dispatch_blocked(self) -> bool:
+        """Readiness only; a free slot never supplies resource authority [MA-1.8]."""
+        if not self._startup_feedback:
+            return False
+        limit = (
+            MANAGER_STARTUP_FAST_PATH_WINDOW
+            if self._admission_backend_name() == "postgres"
+            else 1
+        )
+        return self._startup_blocked or len(self._startup_feedback) >= limit
+
+    def _resume_startup_dispatch(self) -> None:
+        """Make known work eligible for a fresh check and wake the next turn."""
+        self._clear_admission_retry()
+        if not self._startup_dispatch_blocked():
+            self._mark_queue_active(self._queue_names["inbox"])
+            # A receipt used this turn's launch allowance. Its original worker
+            # wake may already be consumed; readiness needs its own local wake.
+            self._strategy.notify_activity()
+
+    def _release_startup_feedback(self, tid: str) -> None:
+        """Release only this launch's transient observation, never its custody."""
+        if tid not in self._startup_feedback:
+            return
+        self._clear_startup_notification_interest(tid)
+        self._startup_feedback.pop(tid)
+        self._resume_startup_dispatch()
+
+    def _clear_startup_notification_interest(self, tid: str | None = None) -> None:
+        """Close one or all reactor-owned startup observation handles [MA-1.8]."""
+        feedback = getattr(self, "_startup_feedback", {})
+        records = tuple(feedback.values()) if tid is None else (feedback[tid],)
+        for record in records:
+            queue, record.queue = record.queue, None
+            record.publication_id = None
+            record.publication_pending = False
+            if queue is not None:
+                queue.close()
 
     def _activity_wait_queues(self) -> list[Queue]:
         """Include startup observation without adding a delivery route [MA-1.8]."""
         queues = super()._activity_wait_queues()
-        tid = getattr(self, "_startup_feedback_tid", None)
-        if tid != getattr(self, "_startup_notification_tid", None):
-            self._clear_startup_notification_interest()
-            if tid is not None:
-                self._startup_notification_queue = self._manager_context().queue(
-                    task_state_queue_name(tid)
-                )
-                self._startup_notification_tid = tid
-        queue = getattr(self, "_startup_notification_queue", None)
-        if queue is not None:
-            queues.append(queue)
+        for tid, record in getattr(self, "_startup_feedback", {}).items():
+            if tid in self._active_child_launches:
+                continue
+            if record.queue is None:
+                record.queue = self._manager_context().queue(task_state_queue_name(tid))
+            queues.append(record.queue)
         return queues
 
     def _has_pending_observation(self) -> bool:
@@ -1864,28 +1900,30 @@ class Manager(ServiceTask):
         advances only the cursor, retaining interest in subsequent evidence.
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
         """
-        tid = getattr(self, "_startup_notification_tid", None)
-        if tid is None or tid != self._startup_feedback_tid:
-            return False
-        if self._startup_publication_pending:
+        records = getattr(self, "_startup_feedback", {})
+        if any(record.publication_pending for record in records.values()):
             return True
+        interested = [(tid, record) for tid, record in records.items() if record.queue]
+        if not interested:
+            return False
         try:
             with self._get_connected_queue().get_connection() as broker:
-                rows = broker.peek_many(
-                    task_state_queue_name(tid),
-                    limit=1,
-                    order="newest",
-                    with_timestamps=True,
-                    after_timestamp=self._startup_publication_id,
-                )
+                for tid, record in interested:
+                    rows = broker.peek_many(
+                        task_state_queue_name(tid),
+                        limit=1,
+                        order="newest",
+                        with_timestamps=True,
+                        after_timestamp=record.publication_id,
+                    )
+                    if rows:
+                        record.publication_id = int(rows[0][1])
+                        record.publication_pending = True
+                        return True
         except (BrokerError, OSError, RuntimeError, ValueError):
             logger.debug("Startup publication observation deferred", exc_info=True)
             return False
-        if not rows:
-            return False
-        self._startup_publication_id = int(rows[0][1])
-        self._startup_publication_pending = True
-        return True
+        return False
 
     def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
         """Route child-launch service-worker events on the manager reactor."""
@@ -2324,7 +2362,12 @@ class Manager(ServiceTask):
         self._scheduler_checkpoint_dirty = True
 
     def _advance_launch_custody(
-        self, tid: str, payload: Mapping[str, Any] | None, *, broker: Any
+        self,
+        tid: str,
+        payload: Mapping[str, Any] | None,
+        *,
+        broker: Any,
+        observe_usage: Callable[[], ConnectionUsage] | None = None,
     ) -> None:
         """Startup release and durable handoff are separate transitions [MA-1.8]."""
         evidence = self._scheduler_residents.get(tid)
@@ -2346,17 +2389,14 @@ class Manager(ServiceTask):
                 )
                 self._family_candidate = None
             self._ack_launch_custody(tid, broker=broker)
-        if self._startup_feedback_tid != tid:
+        if tid not in self._startup_feedback or tid in self._active_child_launches:
             return
         elapsed = (time.time_ns() - evidence.get("launched_ns", time.time_ns())) / 1e9
         ready = handoff
         if not ready and self._admission_backend_name() == "postgres":
-            ready = (
-                self._read_postgres_connection_usage()["by_owner"].get(
-                    evidence["connection_owner"], 0
-                )
-                > 0
-            )
+            ready = (observe_usage or self._read_postgres_connection_usage)()[
+                "by_owner"
+            ].get(evidence["connection_owner"], 0) > 0
         if not ready and elapsed >= MANAGER_ADMISSION_RECHECK_SECONDS:
             latest = read_task_state_snapshot(
                 self._manager_context(), tid, broker=broker
@@ -2375,13 +2415,9 @@ class Manager(ServiceTask):
             )
             ready = bool(evidence.get("host_processes"))
         if ready and (handoff or tid not in self._scheduler_undurable):
-            self._startup_feedback_tid = None
-            self._clear_startup_notification_interest()
+            self._release_startup_feedback(tid)
             self._family_scheduler.release_background(tid)
             self._family_candidate = None
-            # Startup may have deactivated known backlog. Re-enter normal
-            # dispatch (including admission) without waiting for rediscovery.
-            self._mark_queue_active(self._queue_names["inbox"])
             self._scheduler_checkpoint_dirty = True
 
     @staticmethod
@@ -2434,6 +2470,9 @@ class Manager(ServiceTask):
         if time.monotonic() < self._admission_refresh_after:
             return
         try:
+            # Share only within this maintenance pass, and sample lazily so a
+            # usage-observer failure cannot obstruct an already valid handoff.
+            observe_usage = cache(self._read_postgres_connection_usage)
             with self._get_connected_queue().get_connection() as broker:
                 if not self._admission_bootstrapped:
                     snapshots = latest_task_state_rows(
@@ -2448,6 +2487,7 @@ class Manager(ServiceTask):
                             MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
                         )
                     )
+                selected = tuple(dict.fromkeys((*self._startup_feedback, *selected)))
                 self._maintain_orphan_reservations(broker)
                 for tid in selected:
                     latest = read_task_state_snapshot(
@@ -2456,7 +2496,10 @@ class Manager(ServiceTask):
                     if latest is not None:
                         self._adopt_scheduler_evidence(tid, latest[1])
                     self._advance_launch_custody(
-                        tid, latest[1] if latest else None, broker=broker
+                        tid,
+                        latest[1] if latest else None,
+                        broker=broker,
+                        observe_usage=observe_usage,
                     )
                     if tid in self._scheduler_residents:
                         evidence = self._scheduler_residents.pop(tid)
@@ -2725,9 +2768,7 @@ class Manager(ServiceTask):
                 self._ack_launch_custody(tid, broker=broker)
             self._family_scheduler.retire(tid)
             self._scheduler_residents.pop(tid, None)
-            if self._startup_feedback_tid == tid:
-                self._startup_feedback_tid = None
-                self._clear_startup_notification_interest()
+            self._release_startup_feedback(tid)
             changed = True
         if changed:
             self._publish_scheduler_checkpoint()
@@ -2788,6 +2829,8 @@ class Manager(ServiceTask):
         self._admission_retry_after_ns = (
             time.time_ns() + int(MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000)
             if blocked_lanes
+            else self._admission_retry_after_ns
+            if self._startup_blocked
             else 0
         )
         unavailable = decision.capacity is None
@@ -2841,6 +2884,7 @@ class Manager(ServiceTask):
         """Make blocked lanes eligible for an immediate fresh observation."""
 
         self._admission_blocked_lanes.clear()
+        self._startup_blocked = False
         self._admission_retry_after_ns = 0
 
     def _schedule_admission_retry_for_source(self, source_queue: str | None) -> None:
@@ -2896,6 +2940,8 @@ class Manager(ServiceTask):
             return True
         if lane in self._admission_blocked_lanes:
             return False
+        if lane == "public" and self._startup_dispatch_blocked():
+            return False
 
         backend = self._admission_backend_name()
         used = self._observe_admission_usage()
@@ -2903,7 +2949,19 @@ class Manager(ServiceTask):
             used=used, backend=backend, now=time.monotonic()
         )
         self._record_admission_decision(lane=lane, backend=backend, decision=decision)
-        return lane not in decision.blocked_lanes
+        if lane in decision.blocked_lanes:
+            return False
+        if lane == "public" and not _startup_window_allows_launch(
+            unfinished=len(self._startup_feedback),
+            backend=backend,
+            capacity=decision.capacity,
+        ):
+            self._startup_blocked = True
+            self._admission_retry_after_ns = time.time_ns() + int(
+                MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
+            )
+            return False
+        return True
 
     def _register_manager(self) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-005] exception
         """Publish active manager service ownership (Spec: [MA-1.4], [MF-7])."""
@@ -4954,7 +5012,7 @@ class Manager(ServiceTask):
             return False
         if name == self._queue_names.get("inbox"):
             if (
-                self._startup_feedback_tid is not None
+                self._startup_dispatch_blocked()
                 or self._admission_evidence_unavailable
                 or self._scheduler_undurable
             ):
@@ -5108,7 +5166,7 @@ class Manager(ServiceTask):
                 return False
             if queue_name == self._queue_names["inbox"]:
                 if (
-                    self._startup_feedback_tid is not None
+                    self._startup_dispatch_blocked()
                     or self._admission_evidence_unavailable
                     or self._scheduler_undurable
                 ):
@@ -8280,13 +8338,12 @@ class Manager(ServiceTask):
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
         self._timed_manager_call("worker_results", self._drain_worker_results)
-        if self._startup_publication_pending:
-            tid = self._startup_notification_tid
-            self._startup_publication_pending = False
-            if tid is not None and tid == self._startup_feedback_tid:
+        for tid, feedback in tuple(self._startup_feedback.items()):
+            if feedback.publication_pending:
+                feedback.publication_pending = False
                 self._timed_manager_call(
                     "startup_handoff",
-                    lambda: self._reconcile_launch_now(tid),
+                    partial(self._reconcile_launch_now, tid),
                     child_tid=tid,
                 )
         self._retry_stale_child_launches()

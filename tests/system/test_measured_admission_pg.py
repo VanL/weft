@@ -8,12 +8,20 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, closing, contextmanager
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any
 
 import pytest
 
+import weft.core.manager as manager_mod
 from simplebroker import BrokerSession, BrokerTarget, serialize_config
+from tests.core.test_manager import make_manager_spec
+from tests.core.test_manager_family_maintenance import (
+    _join_waiting_processes,
+    _publish_waiting_task,
+)
 from tests.helpers.family_workload import FAMILY_EVENTS
+from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import (
     COMPLETION_WAIT_REORDER_WINDOW_NS,
@@ -21,14 +29,19 @@ from tests.helpers.weft_harness import (
 )
 from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
+    CONTROL_PING,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    load_config,
     resolve_runtime_config,
 )
 from weft.client import WeftClient
 from weft.context import build_context
+from weft.core.control_messages import encode_control_message
+from weft.core.manager import Manager
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator, iter_queue_json_entries
 
 pytest_plugins = ["tests.helpers.pytest_pg_runtime"]
@@ -297,6 +310,174 @@ def _read_denial(
         and row.get("used", 0) >= public_limit
         for row in diagnostics
     )
+
+
+def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_postgres_server: None,
+) -> None:
+    """Real U crosses H with two unfinished startups, then reopens on fresh U."""
+    with WeftTestHarness() as harness:
+        with harness.context.queue("startup-pressure-ids", persistent=True) as queue:
+            manager_tid = str(queue.generate_timestamp())
+        manager = Manager(
+            harness.context.broker_target,
+            make_manager_spec(manager_tid, idle_timeout=0.0),
+            config=load_config(
+                {
+                    "WEFT_ADMISSION_MAX_CONNECTIONS": 80,
+                    "WEFT_ADMISSION_RESERVE_FRACTION": 0.1,
+                    "WEFT_TASK_MONITOR_ENABLED": False,
+                    "WEFT_LIVENESS_MONITOR_ENABLED": False,
+                    "WEFT_HEARTBEAT_ENABLED": False,
+                    "WEFT_AUTOSTART_TASKS": False,
+                }
+            ),
+        )
+        spawn = multiprocessing.get_context("spawn")
+        publication, release = spawn.Event(), spawn.Event()
+        ready = [spawn.Event() for _ in range(3)]
+        started = [spawn.Event() for _ in range(3)]
+        processes: list[BaseProcess] = []
+
+        def launch(
+            _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
+        ) -> BaseProcess:
+            index = len(processes)
+            process = spawn.Process(
+                target=_publish_waiting_task,
+                args=(
+                    child_spec.model_dump(mode="json"),
+                    kwargs["runtime_identity"].to_dict(),
+                    ready[index],
+                    release,
+                    publication,
+                    started[index],
+                    False,
+                    True,
+                ),
+            )
+            processes.append(process)
+            process.start()
+            assert process.pid is not None
+            harness.register_pid(process.pid)
+            assert started[index].wait(timeout=30.0)
+            return process
+
+        monkeypatch.setattr(manager_mod, "launch_task_process", launch)
+        try:
+            manager._refresh_scheduler_evidence()
+            manager._admission_refresh_after = time.monotonic() + 120.0
+            manager._next_inactive_probe_at = time.monotonic() + 120.0
+            source = manager._queue(manager._queue_names["inbox"])
+            reserved = manager._queue(manager._queue_names["reserved"])
+            body = json.dumps(
+                {
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:provide_payload",
+                    }
+                }
+            )
+            request_ids = [int(source.write(body)) for _ in range(3)]
+            tids = [str(request_id) for request_id in request_ids]
+            for tid in tids:
+                harness.register_tid(tid)
+
+            def receipts(count: int) -> bool:
+                return all(tid in manager._child_processes for tid in tids[:count])
+
+            drive_until(
+                lambda: receipts(2),
+                bool,
+                step=manager.process_once,
+                wait=manager.wait_for_activity,
+                timeout=30.0,
+            )
+            assert not ready[0].is_set()
+            with _pressure(harness, None) as pressure:
+                pressure.send(36)
+                assert pressure.poll(30.0) and pressure.recv() == 36
+                observations: list[int] = []
+                read_usage = manager._read_postgres_connection_usage
+
+                def observe_usage() -> Any:
+                    usage = read_usage()
+                    observations.append(int(usage["total"]))
+                    return usage
+
+                # Count real observations without substituting the usage or decision.
+                monkeypatch.setattr(
+                    manager, "_read_postgres_connection_usage", observe_usage
+                )
+                drive_until(
+                    lambda: manager._startup_blocked,
+                    bool,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
+                assert 36 <= observations[-1] < 72
+                assert not manager._admission_blocked_lanes
+                assert source.peek_one(exact_timestamp=request_ids[2]) is not None
+                assert reserved.peek_one(exact_timestamp=request_ids[2]) is None
+                manager._admission_retry_after_ns = time.time_ns() + 120_000_000_000
+                observed = len(observations)
+                for _ in range(5):
+                    manager.process_once()
+                    manager.wait_for_activity(timeout=0.0)
+                assert len(observations) == observed
+                assert not manager._queue_has_pending(source)
+                assert not manager._has_pending_messages()
+                assert not started[2].is_set()
+
+                reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
+                manager._queue(manager._queue_names["ctrl_in"]).write(
+                    encode_control_message(
+                        CONTROL_PING, request_id="startup-pressure", reply_to=reply_name
+                    )
+                )
+                manager.process_once()
+                response = json.loads(str(manager._queue(reply_name).read_one()))
+                assert response["request_id"] == "startup-pressure"
+                assert response["message"] == "PONG"
+
+                pressure.send("release")
+                assert pressure.poll(30.0) and pressure.recv() == "released"
+                manager._admission_retry_after_ns = time.time_ns() - 1
+                drive_until(
+                    lambda: receipts(3),
+                    bool,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
+                assert observations[-1] < 36
+                assert not ready[0].is_set()
+                assert source.peek_one(exact_timestamp=request_ids[2]) is None
+                publication.set()
+                release.set()
+                outboxes = [manager._queue(f"T{tid}.outbox") for tid in tids]
+                drive_until(
+                    lambda: all(queue.peek_one() is not None for queue in outboxes),
+                    bool,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=60.0,
+                )
+                assert [
+                    json.loads(queue.read_one() or "null") for queue in outboxes
+                ] == [
+                    {"data": "payload"},
+                    {"data": "payload"},
+                    {"data": "payload"},
+                ]
+        finally:
+            publication.set()
+            release.set()
+            _join_waiting_processes(processes)
+            manager.stop(join=False)
+            manager.cleanup()
 
 
 @pytest.mark.parametrize("count", [6, 8])

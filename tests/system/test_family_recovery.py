@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import ExitStack, closing
+from functools import partial
 from typing import Any
 
 import psutil
@@ -74,12 +75,25 @@ def _resident(
     return None
 
 
+def _register_resident_processes(
+    harness: WeftTestHarness, tid: str, evidence: dict[str, Any]
+) -> None:
+    """Give harness cleanup the actual surviving wrapper and worker identities."""
+    for host in evidence["host_processes"]:
+        pid = int(host["pid"])
+        harness.register_pid(pid, tid, create_time=float(host["create_time"]))
+        for child in psutil.Process(pid).children(recursive=True):
+            harness.register_pid(
+                child.pid, tid, kind="managed", create_time=child.create_time()
+            )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="SIGKILL crash boundary requires POSIX")
 @pytest.mark.parametrize("background", [False, True])
 def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
     monkeypatch: pytest.MonkeyPatch, background: bool
 ) -> None:
-    """A real orphan survives eligible cleanup and cold admission without replay."""
+    """Two real orphans survive cleanup and cold admission without replay."""
     monkeypatch.setenv("WEFT_ADMISSION_MAX_CONNECTIONS", "0")
     with WeftTestHarness() as harness:
         context = harness.context
@@ -98,50 +112,46 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
                 lambda: read_task_state_snapshot(context, manager_tid),
             )
             with WeftClient(context=context) as client:
-                parent = client.submit(
-                    {
-                        "name": "family-recovery-parent",
-                        "spec": {
-                            "type": "function",
-                            "persistent": background,
-                            "function_target": "tests.helpers.family_workload:family_enrichment",
+                parents = [
+                    client.submit(
+                        {
+                            "name": "family-recovery-parent",
+                            "spec": {
+                                "type": "function",
+                                "persistent": background,
+                                "function_target": "tests.helpers.family_workload:family_enrichment",
+                            },
                         },
-                    },
-                    payload={"index": 0, "gated": True},
-                )
-                harness.register_tid(parent.tid)
-                evidence = _wait(
-                    harness,
-                    [task_state_queue_name(manager_tid), FAMILY_EVENTS],
-                    lambda: _resident(context, manager_tid, parent.tid),
-                )
-                for host in evidence["host_processes"]:
-                    pid = int(host["pid"])
-                    harness.register_pid(
-                        pid, parent.tid, create_time=float(host["create_time"])
+                        payload={"index": index, "gated": True},
                     )
-                    for child in psutil.Process(pid).children(recursive=True):
-                        harness.register_pid(
-                            child.pid,
-                            parent.tid,
-                            kind="managed",
-                            create_time=child.create_time(),
-                        )
-                _wait(
-                    harness,
-                    [task_state_queue_name(manager_tid)],
-                    lambda: _startup_gate_cleared(context, manager_tid, parent.tid),
-                )
-                assert read_task_state_snapshot(context, parent.tid) is None
+                    for index in range(2)
+                ]
+                for parent in parents:
+                    harness.register_tid(parent.tid)
+                    evidence = _wait(
+                        harness,
+                        [task_state_queue_name(manager_tid), FAMILY_EVENTS],
+                        partial(_resident, context, manager_tid, parent.tid),
+                    )
+                    _register_resident_processes(harness, parent.tid, evidence)
+                    _wait(
+                        harness,
+                        [task_state_queue_name(manager_tid)],
+                        partial(
+                            _startup_gate_cleared, context, manager_tid, parent.tid
+                        ),
+                    )
+                    assert read_task_state_snapshot(context, parent.tid) is None
                 with context.queue(
                     f"T{manager_tid}.reserved", persistent=True
                 ) as reserved:
-                    assert (
-                        reserved.peek_one(
-                            exact_timestamp=int(parent.tid), include_claimed=True
+                    for parent in parents:
+                        assert (
+                            reserved.peek_one(
+                                exact_timestamp=int(parent.tid), include_claimed=True
+                            )
+                            is not None
                         )
-                        is not None
-                    )
                 os.kill(process.pid, signal.SIGKILL)
                 process.join(timeout=10.0)
                 assert not process.is_alive()
@@ -160,7 +170,10 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
                 finally:
                     liveness.stop(join=False)
                     liveness.cleanup()
-                assert _resident(context, manager_tid, parent.tid) is not None
+                assert all(
+                    _resident(context, manager_tid, parent.tid) is not None
+                    for parent in parents
+                )
                 monitor_config = dict(context.config)
                 monitor_config["TASK_MONITOR_MODE"] = "jsonl_then_delete"
                 monitor_config["LOG_TASKS_EXTERNAL_ENABLED"] = True
@@ -222,44 +235,78 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
                     task_monitor.stop()
                 successor = harness.ensure_foreground_manager(timeout=30.0)
                 successor_tid = str(successor["tid"])
-                adopted = _wait(
-                    harness,
-                    [task_state_queue_name(successor_tid)],
-                    lambda: _resident(context, successor_tid, parent.tid),
-                )
-                assert adopted["root_tid"] == parent.tid
-                assert adopted["scheduling_class"] == (
-                    "background" if background else "finite"
+                for parent in parents:
+                    adopted = _wait(
+                        harness,
+                        [task_state_queue_name(successor_tid)],
+                        partial(_resident, context, successor_tid, parent.tid),
+                    )
+                    assert adopted["root_tid"] == parent.tid
+                    assert adopted["scheduling_class"] == (
+                        "background" if background else "finite"
+                    )
+                successor_snapshot = read_task_state_snapshot(context, successor_tid)
+                assert successor_snapshot is not None
+                assert (
+                    successor_snapshot[1]["scheduler_frontiers"][
+                        "startup_feedback_tids"
+                    ]
+                    == []
                 )
                 (context.root / ".weft" / "allow-family-snapshot").touch()
-                with context.queue("test.family.release.0", persistent=True) as gate:
-                    gate.write("descend-after-cold-recovery")
+                for index in range(2):
+                    with context.queue(
+                        f"test.family.release.{index}", persistent=True
+                    ) as gate:
+                        gate.write("descend-after-cold-recovery")
                 rows = _wait(
-                    harness, [FAMILY_EVENTS], lambda: _completed_events(harness)
+                    harness,
+                    [FAMILY_EVENTS],
+                    lambda: _completed_events(harness, count=2),
                 )
                 leaves = [r for r in rows if r["event"] == "leaf_started"]
-                assert len(leaves) == 1
-                assert leaves[0]["root_tid"] == parent.tid
-                assert sum(r["event"] == "enrichment_started" for r in rows) == 1
-                harness.register_tid(leaves[0]["tid"])
-                if background:
-                    # Fault suppression is now disabled. Wait for the owner to
-                    # publish its routes before sending a bare-TID control.
-                    _wait(
-                        harness,
-                        [task_state_queue_name(parent.tid)],
-                        lambda: read_task_state_snapshot(context, parent.tid),
+                assert len(leaves) == 2
+                for leaf in leaves:
+                    harness.register_tid(leaf["tid"])
+                for parent in parents:
+                    assert sum(r["root_tid"] == parent.tid for r in leaves) == 1
+                    assert (
+                        sum(
+                            r["event"] == "enrichment_started"
+                            and r["root_tid"] == parent.tid
+                            for r in rows
+                        )
+                        == 1
                     )
-                    parent.stop()
-                else:
-                    assert parent.result(timeout=60.0).status == "completed"
+                    assert (
+                        sum(
+                            r["event"] == "enrichment_completed"
+                            and r["root_tid"] == parent.tid
+                            for r in rows
+                        )
+                        == 1
+                    )
+                    if background:
+                        # Fault suppression is now disabled. Wait for the owner to
+                        # publish its routes before sending a bare-TID control.
+                        _wait(
+                            harness,
+                            [task_state_queue_name(parent.tid)],
+                            partial(read_task_state_snapshot, context, parent.tid),
+                        )
+                        parent.stop()
+                    else:
+                        assert parent.result(timeout=60.0).status == "completed"
                 _wait(
                     harness,
                     [
-                        task_state_queue_name(parent.tid),
+                        *(task_state_queue_name(parent.tid) for parent in parents),
                         task_state_queue_name(successor_tid),
                     ],
-                    lambda: _reservation_absent(context, manager_tid, parent.tid),
+                    lambda: all(
+                        _reservation_absent(context, manager_tid, parent.tid)
+                        for parent in parents
+                    ),
                 )
                 final_liveness = LivenessMonitor(
                     context.broker_target,
@@ -283,10 +330,16 @@ def test_missing_snapshot_crash_preserves_custody_and_descendant_progress(
             process.close()
 
 
-def _completed_events(harness: WeftTestHarness) -> list[dict[str, Any]] | None:
+def _completed_events(
+    harness: WeftTestHarness, *, count: int = 1
+) -> list[dict[str, Any]] | None:
     with harness.context.queue(FAMILY_EVENTS, persistent=True) as queue:
         rows = [json.loads(body) for body in queue.peek_generator()]
-    return rows if any(row["event"] == "enrichment_completed" for row in rows) else None
+    return (
+        rows
+        if sum(row["event"] == "enrichment_completed" for row in rows) >= count
+        else None
+    )
 
 
 def _reservation_absent(context: WeftContext, manager_tid: str, child_tid: str) -> bool:
@@ -304,8 +357,8 @@ def _startup_gate_cleared(
         return False
     checkpoint = snapshot[1].get("scheduler_frontiers", {})
     return (
-        "startup_feedback_tid" in checkpoint
-        and checkpoint["startup_feedback_tid"] is None
+        "startup_feedback_tids" in checkpoint
+        and checkpoint["startup_feedback_tids"] == []
         and bool(
             checkpoint.get("residents", {}).get(child_tid, {}).get("host_processes")
         )

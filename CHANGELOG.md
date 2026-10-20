@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.116] - 2026-10-20
+
+### Changed
+
+- Overlap up to four ordinary PostgreSQL startups below half the usable
+  connection ceiling, retaining fresh measured admission before each launch.
+  Higher usage keeps serialized startup; unknown observations and unresolved
+  launch custody still defer dispatch. SQLite startup remains serialized.
+
+- Bump coordinated extension releases: `weft-docker` 0.9.91, `weft-django`
+  0.9.51, `weft-macos-sandbox` 0.6.20, and `weft-microsandbox` 0.5.21.
+
 ## [0.9.115] - 2026-10-20
 
 ### Fixed

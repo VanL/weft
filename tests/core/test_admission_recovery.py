@@ -161,8 +161,18 @@ def test_positive_scoped_retirement_acknowledges_exact_request_then_releases_che
     manager._checkpoint_spawned_admission(
         _ManagerChildLaunchResult(request, multiprocessing.current_process())
     )
+    sibling = _reserve_and_checkpoint(manager, weft_harness)
+    manager._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(sibling, multiprocessing.current_process())
+    )
     tid = request.child_spec.tid
-    assert tid is not None
+    sibling_tid = sibling.child_spec.tid
+    assert tid is not None and sibling_tid is not None
+    manager._activity_wait_queues()
+    retired_feedback = manager._startup_feedback[tid]
+    sibling_feedback = manager._startup_feedback[sibling_tid]
+    sibling_interest = sibling_feedback.queue
+    assert retired_feedback.queue is not None and sibling_interest is not None
     evidence = manager._scheduler_residents[tid]
     pid = multiprocessing.current_process().pid
     assert pid is not None
@@ -171,12 +181,80 @@ def test_positive_scoped_retirement_acknowledges_exact_request_then_releases_che
     evidence["host_processes"][0]["create_time"] = created - 100.0
     manager._retire_scheduler_residents()
     assert tid not in manager._scheduler_residents
+    assert tid not in manager._startup_feedback
+    assert retired_feedback.queue is None
+    assert sibling_tid in manager._scheduler_residents
+    assert manager._startup_feedback[sibling_tid] is sibling_feedback
+    assert sibling_feedback.queue is sibling_interest
     with weft_harness.context.queue(request.reserved_queue, persistent=True) as queue:
         assert queue.peek_one(exact_timestamp=request.message_timestamp) is None
+        assert queue.peek_one(exact_timestamp=sibling.message_timestamp) is not None
+    snapshot = read_task_state_snapshot(weft_harness.context, manager.tid)
+    assert snapshot is not None
+    residents = snapshot[1]["scheduler_frontiers"]["residents"]
+    assert tid not in residents and sibling_tid in residents
+    with weft_harness.context.broker() as broker:
+        assert manager_launch_custody_pending(snapshot[1], broker=broker)
+
+    manager._scheduler_residents[sibling_tid]["host_processes"][0]["create_time"] = (
+        created - 100.0
+    )
+    manager._retire_scheduler_residents()
+    assert sibling_feedback.queue is None
     snapshot = read_task_state_snapshot(weft_harness.context, manager.tid)
     assert snapshot is not None
     with weft_harness.context.broker() as broker:
         assert not manager_launch_custody_pending(snapshot[1], broker=broker)
+
+
+def test_launch_failure_releases_only_failed_startup_and_keeps_sibling_custody(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real worker's OS-launch error reaches per-TID failure settlement.
+
+    Checkpointed requests and scoped current-process evidence are real. This
+    tests the failure owner boundary, not scheduling two worker operations.
+    """
+    manager = recovery_manager
+    request = _reserve_and_checkpoint(manager, weft_harness)
+    sibling = _reserve_and_checkpoint(manager, weft_harness)
+    manager._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(sibling, multiprocessing.current_process())
+    )
+    tid, sibling_tid = request.child_spec.tid, sibling.child_spec.tid
+    assert tid is not None and sibling_tid is not None
+    manager._activity_wait_queues()
+    failed_feedback = manager._startup_feedback[tid]
+    sibling_feedback = manager._startup_feedback[sibling_tid]
+    sibling_interest = sibling_feedback.queue
+    assert failed_feedback.queue is not None and sibling_interest is not None
+    failure = OSError("named pre-process launch failure")
+
+    def failed_launch(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr("weft.core.manager.launch_task_process", failed_launch)
+    result = manager._run_child_launch_worker(request)
+    assert result.error is failure and result.process is None
+    manager._handle_child_launch_result(result)
+    assert tid not in manager._startup_feedback
+    assert failed_feedback.queue is None
+    assert tid not in manager._scheduler_residents
+    assert manager._startup_feedback[sibling_tid] is sibling_feedback
+    assert sibling_feedback.queue is sibling_interest
+    assert sibling_tid in manager._scheduler_residents
+    assert request.source_queue is not None and request.reserved_queue is not None
+    with weft_harness.context.queue(request.source_queue, persistent=True) as source:
+        assert source.peek_one(exact_timestamp=request.message_timestamp) is None
+    with weft_harness.context.queue(
+        request.reserved_queue, persistent=True
+    ) as reserved:
+        # Existing KEEP policy retains failed acceptance. A free startup slot
+        # cannot erase that row or the live sibling's exact reserved request.
+        assert reserved.peek_one(exact_timestamp=request.message_timestamp) is not None
+        assert reserved.peek_one(exact_timestamp=sibling.message_timestamp) is not None
 
 
 def test_wrapper_checkpoint_preserves_already_observed_live_worker(

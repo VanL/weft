@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs the bounded low-usage startup window under [MA-1.8].
+
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
@@ -435,15 +437,56 @@ On PostgreSQL, unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` means automatic ba
 
 Ordinary launch selection is work-conserving family scheduling over dynamically observed ancestry. There is no configured frontier count or family concurrency cap. Active branches receive round-robin turns and offer newest eligible tip children first. If none has an eligible tip child, the oldest independent pending family enters FIFO by original root ID; otherwise an active family may offer its oldest unassigned sibling subtree, choosing families round-robin. A live finite tip and its ancestors retain lineage, not a capacity permit. A child extends its matching ancestry path; a sibling starts another path when selected and when measured admission and existing launch custody allow it. Positive process exit contracts a path without dropping known descendants. Logical family membership remains while pending or resident descendants exist; late-discovered work rejoins at the original root FIFO position or extends a matching live tip. Queued requests incur no process or prospective connection charge. Multiple Managers retain exact-ID work stealing and measure the same applicable cross-process resource population.
 
-A Manager refreshes actual usage between ordinary launches after wrapper startup becomes observable in `weft.state.tasks.<tid>` (or attributed broker usage) or the launch exits through existing failure/reap handling. Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears the inter-launch gate. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. If a retained pre-launch reference has no durable post-launch process receipt, a successor preserves its validated identity, unresolved reservation, and finite frontier where applicable. It blocks further ordinary dispatch until a matching positive task-owned snapshot or durable scoped receipt resolves the ambiguity. Absence of a PID or snapshot does not prove the request was unlaunched once its pre-launch reference exists. This crash window can require operator resolution and is outside the conditional drain guarantee. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
+Every ordinary PostgreSQL launch requires a fresh coherent usage observation
+and the existing measured admission decision. Let L=max(0,C-R), H=floor(L/2),
+and W=4. If H>=W and observed usage U<H, a Manager may have up to W unfinished
+ordinary startups. Otherwise it waits until no ordinary startup is unfinished
+before authorizing one launch. Unknown usage denies dispatch. Window occupancy
+counts selected launch-worker requests and processes awaiting startup feedback
+once per TID, starting before process creation; it does not count queued work
+or running tasks whose startup feedback has settled. SQLite retains serialized
+startup. The window bounds unobserved launch exposure, not connection consumption;
+it adds no per-task resource charge, family cap, or global admission atomicity.
+The window is local to one Manager incarnation. Surviving tasks adopted after
+restart remain subject to existing resident/custody recovery and fresh measured
+admission, not reconstruction into the new Manager's local startup window.
+Startup settles independently for each TID when its wrapper becomes observable
+in `weft.state.tasks.<tid>` or attributed broker usage, or through existing
+failure/reap handling or the bounded missing-publication fallback below.
+A negative startup-readiness decision suppresses ordinary source readiness until
+startup membership or launch-worker evidence changes, or the existing admission
+recheck deadline arrives. A due recheck can reopen the window with a fresh usage
+observation. Positive admission is never cached across launches. Startup blocking
+does not start or reset the resource-exhaustion drain-wait episode.
 
-A startup handoff or ready fallback that clears startup feedback reactivates
-the ordinary public source, so the next reactor turn reevaluates any known work
-through normal admission and custody gates without waiting for inactive source
-rediscovery. The normal pending check deactivates the source again when it is
-empty.
+Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears that TID's startup feedback. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. If a retained pre-launch reference has no durable post-launch process receipt, a successor preserves its validated identity, unresolved reservation, and finite frontier where applicable. It blocks further ordinary dispatch until a matching positive task-owned snapshot or durable scoped receipt resolves the ambiguity. Absence of a PID or snapshot does not prove the request was unlaunched once its pre-launch reference exists. This crash window can require operator resolution and is outside the conditional drain guarantee. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
 
-Positive startup publication wakes the existing reactor through one notification-only interest in `weft.state.tasks.<tid>`. This queue participates in the SimpleBroker activity waiter, not delivery configuration: no handler, consumption, reservation, or task-state mutation is added. The reactor installs interest before reading, uses a strict publication cursor, and validates exact snapshot identity before handoff/acknowledgement. A new publication returns control even when no delivery queue is actionable. Rejected evidence retains interest without repeatedly treating the unchanged row as work. Successful publication must not wait for the periodic resident-reconciliation tick; the existing one-second absence deadline remains the missing-publication fallback. Gate release, positive process exit, failure and cleanup remove the interest. Native waiter replacement registers the candidate before displacing and closing the old waiter, under existing owner/stop serialization. The process-launch worker remains broker-free; no broker-reading helper thread or historical notification handles are retained. PostgreSQL reuses SimpleBroker's shared process-local listener; SQLite retains its existing data-version/polling mechanism.
+Startup settlement and a successful launch-worker receipt with room remaining
+in the startup window reactivate the ordinary public source. The next reactor
+turn reevaluates known work through normal measured admission and custody gates
+without waiting for inactive-source rediscovery. The normal pending check makes
+the source idle again when empty. A negative startup-readiness decision suppresses
+unchanged blocked backlog as ordinary wait activity.
+
+Each unfinished ordinary startup has one transient notification-only interest
+in `weft.state.tasks.<tid>` once its launch-worker receipt is available. There
+are at most W outstanding interests (one on SQLite).
+These queues participate in the existing activity waiter, not delivery: no
+handler, consumption, reservation or task-state mutation is added. Install
+interest before reading and retain a strict publication cursor per TID. A new
+publication returns control even if no delivery queue is actionable. Validate
+exact snapshot identity before handoff or acknowledgement. Rejected evidence
+advances only its own cursor and retains its interest without unchanged-row
+spinning. Reconcile ready TIDs independently, including out-of-order publication;
+do not wait for an older TID or the periodic reconciliation tick. The existing
+one-second absence fallback applies independently to each startup. Feedback,
+positive exit and failure release only their own interest; cleanup closes all
+owned interests. Native waiter
+replacement registers the candidate before displacing and closing the old waiter,
+under existing owner/stop serialization. The process-launch worker stays
+broker-free; no helper reader thread or historical handles are retained.
+PostgreSQL reuses SimpleBroker's shared process-local listener; SQLite keeps
+its existing data-version/polling mechanism.
 
 Family ordering and resource admission answer different questions. The scheduler must offer eligible indexed work whenever it exists; only measured admission and the existing startup, ownership, and recovery-custody gates may defer its launch. This uses available resource capacity without a fixed family limit. Finite independent-subtree workloads can drain when leaves terminate, required descendants are eventually submitted, broker maintenance is fair, and measured headroom eventually permits each required launch. Depth-first preference prevents already-known descendants from sitting behind independent parent backlogs. It does not guarantee progress if already-running parents retain all capacity needed by descendants submitted later. Resource limits, external saturation, unbounded work, ambiguous launch custody, and arbitrary cross-task waits remain real limits. There is no runtime frontier allowance, prospective path reservation, or child-count declaration in this condition.
 
@@ -514,6 +557,15 @@ _Implementation mapping_:
 - [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `weft/core/manager.py::Manager._pending_request_reference_is_valid`, `weft/core/manager.py::Manager._recover_pending_service_requests`, `weft/core/manager.py::Manager._tracked_service_terminal_proof_visible`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `weft/core/manager.py::Manager._child_terminal_proof_visible`, `weft/core/manager.py::Manager._write_manager_terminal_envelope`, `weft/core/manager.py::Manager._manager_child_timeouts`, `Manager._drain_child_sentinel_events`, `weft/core/manager.py::Manager._register_child_sentinel`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 - [MA-1.8] Admission: `weft/core/admission.py::AdmissionController` owns pure measured decisions and drain-wait diagnostics; `weft/core/admission.py::AdmissionController.set_max_connections` updates the effective ceiling without resetting that history. `weft/core/manager.py::Manager._read_postgres_connection_stats` resolves automatic backend capacity. `weft/core/manager.py` owns exact-ID selection, frontiers, incremental pending indexes, startup feedback, checkpoint custody, bounded recovery and process probes. `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest` own the bounded notification interest and reactor handoff. `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._ensure_multi_activity_waiter`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._wait_for_activity_body`, and `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_hint_action` own subscription replacement and observation wake filtering. `weft/_constants.py` owns configuration. `weft/core/tasks/base.py` owns task snapshots; `weft/core/runtime_identity.py` owns immutable transport. LivenessMonitor and TaskMonitor retain their cleanup boundaries under [LIVENESS.R3–4], [LIVENESS.R7]. Additional verification: `weft/core/family_scheduling.py`, `tests/core/test_admission.py`, `tests/core/test_connection_admission.py`, `tests/core/test_work_conserving_admission.py`, `tests/core/test_family_scheduling.py`, `tests/core/test_manager_family_maintenance.py`, `tests/helpers/family_workload.py`, `tests/system/test_child_admission.py`, `tests/system/test_family_scheduling.py`, `tests/system/test_measured_admission_pg.py`.
+
+The bounded [MA-1.8] startup decision is
+`weft/core/admission.py::_startup_window_allows_launch`, applied only after a
+fresh resource decision. `Manager._startup_dispatch_blocked` shares negative
+readiness between dispatch and waiting; `Manager._resume_startup_dispatch`
+reactivates known work after a receipt or per-TID settlement.
+`Manager._refresh_scheduler_evidence` visits every local startup with one lazy
+coherent usage sample per pass. Startup records are transient observations,
+not durable custody or restart authority.
 
 Implementation plan backlink for [MA-1.4]:
 `2026-08-08-registry-selection-pruning-authority-refactor-plan` (retired — source 396c3b85; see `docs/plans/README.md`)

@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 44 plan files in this directory.
+There are currently 45 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 44 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-20-bounded-startup-fast-path.md`](./2026-10-20-bounded-startup-fast-path.md) | Bounded Startup No-Wait Fast Path | `completed` | none |
 | [`2026-10-16-public-submission-custody-observation-plan.md`](./2026-10-16-public-submission-custody-observation-plan.md) | Public Submission Custody Observation | `completed` | none |
 | [`2026-10-15-operator-owned-permissions.md`](./2026-10-15-operator-owned-permissions.md) | Operator-Owned Filesystem Permissions | `completed` | none |
 | [`2026-10-15-work-conserving-family-scheduling.md`](./2026-10-15-work-conserving-family-scheduling.md) | Work-Conserving Family Scheduling | `completed` | none |

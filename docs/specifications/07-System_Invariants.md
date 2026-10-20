@@ -178,8 +178,9 @@ A live task declares every construction-fixed delivery role and
   rejects runtime `add_queue()` and `remove_queue()`. Notification-only interests
   are separate from delivery roles: the reactor owner may change them between
   turns and waits without adding handlers, consumption, or reserve routes.
-  The Manager observes only the one task-state queue awaiting startup feedback
-  under [MA-1.8]. Registration precedes the initial read; changed publications
+  The Manager observes each task-state queue awaiting its startup feedback,
+  with active notification interests bounded by the [MA-1.8] startup window.
+  Registration precedes the initial read; changed publications
   can return control even without delivery readiness. Rejected evidence retains
   interest with a strict publication cursor; gate release, exit/failure and
   cleanup remove it. Replacement follows the owner/stop and candidate-before-
@@ -384,7 +385,11 @@ Bulk reads share one broker scope and short-lived queue facades. Broker acquisit
 failure policies remain unchanged. Non-task point selectors return absent
 without broker I/O; queue-name construction rejects them. Names alone
 never substitute for valid state, lifecycle evidence, or live process proof.
-Task-owned `weft.state.tasks.<tid>` snapshots ([OBS.6]) carry immutable `root_tid`, nullable `submitter_tid`, ordered finite ancestor chain `ancestry_tids`, validated `scheduling_class` (`"finite"`, `"background"`, or `"internal"`), and opaque `connection_owner` alongside existing runtime handle and scoped host-process evidence, replacing the per-task `admission` budget record. Manager-owned `weft.state.tasks.<manager_tid>` snapshots publish `scheduler_frontiers` (`stacks`, `residents`, nullable `startup_feedback_tid`, and the owning ordinary `source_queue`/`reserved_queue`): active frontier stacks, retained resident task lineage/class/process evidence, exact unresolved reservation references, and the current inter-launch startup gate. Gate release publishes the updated checkpoint before subsequent ordinary dispatch. Detached tasks that survive Manager turnover are adopted and reconciled by bounded liveness probes. Task-owned publication remains best-effort; until handoff the reservation/checkpoint pair preserves recovery evidence under the custody guard above. After handoff, surviving tasks and pending tokens reconstruct their exact live finite ancestor path from `ancestry_tids` and `scheduling_class` even after a prior Manager checkpoint or intermediate ancestor task snapshot is deleted by `LivenessMonitor`. Publication remains edge-triggered, and `LivenessMonitor`-only deletion ownership ([LIVENESS.R3]) remains unchanged.
+Task-owned `weft.state.tasks.<tid>` snapshots ([OBS.6]) carry immutable `root_tid`, nullable `submitter_tid`, ordered finite ancestor chain `ancestry_tids`, validated `scheduling_class` (`"finite"`, `"background"`, or `"internal"`), and opaque `connection_owner` alongside existing runtime handle and scoped host-process evidence, replacing the per-task `admission` budget record. Manager-owned `weft.state.tasks.<manager_tid>` snapshots publish `scheduler_frontiers` (`stacks`, `residents`, `startup_feedback_tids` (a list of unfinished ordinary startup TIDs), and the owning ordinary `source_queue`/`reserved_queue`): active frontier stacks, retained resident task lineage/class/process evidence, exact unresolved reservation references, and the current bounded startup-feedback membership. Startup-feedback membership is diagnostic and is forward-written in the existing
+Manager snapshots. It does not authorize admission, acknowledgement or replay.
+Resident identity, process receipts and exact request custody retain their existing
+durable publication and recovery requirements. Bootstrap uses those resident
+records and fresh resource observation, not the diagnostic membership list. Detached tasks that survive Manager turnover are adopted and reconciled by bounded liveness probes. Task-owned publication remains best-effort; until handoff the reservation/checkpoint pair preserves recovery evidence under the custody guard above. After handoff, surviving tasks and pending tokens reconstruct their exact live finite ancestor path from `ancestry_tids` and `scheduling_class` even after a prior Manager checkpoint or intermediate ancestor task snapshot is deleted by `LivenessMonitor`. Publication remains edge-triggered, and `LivenessMonitor`-only deletion ownership ([LIVENESS.R3]) remains unchanged.
 
 On both backends, the existing pre-launch Manager checkpoint must persist the exact source/reserved/request reference and validated runtime identity before process creation. Post-launch checkpointing adds scoped process evidence and must report publication failure. All acknowledgement paths retain the original reserved request until a valid task-owned snapshot matches its TID, context, lineage, scheduling class, and scoped runtime identity, or existing positive launch-failure/whole-process settlement evidence resolves it. Startup feedback alone is insufficient. Exact acknowledgement and confirmed absence precede removal of the checkpoint obligation; subsequent Manager snapshots retain unresolved entries. Successors may resolve old reservations but never write the old Manager's task-state queue. A post-spawn crash without durable process evidence remains ambiguous; missing evidence never authorizes replay or a claim of guaranteed drain. If a retained pre-launch reference has no durable post-launch process receipt, a successor preserves its validated identity, unresolved reservation, and finite frontier where applicable. It blocks further ordinary dispatch until a matching positive task-owned snapshot or durable scoped receipt resolves the ambiguity. Absence of a PID or snapshot does not prove the request was unlaunched once its pre-launch reference exists. This crash window can require operator resolution and is outside the conditional drain guarantee.
 
@@ -1133,7 +1138,29 @@ On PostgreSQL, unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` means automatic ba
 
 Ordinary launch selection is work-conserving family scheduling over dynamically observed ancestry. There is no configured frontier count or family concurrency cap. Active branches receive round-robin turns and offer newest eligible tip children first. If none has an eligible tip child, the oldest independent pending family enters FIFO by original root ID; otherwise an active family may offer its oldest unassigned sibling subtree, choosing families round-robin. A live finite tip and its ancestors retain lineage, not a capacity permit. A child extends its matching ancestry path; a sibling starts another path when selected and when measured admission and existing launch custody allow it. Positive process exit contracts a path without dropping known descendants. Logical family membership remains while pending or resident descendants exist; late-discovered work rejoins at the original root FIFO position or extends a matching live tip. Queued requests incur no process or prospective connection charge. Multiple Managers retain exact-ID work stealing and measure the same applicable cross-process resource population.
 
-A Manager refreshes actual usage between ordinary launches after wrapper startup becomes observable in `weft.state.tasks.<tid>` (or attributed broker usage) or the launch exits through existing failure/reap handling. Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears the inter-launch gate. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
+Every ordinary PostgreSQL launch requires a fresh coherent usage observation
+and the existing measured admission decision. Let L=max(0,C-R), H=floor(L/2),
+and W=4. If H>=W and observed usage U<H, a Manager may have up to W unfinished
+ordinary startups. Otherwise it waits until no ordinary startup is unfinished
+before authorizing one launch. Unknown usage denies dispatch. Window occupancy
+counts selected launch-worker requests and processes awaiting startup feedback
+once per TID, starting before process creation; it does not count queued work
+or running tasks whose startup feedback has settled. SQLite retains serialized
+startup. The window bounds unobserved launch exposure, not connection consumption;
+it adds no per-task resource charge, family cap, or global admission atomicity.
+The window is local to one Manager incarnation. Surviving tasks adopted after
+restart remain subject to existing resident/custody recovery and fresh measured
+admission, not reconstruction into the new Manager's local startup window.
+Startup settles independently for each TID when its wrapper becomes observable
+in `weft.state.tasks.<tid>` or attributed broker usage, or through existing
+failure/reap handling or the bounded missing-publication fallback below.
+A negative startup-readiness decision suppresses ordinary source readiness until
+startup membership or launch-worker evidence changes, or the existing admission
+recheck deadline arrives. A due recheck can reopen the window with a fresh usage
+observation. Positive admission is never cached across launches. Startup blocking
+does not start or reset the resource-exhaustion drain-wait episode.
+
+Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears that TID's startup feedback. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
 
 Family ordering and resource admission answer different questions. The scheduler must offer eligible indexed work whenever it exists; only measured admission and the existing startup, ownership, and recovery-custody gates may defer its launch. This uses available resource capacity without a fixed family limit. Finite independent-subtree workloads can drain when leaves terminate, required descendants are eventually submitted, broker maintenance is fair, and measured headroom eventually permits each required launch. Depth-first preference prevents already-known descendants from sitting behind independent parent backlogs. It does not guarantee progress if already-running parents retain all capacity needed by descendants submitted later. Resource limits, external saturation, unbounded work, ambiguous launch custody, and arbitrary cross-task waits remain real limits. There is no runtime frontier allowance, prospective path reservation, or child-count declaration in this condition.
 
@@ -1160,6 +1187,11 @@ PING/STATUS schema.
 _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`,
 `weft/core/family_scheduling.py`, `tests/core/test_admission.py`,
 `tests/core/test_manager_family_maintenance.py`, `tests/system/test_measured_admission_pg.py`.
+
+For [MANAGER.18], `weft/core/admission.py::_startup_window_allows_launch`
+owns the bounded overlap predicate. `Manager._startup_dispatch_blocked` and
+`Manager._resume_startup_dispatch` in `weft/core/manager.py` own negative
+readiness and next-turn reactivation, separately from resource drain-wait policy.
 
 The measured PostgreSQL tests exercise coherent actual pressure and bounded
 parent/leaf progress. `tests/system/test_family_recovery.py` exercises missing
@@ -1358,6 +1390,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs bounded startup feedback under [MA-1.8].
 
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 

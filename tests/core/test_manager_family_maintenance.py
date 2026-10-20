@@ -23,7 +23,9 @@ from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_manager import make_manager_spec
 from tests.helpers.reactor_driver import drive_until
+from tests.helpers.test_backend import active_test_backend
 from tests.helpers.typing import BrokerEnv
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     MANAGER_ADMISSION_RECHECK_SECONDS,
     WEFT_FAMILY_PENDING_PREFIX,
@@ -45,6 +47,7 @@ from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import TaskSpec
 
 pytestmark = pytest.mark.shared
+pytest_plugins = ["tests.helpers.pytest_pg_runtime"]
 
 
 @pytest.fixture
@@ -69,6 +72,43 @@ def manager(broker_env: BrokerEnv) -> Iterator[Manager]:
     finally:
         task.stop(join=False)
         task.cleanup()
+
+
+@pytest.fixture
+def startup_pg_manager(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[Manager, WeftTestHarness]]:
+    """Isolate physical PG capacity before constructing its broker or Manager."""
+    if active_test_backend() == "postgres":
+        request.getfixturevalue("isolated_postgres_server")
+    with WeftTestHarness() as harness:
+        target = harness.context.broker_target
+        with harness.context.queue("startup-window-ids", persistent=True) as queue:
+            tid = str(queue.generate_timestamp())
+        task = Manager(
+            target,
+            make_manager_spec(tid, idle_timeout=0.0),
+            config=load_config(
+                {
+                    "WEFT_ADMISSION_MAX_CONNECTIONS": 300,
+                    "WEFT_ADMISSION_RESERVE_FRACTION": 0.1,
+                    "WEFT_TASK_MONITOR_ENABLED": False,
+                    "WEFT_LIVENESS_MONITOR_ENABLED": False,
+                    "WEFT_HEARTBEAT_ENABLED": False,
+                    "WEFT_AUTOSTART_TASKS": False,
+                }
+            ),
+        )
+        try:
+            if active_test_backend() == "postgres":
+                # PG accounting is optional and must not load on SQLite runs.
+                from simplebroker_pg import get_connection_usage
+
+                assert get_connection_usage(task._get_connected_queue())["total"] < 135
+            yield task, harness
+        finally:
+            task.stop(join=False)
+            task.cleanup()
 
 
 def request_body() -> str:
@@ -182,7 +222,7 @@ def test_undurable_internal_launch_blocks_ordinary_reservation_until_checkpoint(
                 request, multiprocessing.current_process(), time.time_ns()
             )
         )
-        assert manager._startup_feedback_tid is None
+        assert not manager._startup_feedback
         assert not manager._process_queue_message(source.name, set())
         assert source.peek_one(exact_timestamp=ordinary_id) is not None
         assert (
@@ -228,6 +268,7 @@ def _publish_waiting_task(
     before_publish: multiprocessing.synchronize.Event | None = None,
     started: multiprocessing.synchronize.Event | None = None,
     unknown_create_time: bool = False,
+    run_after_release: bool = False,
 ) -> None:
     if started is not None:
         started.set()
@@ -248,8 +289,240 @@ def _publish_waiting_task(
         ready.set()
         if not release.wait(timeout=60.0):
             raise TimeoutError("waiting task fixture was not released")
+        if run_after_release:
+            task.run()
     finally:
         task.cleanup()
+
+
+def _join_waiting_processes(processes: list[BaseProcess]) -> None:
+    """Close this fixture's real process producers before broker teardown."""
+    for process in processes:
+        process.join(timeout=30.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10.0)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10.0)
+
+
+def _release_waiting_tasks(
+    publications: dict[str, multiprocessing.synchronize.Event],
+    releases: dict[str, multiprocessing.synchronize.Event],
+) -> None:
+    for event in (*publications.values(), *releases.values()):
+        event.set()
+
+
+def _check_rejected_publication_keeps_startup_window(
+    manager: Manager, tids: list[str], reserved: Queue
+) -> None:
+    """One real invalid publication advances only its own startup cursor."""
+    manager._ensure_wait_strategy_started()
+    records = dict(manager._startup_feedback)
+    state = manager._queue(f"weft.state.tasks.{tids[0]}")
+    resident = manager._scheduler_residents[tids[0]]
+    launched_ns = resident["launched_ns"]
+    # Hold this TID's absence fallback as well as periodic maintenance. Invalid
+    # publication reconciliation must not race a legitimate one-second fallback.
+    resident["launched_ns"] = time.time_ns() + 120_000_000_000
+    try:
+        invalid_id = state.write("{}")
+        drive_until(
+            lambda: records[tids[0]].publication_id,
+            lambda stamp: stamp == invalid_id,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+            wait_slice=30.0,
+        )
+        manager.process_once()
+    finally:
+        resident["launched_ns"] = launched_ns
+    assert set(manager._startup_feedback) == set(tids)
+    assert records[tids[0]].publication_id == invalid_id
+    for tid in tids:
+        assert manager._startup_feedback[tid] is records[tid]
+        assert records[tid].queue is not None
+        assert reserved.peek_one(exact_timestamp=int(tid)) is not None
+    assert all(records[tid].publication_id is None for tid in tids[1:])
+
+
+def _check_missing_publication_settles_only_one_startup(
+    manager: Manager, tid: str, reserved: Queue
+) -> None:
+    """Fallback releases observation, not its custody or another TID's interest."""
+    manager._ensure_wait_strategy_started()
+    records = dict(manager._startup_feedback)
+    interests = {other_tid: record.queue for other_tid, record in records.items()}
+    manager._scheduler_residents[tid]["launched_ns"] = time.time_ns() - int(
+        2 * MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
+    )
+    # Reconcile this exact owner boundary. Enabling full periodic maintenance
+    # would also age out the other intentionally delayed startup publications.
+    with manager._get_connected_queue().get_connection() as broker:
+        manager._advance_launch_custody(tid, None, broker=broker)
+    assert set(manager._startup_feedback) == set(records) - {tid}
+    assert records[tid].queue is None
+    assert reserved.peek_one(exact_timestamp=int(tid)) is not None
+    for other_tid in set(records) - {tid}:
+        assert manager._startup_feedback[other_tid] is records[other_tid]
+        assert records[other_tid].queue is interests[other_tid]
+        assert interests[other_tid] is not None
+        assert reserved.peek_one(exact_timestamp=int(other_tid)) is not None
+
+
+def test_startup_window_overlaps_but_bounds_unobserved_processes(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A receipt wakes the next launch; later feedback frees only its own slot.
+
+    Fence before Consumer construction so neither attributed broker connections
+    nor task-state publication can settle startup before the intended release.
+    """
+    manager, harness = startup_pg_manager
+    window = 4 if active_test_backend() == "postgres" else 1
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    reserved = manager._queue(manager._queue_names["reserved"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    request_ids = [int(source.write(body)) for _ in range(window + 1)]
+    tids = [str(request_id) for request_id in request_ids]
+    for tid in tids:
+        harness.register_tid(tid)
+    spawn = multiprocessing.get_context("spawn")
+    releases = {tid: spawn.Event() for tid in tids}
+    publications = {tid: spawn.Event() for tid in tids}
+    started = {tid: spawn.Event() for tid in tids}
+    ready = {tid: spawn.Event() for tid in tids}
+    processes: list[BaseProcess] = []
+
+    def launch(
+        _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
+    ) -> BaseProcess:
+        tid = child_spec.tid
+        assert tid is not None
+        process = spawn.Process(
+            target=_publish_waiting_task,
+            args=(
+                child_spec.model_dump(mode="json"),
+                kwargs["runtime_identity"].to_dict(),
+                ready[tid],
+                releases[tid],
+                publications[tid],
+                started[tid],
+                False,
+                True,
+            ),
+        )
+        processes.append(process)
+        process.start()
+        assert process.pid is not None
+        harness.register_pid(process.pid)
+        assert started[tid].wait(timeout=30.0)
+        return process
+
+    def settled_receipts(count: int) -> bool:
+        return (
+            all(started[tid].is_set() for tid in tids[:count])
+            and all(tid in manager._child_processes for tid in tids[:count])
+            and not manager._active_child_launches
+        )
+
+    def drive_to_receipts(count: int, *, reason: str) -> None:
+        try:
+            drive_until(
+                lambda: settled_receipts(count),
+                bool,
+                step=manager.process_once,
+                wait=manager.wait_for_activity,
+                timeout=30.0,
+                wait_slice=30.0,
+            )
+        except AssertionError as exc:
+            raise AssertionError(
+                f"{reason}: received={list(manager._child_processes)}"
+            ) from exc
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", launch)
+    try:
+        # No periodic tick may substitute for receipt-to-next-turn notification.
+        manager._admission_refresh_after = time.monotonic() + 120.0
+        manager._next_inactive_probe_at = time.monotonic() + 120.0
+        drive_to_receipts(1, reason="first startup did not reach its receipt barrier")
+        drive_to_receipts(
+            min(window, 2),
+            reason="second startup did not progress before first feedback",
+        )
+        assert not ready[tids[0]].is_set()
+        drive_to_receipts(window, reason="startup window did not fill")
+        # The worker has returned every receipt. Give dispatch complete turns
+        # while all allowed producers remain fenced before publication.
+        for _ in range(5):
+            manager.process_once()
+            manager.wait_for_activity(timeout=0.0)
+        assert not manager._queue_has_pending(source), "full window remained actionable"
+        assert not manager._active_child_launches, "startup selected beyond the window"
+        assert not started[tids[window]].is_set(), "startup exceeded the window"
+        assert source.peek_one(exact_timestamp=request_ids[window]) is not None
+        assert reserved.peek_one(exact_timestamp=request_ids[window]) is None
+        if window > 1:
+            _check_rejected_publication_keeps_startup_window(
+                manager, tids[:window], reserved
+            )
+
+        siblings = {
+            tid: (manager._startup_feedback[tid], manager._startup_feedback[tid].queue)
+            for tid in tids[: window - 1]
+        }
+        publications[tids[window - 1]].set()
+        assert ready[tids[window - 1]].wait(timeout=30.0)
+        drive_to_receipts(
+            window + 1, reason="out-of-order feedback did not free a startup slot"
+        )
+        assert reserved.peek_one(exact_timestamp=request_ids[window - 1]) is None
+        for request_id in request_ids[: window - 1]:
+            assert reserved.peek_one(exact_timestamp=request_id) is not None
+        assert source.peek_one(exact_timestamp=request_ids[window]) is None
+        assert reserved.peek_one(exact_timestamp=request_ids[window]) is not None
+        assert set(manager._startup_feedback) == (
+            set(tids[:window]) - {tids[window - 1]} | {tids[window]}
+        )
+        assert all(
+            manager._startup_feedback[tid] is record
+            and record.queue is interest
+            and interest is not None
+            for tid, (record, interest) in siblings.items()
+        )
+        if window > 1:
+            _check_missing_publication_settles_only_one_startup(
+                manager, tids[0], reserved
+            )
+
+        _release_waiting_tasks(publications, releases)
+        outboxes = [manager._queue(f"T{tid}.outbox") for tid in tids]
+        drive_until(
+            lambda: [queue.peek_one() for queue in outboxes],
+            lambda results: all(body is not None for body in results),
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=60.0,
+        )
+        assert [json.loads(queue.read_one() or "null") for queue in outboxes] == [
+            {"data": "payload"}
+        ] * (window + 1)
+    finally:
+        _release_waiting_tasks(publications, releases)
+        _join_waiting_processes(processes)
 
 
 def test_startup_handoff_reactivates_pending_public_queue(manager: Manager) -> None:
@@ -295,7 +568,7 @@ def test_startup_handoff_reactivates_pending_public_queue(manager: Manager) -> N
         )
         manager._admission_refresh_after = 0.0
         manager._refresh_scheduler_evidence()
-        assert manager._startup_feedback_tid is None
+        assert not manager._startup_feedback
         manager.process_once()
         assert source.peek_one(exact_timestamp=next_id) is None
         assert manager._queue(reserved).peek_one(exact_timestamp=next_id) is not None
@@ -380,41 +653,42 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
             wait=manager.wait_for_activity,
             timeout=30.0,
         )
-        assert manager._startup_feedback_tid == str(request_id)
+        assert str(request_id) in manager._startup_feedback
+        feedback = manager._startup_feedback[str(request_id)]
         manager._admission_refresh_after = time.monotonic() + 60.0
         state_name = f"weft.state.tasks.{request_id}"
         if not publish_before_interest:
             manager._ensure_wait_strategy_started()
-            assert manager._startup_notification_tid == str(request_id)
+            assert feedback.queue is not None and feedback.queue.name == state_name
         else:
-            assert manager._startup_notification_queue is None
+            assert feedback.queue is None
         assert state_name not in manager._queues
         if invalid_first:
             # An incomplete fact must not disarm the later task publication.
             # Observe its real notification before releasing the constructor.
             invalid_id = manager._queue(state_name).write("{}")
             drive_until(
-                lambda: manager._startup_publication_id,
+                lambda: feedback.publication_id,
                 lambda stamp: stamp == invalid_id,
                 step=manager.process_once,
                 wait=manager.wait_for_activity,
                 timeout=0.5,
             )
             manager.process_once()
-            assert manager._startup_feedback_tid == str(request_id)
-            assert manager._startup_notification_tid == str(request_id)
+            assert str(request_id) in manager._startup_feedback
+            assert feedback.queue is not None and feedback.queue.name == state_name
         before_publish.set()
         assert ready.wait(timeout=30.0)
         drive_until(
-            lambda: manager._startup_feedback_tid,
-            lambda tid: tid is None,
+            lambda: str(request_id) in manager._startup_feedback,
+            lambda pending: not pending,
             step=manager.process_once,
             wait=manager.wait_for_activity,
             timeout=0.5,
         )
         assert processes[0].is_alive()
-        assert manager._startup_notification_queue is None
-        assert manager._startup_notification_tid is None
+        assert feedback.queue is None
+        assert str(request_id) not in manager._startup_feedback
         assert manager._queue(state_name).has_pending()
         assert state_name not in manager._queues
         assert manager._queue(reserved).peek_one(exact_timestamp=request_id) is None
@@ -473,7 +747,7 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         assert manager._retry_stale_child_launches()
         assert str(child_id) in manager._family_scheduler.resident_tids
         assert manager._queue(reserved).peek_one(exact_timestamp=child_id) is None
-        assert manager._startup_feedback_tid is None
+        assert not manager._startup_feedback
     finally:
         before_publish.set()
         release.set()
@@ -541,7 +815,7 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
         assert manager._retry_stale_child_launches()
         if late_snapshot:
             assert manager._family_scheduler.frontiers == ()
-            assert manager._startup_feedback_tid == str(parent_id)
+            assert str(parent_id) in manager._startup_feedback
             before_publish.set()
             assert ready.wait(timeout=30.0)
             manager._admission_refresh_after = 0.0
@@ -561,7 +835,7 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
                     patch.setattr(broker_type, "write", fail_checkpoint)
                     manager._refresh_scheduler_evidence()
                     assert str(parent_id) in manager._scheduler_undurable
-                    assert manager._startup_feedback_tid == str(parent_id)
+                    assert str(parent_id) in manager._startup_feedback
                 manager._admission_refresh_after = 0.0
                 manager._refresh_scheduler_evidence()
                 # Publication releases durability first; the next bounded
@@ -572,7 +846,7 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
                     manager._admission_refresh_after = 0.0
                     manager._refresh_scheduler_evidence()
                 assert str(parent_id) not in manager._scheduler_undurable
-                assert manager._startup_feedback_tid is None
+                assert not manager._startup_feedback
                 assert (
                     manager._queue(reserved).peek_one(exact_timestamp=parent_id)
                     is not None

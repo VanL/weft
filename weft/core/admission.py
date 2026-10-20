@@ -18,9 +18,30 @@ from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
     MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS,
     MANAGER_ADMISSION_WAIT_MAX_SECONDS,
+    MANAGER_STARTUP_FAST_PATH_FRACTION,
+    MANAGER_STARTUP_FAST_PATH_WINDOW,
 )
 
 AdmissionLane = Literal["public", "internal"]
+
+
+def _startup_window_allows_launch(
+    *, unfinished: int, backend: str, capacity: Mapping[str, Any] | None
+) -> bool:
+    """Bound startup overlap after normal admission allows a launch [MA-1.8]."""
+
+    if unfinished == 0:
+        return True
+    if backend != "postgres" or capacity is None:
+        return False
+    threshold = math.floor(
+        capacity["public_limit"] * MANAGER_STARTUP_FAST_PATH_FRACTION
+    )
+    return (
+        threshold >= MANAGER_STARTUP_FAST_PATH_WINDOW
+        and capacity["used"] < threshold
+        and unfinished < MANAGER_STARTUP_FAST_PATH_WINDOW
+    )
 
 
 def _admission_capacity(
