@@ -608,6 +608,10 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
     payload["spec"]["persistent"] = persistent
     request_id = int(source.write(json.dumps(payload)))
     reserved = manager._queue_names["reserved"]
+    # Disable periodic reconciliation before launch so the test isolates the
+    # notification path even when process startup takes longer than the real
+    # missing-publication fallback interval under CI load.
+    manager._admission_refresh_after = time.monotonic() + 60.0
     assert source.move_one(reserved, exact_timestamp=request_id) is not None
     spec = manager._build_child_spec(payload, request_id)
     assert spec is not None
@@ -655,7 +659,6 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         )
         assert str(request_id) in manager._startup_feedback
         feedback = manager._startup_feedback[str(request_id)]
-        manager._admission_refresh_after = time.monotonic() + 60.0
         state_name = f"weft.state.tasks.{request_id}"
         if not publish_before_interest:
             manager._ensure_wait_strategy_started()
