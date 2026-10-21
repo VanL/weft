@@ -1139,8 +1139,8 @@ On PostgreSQL, unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` means automatic ba
 Ordinary launch selection is work-conserving family scheduling over dynamically observed ancestry. There is no configured frontier count or family concurrency cap. Active branches receive round-robin turns and offer newest eligible tip children first. If none has an eligible tip child, the oldest independent pending family enters FIFO by original root ID; otherwise an active family may offer its oldest unassigned sibling subtree, choosing families round-robin. A live finite tip and its ancestors retain lineage, not a capacity permit. A child extends its matching ancestry path; a sibling starts another path when selected and when measured admission and existing launch custody allow it. Positive process exit contracts a path without dropping known descendants. Logical family membership remains while pending or resident descendants exist; late-discovered work rejoins at the original root FIFO position or extends a matching live tip. Queued requests incur no process or prospective connection charge. Multiple Managers retain exact-ID work stealing and measure the same applicable cross-process resource population.
 
 Every ordinary PostgreSQL launch requires a fresh coherent usage observation
-and the existing measured admission decision. Let L=max(0,C-R), H=floor(L/2),
-and W=4. If H>=W and observed usage U<H, a Manager may have up to W unfinished
+and the existing measured admission decision. Let L=max(0,C-R), H=floor(4L/5),
+and W=8. If H>=W and observed usage U<H, a Manager may have up to W unfinished
 ordinary startups. Otherwise it waits until no ordinary startup is unfinished
 before authorizing one launch. Unknown usage denies dispatch. Window occupancy
 counts selected launch-worker requests and processes awaiting startup feedback

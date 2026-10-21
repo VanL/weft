@@ -28,6 +28,7 @@ from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     MANAGER_ADMISSION_RECHECK_SECONDS,
+    MANAGER_STARTUP_FAST_PATH_WINDOW,
     WEFT_FAMILY_PENDING_PREFIX,
     load_config,
 )
@@ -383,7 +384,9 @@ def test_startup_window_overlaps_but_bounds_unobserved_processes(
     nor task-state publication can settle startup before the intended release.
     """
     manager, harness = startup_pg_manager
-    window = 4 if active_test_backend() == "postgres" else 1
+    window = (
+        MANAGER_STARTUP_FAST_PATH_WINDOW if active_test_backend() == "postgres" else 1
+    )
     manager._refresh_scheduler_evidence()
     source = manager._queue(manager._queue_names["inbox"])
     reserved = manager._queue(manager._queue_names["reserved"])
