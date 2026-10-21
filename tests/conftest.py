@@ -680,6 +680,18 @@ def pytest_runtest_logfinish(
         _progress_active_items.pop(nodeid, None)
 
 
+def pytest_handlecrashitem(
+    crashitem: str, report: pytest.TestReport, sched: object
+) -> None:
+    """Remove a crashed xdist item from controller-side progress diagnostics."""
+
+    del report, sched
+    if _progress_heartbeat_interval() is None:
+        return
+    with _progress_lock:
+        _progress_active_items.pop(crashitem, None)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Classify backend scope for collected test modules."""

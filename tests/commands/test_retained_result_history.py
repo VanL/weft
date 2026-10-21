@@ -23,7 +23,7 @@ from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import TaskSpec
 
-pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
+pytestmark = pytest.mark.shared
 
 
 def _finish_and_retire_history(

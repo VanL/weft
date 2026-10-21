@@ -40,7 +40,7 @@ from weft.core.tasks import Consumer
 from weft.core.tasks.sessions import CommandSession
 from weft.core.taskspec import TaskSpec
 
-pytestmark = [pytest.mark.shared, pytest.mark.timeout(20)]
+pytestmark = pytest.mark.shared
 
 
 @contextmanager

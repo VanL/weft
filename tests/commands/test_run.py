@@ -1795,12 +1795,19 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
     root = prepare_project_root(tmp_path)
     context = build_context(spec_context=root)
     submitted_tid: dict[str, str] = {}
+    accepted_taskspec: list[TaskSpec] = []
     original_enqueue = _enqueue_taskspec
 
     def _recording_enqueue(*args: Any, **kwargs: Any) -> tuple[int, dict[str, Any]]:
         tid, payload = original_enqueue(*args, **kwargs)
         submitted_tid["value"] = str(tid)
         return tid, payload
+
+    def _capture_submission(
+        tid: str, _context: WeftContext, taskspec: TaskSpec
+    ) -> None:
+        assert taskspec.tid == tid
+        accepted_taskspec.append(taskspec)
 
     monkeypatch.setattr(
         "weft.commands.run.build_context",
@@ -1831,9 +1838,15 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
             json_output=False,
             verbose=False,
             autostart_enabled=True,
+            on_submitted=_capture_submission,
         )
 
-        session = run_cmd._LiveRunSession(execution, context)
+        assert len(accepted_taskspec) == 1
+        session = run_cmd._LiveRunSession(
+            execution,
+            context,
+            _accepted_taskspec=accepted_taskspec[0],
+        )
         try:
             assert session.wait(timeout=10).status == "completed"
         finally:
