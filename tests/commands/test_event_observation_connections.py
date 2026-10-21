@@ -164,9 +164,9 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
                 writer.write(f"T{tid}.outbox", json.dumps({"late": True}))
         return True
 
-    monkeypatch.setattr(
-        events_cmd, "time", SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
-    )
+    clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
+    monkeypatch.setattr(events_cmd, "time", clock)
+    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
     monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))
@@ -245,11 +245,9 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
                 writer.write(custom_control, terminal_body)
         return True
 
-    monkeypatch.setattr(
-        events_cmd,
-        "time",
-        SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns),
-    )
+    clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
+    monkeypatch.setattr(events_cmd, "time", clock)
+    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
     monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))

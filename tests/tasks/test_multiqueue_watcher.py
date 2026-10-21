@@ -1245,11 +1245,14 @@ def test_background_post_replace_publication_failure_restores_old_waiter(
 
     class PublishFailWatcher(MultiQueueWatcher):
         fail_publication = True
-        start_calls = 0
+        strategy_started = False
+        strategy_restarted = threading.Event()
 
         def _start_strategy(self) -> None:
-            self.start_calls += 1
+            if self.strategy_started:
+                self.strategy_restarted.set()
             super()._start_strategy()
+            self.strategy_started = True
 
         def _publish_topology_locked(self, **kwargs: Unpack[_TopologyUpdate]) -> None:
             if self.fail_publication:
@@ -1300,10 +1303,7 @@ def test_background_post_replace_publication_failure_restores_old_waiter(
         assert watcher._strategy.uses_native_activity() is True
         assert old_waiter.close_calls == 0
         assert waiters[1].close_calls == 1
-        deadline = time.monotonic() + 3.0
-        while watcher.start_calls < 2 and time.monotonic() < deadline:
-            time.sleep(0.001)
-        assert watcher.start_calls >= 2
+        assert watcher.strategy_restarted.wait(timeout=10.0)
         make_queue("publish.a").write("still-live")
         assert handled.wait(timeout=2.0)
     finally:
