@@ -798,7 +798,7 @@ MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 MANAGER_STARTUP_FAST_PATH_FRACTION: Final[float] = 0.8
 """Overlap ordinary PostgreSQL startups below 80% of usable capacity [MA-1.8]."""
 
-MANAGER_STARTUP_FAST_PATH_WINDOW: Final[int] = 8
+MANAGER_STARTUP_FAST_PATH_WINDOW: Final[int] = 6
 """Maximum unfinished ordinary startups in one Manager's fast path [MA-1.8]."""
 
 MANAGER_FAMILY_CLASSIFY_PAGE_SIZE: Final[int] = 64
@@ -2105,7 +2105,7 @@ CLAUDE_KEYCHAIN_SERVICE: Final[str] = "Claude Code-credentials"
 """macOS Keychain service name used by the shipped Claude Docker example."""
 
 DOCKERIZED_AGENT_PROVIDER_CHOICES: Final[frozenset[str]] = frozenset(
-    {"claude_code", "codex", "gemini", "opencode", "qwen"}
+    {"claude_code", "codex", "opencode", "qwen"}
 )
 """Supported provider names for the shipped Dockerized agent builtin."""
 
