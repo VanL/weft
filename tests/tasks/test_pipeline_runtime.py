@@ -137,6 +137,7 @@ def _drive_pipeline_until_snapshot(
         wait=task.wait_for_activity,
         timeout=timeout,
         wait_slice=0.05,
+        pending_work=(task._has_pending_messages, task._has_pending_worker_results),
         diagnostics=lambda: {
             "task_status": task.taskspec.state.status,
             "active_queues": task._active_queues,
