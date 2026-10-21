@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from tests.fixtures.mcp_stdio_fixture import call_fixture_tool
 from weft.core.agents.runtime import NormalizedAgentWorkItem, content_to_prompt_text
@@ -16,16 +17,16 @@ from weft.ext import AgentResolverResult, AgentToolProfileResult
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROVIDER_FIXTURE_NAMES = (
+    "agy",
     "claude_code",
     "codex",
-    "gemini",
     "opencode",
     "qwen",
 )
 _PROVIDER_BINARIES = {
+    "agy": "agy",
     "claude_code": "claude",
     "codex": "codex",
-    "gemini": "gemini",
     "opencode": "opencode",
     "qwen": "qwen",
 }
@@ -151,16 +152,16 @@ def main(argv: list[str], *, provider_name: str) -> int:
         print(f"{provider_binary_name(provider_name)}-fixture 1.0")
         return 0
 
+    if provider_name == "agy":
+        return _run_agy(argv)
     if provider_name == "claude_code":
         return _run_claude(argv)
     if provider_name == "codex":
         return _run_codex(argv)
-    if provider_name == "gemini":
-        return _run_gemini_or_qwen(argv, provider_name=provider_name)
     if provider_name == "opencode":
         return _run_opencode(argv)
     if provider_name == "qwen":
-        return _run_gemini_or_qwen(argv, provider_name=provider_name)
+        return _run_qwen(argv, provider_name=provider_name)
 
     print("unsupported fixture provider", file=sys.stderr)
     return 2
@@ -344,7 +345,67 @@ def _run_codex(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SU
     return 0
 
 
-def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
+def _run_agy(argv: list[str]) -> int:
+    model: str | None = None
+    prompt: str | None = None
+    conversation_id: str | None = None
+    options: dict[str, Any] = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--model":
+            model = argv[i + 1]
+            i += 2
+            continue
+        if arg == "--conversation":
+            conversation_id = argv[i + 1]
+            i += 2
+            continue
+        if arg == "--mode":
+            options["mode"] = argv[i + 1]
+            i += 2
+            continue
+        if arg == "--output-format":
+            options["output_format"] = argv[i + 1]
+            i += 2
+            continue
+        if arg == "--print":
+            prompt = argv[i + 1]
+            i += 2
+            continue
+        print(f"unsupported agy arg: {arg}", file=sys.stderr)
+        return 2
+
+    if prompt is None:
+        print("missing prompt", file=sys.stderr)
+        return 2
+    resolved_session_id = conversation_id or str(uuid4())
+    result = _execute_fixture_request(
+        provider_name="agy",
+        prompt=prompt,
+        model=model,
+        options=options,
+        cwd=os.getcwd(),
+        session_key=resolved_session_id,
+        use_latest=False,
+    )
+    if isinstance(result, int):
+        return result
+    print(
+        json.dumps(
+            {
+                "conversation_id": resolved_session_id,
+                "status": "SUCCESS",
+                "response": result,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_qwen(argv: list[str], *, provider_name: str) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-232] exception
     model: str | None = None
     prompt: str | None = None
     options: dict[str, Any] = {}
@@ -361,26 +422,9 @@ def _run_gemini_or_qwen(argv: list[str], *, provider_name: str) -> int:  # noqa:
             prompt = argv[i + 1]
             i += 2
             continue
-        if provider_name == "gemini" and arg == "--resume":
-            session_id = argv[i + 1]
-            use_latest = session_id == "latest"
-            i += 2
-            continue
         if arg == "--approval-mode":
             options["approval_mode"] = argv[i + 1]
             i += 2
-            continue
-        if provider_name == "gemini" and arg == "--allowed-mcp-server-names":
-            options["allowed_mcp_server_names"] = argv[i + 1]
-            i += 2
-            continue
-        if provider_name == "gemini" and arg == "--include-directories":
-            options.setdefault("include_directories", []).append(argv[i + 1])
-            i += 2
-            continue
-        if provider_name == "gemini" and arg == "--skip-trust":
-            options["skip_trust"] = True
-            i += 1
             continue
         if arg == "-y":
             options["yes"] = True
@@ -709,7 +753,7 @@ def _store_session_state(
 def _session_state_root(provider_name: str) -> Path:
     if provider_name == "codex":
         base = Path(os.environ.get("CODEX_HOME") or os.getcwd())
-    elif provider_name in {"gemini", "qwen", "claude_code"}:
+    elif provider_name in {"agy", "qwen", "claude_code"}:
         base = Path(os.environ.get("HOME") or os.getcwd())
     else:
         base = Path(os.getcwd())

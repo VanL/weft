@@ -33,7 +33,7 @@ def _create_parameterized_taskspec(
                     "provider": {
                         "type": "string",
                         "default": "codex",
-                        "choices": ["codex", "gemini"],
+                        "choices": ["codex", "agy"],
                     },
                     "model": {
                         "type": "string",
@@ -58,17 +58,17 @@ def test_parse_declared_parameterization_args_applies_defaults_and_preserves_unk
         "provider": ParameterizationArgumentSection(
             type="string",
             default="codex",
-            choices=("codex", "gemini"),
+            choices=("codex", "agy"),
         ),
         "model": ParameterizationArgumentSection(type="string"),
     }
 
     parsed, remaining = parse_declared_parameterization_args(
-        ["--prompt", "Summarize", "--provider", "gemini"],
+        ["--prompt", "Summarize", "--provider", "agy"],
         arguments,
     )
 
-    assert parsed == {"provider": "gemini"}
+    assert parsed == {"provider": "agy"}
     assert remaining == ["--prompt", "Summarize"]
 
 
@@ -77,7 +77,7 @@ def test_parse_declared_parameterization_args_rejects_choice_mismatch() -> None:
         "provider": ParameterizationArgumentSection(
             type="string",
             required=True,
-            choices=("codex", "gemini"),
+            choices=("codex", "agy"),
         )
     }
 
@@ -115,12 +115,12 @@ def test_materialize_taskspec_template_supports_bundle_local_adapter(
 
     materialized = materialize_taskspec_template(
         taskspec,
-        arguments={"provider": "gemini"},
+        arguments={"provider": "agy"},
         context_root=str(tmp_path),
     )
 
-    assert materialized.name == "example-gemini"
-    assert materialized.description == "gemini"
+    assert materialized.name == "example-agy"
+    assert materialized.description == "agy"
     assert materialized.tid is None
     assert materialized.spec.type == "function"
     assert (

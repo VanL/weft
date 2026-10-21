@@ -50,12 +50,6 @@ def get_agent_image_recipe(provider_name: str) -> AgentImageRecipe | None:
             default_executable="claude",
             npm_package="@anthropic-ai/claude-code",
         )
-    if normalized == "gemini":
-        return _node_agent_recipe(
-            provider="gemini",
-            default_executable="gemini",
-            npm_package="@google/gemini-cli",
-        )
     if normalized == "opencode":
         return _node_agent_recipe(
             provider="opencode",

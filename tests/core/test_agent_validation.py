@@ -23,14 +23,14 @@ from weft.core.agents.validation import (
     validate_taskspec_agent_tool_profile,
 )
 
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
 
 def test_provider_registry_matches_agent_mcp_provider_set() -> None:
     assert tuple(provider.name for provider in list_provider_cli_providers()) == (
+        "agy",
         "claude_code",
         "codex",
-        "gemini",
         "opencode",
         "qwen",
     )
@@ -354,7 +354,7 @@ def test_validate_agent_tool_profile_accepts_claude_explicit_mcp(
     validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
 
 
-@pytest.mark.parametrize("provider_name", ("codex", "gemini", "opencode", "qwen"))
+@pytest.mark.parametrize("provider_name", ("agy", "codex", "opencode", "qwen"))
 def test_validate_agent_tool_profile_rejects_unsupported_explicit_mcp(
     tmp_path: Path,
     provider_name: str,

@@ -57,13 +57,13 @@ Supported runtimes include:
 - `spec.type="agent"`
 - runtime: `llm`
 - runtime: `provider_cli` for host-backed delegated CLI execution through
-  `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`
+  `agy`, `claude_code`, `codex`, `opencode`, and `qwen`
 - runner-specific delegated lane: Docker-backed one-shot `provider_cli`
   execution when `spec.runner.name="docker"`,
   `spec.agent.conversation_scope="per_message"`, `spec.persistent=false`, and
   the selected provider has both an explicit image recipe and a container
   runtime descriptor; the shipped set for both is `claude_code`, `codex`,
-  `gemini`, `opencode`, and `qwen`
+  `opencode`, and `qwen`
 - authority classes:
   - `llm` resolves an omitted `authority_class` to the safe value `bounded`
   - `provider_cli` requires an explicit `authority_class` of `bounded` or
@@ -190,7 +190,7 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
 - `provider_cli` requires `spec.agent.runtime_config.provider`.
 - `provider_cli` supports `authority_class="bounded"` only for providers that
   can actually enforce a bounded mode. In the built-in set that means
-  `claude_code`, `codex`, `gemini`, and `qwen`. `opencode` is `general`
+  `agy`, `claude_code`, `codex`, and `qwen`. `opencode` is `general`
   only.
 - `provider_cli` only supports `spec.agent.output_mode="text"`.
 - `provider_cli` rejects `spec.agent.tools`.
@@ -200,11 +200,11 @@ model defines the full `spec.agent` schema. `SpecSection.type` includes
     `spec.persistent=true` plus `conversation_scope="per_task"`
 - `provider_cli` only accepts `spec.agent.model` for providers whose concrete
   non-interactive CLI surface supports model override. In the built-in
-  provider set, that means `claude_code`, `codex`, `gemini`, `opencode`, and
+  provider set, that means `agy`, `claude_code`, `codex`, `opencode`, and
   `qwen`.
 - `provider_cli` structured tool policy is explicit and provider-limited:
   - `workspace_access="read-only"` is supported by `claude_code`, `codex`,
-    `gemini`, and `qwen`
+    `agy`, and `qwen`
   - `workspace_access="workspace-write"` is supported by `codex`
   - explicit stdio MCP server descriptors are supported by `claude_code` only
 
@@ -259,11 +259,12 @@ authority class as a security control. As verified against
   Codex sessions apply cwd and sandbox flags on the first `exec` turn that
   creates the session; resumed turns use `codex exec resume` and only repeat
   flags that the resume subcommand accepts.
-- **`gemini`** and **`qwen`** (`GeminiProvider`, `QwenProvider`): append
-  `--approval-mode plan` when `authority_class="bounded"` **or**
-  `workspace_access="read-only"`. Neither provider has an unconditional
-  "skip permissions" / yolo flag; outside the bounded/read-only case they run
-  with no explicit approval-mode flag at all.
+- **`agy`** (`AgyProvider`): appends `--mode plan` when
+  `authority_class="bounded"` **or** `workspace_access="read-only"`. It reads
+  structured JSON output, captures the exact `conversation_id` from the first
+  persistent turn, and passes `--conversation <id>` on each later turn.
+- **`qwen`** (`QwenProvider`): appends `--approval-mode plan` when
+  `authority_class="bounded"` **or** `workspace_access="read-only"`.
 - **`opencode`** (`OpencodeProvider`): does **not** declare
   `supports_bounded_authority`, so `authority_class="bounded"` is rejected by
   `validate_authority` before invocation is built. Every invocation —
@@ -275,7 +276,7 @@ Shipped builtin default: the only builtin agent TaskSpec in the repo,
 `weft/builtins/tasks/dockerized-agent/taskspec.json`, sets
 `spec.agent.authority_class="general"` explicitly and defaults
 `spec.agent.runtime_config.provider="codex"` (parameterizable to
-`claude_code`, `codex`, `gemini`, `opencode`, or `qwen`). Its tool profile
+`claude_code`, `codex`, `opencode`, or `qwen`). Its tool profile
 (`dockerized_agent_tool_profile` in
 `weft/builtins/tasks/dockerized-agent/dockerized_agent.py`) leaves
 `workspace_access` unset (not `"read-only"`), so selecting `claude_code` or
@@ -577,12 +578,12 @@ The built-in `provider_cli` adapter behaves as follows:
   before falling back to normal Python imports
 - supports structured delegated tool-profile fields for `workspace_access` and
   stdio MCP server descriptors
-- ships provider adapters for `claude_code`, `codex`, `gemini`, `opencode`,
+- ships provider adapters for `agy`, `claude_code`, `codex`, `opencode`,
   and `qwen`
 - shipped Docker image-recipe support is explicit for `claude_code`, `codex`,
-  `gemini`, `opencode`, and `qwen`
+  `opencode`, and `qwen`
 - shipped Docker container runtime descriptor support is explicit for
-  `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`
+  `claude_code`, `codex`, `opencode`, and `qwen`
 - keeps the public outbox contract unchanged by returning plain text only
 - persists internal runtime metadata and referenced artifacts through normal
   task-log events rather than a new public result envelope
@@ -592,13 +593,11 @@ Backend-specific notes:
 - the built-in provider names and non-interactive dispatch strings intentionally
   follow the concrete provider surfaces already used in `agent-mcp`
 - `spec.agent.model` is forwarded for `claude_code`, `codex`,
-  `gemini`, `opencode`, and `qwen`
+  `agy`, `opencode`, and `qwen`
 - Docker-backed provider runtime defaults are explicit and provider-specific:
   - `codex`: optional writable `~/.codex` mount, and Docker-lane examples use
     explicit `sandbox="danger-full-access"` because the container is the outer
     boundary
-  - `gemini`: optional `GEMINI_API_KEY` forwarding plus an isolated runtime
-    home seeded from a small subset of `~/.gemini`
   - `opencode`: allowlisted provider env forwarding; explicit
     `spec.agent.model` is recommended when you want deterministic backend
     choice instead of host default-model drift
@@ -610,11 +609,9 @@ Backend-specific notes:
 - `authority_class="bounded"` means Weft enforces the strongest
   deterministic narrowing it knows how to express for that provider. It does
   not mean Weft has taken over the provider's full inner safety policy
-- Gemini host-backed one-shot execution uses an isolated runtime home when the
-  authority class is `bounded` or the resolved workspace access is
-  `read-only`; persistent Gemini sessions use the same isolated-home boundary.
-  This prevents a read-only one-shot from inheriting the user's ambient Gemini
-  runtime directory.
+- Agy is host-backed only. Its first persistent turn captures the
+  provider-returned conversation ID and all later turns name that ID
+  explicitly; it does not depend on ambient latest-conversation state.
 - delegated tool-profile validation is split from agent-runtime validation so
   CLI and execution surfaces can report environment-profile, runner,
   agent-runtime, and tool-profile failures separately
@@ -643,7 +640,7 @@ Backend-specific notes:
 - `workspace_access` support is explicit per provider:
   - `claude_code`: `read-only`
   - `codex`: `read-only`, `workspace-write`
-  - `gemini`: `read-only`
+  - `agy`: `read-only`
   - `qwen`: `read-only`
   - `opencode`: none in the built-in adapter
 - explicit stdio MCP server descriptors are translated only for `claude_code`,
@@ -716,7 +713,8 @@ Backend-specific notes:
 - Microsandbox-backed agent tasks accept only one-shot `provider_cli` with
   `spec.persistent=false` and
   `spec.agent.conversation_scope="per_message"`. They reject persistent agent
-  sessions and default to `network="none"` and `workspace_mode="none"`.
+  sessions and the host-only `agy` provider, and default to `network="none"`
+  and `workspace_mode="none"`.
   Credentials or provider env needed inside the guest must be explicit in
   `spec.env`; ambient host environment forwarding is not part of the first
   shipped Microsandbox lane. Generated provider input files, such as bounded
@@ -764,8 +762,6 @@ That preserves the Weft task contract while keeping Docker-specific variation
 at the runner boundary. The shipped provider runtime descriptors are:
 
 - `codex`: optional writable `~/.codex` at `/root/.codex`
-- `gemini`: optional `GEMINI_API_KEY` forwarding plus a generated runtime home
-  at `/tmp/weft-provider-home` seeded from a small subset of `~/.gemini`
 - `opencode`: allowlisted provider env forwarding for keys such as
   `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GITHUB_TOKEN`,
   and `XAI_API_KEY`

@@ -153,10 +153,10 @@ def test_prepare_spec_processes_parameterization_then_run_input(
     prepared = submission_mod.prepare_spec(
         weft_harness.context,
         spec_path,
-        spec_args=("--provider", "gemini", "--prompt", "hello"),
+        spec_args=("--provider", "agy", "--prompt", "hello"),
     )
 
-    assert prepared.taskspec.name == "task-gemini"
+    assert prepared.taskspec.name == "task-agy"
     assert prepared.payload == {"prompt": "hello"}
 
 
@@ -169,7 +169,7 @@ def test_prepare_spec_rejects_payload_when_run_input_is_declared(
         submission_mod.prepare_spec(
             weft_harness.context,
             spec_path,
-            spec_args=("--provider", "gemini", "--prompt", "hello"),
+            spec_args=("--provider", "agy", "--prompt", "hello"),
             payload={"other": True},
         )
 
@@ -539,7 +539,7 @@ def test_prepare_spec_rejects_stdin_when_run_input_declares_no_stdin(
         submission_mod.prepare_spec(
             weft_harness.context,
             spec_path,
-            spec_args=("--provider", "gemini", "--prompt", "hello"),
+            spec_args=("--provider", "agy", "--prompt", "hello"),
             stdin_text="hello",
         )
 

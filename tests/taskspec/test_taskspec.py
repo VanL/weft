@@ -307,7 +307,7 @@ class TestValidation:
                     "provider": {
                         "type": "string",
                         "default": "codex",
-                        "choices": ["codex", "gemini"],
+                        "choices": ["codex", "agy"],
                     },
                     "model": {
                         "type": "string",
@@ -337,7 +337,7 @@ class TestValidation:
                         "provider": {
                             "type": "string",
                             "default": "codex",
-                            "choices": ["gemini"],
+                            "choices": ["agy"],
                         }
                     },
                 },

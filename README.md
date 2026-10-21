@@ -90,7 +90,7 @@ transport extras such as Channels. Runner selection still happens per TaskSpec
 through `spec.runner`. The current Docker runner owns normal command tasks and
 the Docker-backed one-shot `provider_cli` agent lane for providers with
 explicit image recipes. The current shipped image-recipe set is `claude_code`,
-`codex`, `gemini`, `opencode`, and `qwen`. The Microsandbox runner owns
+`codex`, `opencode`, and `qwen`. The Microsandbox runner owns
 disposable command tasks and one-shot `provider_cli` agent calls with explicit
 guest images and guest executables.
 
@@ -336,7 +336,7 @@ a required setup step.
 Another builtin helper currently shipped is `prepare-agent-images`, which
 warms the local Docker image cache for supported Docker-backed delegated agent
 runtimes. It is an explicit optional cache warmer, not hidden setup. The
-current shipped image-recipe set is `claude_code`, `codex`, `gemini`,
+current shipped image-recipe set is `claude_code`, `codex`,
 `opencode`, and `qwen`. The name stays plural because one run may warm
 multiple provider images. Ordinary Docker-backed agent runs use the same
 deterministic image tags and reuse those warmed images when they already
@@ -360,7 +360,7 @@ cat docs/specifications/00-Overview_and_Architecture.md | weft run --spec docker
 or:
 
 ```bash
-weft run --spec dockerized-agent --provider gemini --prompt "Explain this document in one sentence." --document docs/specifications/00-Overview_and_Architecture.md
+weft run --spec dockerized-agent --provider qwen --prompt "Explain this document in one sentence." --document docs/specifications/00-Overview_and_Architecture.md
 ```
 
 This is the one public builtin for that lane. Provider choice stays an
@@ -400,7 +400,7 @@ one-shot delegated `provider_cli` tasks only:
 - `spec.persistent=false`
 - `spec.runner.name="docker"`
 - selected provider has both a shipped Docker image recipe and an internal
-  container runtime descriptor (`claude_code`, `codex`, `gemini`, `opencode`,
+  container runtime descriptor (`claude_code`, `codex`, `opencode`,
   and `qwen` today)
 
 Use this when you want the agent CLI and its runtime inside a restricted
@@ -411,8 +411,6 @@ descriptors for provider-specific runtime mounts and other explicit defaults.
 Current shipped defaults include:
 
 - `codex`: optional writable `~/.codex`
-- `gemini`: optional `GEMINI_API_KEY` forwarding plus a small generated
-  runtime home seeded from a subset of `~/.gemini`
 - `opencode`: allowlisted provider env forwarding
 - `qwen`: optional writable `~/.qwen`
 - `claude_code`: optional writable `~/.claude` and `~/.claude.json` plus

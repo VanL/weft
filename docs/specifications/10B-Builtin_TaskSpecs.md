@@ -216,8 +216,8 @@ What it does:
   `available`
 - calls the shared Docker image helper rather than owning any build logic
 - current shipped image-recipe support is explicit; today that set is
-  `claude_code`, `codex`, `gemini`, `opencode`, and `qwen`, with default
-  executables `claude`, `codex`, `gemini`, `opencode`, and `qwen`
+  `claude_code`, `codex`, `opencode`, and `qwen`, with default
+  executables `claude`, `codex`, `opencode`, and `qwen`
   respectively
 
 What it does not do:
@@ -282,7 +282,7 @@ What it does:
 - declares `spec.parameterization` so `weft run --spec dockerized-agent`
   accepts:
   - optional `--provider` with current choices `claude_code`, `codex`,
-    `gemini`, `opencode`, and `qwen`
+    `opencode`, and `qwen`
   - optional `--model`
 - uses a bundle-local parameterization adapter to materialize a concrete
   provider-specific TaskSpec template before queueing
@@ -335,7 +335,7 @@ What it does:
 - to point it at this repo's architecture overview, either:
   `cat /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md | weft run --spec dockerized-agent --provider codex --prompt "Explain this document in one sentence."`
 - or:
-  `weft run --spec dockerized-agent --provider gemini --prompt "Explain this document in one sentence." --document /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md`
+  `weft run --spec dockerized-agent --provider qwen --prompt "Explain this document in one sentence." --document /Users/van/Developer/weft/docs/specifications/00-Overview_and_Architecture.md`
 
 What it does not do:
 

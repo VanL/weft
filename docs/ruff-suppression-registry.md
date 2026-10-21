@@ -297,7 +297,7 @@ Global raw-`noqa` inventory: `BLE001=132`, `C901=115`, `E402=33`, `F401=5`, `FLY
 | `RUFF-SUP-229` | `tests/architecture/test_import_boundaries.py::_simplebroker_surface_violations` | 1 | `C901=1` |
 | `RUFF-SUP-230` | `tests/conftest.py::_register_from_json` | 1 | `C901=1` |
 | `RUFF-SUP-231` | `tests/core/test_manager.py::test_manager_active_heartbeat_race_preserves_superseded_record` | 1 | `C901=1` |
-| `RUFF-SUP-232` | `tests/fixtures/provider_cli_fixture.py::_run_claude`; `tests/fixtures/provider_cli_fixture.py::_run_codex`; `tests/fixtures/provider_cli_fixture.py::_run_gemini_or_qwen`; `tests/fixtures/provider_cli_fixture.py::_run_opencode` | 4 | `C901=4` |
+| `RUFF-SUP-232` | `tests/fixtures/provider_cli_fixture.py::_run_claude`; `tests/fixtures/provider_cli_fixture.py::_run_codex`; `tests/fixtures/provider_cli_fixture.py::_run_opencode`; `tests/fixtures/provider_cli_fixture.py::_run_qwen` | 4 | `C901=4` |
 | `RUFF-SUP-233` | `tests/helpers/weft_harness.py::WeftTestHarness._stop_active_managers` | 1 | `C901=1` |
 | `RUFF-SUP-234` | `tests/helpers/weft_harness.py::WeftTestHarness._cleanup_preserving_database` | 1 | `C901=1` |
 | `RUFF-SUP-235` | `tests/helpers/weft_harness.py::WeftTestHarness._database_files_releasable` | 1 | `C901=1` |

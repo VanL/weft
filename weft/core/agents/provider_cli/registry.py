@@ -18,7 +18,6 @@ from uuid import uuid4
 
 from weft.ext import AgentMCPServerDescriptor, AgentToolProfileResult
 
-from .runtime_prep import build_gemini_session_environment
 from .settings import load_provider_cli_project_settings
 
 
@@ -39,6 +38,7 @@ class ProviderCLIResult:
 
     output_text: str
     usage: dict[str, Any] | None = None
+    session_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -705,11 +705,11 @@ class CodexProvider(_BaseTextProvider):
         )
 
 
-class GeminiProvider(_BaseTextProvider):
-    """Gemini CLI provider adapter."""
+class AgyProvider(_BaseTextProvider):
+    """Agy CLI provider adapter."""
 
-    name = "gemini"
-    default_executable = "gemini"
+    name = "agy"
+    default_executable = "agy"
     supports_model = True
     supports_bounded_authority = True
     supported_workspace_access_modes = ("read-only",)
@@ -726,22 +726,18 @@ class GeminiProvider(_BaseTextProvider):
         tempdir: Path,
         tool_profile: AgentToolProfileResult,
     ) -> ProviderCLIInvocation:
-        del cwd, options
+        del cwd, options, tempdir
         self.validate_model(model)
         command = [executable]
         if model:
-            command.extend(["-m", model])
-        isolated_runtime = (
+            command.extend(["--model", model])
+        bounded_runtime = (
             authority_class == "bounded" or tool_profile.workspace_access == "read-only"
         )
-        if isolated_runtime:
-            command.extend(["--approval-mode", "plan"])
-        command.extend(["--skip-trust", "-p", prompt])
-        command.extend(["-o", "text"])
-        return ProviderCLIInvocation(
-            command=tuple(command),
-            env=build_gemini_session_environment(tempdir) if isolated_runtime else None,
-        )
+        if bounded_runtime:
+            command.extend(["--mode", "plan"])
+        command.extend(["--output-format", "json", "--print", prompt])
+        return ProviderCLIInvocation(command=tuple(command))
 
     def create_session_context(
         self,
@@ -756,7 +752,7 @@ class GeminiProvider(_BaseTextProvider):
             tempdir=tempdir,
             work_cwd=cwd,
             process_cwd=cwd,
-            env=build_gemini_session_environment(tempdir),
+            env={},
         )
 
     def build_session_invocation(
@@ -771,24 +767,57 @@ class GeminiProvider(_BaseTextProvider):
         session: ProviderCLISessionContext,
         tool_profile: AgentToolProfileResult,
     ) -> ProviderCLIInvocation:
-        del options
+        del cwd, options
         self.validate_model(model)
         command = [executable]
         if session.turn_index > 0:
-            command.extend(["--resume", "latest"])
+            if session.session_id is None:
+                raise RuntimeError("agy session is missing a conversation_id")
+            command.extend(["--conversation", session.session_id])
         if model:
-            command.extend(["-m", model])
-        isolated_runtime = (
+            command.extend(["--model", model])
+        bounded_runtime = (
             authority_class == "bounded" or tool_profile.workspace_access == "read-only"
         )
-        if isolated_runtime:
-            command.extend(["--approval-mode", "plan"])
-        command.extend(["--skip-trust", "-p", prompt])
-        command.extend(["-o", "text"])
+        if bounded_runtime:
+            command.extend(["--mode", "plan"])
+        command.extend(["--output-format", "json", "--print", prompt])
         return ProviderCLIInvocation(
             command=tuple(command),
             env=session.env,
             cwd=session.process_cwd,
+        )
+
+    def parse_result(
+        self,
+        *,
+        completed: subprocess.CompletedProcess[str],
+        invocation: ProviderCLIInvocation,
+    ) -> ProviderCLIResult:
+        del invocation
+        if completed.returncode != 0:
+            detail = _compact_process_detail(completed)
+            raise RuntimeError(f"agy execution failed: {detail}")
+        try:
+            payload = json.loads(completed.stdout or "")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("agy produced invalid JSON output") from exc
+        if not isinstance(payload, Mapping):
+            raise TypeError("agy produced a non-object JSON result")
+        status = payload.get("status")
+        if status != "SUCCESS":
+            raise RuntimeError(f"agy execution returned status {status!r}")
+        response = payload.get("response")
+        if not isinstance(response, str) or not response.strip():
+            raise RuntimeError("agy produced an empty response")
+        conversation_id = payload.get("conversation_id")
+        if not isinstance(conversation_id, str) or not conversation_id.strip():
+            raise RuntimeError("agy result is missing conversation_id")
+        usage = payload.get("usage")
+        return ProviderCLIResult(
+            output_text=response.strip(),
+            usage=dict(usage) if isinstance(usage, Mapping) else None,
+            session_id=conversation_id.strip(),
         )
 
 
@@ -1053,9 +1082,9 @@ class QwenProvider(_BaseTextProvider):
 
 
 _PROVIDERS: dict[str, ProviderCLIProvider] = {
+    "agy": cast(ProviderCLIProvider, AgyProvider()),
     "claude_code": cast(ProviderCLIProvider, ClaudeCodeProvider()),
     "codex": cast(ProviderCLIProvider, CodexProvider()),
-    "gemini": cast(ProviderCLIProvider, GeminiProvider()),
     "opencode": cast(ProviderCLIProvider, OpencodeProvider()),
     "qwen": cast(ProviderCLIProvider, QwenProvider()),
 }

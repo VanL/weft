@@ -111,7 +111,7 @@ schema validity.
           "type": "string" | "path",
           "required": true | false,
           "default": "codex" | null,
-          "choices": ["codex", "gemini"] | [],
+          "choices": ["codex", "agy"] | [],
           "help": "Shown in generated CLI help, docs, and examples"
         }
       }
@@ -553,11 +553,10 @@ TaskSpec stays portable and declarative, while provider image availability,
 Docker daemon reachability, internal provider container runtime descriptors,
 and cache warming remain explicit runtime concerns rather than hidden
 submission gates. The current shipped Docker provider set is
-`claude_code`, `codex`, `gemini`, `opencode`, and `qwen`, but their runtime
+`claude_code`, `codex`, `opencode`, and `qwen`, but their runtime
 defaults differ. Examples include writable mounted config dirs such as
 `~/.codex` or `~/.qwen`, allowlisted auth env forwarding such as
-`GEMINI_API_KEY` or OpenCode provider keys, and generated runtime homes for
-Gemini. On macOS specifically, Docker-backed `claude_code` also needs
+OpenCode provider keys. On macOS specifically, Docker-backed `claude_code` also needs
 portable auth because a host `claude.ai` login lives in macOS Keychain rather
 than a mounted Linux credential file. Ahead-of-time validation for that
 one-shot Docker lane therefore stays static and container-oriented: it checks

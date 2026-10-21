@@ -76,7 +76,7 @@ def test_resolve_live_provider_targets_discovers_registered_defaults(
     live_providers = _load_live_provider_module()
     executable_paths = {
         "claude": "/tools/claude",
-        "gemini": "/tools/gemini",
+        "agy": "/tools/agy",
     }
     monkeypatch.setattr(
         live_providers.shutil,
@@ -86,7 +86,7 @@ def test_resolve_live_provider_targets_discovers_registered_defaults(
 
     targets = live_providers.resolve_live_provider_targets(None)
 
-    assert targets == ("claude_code", "gemini")
+    assert targets == ("agy", "claude_code")
 
 
 def test_resolve_live_provider_targets_rejects_unknown_explicit_target() -> None:

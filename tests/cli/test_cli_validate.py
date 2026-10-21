@@ -22,7 +22,7 @@ from tests.taskspec.fixtures import (
 )
 
 pytestmark = [pytest.mark.shared]
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
 
 def write_taskspec(path: Path, spec: Any) -> None:

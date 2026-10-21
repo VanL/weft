@@ -35,7 +35,7 @@ def _agent_payload(**options: object) -> dict[str, object]:
                 "runtime": "provider_cli",
                 "authority_class": "general",
                 "conversation_scope": "per_message",
-                "runtime_config": {"provider": "gemini"},
+                "runtime_config": {"provider": "qwen"},
             },
             "runner": {
                 "name": "microsandbox",
@@ -62,10 +62,22 @@ def test_agent_mode_requires_guest_executable() -> None:
 
 
 def test_agent_mode_accepts_guest_executable_without_host_resolution() -> None:
-    options = parse_options_from_payload(_agent_payload(executable="gemini"))
+    options = parse_options_from_payload(_agent_payload(executable="qwen"))
 
     assert options.mode == "agent"
-    assert options.executable == "gemini"
+    assert options.executable == "qwen"
+
+
+def test_agent_mode_rejects_agy_without_guest_runtime_contract() -> None:
+    payload = _agent_payload(executable="agy")
+    spec = payload["spec"]
+    assert isinstance(spec, dict)
+    agent = spec["agent"]
+    assert isinstance(agent, dict)
+    agent["runtime_config"] = {"provider": "agy"}
+
+    with pytest.raises(ValueError, match="does not support provider 'agy'"):
+        parse_options_from_payload(payload)
 
 
 def test_unknown_option_fails() -> None:

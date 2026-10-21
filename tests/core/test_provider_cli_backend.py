@@ -23,7 +23,7 @@ from weft.core.agents.provider_cli.registry import (
 from weft.core.agents.runtime import clear_agent_runtime_registry, execute_agent_target
 from weft.core.taskspec import AgentSection
 
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
 
 @pytest.fixture(autouse=True)
@@ -159,7 +159,7 @@ def test_provider_cli_runtime_rejects_raw_options_that_conflict_with_tool_profil
     (
         ("claude_code", "permission_mode", "plan"),
         ("codex", "sandbox", "read-only"),
-        ("gemini", "approval_mode", "plan"),
+        ("agy", "mode", "plan"),
         ("qwen", "approval_mode", "plan"),
     ),
 )
@@ -220,19 +220,15 @@ def test_provider_cli_runtime_resolves_callable_tool_profile_once_per_one_shot(
     assert TOOL_PROFILE_CALLS == [{"provider": "codex", "tid": "123"}]
 
 
-def test_provider_cli_runtime_gemini_read_only_one_shot_uses_isolated_home(
+def test_provider_cli_runtime_agy_read_only_one_shot_uses_plan_mode(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    host_home = tmp_path / "host-home"
-    (host_home / ".gemini").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(host_home))
-    executable = str(write_provider_cli_wrapper(tmp_path, "gemini"))
+    executable = str(write_provider_cli_wrapper(tmp_path, "agy"))
 
     result = execute_agent_target(
         make_agent_section(
             executable=executable,
-            provider_name="gemini",
+            provider_name="agy",
             model="fixture-model",
             tool_profile_ref=(
                 "tests.fixtures.runtime_profiles_fixture:structured_tool_profile"
@@ -243,10 +239,9 @@ def test_provider_cli_runtime_gemini_read_only_one_shot_uses_isolated_home(
     )
 
     payload = json.loads(result.aggregate_public_output())
-    assert payload["provider"] == "gemini"
-    assert payload["options"]["approval_mode"] == "plan"
-    assert payload["home"] != str(host_home)
-    assert payload["home"].endswith("gemini-home")
+    assert payload["provider"] == "agy"
+    assert payload["options"]["mode"] == "plan"
+    assert payload["options"]["output_format"] == "json"
 
 
 def test_provider_cli_runtime_uses_project_agent_settings_executable(
@@ -433,9 +428,9 @@ def test_opencode_failure_preserves_structured_api_error_detail() -> None:
 
 
 def test_provider_failure_preserves_actionable_stderr_tail() -> None:
-    provider = get_provider_cli_provider("gemini")
+    provider = get_provider_cli_provider("agy")
     completed = subprocess.CompletedProcess(
-        args=["gemini"],
+        args=["agy"],
         returncode=1,
         stdout="",
         stderr=(
@@ -448,7 +443,23 @@ def test_provider_failure_preserves_actionable_stderr_tail() -> None:
     with pytest.raises(RuntimeError, match="prepayment credits are depleted"):
         provider.parse_result(
             completed=completed,
-            invocation=ProviderCLIInvocation(command=("gemini",)),
+            invocation=ProviderCLIInvocation(command=("agy",)),
+        )
+
+
+def test_agy_parser_rejects_success_without_conversation_identity() -> None:
+    provider = get_provider_cli_provider("agy")
+    completed = subprocess.CompletedProcess(
+        args=["agy"],
+        returncode=0,
+        stdout=json.dumps({"status": "SUCCESS", "response": "answer"}),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError, match="missing conversation_id"):
+        provider.parse_result(
+            completed=completed,
+            invocation=ProviderCLIInvocation(command=("agy",)),
         )
 
 

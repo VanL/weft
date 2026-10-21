@@ -10,6 +10,10 @@
 
 ### Changed
 
+- Replace the deprecated Gemini CLI provider with the host-backed Agy provider.
+  Bounded and read-only calls use Agy plan mode; persistent tasks capture and
+  reuse the exact provider conversation ID. Agy is not advertised for Docker
+  until a deterministic container installation and authentication recipe exists.
 - Expand the PostgreSQL startup fast path to eight unfinished startups while
   observed usage remains below 80% of the usable connection ceiling. Every
   launch still requires a fresh coherent usage observation and normal measured

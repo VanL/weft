@@ -105,7 +105,7 @@ def test_agent_runner_uses_provider_cli_parser_from_guest_stdout() -> None:
         target_type="agent",
         tid="1234567890123456789",
         process_target=None,
-        agent=_agent("gemini"),
+        agent=_agent("qwen"),
         args=[],
         env={},
         working_dir=None,
@@ -113,7 +113,7 @@ def test_agent_runner_uses_provider_cli_parser_from_guest_stdout() -> None:
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=StdoutAgentRuntime(),
@@ -124,9 +124,9 @@ def test_agent_runner_uses_provider_cli_parser_from_guest_stdout() -> None:
     assert outcome.status == "ok"
     assert isinstance(outcome.value, AgentExecutionResult)
     assert outcome.value.outputs == ("agent answer",)
-    assert outcome.value.metadata["provider"] == "gemini"
+    assert outcome.value.metadata["provider"] == "qwen"
     assert StdoutAgentRuntime.last_spec is not None
-    assert StdoutAgentRuntime.last_spec.command[0] == "gemini"
+    assert StdoutAgentRuntime.last_spec.command[0] == "qwen"
     assert StdoutAgentRuntime.last_spec.cwd == "/workspace"
 
 
@@ -147,7 +147,7 @@ def test_agent_runner_converts_result_builder_failure_to_error_outcome(
         target_type="agent",
         tid="1234567890123456789",
         process_target=None,
-        agent=_agent("gemini"),
+        agent=_agent("qwen"),
         args=[],
         env={},
         working_dir=None,
@@ -155,7 +155,7 @@ def test_agent_runner_converts_result_builder_failure_to_error_outcome(
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=StdoutAgentRuntime(),
@@ -207,7 +207,7 @@ def test_agent_runner_converts_provider_parser_failure_to_error_outcome(
         target_type="agent",
         tid="1234567890123456789",
         process_target=None,
-        agent=_agent("gemini"),
+        agent=_agent("qwen"),
         args=[],
         env={},
         working_dir=None,
@@ -215,7 +215,7 @@ def test_agent_runner_converts_provider_parser_failure_to_error_outcome(
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=StdoutAgentRuntime(),
@@ -256,7 +256,7 @@ def test_agent_runner_does_not_contain_fatal_result_builder_signal(
         target_type="agent",
         tid="1234567890123456789",
         process_target=None,
-        agent=_agent("gemini"),
+        agent=_agent("qwen"),
         args=[],
         env={},
         working_dir=None,
@@ -264,7 +264,7 @@ def test_agent_runner_does_not_contain_fatal_result_builder_signal(
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=StdoutAgentRuntime(),
@@ -383,7 +383,7 @@ def test_bounded_claude_agent_copies_generated_mcp_config_into_guest() -> None:
     assert outcome.value.outputs == ("bounded answer",)
 
 
-def test_agent_runner_passes_explicit_and_provider_env_to_guest() -> None:
+def test_agent_runner_passes_explicit_env_to_guest() -> None:
     class EnvRuntime(StdoutAgentRuntime):
         pass
 
@@ -391,15 +391,15 @@ def test_agent_runner_passes_explicit_and_provider_env_to_guest() -> None:
         target_type="agent",
         tid="1234567890123456789",
         process_target=None,
-        agent={**_agent("gemini"), "authority_class": "bounded"},
+        agent={**_agent("qwen"), "authority_class": "bounded"},
         args=[],
-        env={"CALLER_ONLY": "1", "GEMINI_API_KEY": "from-spec"},
+        env={"CALLER_ONLY": "1", "PROVIDER_TOKEN": "from-spec"},
         working_dir=None,
         timeout=5.0,
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=EnvRuntime(),
@@ -410,9 +410,7 @@ def test_agent_runner_passes_explicit_and_provider_env_to_guest() -> None:
     assert outcome.status == "ok"
     assert EnvRuntime.last_spec is not None
     assert EnvRuntime.last_spec.env["CALLER_ONLY"] == "1"
-    assert EnvRuntime.last_spec.env["GEMINI_API_KEY"] == "from-spec"
-    assert "HOME" in EnvRuntime.last_spec.env
-    assert "USERPROFILE" in EnvRuntime.last_spec.env
+    assert EnvRuntime.last_spec.env["PROVIDER_TOKEN"] == "from-spec"
 
 
 def test_agent_runner_malformed_provider_output_fails() -> None:
@@ -420,7 +418,7 @@ def test_agent_runner_malformed_provider_output_fails() -> None:
         target_type="agent",
         tid=None,
         process_target=None,
-        agent=_agent("gemini"),
+        agent=_agent("qwen"),
         args=[],
         env={},
         working_dir=None,
@@ -428,7 +426,7 @@ def test_agent_runner_malformed_provider_output_fails() -> None:
         limits=None,
         runner_options={
             "image": "agent:latest",
-            "executable": "gemini",
+            "executable": "qwen",
             "cwd": "/workspace",
         },
         runtime=EmptyRuntime(),

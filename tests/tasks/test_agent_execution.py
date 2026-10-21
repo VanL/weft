@@ -39,7 +39,7 @@ from weft.core.taskspec import (
     TaskSpec,
 )
 
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 _LIVE_PROVIDER_TIMEOUT_SECONDS: Final[float] = 120.0
 """Per-turn wait budget for authenticated provider CLI calls."""
 
@@ -329,7 +329,7 @@ def test_task_runner_executes_provider_cli_agent_successfully(
         "profile instructions\n\n"
         "resolved:hello"
     )
-    if provider_name in {"gemini", "qwen"}:
+    if provider_name in {"agy", "qwen"}:
         assert "yes" not in payload["options"]
 
 
@@ -363,9 +363,8 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
         assert payload["options"]["sandbox"] == "read-only"
     elif provider_name == "claude_code":
         assert payload["options"]["permission_mode"] == "plan"
-    elif provider_name == "gemini":
-        assert payload["options"]["approval_mode"] == "plan"
-        assert payload["options"]["skip_trust"] is True
+    elif provider_name == "agy":
+        assert payload["options"]["mode"] == "plan"
         assert "yes" not in payload["options"]
     elif provider_name == "qwen":
         assert payload["options"]["approval_mode"] == "plan"
@@ -377,7 +376,7 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
     (
         ("claude_code", "permission_mode", "plan"),
         ("codex", "sandbox", "read-only"),
-        ("gemini", "approval_mode", "plan"),
+        ("agy", "mode", "plan"),
         ("qwen", "approval_mode", "plan"),
     ),
 )
@@ -405,8 +404,8 @@ def test_task_runner_executes_explicit_bounded_provider_cli_agent_successfully(
     payload = json.loads(outcome.value.aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["options"][expected_option] == expected_value
-    if provider_name == "gemini":
-        assert payload["options"]["skip_trust"] is True
+    if provider_name == "agy":
+        assert payload["options"]["output_format"] == "json"
         assert "yes" not in payload["options"]
     if provider_name == "qwen":
         assert "yes" not in payload["options"]

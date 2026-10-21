@@ -298,6 +298,16 @@ class ProviderCLIBackendSession:
             executable=self._executable,
             command_class="session",
         )
+        if provider_result.session_id is not None:
+            if (
+                self._session.session_id is not None
+                and self._session.session_id != provider_result.session_id
+            ):
+                raise RuntimeError(
+                    f"{self._provider.name} changed session identity from "
+                    f"{self._session.session_id!r} to {provider_result.session_id!r}"
+                )
+            self._session.session_id = provider_result.session_id
         self._session.turn_index += 1
         return build_provider_cli_execution_result(
             agent=self._agent,

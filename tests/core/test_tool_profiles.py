@@ -15,7 +15,7 @@ from weft.core.agents import register_builtin_agent_runtimes
 from weft.core.agents.runtime import clear_agent_runtime_registry, execute_agent_target
 from weft.core.taskspec import AgentSection
 
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +80,9 @@ def test_structured_tool_profile_materializes_provider_specific_workspace_access
         assert payload["options"]["sandbox"] == "read-only"
     elif provider_name == "claude_code":
         assert payload["options"]["permission_mode"] == "plan"
-    elif provider_name in {"gemini", "qwen"}:
+    elif provider_name == "agy":
+        assert payload["options"]["mode"] == "plan"
+    elif provider_name == "qwen":
         assert payload["options"]["approval_mode"] == "plan"
     elif provider_name == "opencode":
         assert "approval_mode" not in payload["options"]
@@ -126,7 +128,7 @@ def test_claude_mcp_tool_profile_wires_explicit_config(tmp_path: Path) -> None:
     assert "fixture-server" in payload["options"]["mcp_servers"]
 
 
-@pytest.mark.parametrize("provider_name", ("codex", "gemini", "opencode", "qwen"))
+@pytest.mark.parametrize("provider_name", ("agy", "codex", "opencode", "qwen"))
 def test_unsupported_mcp_tool_profile_fails_for_providers_without_explicit_support(
     tmp_path: Path,
     provider_name: str,

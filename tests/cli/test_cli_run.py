@@ -902,7 +902,7 @@ def test_cli_run_spec_help_is_spec_aware_for_builtin_dockerized_agent(
     assert "Spec Help: dockerized-agent" in out
     assert "Parameterization Options:" in out
     assert "--provider TEXT" in out
-    assert "choices: claude_code, codex, gemini, opencode, qwen" in out
+    assert "choices: claude_code, codex, opencode, qwen" in out
     assert "--model TEXT" in out
     assert "Run Input Options:" in out
     assert "--prompt TEXT" in out
@@ -1778,8 +1778,8 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
                 "def build_codex(request):",
                 "    return f\"codex|{request.arguments['prompt']}\"",
                 "",
-                "def build_gemini(request):",
-                "    return f\"gemini|{request.arguments['prompt']}\"",
+                "def build_agy(request):",
+                "    return f\"agy|{request.arguments['prompt']}\"",
                 "",
             ]
         ),
@@ -1799,7 +1799,7 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
                             "type": "string",
                             "required": False,
                             "default": "codex",
-                            "choices": ["codex", "gemini"],
+                            "choices": ["codex", "agy"],
                         }
                     },
                 },
@@ -1827,13 +1827,13 @@ def test_cli_run_spec_bundle_parameterization_materializes_before_run_input(
         "--prompt",
         "Summarize",
         "--provider",
-        "gemini",
+        "agy",
         cwd=workdir,
         harness=weft_harness,
     )
 
     assert rc == 0
-    assert out == "gemini|Summarize"
+    assert out == "agy|Summarize"
     assert err == ""
 
 

@@ -6,7 +6,6 @@ Spec references:
 
 from __future__ import annotations
 
-import json
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -52,11 +51,7 @@ def materialize_provider_runtime_home(
         target_path = runtime_home_root / copied_file.target_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(copied_file.source, target_path)
-    _apply_provider_runtime_home_overrides(
-        provider_name,
-        runtime_home_root=runtime_home_root,
-        host_home_dir=host_home_dir,
-    )
+    del provider_name, host_home_dir
 
 
 def prepare_provider_container_runtime(
@@ -91,111 +86,8 @@ def prepare_provider_container_runtime(
     )
 
 
-def build_gemini_session_environment(
-    tempdir: Path,
-    *,
-    host_home_dir: str | Path | None = None,
-) -> dict[str, str]:
-    """Build an isolated Gemini home directory with copied auth state only."""
-
-    runtime_home_root = tempdir / "gemini-home"
-    resolution = _gemini_runtime_resolution(host_home_dir=host_home_dir)
-    materialize_provider_runtime_home(
-        "gemini",
-        resolution,
-        runtime_home_root=runtime_home_root,
-        host_home_dir=host_home_dir,
-    )
-    runtime_home = resolution.runtime_home
-    if runtime_home is None:  # pragma: no cover - descriptor contract guard
-        return {}
-    return {name: str(runtime_home_root) for name in runtime_home.env_names}
-
-
-def _apply_provider_runtime_home_overrides(
-    provider_name: str,
-    *,
-    runtime_home_root: Path,
-    host_home_dir: str | Path | None,
-) -> None:
-    if provider_name != "gemini":
-        return
-    gemini_home = runtime_home_root / ".gemini"
-    gemini_home.mkdir(parents=True, exist_ok=True)
-    settings: dict[str, object] = {
-        "admin": {
-            "mcp": {"enabled": False},
-            "extensions": {"enabled": False},
-            "skills": {"enabled": False},
-        },
-        "hooks": {},
-        "ui": {
-            "hideBanner": True,
-            "showHomeDirectoryWarning": False,
-        },
-    }
-    selected_auth_type = _resolve_gemini_selected_auth_type(host_home_dir=host_home_dir)
-    if selected_auth_type is not None:
-        settings["security"] = {"auth": {"selectedType": selected_auth_type}}
-
-    (gemini_home / "settings.json").write_text(
-        f"{json.dumps(settings, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
-    )
-    (gemini_home / "projects.json").write_text(
-        f"{json.dumps({'projects': {}}, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
-    )
-    (gemini_home / "trustedFolders.json").write_text(
-        f"{json.dumps({}, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
-    )
-
-
-def _resolve_gemini_selected_auth_type(
-    *,
-    host_home_dir: str | Path | None,
-) -> str | None:
-    home_dir = (
-        Path(host_home_dir).expanduser() if host_home_dir is not None else Path.home()
-    )
-    settings_path = home_dir / ".gemini" / "settings.json"
-    if not settings_path.exists():
-        return None
-    try:
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    security = payload.get("security")
-    if not isinstance(security, Mapping):
-        return None
-    auth = security.get("auth")
-    if not isinstance(auth, Mapping):
-        return None
-    selected_type = auth.get("selectedType")
-    if not isinstance(selected_type, str) or not selected_type.strip():
-        return None
-    return selected_type.strip()
-
-
-def _gemini_runtime_resolution(
-    *,
-    host_home_dir: str | Path | None,
-) -> ProviderContainerRuntimeResolution:
-    from .container_runtime import resolve_provider_container_runtime
-
-    return resolve_provider_container_runtime(
-        "gemini",
-        task_env={},
-        working_dir=None,
-        host_env={},
-        home_dir=host_home_dir,
-    )
-
-
 __all__ = [
     "PreparedProviderContainerRuntime",
-    "build_gemini_session_environment",
     "materialize_provider_runtime_home",
     "prepare_provider_container_runtime",
 ]

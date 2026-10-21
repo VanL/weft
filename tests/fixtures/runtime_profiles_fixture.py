@@ -142,7 +142,7 @@ def invalid_environment_profile(
 def structured_tool_profile(*, agent: AgentSection, tid: str) -> AgentToolProfileResult:
     provider_name = str(agent.runtime_config.get("provider", "")).strip()
     workspace_access = None
-    if provider_name in {"claude_code", "codex", "gemini", "qwen"}:
+    if provider_name in {"agy", "claude_code", "codex", "qwen"}:
         workspace_access = "read-only"
     return AgentToolProfileResult(
         instructions="structured profile instructions",

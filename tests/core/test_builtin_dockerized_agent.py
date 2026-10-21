@@ -148,15 +148,15 @@ def test_dockerized_agent_parameterization_materializes_selected_provider() -> N
 
     materialized = materialize_taskspec_template(
         taskspec,
-        arguments={"provider": "gemini"},
+        arguments={"provider": "qwen"},
         context_root="/tmp",
     )
 
     agent = materialized.spec.agent
     assert agent is not None
-    assert materialized.name == "dockerized-agent-gemini"
+    assert materialized.name == "dockerized-agent-qwen"
     assert materialized.spec.parameterization is None
-    assert agent.runtime_config["provider"] == "gemini"
+    assert agent.runtime_config["provider"] == "qwen"
     assert agent.model is None
     assert agent.resolved_authority_class == "general"
 
@@ -349,13 +349,6 @@ def test_dockerized_agent_parameterization_covers_all_supported_providers() -> N
         },
         "codex": {
             "name": "dockerized-agent-codex",
-            "model": None,
-            "environment_profile_ref": (
-                "dockerized_agent:dockerized_agent_environment_profile"
-            ),
-        },
-        "gemini": {
-            "name": "dockerized-agent-gemini",
             "model": None,
             "environment_profile_ref": (
                 "dockerized_agent:dockerized_agent_environment_profile"

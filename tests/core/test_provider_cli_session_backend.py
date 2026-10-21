@@ -22,7 +22,7 @@ from weft.core.agents.runtime import (
 )
 from weft.core.taskspec import AgentSection
 
-_MODEL_PROVIDERS = frozenset({"claude_code", "codex", "gemini", "opencode", "qwen"})
+_MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +89,15 @@ def test_provider_cli_session_continues_across_turns(
     assert second_payload["turn_index"] == 2
     assert second_payload["remembered"] == "phase2-token"
     assert second.metadata["session"]["turn_index"] == 2
+    if provider_name == "agy":
+        assert (
+            first.metadata["session"]["provider_session_id"]
+            == second.metadata["session"]["provider_session_id"]
+        )
+        assert isinstance(
+            first.metadata["session"]["provider_session_id"],
+            str,
+        )
     if provider_name == "codex":
         assert second_payload["cwd"] == str(tmp_path)
         assert "color" not in second_payload["options"]

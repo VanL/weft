@@ -213,7 +213,12 @@ def _validate_agent(agent_payload: Mapping[str, Any] | None) -> None:
             "Microsandbox agent mode requires "
             "spec.agent.conversation_scope='per_message'"
         )
-    runtime_config_str(agent, "provider")
+    provider_name = runtime_config_str(agent, "provider")
+    if provider_name == "agy":
+        raise ValueError(
+            "Microsandbox agent mode does not support provider 'agy': "
+            "no guest installation and authentication contract is defined"
+        )
 
 
 def _normalize_mode(value: object, *, target_type: str) -> MicrosandboxMode:

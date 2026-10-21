@@ -22,13 +22,12 @@ pytestmark = [pytest.mark.shared]
 def test_get_agent_image_recipe_support_is_explicit() -> None:
     recipes = {
         name: get_agent_image_recipe(name)
-        for name in ("claude_code", "codex", "gemini", "opencode", "qwen")
+        for name in ("claude_code", "codex", "opencode", "qwen")
     }
 
     assert all(recipe is not None for recipe in recipes.values())
     assert recipes["claude_code"].default_executable == "claude"  # type: ignore[union-attr]
     assert recipes["codex"].default_executable == "codex"  # type: ignore[union-attr]
-    assert recipes["gemini"].default_executable == "gemini"  # type: ignore[union-attr]
 
 
 def test_ensure_docker_image_reuses_existing_tag_without_rebuilding() -> None:

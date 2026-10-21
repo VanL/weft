@@ -258,10 +258,10 @@ def test_prepare_agent_images_contains_one_provider_failure_and_continues(
     )
 
     payload = prepare_agent_images_task(
-        {"providers": ["codex", "gemini"], "refresh": True}
+        {"providers": ["codex", "qwen"], "refresh": True}
     )
 
-    assert attempts == ["codex", "gemini"]
+    assert attempts == ["codex", "qwen"]
     assert payload["summary"] == {
         "requested": 2,
         "built": 1,
@@ -277,11 +277,11 @@ def test_prepare_agent_images_contains_one_provider_failure_and_continues(
             "error": "provider build contains sensitive detail",
         },
         {
-            "provider": "gemini",
+            "provider": "qwen",
             "recipe_status": "supported",
             "action": "built",
-            "image": "weft-agent-gemini:fresh",
-            "cache_key": "gemini-cache-key",
+            "image": "weft-agent-qwen:fresh",
+            "cache_key": "qwen-cache-key",
         },
     ]
 
