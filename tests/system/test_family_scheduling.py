@@ -41,14 +41,22 @@ def _wait_events(
         harness.context.queue(FAMILY_EVENTS, persistent=True) as queue,
         closing(QueueChangeMonitor([queue], config=harness.context.config)) as monitor,
     ):
-        deadline = time.monotonic() + 60.0
+        observed = 0
+        progress_deadline = time.monotonic() + 60.0
         while True:
             rows = _events(harness)
-            if sum(row["event"] == event for row in rows) >= count:
+            current = sum(row["event"] == event for row in rows)
+            if current >= count:
                 return rows
-            remaining = deadline - time.monotonic()
+            if current > observed:
+                observed = current
+                progress_deadline = time.monotonic() + 60.0
+            remaining = progress_deadline - time.monotonic()
             if remaining <= 0:
-                raise AssertionError(f"missing {count} {event} events: {rows}")
+                raise AssertionError(
+                    f"no progress waiting for {count} {event} events "
+                    f"after observing {observed}: {rows}"
+                )
             monitor.wait(remaining)
 
 

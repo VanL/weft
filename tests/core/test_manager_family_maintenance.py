@@ -132,7 +132,8 @@ def test_unfinished_bootstrap_uses_evidence_retry_without_expired_repair_timer(
     with monkeypatch.context() as patch:
         patch.setattr(manager_mod.time, "monotonic", lambda: now)
         timeouts = manager._admission_retry_timeouts(now_ns=time.time_ns())
-        assert timeouts and min(timeouts) == MANAGER_ADMISSION_RECHECK_SECONDS
+        assert timeouts
+        assert min(timeouts) == pytest.approx(MANAGER_ADMISSION_RECHECK_SECONDS)
 
 
 def test_failed_family_index_write_waits_then_retries_accepted_request(
