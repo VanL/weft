@@ -389,8 +389,9 @@ _QUIET_CHILD = (
     "import sys, time\n"
     "from pathlib import Path\n"
     "sys.stdin.readline()\n"
-    "time.sleep(0.3)\n"
     "Path({marker_path}).write_text('ready', encoding='utf-8')\n"
+    "while not Path({release_path}).exists():\n"
+    "    time.sleep(0.01)\n"
     "sys.stdout.write('ready\\n')\n"
     "sys.stdout.flush()\n"
     "sys.stdin.readline()\n"
@@ -421,8 +422,12 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
     db_path, make_queue = broker_env
     script = tmp_path / "quiet_child.py"
     child_ready = tmp_path / "quiet_child.ready"
+    release_child = tmp_path / "quiet_child.release"
     script.write_text(
-        _QUIET_CHILD.format(marker_path=repr(str(child_ready))),
+        _QUIET_CHILD.format(
+            marker_path=repr(str(child_ready)),
+            release_path=repr(str(release_child)),
+        ),
         encoding="utf-8",
     )
     # The deferred process title is a legitimate one-shot timer that lands in
@@ -435,6 +440,18 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
         enable_process_title=False,
     )
     task = Consumer(db_path, spec)
+    original_wait = task._wait_for_activity_body
+    reactor_waiting = threading.Event()
+
+    def wait_after_child_ready(timeout: float | None) -> None:
+        child_deadline = time.monotonic() + 5.0
+        while time.monotonic() < child_deadline and not child_ready.exists():
+            time.sleep(0.01)
+        assert child_ready.exists()
+        reactor_waiting.set()
+        original_wait(timeout)
+
+    monkeypatch.setattr(task, "_wait_for_activity_body", wait_after_child_ready)
     if not notify:
         original_start_session = TaskRunner.start_session
 
@@ -460,13 +477,11 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
         )
 
     try:
-        child_deadline = time.monotonic() + 5.0
-        while time.monotonic() < child_deadline and not child_ready.exists():
-            time.sleep(0.01)
-        assert child_ready.exists()
+        assert reactor_waiting.wait(5.0)
+        release_child.write_text("release", encoding="utf-8")
 
-        # The marker is written immediately before stdout. The muted case now
-        # proves the row remains undelivered after the child produced output.
+        # Output is released only after the reactor starts its quiet wait. The
+        # muted case therefore cannot deliver it in the preceding reactor turn.
         deadline = time.monotonic() + (5.0 if notify else 0.5)
         while time.monotonic() < deadline and not delivered():
             time.sleep(0.01)
