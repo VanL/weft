@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import time
 from collections.abc import Callable, Iterator
@@ -30,6 +31,7 @@ from tests.helpers.weft_harness import (
 from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
     CONTROL_PING,
+    MANAGER_STARTUP_FAST_PATH_FRACTION,
     QUEUE_OUTBOX_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -317,6 +319,8 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
     isolated_postgres_server: None,
 ) -> None:
     """Real U crosses H with two unfinished startups, then reopens on fresh U."""
+    public_limit = 72
+    startup_threshold = math.floor(public_limit * MANAGER_STARTUP_FAST_PATH_FRACTION)
     with WeftTestHarness() as harness:
         with harness.context.queue("startup-pressure-ids", persistent=True) as queue:
             manager_tid = str(queue.generate_timestamp())
@@ -396,8 +400,8 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
             )
             assert not ready[0].is_set()
             with _pressure(harness, None) as pressure:
-                pressure.send(36)
-                assert pressure.poll(30.0) and pressure.recv() == 36
+                pressure.send(startup_threshold)
+                assert pressure.poll(30.0) and pressure.recv() == startup_threshold
                 observations: list[int] = []
                 read_usage = manager._read_postgres_connection_usage
 
@@ -417,7 +421,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                     wait=manager.wait_for_activity,
                     timeout=30.0,
                 )
-                assert 36 <= observations[-1] < 72
+                assert startup_threshold <= observations[-1] < public_limit
                 assert not manager._admission_blocked_lanes
                 assert source.peek_one(exact_timestamp=request_ids[2]) is not None
                 assert reserved.peek_one(exact_timestamp=request_ids[2]) is None
@@ -452,7 +456,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                     wait=manager.wait_for_activity,
                     timeout=30.0,
                 )
-                assert observations[-1] < 36
+                assert observations[-1] < startup_threshold
                 assert not ready[0].is_set()
                 assert source.peek_one(exact_timestamp=request_ids[2]) is None
                 publication.set()
