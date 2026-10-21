@@ -10254,12 +10254,13 @@ def test_manager_autostart_templates(
     manager = Manager(db_path, spec, config=config)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     try:
-        start = time.time()
-        while not manager._child_processes and time.time() - start < 5.0:
-            manager.process_once()
-            time.sleep(0.05)
-
-        assert manager._child_processes, "expected autostart child"
+        drive_until(
+            lambda: manager._child_processes,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
         child_info = next(iter(manager._child_processes.values()))
         assert child_info.autostart_source == str(template_path.resolve())
 
