@@ -31,14 +31,6 @@ def _minimum_dependency_version(dependencies: list[str], package_name: str) -> s
     raise AssertionError(f"{package_name} minimum not found in {dependencies!r}")
 
 
-def _dependency_entry(dependencies: list[str], package_name: str) -> str:
-    prefix = f"{package_name}>="
-    for dependency in dependencies:
-        if dependency.startswith(prefix):
-            return dependency
-    raise AssertionError(f"{package_name} dependency not found in {dependencies!r}")
-
-
 def _normalized_dependency_name(dependency: str) -> str:
     match = re.match(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)", dependency)
     if match is None:
@@ -57,7 +49,10 @@ def test_django_channels_extras_are_explicit_opt_ins() -> None:
     root_extras = root_pyproject["project"]["optional-dependencies"]
     django_extras = django_pyproject["project"]["optional-dependencies"]
 
-    assert django_extras["channels"] == ["channels>=4.3.2,<5"]
+    assert [
+        _normalized_dependency_name(dependency)
+        for dependency in django_extras["channels"]
+    ] == ["channels"]
     assert django_extras["realtime"] == django_extras["channels"]
     assert any(
         dependency.startswith("weft-django[channels]")
@@ -171,18 +166,3 @@ def test_root_extras_do_not_undercut_local_extension_versions() -> None:
             )
             >= pg_version
         )
-
-
-def test_microsandbox_sdk_dependency_is_minor_bounded() -> None:
-    """The SDK adapter depends on a tight 0.5.x Microsandbox API surface."""
-
-    microsandbox_pyproject = _load_pyproject(
-        PROJECT_ROOT / "extensions" / "weft_microsandbox" / "pyproject.toml"
-    )
-
-    dependency = _dependency_entry(
-        microsandbox_pyproject["project"]["dependencies"],
-        "microsandbox",
-    )
-
-    assert dependency == "microsandbox>=0.5.10,<0.6"

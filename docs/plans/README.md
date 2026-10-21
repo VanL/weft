@@ -23,6 +23,7 @@ There are currently 45 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-21-unbounded-dependency-compatibility.md`](./2026-10-21-unbounded-dependency-compatibility.md) | Unbounded Dependency Compatibility | `completed` | none |
 | [`2026-10-20-bounded-startup-fast-path.md`](./2026-10-20-bounded-startup-fast-path.md) | Bounded Startup No-Wait Fast Path | `completed` | none |
 | [`2026-10-16-public-submission-custody-observation-plan.md`](./2026-10-16-public-submission-custody-observation-plan.md) | Public Submission Custody Observation | `completed` | none |
 | [`2026-10-15-operator-owned-permissions.md`](./2026-10-15-operator-owned-permissions.md) | Operator-Owned Filesystem Permissions | `completed` | none |

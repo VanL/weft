@@ -5,7 +5,8 @@
 The package is typed (`py.typed`) and depends on Weft through the public
 `weft.client` API.
 
-Supported Django versions are 6.1.2 and later 6.x releases (`django>=6.1.2,<7`).
+The declared minimum Django version is 6.1.2. The package does not impose an
+upper bound without a reproduced incompatibility.
 
 It provides:
 

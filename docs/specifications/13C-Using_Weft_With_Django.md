@@ -1525,15 +1525,13 @@ Why:
 
 Versioning rules:
 
-- `weft-django` major version must track the supported Weft core major version
-- `weft-django` 0.9.42 supports Django `>=5.2,<7` and requires
-  Weft `>=0.9.107`, the first core release with retained client-owned
-  submission sessions
-- while the stable core client is young, minor releases may carry paired
-  compatibility requirements
-- release core client/session borrowing first, then release Django request
-  lifecycle reuse against the first declared core version that supplies that
-  contract; do not ship a reflection-based compatibility fallback
+- `weft-django` release numbering tracks the supported Weft core major; this
+  is a release-numbering rule, not a dependency upper bound
+- published dependencies declare minimum versions for the APIs in use and do
+  not impose upper bounds without a reproduced incompatibility and a tracked
+  removal path
+- unsupported combinations must fail clearly rather than silently degrading
+- do not ship reflection-based compatibility fallbacks
 
 Suggested install surfaces:
 
@@ -1554,6 +1552,8 @@ Once the package is split into a sibling repo:
   provide the required public client API
 
 ## Backlinks
+
+- [Unbounded dependency compatibility](../plans/2026-10-21-unbounded-dependency-compatibility.md)
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 

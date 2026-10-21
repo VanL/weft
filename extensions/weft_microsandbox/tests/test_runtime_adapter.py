@@ -70,6 +70,50 @@ def test_timeout_classifier_propagates_unexpected_sdk_lookup_defect(
         _runtime._is_timeout_error(TimeoutError())
 
 
+@pytest.mark.parametrize("installed", [True, False])
+def test_preflight_uses_runtime_installation_checker(
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+) -> None:
+    checked = False
+
+    def checker() -> bool:
+        nonlocal checked
+        checked = True
+        return installed
+
+    monkeypatch.setattr(
+        _runtime,
+        "_load_sdk",
+        lambda: SimpleNamespace(is_runtime_installed=checker),
+    )
+    monkeypatch.setattr(_runtime, "_validate_platform", lambda: None)
+
+    if installed:
+        MicrosandboxRuntime().check_preflight()
+    else:
+        with pytest.raises(
+            _runtime.MicrosandboxRuntimeError,
+            match="runtime is not installed",
+        ):
+            MicrosandboxRuntime().check_preflight()
+
+    assert checked is True
+
+
+def test_preflight_rejects_sdk_without_runtime_installation_checker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: SimpleNamespace())
+    monkeypatch.setattr(_runtime, "_validate_platform", lambda: None)
+
+    with pytest.raises(
+        _runtime.MicrosandboxRuntimeError,
+        match="does not expose a runtime installation check",
+    ):
+        MicrosandboxRuntime().check_preflight()
+
+
 @pytest.mark.parametrize("network", ["none", "allow"])
 def test_adapter_calls_bind_to_installed_sdk(
     monkeypatch: pytest.MonkeyPatch,
@@ -126,11 +170,6 @@ def test_adapter_calls_bind_to_installed_sdk(
         ),
     )
 
-    def installed() -> bool:
-        inspect.signature(sdk.is_installed).bind()
-        checked.add("is_installed")
-        return True
-
     proxy = SimpleNamespace(
         Sandbox=SimpleNamespace(
             create=binding_call("create", sdk.Sandbox.create, sandbox),
@@ -142,8 +181,15 @@ def test_adapter_calls_bind_to_installed_sdk(
         Rlimit=sdk.Rlimit,
         ExecTimeoutError=sdk.ExecTimeoutError,
         MicrosandboxError=sdk.MicrosandboxError,
-        is_installed=installed,
     )
+    sdk_is_runtime_installed = sdk.is_runtime_installed
+
+    def installed() -> bool:
+        inspect.signature(sdk_is_runtime_installed).bind()
+        checked.add("is_runtime_installed")
+        return True
+
+    proxy.is_runtime_installed = installed
     monkeypatch.setattr(_runtime, "_load_sdk", lambda: proxy)
     monkeypatch.setattr(_runtime, "_validate_platform", lambda: None)
     source = tmp_path / "input.txt"
@@ -179,7 +225,7 @@ def test_adapter_calls_bind_to_installed_sdk(
     assert description.state == "running"
     runtime.check_preflight()
     # Cleanup and control calls can swallow SDK errors. Require successful binding.
-    assert checked == {
+    expected_calls = {
         "create",
         "get",
         "remove",
@@ -191,8 +237,9 @@ def test_adapter_calls_bind_to_installed_sdk(
         "mkdir",
         "copy_from_host",
         "copy_to_host",
-        "is_installed",
+        "is_runtime_installed",
     }
+    assert checked == expected_calls
 
 
 def test_sandbox_name_handles_current_sdk_attribute_shape() -> None:
@@ -506,7 +553,7 @@ def test_runtime_builds_network_volume_and_rlimit_from_real_sdk(tmp_path: Path) 
     rlimits = _runtime._rlimits(sdk, spec)
 
     assert isinstance(network, sdk.Network)
-    assert network.policy == "none"
+    assert network == sdk.Network.none()
     assert set(volumes) == {"/input", "/work"}
     assert volumes["/input"].bind == str(source)
     assert volumes["/input"].readonly is True
@@ -728,6 +775,35 @@ def test_exec_with_cancel_maps_cancelled_sdk_exec_task() -> None:
 
     assert result is None
     assert killed is True
+
+
+def test_exec_with_cancel_accepts_sdk_future() -> None:
+    sentinel = object()
+
+    class FutureSandbox:
+        def exec(self, *_args: object, **_kwargs: object) -> asyncio.Future[object]:
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            loop.call_soon(future.set_result, sentinel)
+            return future
+
+    async def _run() -> object | None:
+        return await _runtime._exec_with_cancel(
+            object(),
+            FutureSandbox(),
+            MicrosandboxRunSpec(
+                name="weft-future-exec",
+                image="python:3.12",
+                command=("python", "-c", "print(1)"),
+                env={},
+                cwd="/",
+                network="none",
+                workspace=WorkspaceSpec(),
+            ),
+            cancel_requested=None,
+        )
+
+    assert asyncio.run(_run()) is sentinel
 
 
 def test_exec_with_cancel_maps_post_kill_exec_output_to_cancelled() -> None:

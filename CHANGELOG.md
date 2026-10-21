@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.117] - 2026-10-21
+
+### Changed
+
+- Remove speculative upper bounds from first-party integration dependencies.
+  Published requirements retain API-based minimums; a temporary ceiling now
+  requires a reproduced incompatibility and a tracked removal path.
+- Raise `weft-microsandbox`'s Microsandbox SDK minimum to 0.7.0; 0.5.x and
+  0.6.x are no longer supported. Support the 0.7 SDK's execution Futures and
+  required `is_runtime_installed` preflight API without a legacy fallback.
+- Bump coordinated extension releases: `weft-docker` 0.9.92, `weft-django`
+  0.9.52, `weft-macos-sandbox` 0.6.21, and `weft-microsandbox` 0.5.22.
+
 ## [0.9.116] - 2026-10-20
 
 ### Changed

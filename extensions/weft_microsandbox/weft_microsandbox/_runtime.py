@@ -143,8 +143,12 @@ class MicrosandboxRuntime:
     def check_preflight(self) -> None:
         sdk = _load_sdk()
         _validate_platform()
-        is_installed = getattr(sdk, "is_installed", None)
-        if callable(is_installed) and not bool(is_installed()):
+        is_runtime_installed = getattr(sdk, "is_runtime_installed", None)
+        if not callable(is_runtime_installed):
+            raise MicrosandboxRuntimeError(
+                "Microsandbox SDK does not expose a runtime installation check"
+            )
+        if not bool(is_runtime_installed()):
             raise MicrosandboxRuntimeError("Microsandbox runtime is not installed")
 
     async def _run_async(
@@ -431,7 +435,7 @@ async def _exec_with_cancel(
     *,
     cancel_requested: Callable[[], bool] | None,
 ) -> Any | None:
-    exec_task = asyncio.create_task(
+    exec_task = asyncio.ensure_future(
         sandbox.exec(
             spec.command[0],
             list(spec.command[1:]),

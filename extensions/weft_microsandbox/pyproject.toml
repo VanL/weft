@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "weft-microsandbox"
-version = "0.5.21"
+version = "0.5.22"
 description = "Microsandbox runner plugin for Weft"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,8 +13,8 @@ authors = [
     {name = "Van Lindberg", email = "van@modelmonster.ai"},
 ]
 dependencies = [
-    "microsandbox>=0.5.10,<0.6",
-    "weft>=0.9.116",
+    "microsandbox>=0.7.0",
+    "weft>=0.9.117",
 ]
 
 [project.optional-dependencies]
