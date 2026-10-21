@@ -649,16 +649,22 @@ def test_success_terminal_ctrl_out_survives_global_log_retirement(
 
 
 def test_state_logging_records_failure(
-    broker_env: BrokerEnv, task_factory: TaskFactory, unique_tid: str
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, make_queue = broker_env
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     drain_queue(log_queue)
 
-    spec = build_function_spec(
-        unique_tid, function_target="tests.tasks.sample_targets:fail_payload"
-    )
+    spec = build_function_spec(unique_tid)
     task = task_factory(spec)
+
+    def fail_without_host_process(_work_item: object) -> tuple[Any, bool]:
+        raise RuntimeError("intentional failure for testing")
+
+    monkeypatch.setattr(task, "_run_task_for_reactor", fail_without_host_process)
     inbox = make_queue(spec.io.inputs["inbox"])
     inbox.write(json.dumps({"args": ["payload"]}))
 
