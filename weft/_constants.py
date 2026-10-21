@@ -796,7 +796,7 @@ MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
 
 MANAGER_STARTUP_FAST_PATH_FRACTION: Final[float] = 0.8
-"""Overlap ordinary PostgreSQL startups below half the usable ceiling [MA-1.8]."""
+"""Overlap ordinary PostgreSQL startups below 80% of usable capacity [MA-1.8]."""
 
 MANAGER_STARTUP_FAST_PATH_WINDOW: Final[int] = 8
 """Maximum unfinished ordinary startups in one Manager's fast path [MA-1.8]."""

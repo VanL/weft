@@ -10,6 +10,10 @@
 
 ### Changed
 
+- Expand the PostgreSQL startup fast path to eight unfinished startups while
+  observed usage remains below 80% of the usable connection ceiling. Every
+  launch still requires a fresh coherent usage observation and normal measured
+  admission; higher usage and SQLite retain serialized startup.
 - Bump coordinated extension releases: `weft-docker` 0.9.93, `weft-django`
   0.9.53, `weft-macos-sandbox` 0.6.22, and `weft-microsandbox` 0.5.23.
 
