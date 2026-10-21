@@ -22,7 +22,10 @@ import weft.commands.submission as submission_cmd
 from simplebroker import Config, Queue
 from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
-from tests.helpers.weft_harness import WeftTestHarness
+from tests.helpers.weft_harness import (
+    DEFAULT_TASK_COMPLETION_TIMEOUT,
+    WeftTestHarness,
+)
 from weft._constants import (
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
@@ -1848,7 +1851,10 @@ def test_run_inline_wait_succeeds_when_post_proof_acknowledgement_fails(
             _accepted_taskspec=accepted_taskspec[0],
         )
         try:
-            assert session.wait(timeout=10).status == "completed"
+            assert (
+                session.wait(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT).status
+                == "completed"
+            )
         finally:
             session.close()
         tid = submitted_tid["value"]
