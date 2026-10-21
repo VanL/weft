@@ -4512,13 +4512,24 @@ class Manager(ServiceTask):
                     time.sleep(pause)
         return False
 
-    def _cleanup_children(self, *, deadline: float | None = None) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
+    def _cleanup_children(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
+        self,
+        *,
+        deadline: float | None = None,
+        retain_managed_survivors: bool = False,
+    ) -> bool:
+        """Reap exited wrappers without abandoning shutdown-owned descendants."""
+
         autostart_child_exited = False
         child_exited = False
         for tid, child in list(self._child_processes.items()):
             if deadline is not None and self._remaining_deadline(deadline) <= 0:
                 break
             if self._child_has_exited(child):
+                if retain_managed_survivors and any(
+                    pid_is_live(pid) for pid in self._managed_pids_for_child(tid)
+                ):
+                    continue
                 if child.terminal_retry_after_ns > time.time_ns():
                     continue
                 if self._child_terminal_proof_still_within_grace(tid, child):
@@ -8656,7 +8667,9 @@ class Manager(ServiceTask):
             return
         if self._drain_stops_children:
             self._signal_children_to_stop()
-        self._cleanup_children()
+        self._cleanup_children(
+            retain_managed_survivors=self._drain_stops_children,
+        )
         if (
             self._drain_stops_children
             and self._child_processes

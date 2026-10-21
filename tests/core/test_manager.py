@@ -4701,7 +4701,7 @@ def test_manager_drain_immediate_continuation_is_one_shot(
         ctrl_queue="Tchild.ctrl_in",
     )
     monkeypatch.setattr(manager, "_revalidate_leadership_drain", lambda: True)
-    monkeypatch.setattr(manager, "_cleanup_children", lambda: False)
+    monkeypatch.setattr(manager, "_cleanup_children", lambda **_kwargs: False)
     monkeypatch.setattr(manager, "_send_stop_command", lambda _queue: None)
 
     assert manager.next_wait_timeout() == 0.0
@@ -10124,6 +10124,48 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
 
     assert manager._child_processes == {}
     assert fake_process.join_calls == [0.0, 0.1]
+
+
+def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _make_queue = manager_setup
+
+    class ExitedProcess:
+        pid = 424242
+        exitcode = 0
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    child = ManagedChild(
+        process=cast(BaseProcess, ExitedProcess()),
+        ctrl_queue=None,
+        persistent=False,
+    )
+    manager._child_processes["child"] = child
+    managed_pid_live = [True]
+    monkeypatch.setattr(
+        manager,
+        "_managed_pids_for_child",
+        lambda tid: {515151} if tid == "child" else set(),
+    )
+    monkeypatch.setattr(
+        manager_mod,
+        "pid_is_live",
+        lambda pid: pid == 515151 and managed_pid_live[0],
+    )
+
+    assert manager._cleanup_children(retain_managed_survivors=True) is False
+    assert manager._child_processes == {"child": child}
+
+    managed_pid_live[0] = False
+    assert manager._cleanup_children(retain_managed_survivors=True) is True
+    assert manager._child_processes == {}
 
 
 def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
