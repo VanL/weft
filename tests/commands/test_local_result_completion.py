@@ -11,7 +11,10 @@ from typing import Any
 import pytest
 
 from simplebroker import Queue
-from tests.helpers.weft_harness import WeftTestHarness
+from tests.helpers.weft_harness import (
+    DEFAULT_TASK_COMPLETION_TIMEOUT,
+    WeftTestHarness,
+)
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._exceptions import CommandExecutionError, CommandTimeoutError
 from weft.commands._result_wait import drain_ctrl_out_stream_messages
@@ -153,7 +156,7 @@ def test_concurrent_accepted_waits_wake_on_local_completion_only(
             Consumer(harness.context.broker_target, spec, config=harness.context.config)
             for spec in specs
         ]
-        registered = Barrier(3, timeout=20)
+        registered = Barrier(3, timeout=DEFAULT_TASK_COMPLETION_TIMEOUT)
         registered_monitors: set[int] = set()
         interests: list[str] = []
         searches: list[str] = []
@@ -182,7 +185,10 @@ def test_concurrent_accepted_waits_wake_on_local_completion_only(
         def observe(spec: TaskSpec) -> Any:
             assert spec.tid is not None
             return await_task_result(
-                harness.context, spec.tid, timeout=20, _accepted_taskspec=spec
+                harness.context,
+                spec.tid,
+                timeout=DEFAULT_TASK_COMPLETION_TIMEOUT,
+                _accepted_taskspec=spec,
             )
 
         try:
@@ -204,7 +210,10 @@ def test_concurrent_accepted_waits_wake_on_local_completion_only(
                 with harness.context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
                     for index in range(10, 300):
                         log.write(json.dumps({"tid": "unrelated", "index": index}))
-                assert [future.result(timeout=20).status for future in futures] == [
+                assert [
+                    future.result(timeout=DEFAULT_TASK_COMPLETION_TIMEOUT).status
+                    for future in futures
+                ] == [
                     "failed",
                     "failed",
                 ]
