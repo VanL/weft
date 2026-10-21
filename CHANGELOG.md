@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.118] - 2026-10-21
+
+### Fixed
+
+- Keep the requested Microsandbox name as the canonical runtime identity when
+  using the 0.7 SDK. Awaitable SDK attributes are no longer stringified into
+  invalid sandbox IDs, so liveness and stop operations address the running VM.
+
+### Changed
+
+- Bump coordinated extension releases: `weft-docker` 0.9.93, `weft-django`
+  0.9.53, `weft-macos-sandbox` 0.6.22, and `weft-microsandbox` 0.5.23.
+
 ## [0.9.117] - 2026-10-21
 
 ### Changed

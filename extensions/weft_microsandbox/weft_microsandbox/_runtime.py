@@ -163,6 +163,7 @@ class MicrosandboxRuntime:
         sdk = _load_sdk()
         started = time.monotonic()
         sandbox = None
+        sandbox_name = spec.name
         try:
             sandbox = await sdk.Sandbox.create(
                 spec.name,
@@ -173,7 +174,6 @@ class MicrosandboxRuntime:
                 labels=dict(spec.labels or {}),
                 **_resource_create_kwargs(spec),
             )
-            sandbox_name = _sandbox_name(sandbox, fallback=spec.name)
             if on_started is not None:
                 on_started(
                     MicrosandboxStarted(
@@ -212,7 +212,6 @@ class MicrosandboxRuntime:
             )
         except Exception as exc:
             if _is_timeout_error(exc):
-                sandbox_name = _sandbox_name(sandbox, fallback=spec.name)
                 return MicrosandboxRunResult(
                     sandbox_id=sandbox_name,
                     sandbox_name=sandbox_name,
@@ -474,18 +473,6 @@ async def _exec_with_cancel(
             )
             exec_task.cancel()
         return None
-
-
-def _sandbox_name(sandbox: Any | None, *, fallback: str) -> str:
-    if sandbox is None:
-        return fallback
-    try:
-        value = getattr(sandbox, "name", None)
-    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-317] exception
-        logger.warning("Failed to read Microsandbox name; using fallback")
-        return fallback
-    text = str(value).strip()
-    return text or fallback
 
 
 async def _cleanup_sandbox(sdk: Any, sandbox: Any, name: str) -> None:

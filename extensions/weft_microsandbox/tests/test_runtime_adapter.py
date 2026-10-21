@@ -242,34 +242,74 @@ def test_adapter_calls_bind_to_installed_sdk(
     assert checked == expected_calls
 
 
-def test_sandbox_name_handles_current_sdk_attribute_shape() -> None:
-    class AttributeNameSandbox:
-        name = "sandbox-attribute"
+def test_run_and_stop_use_requested_name_when_sdk_name_is_awaitable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_name = "canonical-sandbox-name"
+    looked_up_names: list[str] = []
 
-    assert (
-        _runtime._sandbox_name(AttributeNameSandbox(), fallback="fallback")
-        == "sandbox-attribute"
+    class Sandbox:
+        def __init__(self) -> None:
+            self.name = asyncio.get_running_loop().create_future()
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(exit_code=0, stdout_text="done", stderr_text="")
+
+        async def stop(self, *, timeout: float) -> None:
+            assert timeout == 2.0
+
+    class Handle:
+        async def stop(self, *, timeout: float) -> None:
+            assert timeout == 1.0
+
+    class SandboxAPI:
+        @staticmethod
+        async def create(name: str, **_kwargs: object) -> Sandbox:
+            assert name == requested_name
+            return Sandbox()
+
+        @staticmethod
+        async def get(name: str) -> Handle:
+            looked_up_names.append(name)
+            return Handle()
+
+        @staticmethod
+        async def remove(name: str) -> None:
+            assert name == requested_name
+
+    class Network:
+        @staticmethod
+        def none() -> object:
+            return object()
+
+    sdk = SimpleNamespace(Sandbox=SandboxAPI, Network=Network)
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: sdk)
+    started: list[_runtime.MicrosandboxStarted] = []
+    runtime = MicrosandboxRuntime()
+
+    result = runtime.run(
+        MicrosandboxRunSpec(
+            name=requested_name,
+            image="python:3.12",
+            command=("true",),
+            env={},
+            cwd="/",
+            network="none",
+            workspace=WorkspaceSpec(),
+        ),
+        on_started=started.append,
     )
 
-
-def test_sandbox_name_reports_lookup_failure_and_uses_fallback(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class FailingNameSandbox:
-        @property
-        def name(self) -> str:
-            raise RuntimeError("sensitive sandbox name failure")
-
-    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
-
-    name = _runtime._sandbox_name(FailingNameSandbox(), fallback="sensitive-fallback")
-
-    assert name == "sensitive-fallback"
-    assert [record.getMessage() for record in caplog.records] == [
-        "Failed to read Microsandbox name; using fallback"
+    assert started == [
+        _runtime.MicrosandboxStarted(
+            sandbox_id=requested_name,
+            sandbox_name=requested_name,
+        )
     ]
-    assert caplog.records[0].exc_info is None
-    assert "sensitive" not in caplog.text
+    assert result.sandbox_id == requested_name
+    assert result.sandbox_name == requested_name
+    assert runtime.stop(result.sandbox_id, timeout=1.0) is True
+    assert looked_up_names == [requested_name]
 
 
 def test_stop_reports_adapter_failure_and_returns_false(
