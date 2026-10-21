@@ -439,7 +439,7 @@ Ordinary launch selection is work-conserving family scheduling over dynamically 
 
 Every ordinary PostgreSQL launch requires a fresh coherent usage observation
 and the existing measured admission decision. Let L=max(0,C-R), H=floor(4L/5),
-and W=8. If H>=W and observed usage U<H, a Manager may have up to W unfinished
+and W=6. If H>=W and observed usage U<H, a Manager may have up to W unfinished
 ordinary startups. Otherwise it waits until no ordinary startup is unfinished
 before authorizing one launch. Unknown usage denies dispatch. Window occupancy
 counts selected launch-worker requests and processes awaiting startup feedback

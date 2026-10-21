@@ -20,11 +20,11 @@ from weft.core.admission import (
 @pytest.mark.parametrize(
     ("unfinished", "backend", "capacity", "allowed"),
     [
-        (7, "postgres", {"public_limit": 270, "used": 215}, True),
-        (7, "postgres", {"public_limit": 270, "used": 216}, False),
-        (8, "postgres", {"public_limit": 270, "used": 215}, False),
-        (1, "postgres", {"public_limit": 9, "used": 0}, False),
-        (1, "postgres", {"public_limit": 10, "used": 0}, True),
+        (5, "postgres", {"public_limit": 270, "used": 215}, True),
+        (5, "postgres", {"public_limit": 270, "used": 216}, False),
+        (6, "postgres", {"public_limit": 270, "used": 215}, False),
+        (1, "postgres", {"public_limit": 7, "used": 0}, False),
+        (1, "postgres", {"public_limit": 8, "used": 0}, True),
         (1, "postgres", {"public_limit": 11, "used": 7}, True),
         (1, "postgres", {"public_limit": 11, "used": 8}, False),
         (1, "sqlite", {"public_limit": 270, "used": 0}, False),
@@ -41,7 +41,7 @@ def test_startup_overlap_requires_low_postgres_usage_and_room(
     capacity: dict[str, Any] | None,
     allowed: bool,
 ) -> None:
-    # Literal boundaries protect the 80%-capacity and eight-startup contracts,
+    # Literal boundaries protect the 80%-capacity and six-startup contracts,
     # independently of the implementation's constants or threshold calculation.
     assert (
         _startup_window_allows_launch(
