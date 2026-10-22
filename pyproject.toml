@@ -70,12 +70,12 @@ dev = [
     "weft-docker>=0.9.93",
     "weft-macos-sandbox>=0.6.22",
     "weft-microsandbox>=0.5.23; platform_system != 'Windows'",
-    "hypothesis>=6.168.5",
+    "hypothesis>=6.170.5",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "mypy>=2.4.0",
-    "ruff>=0.16.10",
+    "ruff>=0.17.1",
     "pytest-timeout>=2.4.0",
     "types-docker>=7.2.0.20261006",
     "types-psutil>=7.2.2.20260906",
@@ -93,14 +93,23 @@ Issues = "https://github.com/VanL/weft/issues"
 
 [tool.uv]
 constraint-dependencies = [
+    "ast-serialize>=0.13.1",
+    "certifi>=2026.10.19",
     "charset-normalizer>=3.5.2",
-    "httpcore2>=2.13.1",
-    "httpx2>=2.13.1",
+    "httpcore2>=2.16.0",
+    "httpx2>=2.16.0",
     "idna>=3.20",
+    "openai>=3.36.0",
+    "pip>=26.2.2",
+    "pluggy>=1.7.0",
     "pygments>=2.21.0",
+    "python-dateutil>=3.0.0",
+    "setuptools>=84.2.1",
     "sqlite-utils>=4.2.1",
     "sqlparse>=0.6.0",
+    "tzdata>=2026.5",
     "typing-inspection>=0.4.4",
+    "wcwidth>=0.9.3",
 ]
 
 [tool.uv.sources]
