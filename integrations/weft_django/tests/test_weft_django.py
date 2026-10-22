@@ -2463,7 +2463,7 @@ class _IdleFollowProbe:
         if self.consumer is not None and self.consumer._stream_cancel is not None:
             self.consumer._stream_cancel.set()
         for monitor in self.monitors:
-            monitor._activity_event.set()
+            monitor.wake()
 
     @staticmethod
     async def _await_cleanup(task: asyncio.Task[Any] | None) -> None:

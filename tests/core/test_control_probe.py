@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import threading
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -42,65 +40,65 @@ def _queue_names(ctx: WeftContext) -> set[str]:
         return set(broker.list_queues())
 
 
-def _start_pong_responder(
+def _respond_to_probe_write(
     ctx: WeftContext,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     tid: str,
     rows_before_pong: tuple[str, ...] = (),
-) -> tuple[threading.Thread, list[dict[str, Any]]]:
+) -> list[dict[str, Any]]:
     observed: list[dict[str, Any]] = []
-    ready = threading.Event()
+    original_write = control_probe_mod._write_probe_request
 
-    def respond() -> None:
-        ctrl_in = ctx.queue(f"T{tid}.ctrl_in", persistent=False)
-        try:
-            ready.set()
-            deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline:
-                raw = ctrl_in.read_one()
-                if raw is None:
-                    time.sleep(0.001)
-                    continue
-                request = json.loads(str(raw))
-                observed.append(request)
-                reply = ctx.queue(request["reply_to"], persistent=False)
-                try:
-                    for row in rows_before_pong:
-                        reply.write(row)
-                    reply.write(
-                        json.dumps(
-                            {
-                                "command": "PING",
-                                "status": "ok",
-                                "message": "PONG",
-                                "tid": tid,
-                                "request_id": request["request_id"],
-                                "task_status": "running",
-                            }
-                        )
-                    )
-                finally:
-                    reply.close()
-                return
-            raise AssertionError("probe PING did not arrive")
-        finally:
-            ctrl_in.close()
+    def write_and_respond(
+        reply_queue: Any,
+        *,
+        broker: Any | None,
+        ctrl_in_name: str,
+        message: str,
+    ) -> None:
+        original_write(
+            reply_queue,
+            broker=broker,
+            ctrl_in_name=ctrl_in_name,
+            message=message,
+        )
+        with ctx.queue(ctrl_in_name, persistent=False) as ctrl_in:
+            raw = ctrl_in.read_one()
+        assert raw is not None
+        request = json.loads(str(raw))
+        observed.append(request)
+        with ctx.queue(request["reply_to"], persistent=False) as reply:
+            for row in rows_before_pong:
+                reply.write(row)
+            reply.write(
+                json.dumps(
+                    {
+                        "command": "PING",
+                        "status": "ok",
+                        "message": "PONG",
+                        "tid": tid,
+                        "request_id": request["request_id"],
+                        "task_status": "running",
+                    }
+                )
+            )
 
-    thread = threading.Thread(target=respond, daemon=True)
-    thread.start()
-    assert ready.wait(timeout=10.0), "PONG responder did not open its control queue"
-    return thread, observed
+    # Routing and cleanup do not promise a responder's wall-clock latency.
+    # Publish through the real request route before the probe deadline starts.
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", write_and_respond)
+
+    return observed
 
 
 def test_send_keyed_ping_probe_routes_pong_to_ephemeral_ctrl_in(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid = "1775622400000000101"
-    thread, observed = _start_pong_responder(
-        ctx,
-        tid=tid,
-        rows_before_pong=("not-json",),
+    observed = _respond_to_probe_write(
+        ctx, monkeypatch, tid=tid, rows_before_pong=("not-json",)
     )
 
     result = send_keyed_ping_probe(
@@ -110,9 +108,6 @@ def test_send_keyed_ping_probe_routes_pong_to_ephemeral_ctrl_in(
         request_id="probe-request-1",
         timeout=1.0,
     )
-    thread.join(timeout=3.0)
-
-    assert not thread.is_alive()
     assert result.error is None
     assert result.timed_out is False
     assert result.matched is not None
@@ -232,7 +227,7 @@ def test_cleanup_failures_do_not_replace_matched_probe_result(
 ) -> None:
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     tid = "1775622400000000114"
-    thread, _observed = _start_pong_responder(ctx, tid=tid)
+    _respond_to_probe_write(ctx, monkeypatch, tid=tid)
     original_stop = control_probe_mod.MultiQueueWatcher.stop
     stop_calls = 0
 
@@ -257,7 +252,6 @@ def test_cleanup_failures_do_not_replace_matched_probe_result(
         request_id="cleanup-result",
         timeout=1.0,
     )
-    thread.join(timeout=3.0)
 
     assert result.matched is not None
     assert stop_calls == 2

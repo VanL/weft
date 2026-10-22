@@ -6515,6 +6515,9 @@ def test_process_once_launches_service_spawn_after_shared_self_write_wake(
 
     monkeypatch.setattr(manager, "_launch_child_task", record_launch)
 
+    # Only the self-write wake may activate these requests in this test;
+    # periodic inactive discovery can otherwise launch them in the first turn.
+    manager._next_inactive_probe_at = float("inf")
     try:
         manager.process_once()
         assert launched == []

@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 class QueueChangeMonitor:
-    """Wait for new messages on one or more queues using SimpleBroker watchers."""
+    """Wake one observing caller from any number of queue activity producers.
+
+    Concurrent wait callers are unsupported: a wake releases at most one waiter.
+    Close and failure remain durable for every subsequent wait.
+    """
 
     def __init__(
         self,
@@ -33,7 +37,10 @@ class QueueChangeMonitor:
         *,
         config: Mapping[str, Any] | None = None,
     ) -> None:
-        self._activity_event = threading.Event()
+        # A released token is a pending wake. Unlike Event's Condition, release
+        # cannot block on a lock stranded by SIGINT during Python __enter__.
+        self._activity_token = threading.Lock()
+        self._activity_token.acquire()
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._closed = False
@@ -149,9 +156,13 @@ class QueueChangeMonitor:
         """Wake observation without broker effects; safe across threads and close.
 
         Wake sources record durable contents, failure or cancellation first;
-        callers recheck that state after the coalesced Event wake [MF-5].
+        callers recheck that state after the coalesced wake [MF-5].
         """
-        self._activity_event.set()
+        try:
+            self._activity_token.release()
+        except RuntimeError:
+            # Already released: a wake is pending, so coalesce this notification.
+            pass
 
     def _handle_queue_activity(self, _message: str, _timestamp: int) -> None:
         self.wake()
@@ -164,9 +175,9 @@ class QueueChangeMonitor:
         self._raise_failure()
         if self._stop_event.is_set():
             return True
-        triggered = self._activity_event.wait(timeout=timeout)
-        if triggered:
-            self._activity_event.clear()
+        triggered = self._activity_token.acquire(
+            timeout=-1 if timeout is None else max(0.0, timeout)
+        )
         self._raise_failure()
         return triggered
 

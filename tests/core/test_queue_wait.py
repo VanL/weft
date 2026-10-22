@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 import threading
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -475,13 +478,17 @@ def test_queue_change_monitor_close_wakes_idle_wait_without_deadline(
     monitor = QueueChangeMonitor([make_queue("monitor.close.idle")])
     entered = threading.Event()
     returned = threading.Event()
-    event_wait = monitor._activity_event.wait
+    token = monitor._activity_token
 
-    def observe_wait(timeout: float | None = None) -> bool:
-        entered.set()
-        return event_wait(timeout)
+    class ObservedToken:
+        def acquire(self, *, timeout: float) -> bool:
+            entered.set()
+            return token.acquire(timeout=timeout)
 
-    monkeypatch.setattr(monitor._activity_event, "wait", observe_wait)
+        def release(self) -> None:
+            token.release()
+
+    monkeypatch.setattr(monitor, "_activity_token", ObservedToken())
 
     def wait() -> None:
         try:
@@ -499,12 +506,14 @@ def test_queue_change_monitor_close_wakes_idle_wait_without_deadline(
         assert waiter.close_calls == 1
     finally:
         # Ensure even the pre-fix indefinitely blocked caller is cleaned up.
-        monitor._activity_event.set()
+        monitor.wake()
         thread.join(1.0)
         monitor.close()
 
 
+@pytest.mark.parametrize("timeout", [0.0, -2.0])
 def test_queue_change_monitor_explicit_wake_is_harmless_after_close(
+    timeout: float,
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,7 +526,9 @@ def test_queue_change_monitor_explicit_wake_is_harmless_after_close(
     monitor = QueueChangeMonitor([queue])
     try:
         monitor.wake()
-        assert monitor.wait(timeout=0.0)
+        monitor.wake()
+        assert monitor.wait(timeout=timeout)
+        assert not monitor.wait(timeout=timeout)
         queue.write("caller-owned result")
         monitor.close()
         monitor.wake()
@@ -595,3 +606,67 @@ def test_queue_change_monitor_does_not_consume_messages(
         assert queue.read_one() == "payload"
     finally:
         monitor.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGINT delivery")
+def test_monitor_interruption_does_not_strand_wake_or_close() -> None:
+    """Reproduce interrupted Condition entry; fallback checks wrapper-free wait.
+
+    The child contains the historical deadlock. On a wrapper-free implementation,
+    injection at wait return checks recovery, not every possible native boundary.
+    """
+    script = textwrap.dedent(
+        """\
+        import signal
+        import sys
+        import threading
+        from weft.core.queue_wait import QueueChangeMonitor
+
+        monitor = QueueChangeMonitor([])
+        injected = None
+        interrupted = False
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+
+        def inject(frame, event, arg):
+            global injected
+            if injected is None and event == "return":
+                if frame.f_code is threading.Condition.__enter__.__code__:
+                    injected = "enter"
+                elif frame.f_code is QueueChangeMonitor.wait.__code__:
+                    injected = "return"
+                if injected is not None:
+                    print("injected:" + injected, flush=True)
+                    signal.raise_signal(signal.SIGINT)
+            return inject
+
+        monitor.wake()
+        sys.settrace(inject)
+        try:
+            monitor.wait(0)
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            sys.settrace(None)
+        assert injected is not None and interrupted
+        producer = threading.Thread(target=monitor.wake, daemon=True)
+        producer.start()
+        producer.join(2)
+        assert not producer.is_alive(), "cross-thread wake blocked"
+        assert monitor.wait(1)
+        assert not monitor.wait(0), "wake was not consumed"
+        closer = threading.Thread(target=monitor.close, daemon=True)
+        closer.start()
+        closer.join(2)
+        assert not closer.is_alive(), "close blocked"
+        monitor.close()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "injected:" in result.stdout

@@ -64,7 +64,7 @@ def result_observation(
     commands.run._LiveRunSession:
     `_register_wakeup` returns idempotent deregistration. Callbacks must be
     thread-safe, non-blocking and perform no broker effects. Deregister before
-    monitor disposal; a racing callback only sets its harmless activity Event.
+    monitor disposal; a racing callback only calls its harmless wake method.
 
     Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5];
         docs/specifications/04-SimpleBroker_Integration.md [SB-0.4].

@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 46 plan files in this directory.
+There are currently 48 plan files in this directory.
 
 ## Curation Policy
 
@@ -23,6 +23,7 @@ There are currently 46 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-10-21-interrupt-safe-observation-wake.md`](./2026-10-21-interrupt-safe-observation-wake.md) | Interrupt-Safe Observation Wake | `completed` | none |
 | [`2026-10-21-agy-provider-replacement.md`](./2026-10-21-agy-provider-replacement.md) | Agy Provider Replacement | `completed` | none |
 | [`2026-10-21-unbounded-dependency-compatibility.md`](./2026-10-21-unbounded-dependency-compatibility.md) | Unbounded Dependency Compatibility | `completed` | none |
 | [`2026-10-20-bounded-startup-fast-path.md`](./2026-10-20-bounded-startup-fast-path.md) | Bounded Startup No-Wait Fast Path | `completed` | none |

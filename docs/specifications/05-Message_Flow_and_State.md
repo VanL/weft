@@ -1168,7 +1168,9 @@ routes without treating submission state as lifecycle evidence.
 `weft/commands/_result_wait.py::result_observation` owns shared queue
 acquisition, registration-before-read and cancellation wake registration.
 `weft/core/queue_wait.py::QueueChangeMonitor` owns native/fallback thread
-custody, latched operational failure, wake and close. Shared typed error
+custody, latched operational failure, wake and close. Its single-observer wake
+uses a native binary token so interrupted waiting cannot strand a lock needed
+by cleanup (see the [interrupt-safe observation wake plan](../plans/2026-10-21-interrupt-safe-observation-wake.md)). Shared typed error
 translation remains in `weft/commands/_boundary.py`.
 `weft/core/task_evidence.py::read_task_history` owns explicit raw-history reads,
 exact identity validation, ordering, and inspected progress. Explicit history
