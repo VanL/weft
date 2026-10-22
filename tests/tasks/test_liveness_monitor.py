@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1470,7 +1471,9 @@ def test_terminal_projection_retains_snapshot_without_repeated_probes(
     monitor._reconcile_mapping_rows(full=True)
     row = monitor._latest_rows[tid]
     wall = [row.message_id]
-    monkeypatch.setattr(liveness_monitor_mod.time, "time_ns", lambda: wall[0])
+    monkeypatch.setattr(
+        liveness_monitor_mod, "time", SimpleNamespace(time_ns=lambda: wall[0])
+    )
     submitted: list[ProbeWork] = []
 
     def enqueue(_name: str, work: ProbeWork, **_kwargs: Any) -> bool:
@@ -1491,6 +1494,9 @@ def test_terminal_projection_retains_snapshot_without_repeated_probes(
     # Changed runtime identity invalidates the old retention-only deferral.
     terminal["runtime_handle"]["id"] = "replacement-runtime"  # type: ignore[index]
     replacement_id = queue.write(json.dumps(terminal))
+    # Start the replacement's retention interval at its own publication time.
+    # The broker clock keeps advancing while this monitor's wall clock is frozen.
+    wall[0] = replacement_id
     monitor._reconcile_mapping_rows(full=False)
     monitor._schedule_due_probes(now=now[0])
     replacement = next(work for work in submitted if work.tid == tid)

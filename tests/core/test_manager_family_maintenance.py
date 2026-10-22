@@ -606,6 +606,21 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
     Hold periodic reconciliation beyond the observation deadline. The real
     publication and reactor notification must own admission and exact handoff.
     """
+    # Launch-result reconciliation also runs the missing-publication fallback,
+    # independently of the periodic fence below. Freeze the Manager's wall clock
+    # (launch times, absence fallback, and retry expiry) so only positive
+    # publication settles startup [MA-1.8]. Monotonic deadlines stay real.
+    now_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            time_ns=lambda: now_ns,
+            monotonic=time.monotonic,
+            perf_counter=time.perf_counter,
+            sleep=time.sleep,
+        ),
+    )
     manager._refresh_scheduler_evidence()
     source = manager._queue(manager._queue_names["inbox"])
     payload = json.loads(request_body())
@@ -746,11 +761,9 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         child_process.start()
         assert child_ready.wait(timeout=30.0)
         manager._active_child_launches[str(child_id)] = child_request
-        manager._child_launch_started_ns[str(child_id)] = (
-            time.time_ns() - 10_000_000_000
-        )
+        manager._child_launch_started_ns[str(child_id)] = now_ns - 10_000_000_000
         manager._drain_worker_results()
-        assert manager._stale_child_launch_timeouts(now_ns=time.time_ns()) == [0.0]
+        assert manager._stale_child_launch_timeouts(now_ns=now_ns) == [0.0]
         assert manager._retry_stale_child_launches()
         assert str(child_id) in manager._family_scheduler.resident_tids
         assert manager._queue(reserved).peek_one(exact_timestamp=child_id) is None
