@@ -889,41 +889,40 @@ def _terminal_evidence(tid: str) -> TaskEvidenceSnapshot:
     )
 
 
-@pytest.mark.timeout(10)
 @pytest.mark.parametrize("live_status", ["running", "pending"])
 def test_terminal_snapshot_positive_timeout_stops_at_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     live_status: str,
 ) -> None:
-    """A positive timeout bounds continuing nonterminal evidence.
+    """Expiry returns honest nonterminal evidence at the observation deadline.
 
-    Verifies:
-    - The evidence branch exits at the deadline instead of polling forever
-    - Expiry returns the latest honest nonterminal snapshot, not a timeout
+    The policy clock excludes host scheduling and broker cleanup latency. A
+    third read fails explicitly, so removing the expiry branch cannot spin.
     """
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     tid = str(time.time_ns())
     calls: list[str] = []
+    now = 100.0
 
     def _always_live(_ctx: Any, *, tid: str, **_kwargs: Any) -> TaskEvidenceSnapshot:
+        nonlocal now
         calls.append(tid)
+        assert len(calls) <= 2, "observation continued past its deadline"
+        # Exact binary fractions: each observation consumes half the budget.
+        now += 0.03125
         return _live_evidence(tid, live_status)
 
     monkeypatch.setattr(task_evidence, "known_tid_evidence", _always_live)
+    monkeypatch.setattr(task_cmd, "time", SimpleNamespace(monotonic=lambda: now))
 
-    started = time.monotonic()
-    snapshot = task_cmd.task_terminal_snapshot(tid, timeout=0.05, context=ctx)
-    elapsed = time.monotonic() - started
+    snapshot = task_cmd.task_terminal_snapshot(tid, timeout=0.0625, context=ctx)
 
-    # 0.05 s budget + at most one TASK_EVIDENCE_POLL_INTERVAL sleep + slack;
-    # the mark.timeout above turns a regression into a failure, not a hang.
-    assert elapsed < 1.0
     assert snapshot.status == live_status
     assert snapshot.terminal is False
     assert snapshot.ack_targets == ()
-    assert calls, "evidence was consulted"
+    assert calls == [tid, tid], "return at expiry, neither early nor after another read"
 
 
 def test_terminal_snapshot_zero_timeout_observes_live_evidence_once(
