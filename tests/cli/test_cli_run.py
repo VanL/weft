@@ -2354,6 +2354,7 @@ def test_cli_run_once_overrides_persistent_spec(
 def test_cli_run_continuous_overrides_nonpersistent_spec(
     workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
+    weft_harness.ensure_foreground_manager()
     context = build_context(spec_context=workdir)
     spec_path = workdir / "continuous_override.json"
     spec_payload = {

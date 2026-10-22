@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from weft.helpers import kill_process_tree
+
 pytestmark = [pytest.mark.sqlite_only]
 
 
@@ -42,14 +44,20 @@ from weft.core.taskspec import IOSection, RunnerSection, SpecSection, StateSecti
 from weft.helpers import kill_process_tree
 
 
-def build_spec(tid: str, root: Path) -> TaskSpec:
+def build_spec(tid: str, root: Path, ready: Path, release: Path) -> TaskSpec:
     return TaskSpec(
         tid=tid,
         name="sqlite-stop-regression",
         spec=SpecSection(
             type="command",
             process_target=sys.executable,
-            args=["-c", "import time; time.sleep(10)"],
+            args=[
+                "-c",
+                "from tests.tasks.sample_targets import signal_ready_and_wait_for_release; "
+                "import sys; signal_ready_and_wait_for_release(sys.argv[1], sys.argv[2])",
+                str(ready),
+                str(release),
+            ],
             timeout=30.0,
             working_dir=str(root),
             runner=RunnerSection(name="host", options={}),
@@ -122,7 +130,9 @@ def main(root_arg: str) -> int:
     try:
         for index in range(5):
             tid = str(time.time_ns())
-            spec = build_spec(tid, root)
+            ready = root / f"ready-{index}"
+            release = root / f"release-{index}"
+            spec = build_spec(tid, root, ready, release)
             inbox = context.queue(spec.io.inputs["inbox"], persistent=True)
             inboxes.append(inbox)
             inbox.write(json.dumps({}))
@@ -132,19 +142,34 @@ def main(root_arg: str) -> int:
                 spec,
                 config=context.config,
             )
-            wait_for_status(root, tid, "running")
-            stopped = task_cmd.stop_tasks([tid], context_path=root)
-            if stopped != 1:
-                raise RuntimeError(f"stop_tasks returned {stopped} on iteration {index}")
-            wait_for_status(root, tid, "cancelled", timeout=20.0)
-            if not wait_for_exit(process):
-                pid = getattr(process, "pid", None)
-                if isinstance(pid, int) and pid > 0:
-                    kill_process_tree(pid)
-                raise RuntimeError(
-                    f"consumer process {pid!r} still alive after cancelled state on iteration {index}"
-                )
-            assert_integrity(context.database_path)
+            try:
+                # Setup is bounded by the unchanged outer 180s aggregate guard.
+                # Worker entry follows work_started; wrapper PID liveness does not.
+                print(f"iteration={index} tid={tid} phase=readiness", file=sys.stderr, flush=True)
+                while not ready.exists():
+                    process.join(timeout=0.05)
+                    if process.exitcode is not None:
+                        raise RuntimeError(
+                            f"consumer exited before readiness: {process.exitcode}; "
+                            f"latest={task_cmd.task_status(tid, context_path=root)!r}"
+                        )
+                wait_for_status(root, tid, "running")
+                print(f"iteration={index} tid={tid} phase=stop", file=sys.stderr, flush=True)
+                stopped = task_cmd.stop_tasks([tid], context_path=root)
+                if stopped != 1:
+                    raise RuntimeError(f"stop_tasks returned {stopped} on iteration {index}")
+                wait_for_status(root, tid, "cancelled", timeout=20.0)
+                if not wait_for_exit(process):
+                    raise RuntimeError(
+                        f"consumer process {process.pid!r} still alive after cancelled state on iteration {index}"
+                    )
+                print(f"iteration={index} tid={tid} phase=integrity", file=sys.stderr, flush=True)
+                assert_integrity(context.database_path)
+            finally:
+                release.touch()
+                if not wait_for_exit(process):
+                    kill_process_tree(process.pid)
+                    process.join(timeout=5.0)
         return 0
     finally:
         for inbox in inboxes:
@@ -161,13 +186,21 @@ if __name__ == "__main__":
     )
 
     repo_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
+    with subprocess.Popen(
         [sys.executable, str(script), str(tmp_path / "runtime-root")],
         cwd=repo_root,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=180,
-        check=False,
-    )
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            # The aggregate guard must also clean up the script's owned children.
+            kill_process_tree(process.pid)
+            stdout, stderr = process.communicate()
+            pytest.fail(
+                f"STOP script exceeded 180s; stdout={stdout!r}; stderr={stderr!r}"
+            )
 
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert process.returncode == 0, stderr or stdout
