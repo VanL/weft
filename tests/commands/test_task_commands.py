@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -2286,40 +2288,39 @@ def test_force_kill_task_processes_kills_pid_with_matching_create_time(
         _cleanup_running_task(process, worker)
 
 
-def test_force_kill_task_processes_refuses_stale_create_time(tmp_path: Path) -> None:
-    """A mapping entry with a mismatched create_time must not be signaled --
-    the command refuses to signal that PID and flows into the same outcome a
-    dead task takes today, instead of killing a PID that may have been
-    reused by an unrelated process (Spec: [CC-3.2])."""
-    spec, process, worker = _launch_running_task(tmp_path)
-    assert spec.tid is not None
-    assert process.pid is not None
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    try:
-        entry = _latest_mapping_entry(ctx, spec.tid)
-        assert entry is not None
-        handle = RunnerHandle.from_dict(entry["runtime_handle"])
-        recorded = dict(handle.scoped_host_processes())
-        assert recorded
-        target_pid = next(iter(recorded))
-        handle_payload = dict(entry["runtime_handle"])
-        # Corrupt the recorded create_time so it no longer matches the live
-        # process -- simulating a stale mapping pointing at a reused PID.
-        handle_payload["observations"] = dict(handle_payload["observations"])
-        handle_payload["observations"]["host_processes"] = [
-            {"pid": target_pid, "create_time": 1.0}
-        ]
-        stale_entry = dict(entry)
-        stale_entry["runtime_handle"] = handle_payload
+def test_force_kill_task_processes_refuses_stale_create_time() -> None:
+    """A stale creation time grants no authority over a live PID [CC-3.2]."""
+    # This direct identity check needs a real process, not Consumer startup.
+    # Keep it alive until cleanup without a timed workload or broker readiness.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ) as process:
+        try:
+            created = process_create_time(process.pid)
+            assert created is not None and created != 1.0
+            assert pid_is_live(process.pid)
+            stale_entry = {
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    str(process.pid),
+                    host_pids=[process.pid],
+                    observations={
+                        "host_processes": [{"pid": process.pid, "create_time": 1.0}]
+                    },
+                )
+            }
 
-        task_killed = task_cmd._force_kill_task_processes(stale_entry)
+            task_killed = task_cmd._force_kill_task_processes(stale_entry)
 
-        assert task_killed is False
-        # The real mapped process was never touched, so it is still alive.
-        assert pid_is_live(target_pid)
-    finally:
-        _cleanup_running_task(process, worker)
+            assert task_killed is False
+            assert pid_is_live(process.pid)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5.0)
 
 
 def test_force_kill_task_processes_records_attempt_while_verified_pid_lingers(
