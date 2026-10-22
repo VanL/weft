@@ -2123,6 +2123,8 @@ def test_task_runner_enforces_memory_limit(tmp_path: Path) -> None:
 
 
 def test_task_runner_enforces_cpu_limit(tmp_path: Path) -> None:
+    # Keep CPU pressure active until enforcement; a fixed CPU-time budget can
+    # finish before the monitor collects its five samples under suite load.
     pytest.importorskip("psutil")
     limits = LimitsSection(cpu_percent=1)
     runner = TaskRunner(
@@ -2135,8 +2137,6 @@ def test_task_runner_enforces_cpu_limit(tmp_path: Path) -> None:
             PROCESS_SCRIPT,
             "--cpu-percent",
             "100",
-            "--cpu-seconds",
-            "2",
             "--duration",
             "15",
         ],
