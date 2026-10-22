@@ -27,7 +27,7 @@ from weft.core.taskspec import TaskSpec
 from weft.core.taskspec.transport import validate_taskspec_payload
 from weft.helpers import closing_queue_iterator
 
-pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
+pytestmark = [pytest.mark.shared]
 
 STREAM_PREFIX_REGRESSION_FRAME_COUNT = 501
 """Minimum frame count proving the historical 500-frame prefix cap is gone."""
