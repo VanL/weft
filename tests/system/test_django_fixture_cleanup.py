@@ -141,49 +141,66 @@ def test_django_module_fixture_reaps_owned_runtime(tmp_path: Path, mode: str) ->
     # Process creation timestamps have second precision on some platforms.
     launched_after = time.time() - 1.0
     timeout_triggered = False
+    stdout_path = tmp_path / "child.stdout"
+    stderr_path = tmp_path / "child.stderr"
+
+    def child_output() -> str:
+        return stdout_path.read_text(
+            encoding="utf-8", errors="replace"
+        ) + stderr_path.read_text(encoding="utf-8", errors="replace")
+
     try:
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "integrations/weft_django/tests/test_weft_django.py::test_decorated_task_enqueue_returns_richer_submission_handle",
-                "-n",
-                "0",
-                "-q",
-                "-p",
-                "django_ownership_probe",
-            ],
-            cwd=project_root,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        # The readiness branch cannot drain pipes while waiting for its marker.
+        # File-backed output lets failed children exit and preserves diagnostics.
+        with (
+            stdout_path.open("w", encoding="utf-8") as stdout_file,
+            stderr_path.open("w", encoding="utf-8") as stderr_file,
+        ):
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "integrations/weft_django/tests/test_weft_django.py::test_decorated_task_enqueue_returns_richer_submission_handle",
+                    "-n",
+                    "0",
+                    "-q",
+                    "-p",
+                    "django_ownership_probe",
+                ],
+                cwd=project_root,
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+            )
         try:
             if mode == "controller-timeout":
                 deadline = time.monotonic() + 60.0
                 while not timeout_ready.exists():
-                    assert process.poll() is None, "Child exited before timeout gate"
+                    assert process.poll() is None, (
+                        f"Child exited before timeout gate:\n{child_output()}"
+                    )
                     assert time.monotonic() < deadline, (
-                        "Child did not reach timeout gate"
+                        f"Child did not reach timeout gate:\n{child_output()}"
                     )
                     time.sleep(0.01)
                 with pytest.raises(subprocess.TimeoutExpired):
-                    process.communicate(timeout=0.1)
+                    process.wait(timeout=0.1)
                 assert not evidence_path.exists()
                 timeout_triggered = True
                 return
-            stdout, stderr = process.communicate(timeout=60.0)
+            process.wait(timeout=60.0)
         finally:
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=10.0)
+            process.wait(timeout=10.0)
         assert process.returncode == (1 if mode == "assert-failure" else 0), (
-            stdout + stderr
+            child_output()
         )
         if mode == "assert-failure":
-            assert "induced fixture teardown failure" in stdout
+            assert "induced fixture teardown failure" in stdout_path.read_text(
+                encoding="utf-8", errors="replace"
+            )
         evidence = json.loads(evidence_path.read_text())
         root = Path(evidence["root"])
         assert evidence["base"] == evidence["context"] == str(root)
