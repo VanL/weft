@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
+from tests.tasks.sample_targets import wait_for_file
 from weft.helpers import tid_short_form
 
 
@@ -75,15 +76,17 @@ def test_task_ping_outputs_extended_pong_json(
     workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
     weft_harness.ensure_foreground_manager()
+    ready_path = workdir / "ping-ready"
+    release_path = workdir / "ping-release"
     rc, out, err = run_cli(
         "run",
         "--no-wait",
         "--function",
-        "tests.tasks.sample_targets:simulate_work",
+        "tests.tasks.sample_targets:signal_ready_and_wait_for_release",
         "--kw",
-        "duration=30",
+        f"ready_path={ready_path}",
         "--kw",
-        "result=done",
+        f"release_path={release_path}",
         cwd=workdir,
         harness=weft_harness,
     )
@@ -93,19 +96,26 @@ def test_task_ping_outputs_extended_pong_json(
     assert tid
     weft_harness.register_tid(tid)
 
-    rc, out, err = run_cli("task", "ping", tid, "--timeout", "10", cwd=workdir)
+    try:
+        # --no-wait proves acceptance, not child readiness [CLI-1.1.1].
+        # Function entry follows observation publication and running [MF-5].
+        wait_for_file(str(ready_path), timeout=30.0)
 
-    assert rc == 0, err
-    assert err == ""
-    payload = json.loads(out)
-    assert payload["timed_out"] is False
-    assert payload["error"] is None
-    assert isinstance(payload["observed_at"], str)
-    assert len(payload["observed_at"]) == 19
-    assert payload["observed_at"].isascii()
-    assert payload["observed_at"].isdigit()
-    assert payload["pong"]["command"] == "PING"
-    assert payload["pong"]["message"] == "PONG"
-    assert payload["pong"]["tid"] == tid
-    assert payload["pong"]["task_status"] == "running"
-    assert payload["pong"]["request_id"]
+        rc, out, err = run_cli("task", "ping", tid, "--timeout", "10", cwd=workdir)
+
+        assert rc == 0, err
+        assert err == ""
+        payload = json.loads(out)
+        assert payload["timed_out"] is False
+        assert payload["error"] is None
+        assert isinstance(payload["observed_at"], str)
+        assert len(payload["observed_at"]) == 19
+        assert payload["observed_at"].isascii()
+        assert payload["observed_at"].isdigit()
+        assert payload["pong"]["command"] == "PING"
+        assert payload["pong"]["message"] == "PONG"
+        assert payload["pong"]["tid"] == tid
+        assert payload["pong"]["task_status"] == "running"
+        assert payload["pong"]["request_id"]
+    finally:
+        release_path.touch()
