@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock
@@ -468,28 +469,41 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
     inbox.write(json.dumps({"stdin": "go\n"}))
-    driver = threading.Thread(target=task.run_until_stopped, daemon=True)
-    driver.start()
+    driver_finished = threading.Event()
 
     def delivered() -> bool:
         return any(
             json.loads(raw).get("data") == "ready\n" for raw in outbox.peek_generator()
         )
 
-    try:
-        assert reactor_waiting.wait(5.0)
-        release_child.write_text("release", encoding="utf-8")
+    def observe_output() -> None:
+        try:
+            reactor_waiting.wait()
+            assert not driver_finished.is_set(), "driver exited before quiet wait"
+            release_child.write_text("release", encoding="utf-8")
 
-        # Output is released only after the reactor starts its quiet wait. The
-        # muted case therefore cannot deliver it in the preceding reactor turn.
-        deadline = time.monotonic() + (5.0 if notify else 0.5)
-        while time.monotonic() < deadline and not delivered():
-            time.sleep(0.01)
-        assert delivered() is notify
-    finally:
-        task.stop()
-        driver.join()
-        assert not driver.is_alive()
+            # Output is released only after the reactor starts its quiet wait.
+            # Retain the notification deadline, independent of session startup.
+            deadline = time.monotonic() + (5.0 if notify else 0.5)
+            while time.monotonic() < deadline and not delivered():
+                time.sleep(0.01)
+            assert not driver_finished.is_set(), "driver exited during observation"
+            assert delivered() is notify
+        finally:
+            # The main test thread owns the driver; do not join it from here.
+            task.stop(join=False)
+
+    # Session construction precedes the notification-latency assertion. Keep the
+    # real driver on one owner thread and propagate helper assertions via Future.
+    with ThreadPoolExecutor(max_workers=1) as observer:
+        observation = observer.submit(observe_output)
+        try:
+            task.run_until_stopped()
+        finally:
+            driver_finished.set()
+            reactor_waiting.set()  # Release the observer if startup raises/exits.
+            task.stop(join=False)
+        observation.result()
 
 
 @pytest.mark.parametrize(
