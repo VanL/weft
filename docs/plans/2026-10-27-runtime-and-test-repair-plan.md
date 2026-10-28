@@ -505,11 +505,13 @@ and test cleanup failures are not passes. Independent review must confirm this
 small owner repair before admission B begins. Include it in the common repaired
 baseline for all measurement arms so its effect is not attributed to B.
 
-### 4. Repair and consolidate the demonstrated test gaps (T1–T5)
+### 4. Repair and consolidate the demonstrated test gaps (T1–T6)
 
 Files to modify: `tests/specs/taskspec/test_state_transitions.py`,
 `tests/core/test_state_machines.py`, `tests/core/test_agent_validation.py`, and
-`tests/commands/test_task_commands.py`. Read the actual validator,
+`tests/commands/test_task_commands.py`; follow-ups T5/T6 also touch
+`tests/tasks/test_runner.py` and `tests/tasks/test_consumer_terminal_events.py`.
+Read the actual validator,
 `weft/core/taskspec/model.py::TaskSpec.set_status`, the provider resolver and its
 keeper in `tests/core/test_provider_cli_backend.py`, and the existing module-time
 facade in `tests/commands/test_task_commands.py` first. No production seams or
@@ -570,6 +572,27 @@ the old fixture but cleans up with the candidate, and that a broken terminate
 still fails the descendant-exit assertion while cleanup completes. Exercise both
 callers of the shared generated scripts and the canonical PG path. Review the
 small fixture delta independently. Do not call a passing rerun a causal diagnosis.
+
+T6 (2026-10-28 Windows CI follow-up; test-only): the new
+`test_monitor_validation_failure_finalizes_consumer_and_reaps_command` reached
+its failed state with a PermissionError on `command.pid`, before the real invalid-
+monitor validator ran. The CI log confirms that failed dependency; it does not
+identify the Windows sharing/permission cause. Replace the unnecessary file
+readiness handshake with observation of the real Host-to-supervisor process
+handoff if that boundary supplies the already-created process. Retain the actual owned `Popen` object before any observation can raise,
+assert it is live, then forward unchanged to the real supervisor
+and real `builtins.str` validation. This contract needs actual process acquisition,
+not proof that the child's Python script has published a file. Preserve both
+KEEP/CLEAR reserved-policy cases, the expected validation error, single terminal
+fact, closed reactor and completed-reap assertions. Assert its recorded `returncode`
+before any oracle poll: `poll()` itself can reap and conceal missing cleanup.
+Use the retained `Popen` for independent failure-path kill/wait; no psutil identity
+reconstruction is needed for this acquired root. Keep cleanup independent of the
+owner defect. Do not patch global subprocess APIs, relax timing, repair filesystem
+permissions, or replace the validator result. Governing [RM-5.1] and [TS-0]
+contracts are unchanged. Verify the old missing-rollback behavior still fails
+the live-child assertion, both backends pass, and the corrected test passes
+Windows CI. Review this narrow test change independently before completion.
 
 Run mutation controls in isolated subprocesses or bounded monkeypatch scopes,
 never leave mutant code in the repository, and record exact failure assertions.
@@ -2238,3 +2261,222 @@ No `RECONSIDERATION REQUESTED`. The diff leaves TS-0, WT-2/WT-4, process-identit
 **Scoped verdict: no blocker.** F1 and F2 are non-blocking. As you noted, the pending same-head CI rerun doesn't certify this uncommitted delta; a new head has to run after this review.
 
 </details>
+
+
+### Fixture-head Windows failure (2026-10-28; investigation open)
+
+Run `40721270954` at head `40f094c34e3a598ee8c778f5bda53be72aea54aa`, Windows
+3.12 remaining job `122932890976`, failed the KEEP parameter of the R3 Consumer
+regression: expected `BaseResourceMonitor subclass`, observed PermissionError
+during access to the test's `command.pid` marker. The job reported 1 failed, 2167 passed and
+75 skipped. Log: `/tmp/weft-implementation-20261027/ci-v3-windows312-remaining.log`.
+The other jobs are not all finished. This is a new actionable test-boundary
+failure, not a passing runtime gate and not evidence for weakening the expected
+error. T6 above records the proposed removal of unnecessary readiness I/O.
+
+Parent confirmed the CI payload alone does not distinguish `exists()` from
+`read_text()` or identify a sharing/permission cause. A controlled read fault
+reproduces the same masked validation assertion in both reserved-policy cases;
+it is a dependency-sensitivity proof, not a Windows syscall diagnosis.
+
+
+T6 parent refinement: the first handoff candidate passed cross-family source
+review (275.35 s, no blocker; required context read). Its F1 identified observation
+before cleanup registration, suggesting rejection as practically unlikely. Parent
+accepts the simpler alternative: retain the already-owned `Popen` immediately
+instead of reconstructing a psutil identity. An isolated kill-plus-stdout-EOF
+without reap control showed that `poll()` in the assertion falsely passes both
+policies. The recorded-returncode assertion fails both missing rollback and
+kill-without-reap, while normal/marker-fault cases pass and independent cleanup
+needs no rescue. The final diagnostic will describe failure to reap, not assume
+the child is still live. Parent inspected exact assertion failures and control
+source. This test establishes acquired-root rollback; it makes no claim about
+Windows venv redirector descendant coverage. Final-refinement review and Windows
+CI remain pending.
+
+
+### T6 first cross-family review and Popen refinement evidence
+
+Claude completed the first T6 review in 275.35 seconds, with required context read and no blocker. F1 is accepted through removal: retain the acquired Popen before assertions rather than reconstructing process identity. O1 is an accepted proof limit: acquired root only, not Windows redirector descendants. O2 is eliminated with the same simplification. Broader observations remain outside this test-only slice.
+
+<details><summary>Verbatim first T6 review</summary>
+
+# T6 review: `test_monitor_validation_failure_finalizes_consumer_and_reaps_command`
+
+**Verdict: no blocker.** One nit (F1), recommended for rejection. No `RECONSIDERATION REQUESTED`. Windows CI is still required before T6 can be called complete.
+
+## Context completion
+
+I read the mandatory context in the required order:
+- `docs/program-theory.md`.
+- `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md` and `engineering-principles.md`.
+- The runbooks `testing-patterns.md` and `review-loops-and-agent-bootstrap.md`.
+- `docs/agent-context/lessons.md`.
+- `docs/lessons.md`. The watermark in `docs/coalescing.md:91` is "(none)", so I read the Golden Rules and every dated section, through the working-tree 2026-10-28 entry.
+
+Governing contracts: `06-Resource_Management.md` [RM-5.1] (lines 123–175), `08-Testing_Strategy.md` [TS-0], and plan Task 4 T6 (`2026-10-27-runtime-and-test-repair-plan.md:576-592`). The only "theory" files are the program theory and two plans; no module theory exists for runners or Consumer, which I'm recording rather than skipping. I read no other runbooks; they don't apply to a test-only delta. I ran nothing. Everything below comes from reading the code, except where I attribute a result to your supplied evidence.
+
+## Verification of the requested points (my reading)
+
+- **Host call site and binding.**
+  - `host.py:46-49` imports `run_monitored_subprocess` into Host's own namespace. The only call is the bare-name, keyword-only call at `host.py:977-994`, so patching `host_module.run_monitored_subprocess` takes effect.
+  - The process is created first: real `subprocess.Popen` at `:936`, then `_host_handle` at `:967`, then the handoff.
+  - Neither global `subprocess.Popen` nor the validator is patched.
+  - The wrapper's `**kwargs` exactly matches today's keyword-only call. If the call ever passes positional arguments, the test fails loudly.
+- **Supervisor ordering.**
+  - Inside `subprocess_runner.py:107`, the order is: worker-start and handle callbacks (`:108-117`), then `load_resource_monitor` (`:119-124`), then `TypeError` at `resource_monitor.py:273-276`.
+  - The `except BaseException` at `:425-431` then calls `_cleanup_after_execution_failure` (`:447-471`): tree stop, then `wait`, then `kill`/`wait` if still alive. The original error is re-raised.
+  - The wrapper only adds steps before this function; nothing in it changes.
+- **Identity pin.**
+  - `poll() is None` on an unreaped `Popen` means the PID can't have been reused when `psutil.Process(pid)` runs. On POSIX the unreaped zombie holds the PID; on Windows the open process handle does.
+  - psutil 7 records `(pid, create_time)` when the object is constructed (`psutil/__init__.py:346-347`). After rollback reaps the process, `is_running()` therefore can't be fooled by PID reuse.
+  - This pin is sounder than the old one, which relied on a PID the child wrote to a file.
+- **Consumer propagation.**
+  - The runner runs on an in-process worker lane, so the patch applies.
+  - Exceptions are caught at `consumer.py:376-386` and finalized at `:528-534`, which produces `failed`, `state.error`, the reserved policy and `work_failed`.
+  - `cleanup_on_exit=False` (`:1196-1206`) leaves runner rollback as the only thing that kills the child.
+  - If the wrapper's own assertion fires, its message lands in `state.error` and shows up in the first assertion's output, so failures are easy to diagnose.
+- **Kept assertions.** Lines 174–183 still check: the real validation error, exactly one `work_failed`, `CLOSED`, KEEP/CLEAR reserved custody, a recorded child, and a dead child.
+- **Unchanged guards.** The 10 s `drive_until` guard and the worker count are unchanged. The only wait removed is the 5 s marker poll; none was added.
+- **Removed imports.** `threading`, `Path`, `tmp_path` and `subprocess_runner` have no remaining uses in the file.
+- **Test count.** 3 + 1 + 2 + 4 = 10, which matches your "10 passed".
+
+## Findings
+
+| ID | Severity | Location | Finding | Strongest counterargument | Suggested disposition |
+|---|---|---|---|---|---|
+| F1 | nit | `tests/tasks/test_consumer_terminal_events.py:152-157` | The wrapper now runs *before* the supervisor's rollback scope. In the old design the hook ran inside it (`subprocess_runner.py:107`/`:425`). If the wrapper raises after it has the live `Popen` but before `children.append` and the forward, nothing owns the child: not production rollback, and not the test's `finally`. That breaks the 2026-10-28 lesson "ownership starts at acquisition". | In practice this can't happen. `poll()` on your own unreaped child, psutil on your own child, and the keyword-only call site make such an exception practically unreachable. Any leak is bounded by `sleep(30)`, and the test fails loudly anyway. Guarding it would be over-armoring ([WT-4.4]). | **Reject; no change.** If the owner disagrees, the smallest fix is to append `process` to a list first and `kill()`/`wait()` it in `finally` when `poll() is None`. |
+
+## Your three questions
+
+1. **Correctness: yes.**
+   - The test observes the real acquisition handoff and passes the call through unchanged. It still fires against the actual defect: in your missing-rollback control, both cases failed exactly `assert not child.is_running()`. That is supplied evidence, consistent with my reading.
+   - The negative assertion has positive support: the child is live at handoff, and `sleep(30)` outlasts the 10 s guard, so without rollback the child must still be alive when asserted. The only way it passes vacuously is if the interpreter crashes on its own.
+   - Your marker-fault controls show the dependency that masked the failure is gone, not hidden. They don't diagnose the Windows cause, and you correctly don't claim they do.
+2. **Expert elegance: yes.** Watching the existing Host-to-supervisor seam is the direct move. It removes a file handshake whose readiness was never part of the contract, adds no helper or production seam, and makes the test shorter.
+3. **Underlying primitives and data structures: yes.** The test uses the `Popen` handle for liveness and PID stability while the process is unreaped, then psutil `(pid, create_time)` for death checks after reaping. That pairing matches Golden Rule 14's scoped-identity rule. No file, pipe, socket or event handshake remains.
+
+**Does dropping the handshake weaken the bug detector?** Not for the [RM-5.1] obligation, which covers the acquired root process (see O1).
+
+## Observations (not actionable in this pass)
+
+- **O1: Windows venvs.** On Windows, `sys.executable` in a venv may be a redirector that starts the real interpreter as a child. This is inference; I haven't checked the uv venv used in CI. If so, the old marker pinned that descendant, while the new test pins the `Popen` root.
+  - [RM-5.1] makes the root the obligation and explicitly doesn't widen tree enforcement, so the new pin is the exact contract.
+  - Production rollback still kills the whole tree (`terminate_process_tree`), but this test no longer asserts that descendants die. Optionally say so in the T6 completion note.
+- **O2: redundant `create_time()`.** The explicit `child.create_time()` at `:156` duplicates what psutil 7 already does at construction. It was in the baseline and this change doesn't make it worse.
+- **O3: plan status.** Plan line 2272 still calls T6 "proposed". Reconcile it when Windows CI results come in. The plan is outside this unit.
+- **O4: completion gate.** You haven't claimed a Windows pass, and the plan (`:591`) makes one a T6 acceptance condition. The completion gate stays open until it passes.
+
+No standing constraint moves: [RM-5.1], [TS-0], WT-2/WT-4, custody contracts and [ALT-WT-017] (no reduced workers) are all unchanged.
+
+</details>
+
+Final refinement source SHA-256: `85ede730a503fbc48f0faec64c2cb36e06f992e53bf8ca2854a6e77c06d12bcf`. The affected file passed all 10 cases in 6.60 seconds; the canonical PostgreSQL KEEP/CLEAR pair passed in 1.93 seconds. Ruff, format and scoped mypy passed. Normal 12-worker settings were retained; all-extras was restored and the owned PostgreSQL container removed.
+
+Author fresh-eyes pass: ownership is recorded before observation, the original supervisor and monitor validation remain real, and cached returncode cannot reap the process being checked. The explicit poll-only alternative falsely passed both kill-without-reap controls; the final oracle failed those and missing rollback for both policies. Normal and marker-fault controls passed. Independent cleanup reaped all ten control Popen objects without rescue. Controls differ from final only in the assertion diagnostic text. Evidence and exact commands: `/tmp/weft-implementation-20261027/t6-popen-review-evidence.md`. This is stronger root ownership evidence with fewer primitives, not descendant coverage. Final focused cross-family review and corrected-head Windows CI remain open.
+
+
+### T6 final focused cross-family review (2026-10-28)
+
+Claude completed in 174.31 seconds with required context read, no findings in scope and no blocker. Correctness, elegance and use of underlying primitives all pass. Author accepts the explicit root/owned-handle proof boundary. O1 is a required diagnostic constraint for Windows: investigate any bounded rollback expiry; do not relax the oracle. O2 records ownership semantics. O3/O4 are pre-existing cleanup-path observations, not expanded in this narrow change; O5 records descendant coverage limits. O6 remains open pending current-head CI and plan closure.
+
+<details><summary>Verbatim final T6 refinement review</summary>
+
+# T6 Popen refinement review: `test_monitor_validation_failure_finalizes_consumer_and_reaps_command`
+
+**Verdict: no blocker.** I found no findings inside the unit. There is no `RECONSIDERATION REQUESTED`. Windows CI is still required before T6 is complete.
+
+## Context completion
+
+I read the full required context, in this order:
+1. `docs/program-theory.md`
+2. `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`
+3. Runbooks: `testing-patterns.md` and `review-loops-and-agent-bootstrap.md`
+4. `docs/agent-context/lessons.md`
+5. `docs/lessons.md`. The watermark in `docs/coalescing.md:91` is "(none)", so I read the Golden Rules and every dated section, through the working-tree 2026-10-28 entry ("ownership starts at acquisition", "cleanup must remain effective when the method being tested is broken").
+
+I also read the governing contracts:
+- `06-Resource_Management.md` [RM-5.1], lines 123–175, especially 168–175 ("stops and reaps the acquired root process … does not broaden the … process-tree enforcement boundary").
+- `08-Testing_Strategy.md` [TS-0].
+- Plan T6 at `2026-10-27-runtime-and-test-repair-plan.md:576-595` and the refinement note at `:2266-2295`.
+
+There is no module theory for runners or Consumer. The only theory files are the program theory and two plans, so this is recorded as absent, not skipped. I read no other runbooks because they don't apply to a test-only delta.
+
+I ran nothing and computed no hashes. Anything I attribute to "supplied evidence" comes from your package. Everything else comes from reading the repo, and I label stdlib-behaviour points as inference.
+
+## Verification of the requested points (my reading)
+
+**Host call site and module-local binding**
+- `host.py:46-49` imports `run_monitored_subprocess` into Host's own namespace.
+- Command dispatch goes `host.py:487-488` → `_run_command_with_hooks`. That function creates the real `Popen` at `:936` (text pipes, so `Popen[str]` matches the annotation), checks `_host_handle` at `:967-969`, then makes one bare-name, keyword-only call at `:977-994`.
+- Patching `host_module.run_monitored_subprocess` therefore intercepts exactly the handoff, with the process already acquired.
+- Global `subprocess.Popen`, the validator and the supervisor body are untouched. The `**kwargs` wrapper would fail loudly if the call ever went positional.
+- `psutil` and `contextlib` are still used later in the file (`:214-328`), so keeping those imports is correct.
+
+**Supervisor ordering**
+- Inside `subprocess_runner.py:107`, the order is: callbacks (`:108-117`), then `load_resource_monitor` (`:119-124`), then `TypeError` at `resource_monitor.py:273-276`.
+- The `except BaseException` at `:425-431` calls `_cleanup_after_execution_failure` (`:447-471`), suppresses errors from it, and re-raises the original.
+- The cleanup sequence:
+  1. Stop: `terminate_process_tree`, then `process.wait(0.2)` (`:474-484`).
+  2. On timeout, the kill path: kill tree, `wait`, `kill`, `wait` (`:487-497`).
+  3. Then `poll()`; if the process is still alive, `kill` and `wait` (`:462-471`).
+- `finally` closes pipes and stops the monitor (`:432-444`). The wrapper only adds steps before all of this.
+
+**Cached returncode oracle**
+- `Popen.returncode` is set only by the handle's own `poll`, `wait` or `communicate`.
+- Every production rollback path ends in `Popen.wait` or `Popen.poll` on the owned handle.
+- On POSIX, `terminate_process_tree`'s `psutil.wait_procs` may `waitpid` the child first. A later `Popen.wait`/`poll` then gets `ECHILD`, and CPython sets `returncode = 0` (inference from CPython's `_try_wait`/`_internal_poll`). So the oracle can't give a false red against today's code.
+- The only non-product `poll()` before the assertion is the wrapper's. If it ever reaps, it does so only on a path where its own `assert … is None` already fails the test.
+- So "the owner handle recorded exit" can only be satisfied by product rollback. Your kill-without-reap control (supplied evidence) shows the poll-oracle false green is real and that this oracle closes it.
+
+**Consumer lifecycle and error propagation**
+- The runner executes on the in-process worker lane, so the patch applies there.
+- `consumer.py:376-386` captures the exception. `:528-534` → `_finalize_work_exception` (`:271-295`) marks the task failed, sets `state.error` and emits one `work_failed` through the terminal finalizer.
+- `cleanup_on_exit=False` leaves runner rollback as the only thing that kills the child.
+- If the wrapper's assertion ever fires, its message lands in `state.error`, and the first assertion (`:173`) shows it.
+
+**Kept assertions**
+- Lines 173–183 still check: the real `BaseResourceMonitor subclass` text, exactly one `work_failed`, `CLOSED`, KEEP/CLEAR reserved custody, a recorded child, and the reap.
+- The 10 s `drive_until` guard and the worker count are unchanged. No wait was added.
+
+## Does removing the handshake weaken the bug detector?
+
+**No. It strengthens it.**
+- The [RM-5.1] obligation is the acquired root, and `poll() is None` at handoff proves the root is live at the point the contract cares about.
+- The prior review's only vacuous-pass route was "the child exits on its own before the check". That route is now closed: with rollback missing, nothing on the owner handle sets `returncode`, so the assertion fails even if the child died independently.
+- Supplied evidence matches this reading: missing rollback and kill-without-reap fail exactly `assert child.returncode is not None` under both policies.
+
+## Do the controls exercise production and preserve cleanup?
+
+**Yes (my reading of the supplied plugin).**
+- Each mutation replaces a module-global name that production looks up at call time, so the mutations take effect: `subprocess_runner.load_resource_monitor` (called at `:120`) and `subprocess_runner._cleanup_after_execution_failure` (called at `:428`).
+- The candidate source really ran on both xdist workers: the tracebacks point at `/tmp/.../t6-popen-returncode-candidate.py:181` on gw0 and gw1.
+- Kill plus stdout EOF with no wait is a sound "exited but unreaped" construction for a single-process root on macOS.
+- The test's `finally` uses the retained `Popen` (`poll`/`kill`/`wait`), which works even when rollback is broken. Supplied evidence shows `needed_rescue` and `alive_after_cleanup` empty for all 10 recorded processes.
+
+## Findings
+
+None within the unit.
+
+## The three answers
+
+1. **Correctness: yes.** The test watches the real ownership boundary, records the owned handle before anything that can raise (this resolves the prior F1), and forwards the call unchanged. The real validator still fires. The completion oracle can only be satisfied by the product's own wait or poll. It also no longer depends on psutil re-reading the process's identity.
+2. **Expert elegance: yes.** It is a four-line pass-through at the existing seam: no file, pipe, socket or event handshake, no helper, no production seam, and a shorter test. The comment at `:180` states the one non-obvious point: don't let the oracle do the reap it is checking for.
+3. **Underlying primitives and data structures: yes.** `Popen` is the handle the product owns, and `returncode` is its own record of exit. Using that, rather than OS probes or a PID the child publishes itself, follows [WT-4.2] "one owner for each resource" and "keep an identity you already have".
+
+## Observations (not actionable in this pass)
+
+- **O1: interpreting a Windows failure (affects this delta).** On Windows, the old psutil `is_running()` oracle would pass if the process died after production's bounded waits expired. The new oracle requires the product to have observed the exit within those waits: about 0.2 s per step, roughly 1 s or more of total grace after the kill (`_constants.py:1911`). That stricter requirement matches [RM-5.1]'s "stops and reaps". If Windows CI fails on `:181`, treat it under [TS-0] as a possible product rollback-budget expiry and investigate it. Don't relax the oracle.
+- **O2: oracle scope.** The oracle means "the owned `Popen` recorded exit", which is stricter than "the OS reaped the PID". A future rollback that reaps only through psutil would fail this test. I consider that correct, because the handle is the owner, but it's worth knowing.
+- **O3: cleanup order (pre-existing, unchanged).** In `finally`, `task.cleanup()` runs before the child reap loop (`:185-189`). If `task.cleanup()` ever raised, the 30 s child would outlive the test. This ordering is the same as at baseline `40f094c3`, so the delta doesn't make it worse. Under the 2026-10-28 lesson, the smallest fix would be to reap the children first, or nest a `try/finally`. That's for the owner to decide.
+- **O4: unclosed pipes.** If the wrapper's own assertion fails, the product never runs, so the pipes are left to garbage collection. No `ResourceWarning` filter is configured in `pyproject.toml`, and that path already fails the test. Negligible.
+- **O5: descendant coverage.** Coverage is root-only, as you correctly say. A Windows venv redirector descendant isn't covered by this test; production still kills the whole tree (`helpers/__init__.py:489`, `:572`).
+- **O6: completion gate.** Windows CI and the plan-status reconciliation (`:2266-2295`) are still open.
+
+No standing constraint moves: [RM-5.1], [TS-0], WT-2/WT-4, durable queue/state/custody contracts and [ALT-WT-017] are all unchanged.
+
+**Verdict line: no blocker.**
+
+</details>
+
+Final local integration checks: mypy passed 478 files; Ruff check, formatting (631 files), suppression registry and whitespace checks passed. Six plan/spec hygiene cases passed in 0.94 seconds and documentation paths passed. The focused SQLite/PostgreSQL evidence above is on the final test. No runtime behavior changed in T5/T6, so the existing full runtime suites remain applicable; new-head complete CI remains required.

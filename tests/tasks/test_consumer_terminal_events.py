@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import subprocess
 import sys
-import threading
 import time
-from pathlib import Path
 from typing import Any
 
 import psutil
@@ -20,7 +19,7 @@ from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands.result import await_task_result
-from weft.core.runners import subprocess_runner
+from weft.core.runners import host as host_module
 from weft.core.tasks import Consumer
 from weft.core.tasks.base import TaskReactorLifecycle
 from weft.core.tasks.runner import RunnerOutcome
@@ -120,26 +119,19 @@ def test_consumer_unknown_runner_outcome_status_fails_task(
 @pytest.mark.parametrize("reserved_policy", [ReservedPolicy.KEEP, ReservedPolicy.CLEAR])
 def test_monitor_validation_failure_finalizes_consumer_and_reaps_command(
     broker_env: BrokerEnv,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reserved_policy: ReservedPolicy,
 ) -> None:
     """A failed task must not leave its post-spawn acquisition running [RM-5.1]."""
     db_path, make_queue = broker_env
     unique_tid = str(time.time_ns())
-    marker = tmp_path / "command.pid"
-    script = (
-        "import os,sys,time; from pathlib import Path; "
-        "p=Path(sys.argv[1]); tmp=p.with_suffix('.tmp'); "
-        "tmp.write_text(str(os.getpid())); tmp.replace(p); time.sleep(30)"
-    )
     spec = TaskSpec(
         tid=unique_tid,
         name="invalid-command-monitor",
         spec=SpecSection(
             type="command",
             process_target=sys.executable,
-            args=["-c", script, str(marker)],
+            args=["-c", "import time; time.sleep(30)"],
             monitor_class="builtins.str",
             cleanup_on_exit=False,
             reserved_policy_on_error=reserved_policy,
@@ -155,21 +147,17 @@ def test_monitor_validation_failure_finalizes_consumer_and_reaps_command(
         state=StateSection(),
     )
     task = Consumer(db_path, spec)
-    children: list[psutil.Process] = []
-    original_loader = subprocess_runner.load_resource_monitor
+    children: list[subprocess.Popen[str]] = []
+    original_supervisor = host_module.run_monitored_subprocess
 
-    def load_after_child_ready(*args: Any, **kwargs: Any) -> Any:
-        deadline = time.monotonic() + 5.0
-        while not marker.exists():
-            assert time.monotonic() < deadline, "spawned command did not become ready"
-            threading.Event().wait(0.01)
-        child = psutil.Process(int(marker.read_text()))
-        child.create_time()  # Pin identity before the expected validation failure.
-        children.append(child)
-        return original_loader(*args, **kwargs)
+    def record_acquired_command(**kwargs: Any) -> RunnerOutcome:
+        process = kwargs["process"]
+        children.append(process)
+        assert process.poll() is None, "command exited before monitor validation"
+        return original_supervisor(**kwargs)
 
     monkeypatch.setattr(
-        subprocess_runner, "load_resource_monitor", load_after_child_ready
+        host_module, "run_monitored_subprocess", record_acquired_command
     )
     try:
         with make_queue(spec.io.inputs["inbox"]) as inbox:
@@ -189,16 +177,16 @@ def test_monitor_validation_failure_finalizes_consumer_and_reaps_command(
             assert reserved.has_pending() is (reserved_policy is ReservedPolicy.KEEP)
         assert children, "monitor validation must occur after actual process creation"
         for child in children:
-            assert not child.is_running(), (
-                "failed Consumer left its owned command alive"
+            # Do not let the assertion reap a child the supervisor failed to wait for.
+            assert child.returncode is not None, (
+                "failed Consumer did not reap its owned command"
             )
     finally:
         task.cleanup()
         for child in children:
-            with contextlib.suppress(psutil.NoSuchProcess):
-                if child.is_running():
-                    child.kill()
-                child.wait(timeout=5.0)
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5.0)
 
 
 @pytest.mark.parametrize(
