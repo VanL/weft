@@ -939,3 +939,144 @@ The standing constraints are untouched: WT-2/4, ALT-WT-017/019, MA1.8/MA3, MF5 c
 </details>
 
 Final gates: six plan/spec hygiene tests passed and the two experiments skipped without opt-in, as required; those skips are not measurements. Ruff/format, suppression registry, full mypy479files, documentation paths and whitespace checks passed. First A measurements will use a dedicated detached baseline worktree and its own virtual environment, with the same configuration, source-manifest and actual-child preflight. The local .envrc is ignored rather than tracked; copied its existing environment loader and linked the same operator .env. Initial setup selected the primary checkout uv wrapper; no measurement ran, and both editables were restored to their owning checkouts before comparison.
+
+
+### First A batches retained; B promotion (2026-10-28)
+
+Common repaired A is `8123b129`, frozen in `/Users/van/.codex/worktrees/admission-baseline/weft`. All four normal12-worker batches passed: SQLite quiet24.76s, trace24.56s, PostgreSQL quiet45.34s, trace48.31s. Each has an empty source diff, same committed harness, verified actual-child source provenance, warmup plus three measured throughput/STOP pairs and complete raw artifacts. No B source or tests were applied before these results. Artifact inventory and complete series: `/tmp/weft-implementation-20261027/A-before-verified.json`; raw root: `/tmp/weft-implementation-20261027/dispatch-measurements/A-before`.
+
+Quiet useful-work seconds: SQLite [4.033703209,4.430341833,3.975394167]; PostgreSQL [4.687358625,4.742724583,4.739174792]. These are baseline samples only. The returning A batches remain required; no benefit or regression is decided from this first batch. Original unchanged six/eight-parent acceptance passed both backends as recorded above.
+
+B proposed [MA-3] paragraph is now promoted text-first against8123b129, before its implementation. The spec marks this permitted scope in flight without claiming a completed mapping. B retains one authorization and receipt-consumes-turn. Comprehension checks: free lane is not authority; no waiting for receipts; missing evidence never permits reseeding; newly ready child maintenance yields to its normal owner. The first real RED cases will now qualify duplicate-sweep removal and pre-fetch maintenance without changing original load/capacity.
+
+
+### B implementation, falsification and A/B/A evidence (2026-10-28)
+B implements only the promoted ordinary-delivery scope and pre-reservation child-maintenance observation. No C1 receipt allowance or C2 batching change is present. Manager SHA-256 `e5d98ca0a5428e5e23d1899704dc82619d679a4d699b313b556e90d36cf70fbc`; new-test SHA-256 `16c51addc4031c63c54eafa037fc9b97e70612b4b89eaf4acfa0966a7aab0787`. Tests live with the existing real family-maintenance fixture, rather than splitting its owned process/server setup across three files. This is a test placement adjustment, not reduced coverage.
+Final RED: four intended failures and three passes on SQLite and PostgreSQL. Earlier fixture errors (body/tuple return shape and injecting before classification instead of after reservation) were corrected before accepting RED. GREEN: fifteen focused/keeper cases per backend, then the complete 51-case family gate on each backend, including unchanged six/eight-parent system acceptance. Ten isolated mutants produced twelve intended assertion failures; seven positive controls passed. Parent inspected the exact assertions, not only exit codes. All fourteen unique owned PIDs were absent afterward (28 marker-path records); environment and server inventory were restored. Exact logs, hashes, commands and controls: `/tmp/weft-implementation-20261027/b-final-manifest.json`, `b-red-final-manifest.json`, `b-mutant-verified-results.json` and `admission-b-prepare-mutant.py`.
+All twelve A/B/A batches and 96 warmup/measured scenarios completed with matched harness/dependency provenance, actual-child source verification, normal twelve workers, unchanged capacity/autostart, and retained raw artifacts. A-before and A-after are the same clean8123b129 checkout; B uses that commit plus the frozen B source diff. Inventory: `/tmp/weft-implementation-20261027/A-after-verified.json`; combined evidence: `ABA-primary-analysis.json`; raw root: `dispatch-measurements/`.
+Primary quiet samples below are seconds, in measurement order. The rule was fixed before A-before.
+| Backend / metric | A-before | B | A-after |
+|---|---|---|---|
+| sqlite / elapsed_seconds | [4.033703209, 4.430341833, 3.975394167] | [4.153165042, 4.370222125, 4.131000125] | [4.328474375, 4.635464375, 4.419605875] |
+| sqlite / ping_call_to_return_seconds | [0.014500083, 0.015966208, 0.012072375] | [0.013300041, 0.012900167, 0.011812708] | [0.015394291, 0.015246834, 0.121546916] |
+| sqlite / stop_handler_return_seconds | [0.002635084, 0.002430875, 0.002530875] | [0.002668041, 0.002757834, 0.009014958] | [0.003194625, 0.003694834, 0.002961958] |
+| postgres / elapsed_seconds | [4.687358625, 4.742724583, 4.739174792] | [4.739131542, 4.950271834, 4.742491833] | [4.935938334, 5.023572291, 5.119909375] |
+| postgres / ping_call_to_return_seconds | [0.167205250, 0.174405792, 0.172763250] | [0.182297625, 0.175903292, 0.167479416] | [0.175720292, 0.178162459, 0.170451458] |
+| postgres / stop_handler_return_seconds | [0.043082208, 0.049754041, 0.049808375] | [0.051847541, 0.053241042, 0.048893333] | [0.053029625, 0.047690584, 0.052007041] |
+
+No primary quiet series meets the predeclared reproducible-regression rule; neither backend meets the elapsed-benefit rule. PostgreSQL elapsed and SQLite STOP have disjoint surrounding baseline ranges, so attribution is uncertain. The 9.015 ms B SQLite STOP sample and 121.547 ms returning-A PING sample remain in the record. Do not call these data a speedup or proof of causal neutrality. No extra batch is used to fish for significance.
+Every trace repetition removes exactly24 handler sweeps. B actual gate-call counts: SQLite26/24/24 and PostgreSQL34/34/32; positive coverage closes the instrumentation gate. Maintenance yields are SQLite2/0/0 across1/0/0distinct turns and PostgreSQL10/10/8 across5/5/4turns, all sentinel-driven. The gate does not erase maintenance work, and its child-deadline projection remains O(tracked children). Total sweep and turn counts, blocked intervals and missing completion-proxy samples remain secondary evidence in the combined JSON.
+Provisional retention decision: B qualifies under the explicitly allowed redundant-sweep-removal clause with no demonstrated primary regression. Retention remains subject to the completed-work review and outstanding correctness gates. This is not a performance-benefit claim. Independent reconstruction found all72 measured B PostgreSQL receipts ready and committed inside their authorization turn; SQLite72receipts were from prior turns. C1 still requires its own B/C1/B comparison. No concurrent workers are justified by these observations.
+Author fresh-eyes read the exact production/spec delta and all seven tests separately after implementation. Scope/finally, inherited/public routes, non-consuming readiness, exact custody and later same-turn convergence agree with the approved design. Existing sentinel and deadline owners are reused; no new scheduler/cache/worker is introduced. Full note: `/tmp/weft-implementation-20261027/b-author-fresh-eyes.md`.
+Tier-1 implementation review attempt1 timed out after540.26s, exit143, with no final result and empty stderr. Read progress is not approval. The same seven-part brief was retried with a900s bound calibrated to its size; result pending. Invocation remains the verified read-only Claude posture recorded above.
+Full SQLite verification finished239.80s:5973passed,38skipped,3failed. The failures are measurement-harness hygiene: two direct `simplebroker.__file__` uses violate the architecture guard, and three reasoned BLE001 catches are absent from the global suppression inventory, causing two policy failures. No runtime case failed. Earlier blanket wording that final harness suppression gates passed is superseded by this actual frozen-source full-run result. Correct the harness provenance accessor and reconcile reviewed suppression evidence before closure; do not weaken the architecture or registry tests. Existing A/B/A artifacts remain tied to their recorded frozen source. Ruff/format, full mypy479files, doc paths and whitespace checks passed for B; policy failures remain open.
+
+
+### B completed-work independent review (2026-10-28)
+
+Tier-1 Claude retry completed455.76s, exit0, required context confirmed, no blocker and all three implementation questions answered yes. Its performance observation reflects the dispatch-time snapshot; subsequent A/B/A results are recorded above and were independently verified by a native research agent plus author calculations, not attributed to Claude.
+
+Dispositions: F1 accepted as a measurement limitation: readiness hints can be stale or empty, costing one ordinary turn. Current artifacts count all observed gate yields but do not record matching-event counts at the following drain, so the stale-hint fraction is unavailable. Do not describe every sentinel yield as necessary settlement. No new polling, wake or adapter change is justified. F2 accepted: normalize whitespace and implementation-mapping style. F3 accepted: remove the classification test's duplicate explicit stop/cleanup and rely on its existing fixture owner, keeping release.touch. The staged-maintenance helper's cleanup remains because it owns the clock/fault scope. F4 declined: retain the inexpensive completed-result assertion for both real delivery routes; it proves these routes finish and supports clean teardown. No behavioral production correction requested.
+
+<details><summary>Verbatim B completed-work review</summary>
+
+## Context read
+
+I read every required source in the order given, in full, before forming any judgment:
+
+1. `docs/program-theory.md`
+2. `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`
+3. Runbooks: `testing-patterns.md`, `review-loops-and-agent-bootstrap.md`, `hardening-plans.md`
+4. `docs/agent-context/lessons.md`
+5. All of `docs/lessons.md`. `docs/coalescing.md` sets the lessons watermark at "(none)", so every dated section counts as startup context. That includes the 2026-10-28 lessons on retry consumption and test ownership.
+
+For module context I read:
+- The B design, decision rules, slices and acceptance matrix in `docs/plans/2026-10-22-bounded-concurrent-manager-launches.md`, plus the B entries dated 2026-10-28.
+- The promoted [MA-3] paragraph at `docs/specifications/03-Manager_Architecture.md:883-901`.
+- [MANAGER.11], [IMPL.8] and [IMPL.10] in `07-System_Invariants.md`.
+- The live owners: `Manager._process_manager_reactor_turn`, `_process_queue_message`, `_handle_work_message`, `_cleanup_children`, `_child_has_exited`, `_manager_child_timeouts`, `next_wait_timeout`, `_ManagerChildSentinelAdapter`, `_drain_child_sentinel_events`, `_run_managed_service_convergence`, `_continue_shutdown_drain` and `_terminate_children`; `BaseTask.process_once` and `_process_reactor_turn`; and `MultiQueueWatcher._process_queue_message`, `_drain_round_robin_pass`, `_drain_priority_queues` and `_drain_queue`.
+
+## What I verified and what I didn't
+
+**Verified by reading the files:**
+- Every manager hunk is in the working tree at the diff's positions (`manager.py:646, 5170-5211, 5474-5478, 8361, 8409-8436`). The spec paragraph is at `03-Manager_Architecture.md:883-901`.
+- The new tests are at `test_manager_family_maintenance.py:969/1067/1154/1270/1398`, and the exact assertion strings in the mutant log appear there.
+- All identifiers in the tests and the RED notes exist. The RED note's `manager.py:2634` corresponds to the current line 2635 (`_family_request_identity` → `_build_child_spec`) once you allow for B's one added line at 646.
+- The S2 retry consumption (`manager.py:4539-4540`) is in the baseline and untouched by this diff.
+
+**Not verified:**
+- The SHA-256 manifest hashes. My toolset can only read files, not hash them.
+- Test and mutant results. You told me not to run tests, so those are your supplied evidence and I only read the assertions.
+
+## Findings
+
+| ID | Severity | Location | Finding and evidence | Strongest counterargument | Suggested disposition |
+|---|---|---|---|---|---|
+| F1 | P3 | `manager.py:5197` gate, adapter at `manager.py:457-477` and `546-549`, top-of-turn drain at `8344` | **The sentinel hint can be set when nothing needs servicing, which costs one turn with no dispatch.** Two ways this happens: **(a)** The observer thread puts its result, the reactor's `drain()` consumes it, clears the event and finds the queue empty, and only then does the observer call `_result_event.set()`. The event stays set with no result behind it. **(b)** A child exits after the top-of-turn drain but before `child_cleanup`. The outer sweep reaps it through `exitcode` (`4360-4362`) and calls `remove(tid)`, but the event already queued for it stays set. In both cases the gate yields once. The next turn's drain clears the event, and because `notify_activity()` always follows `set()` (`548-549`), that next turn starts at once. This is bounded and safe. | This is the accepted design: a hint is not death evidence and yields to an ordinary turn. Both windows are narrow races, not the usual path (exit → wake → drain → sweep). | No code change. In the B trace measurement, count gate yields whose next top-of-turn drain returned 0 matching events. That separates spurious yields from real ones in the yield-turn counts the plan already requires. |
+| F2 | nit | `03-Manager_Architecture.md:881-901` | **Spec formatting drifts from the surrounding section.** There are two blank lines before the paragraph. The mapping uses plain `Implementation mapping:` where the same section uses `_Implementation mapping_:` (line 830). The new rule sits after that existing mapping list, not in the [MA-3] prose. I did not check whether backstitch or spec-hygiene tooling depends on the italic header. | The plan said "append before the next same-level section", and the text was promoted and reviewed in that position. | Use one blank line and the `_Implementation mapping_:` form. You could also fold the three-symbol mapping into the existing list as one bullet. The rule text stays as is. |
+| F3 | nit | `test_classification_continuation_keeps_first_dispatch`, in the `finally` | **Teardown duplicated by the fixture.** `manager.stop(join=False); manager.cleanup()` already runs in `startup_pg_manager`'s teardown (`:116-118`), still inside the harness. The test's `monkeypatch.context()` has closed before its `finally` runs, so the clock and broker state are the same as at fixture teardown. The similar call inside `_staged_dispatch_maintenance` is justified, because it runs under the advanced Manager clock with the outage cleared. That lets custody settle even when the gate is broken, as the 2026-10-28 lesson requires. | `stop()` and `cleanup()` are idempotent. | Delete the two lines and keep `release.touch()`. |
+| F4 | nit | `test_dispatch_reuses_outer_child_cleanup`, after `ready.exists` | **Possibly unneeded work in one test.** Both routes also release the child and wait for the outbox result `"done"`. B's claim (no nested sweep, convergence kept, real launch) is already proven by `ready.exists` and the ready file's PID. The full result path is proven separately in the yield test. | It cheaply shows that both B delivery routes produce a completed child and leave no custody leak. It also lets the child finish cleanly instead of overlapping teardown. | Your call. It is optional to trim. Keep it if you value the end-to-end check on each route. |
+
+None of these findings is a correctness defect in the unit under review.
+
+## Required checks
+
+- **Forward-only scope.** The flag is set after `child_cleanup` and any forced convergence (`8400-8408`). It is cleared before the drain continuation, the leadership recheck and service convergence (`8437-8446`). Only two places read it: the handler (`5477`) and the gate (`5196`).
+- **Exception restoration.** A `try/finally` wraps both delivery paths (`8411-8436`). The test raises a `BaseException` after a real reservation (exact reserved row, no seeded inbox). The standalone sweep before it is a positive control and the one after it is the target. The `leaked-scope` mutant fails on both routes.
+- **Inherited and public delivery.** Both run inside the one scope and both reach `Manager._process_queue_message`. The public path goes `_drain_spawn_requests_from_queue` → `_drain_round_robin_pass` → `_process_queue_message`. So one gate covers both. In the yield test, a source left active also reaches `public_dispatch` and is captured there. An ungated public path would also trip the `launch` observer's settlement assertion.
+- **Standalone calls.** The flag is false outside a turn, so the handler still sweeps. The test checks this, and the `no-standalone-cleanup` mutant fires.
+- **Service convergence.** Its `_cleanup_children()` (`8001`) and the internal spawn drain (`8019`) run after the scope, so handler sweeps there are retained.
+- **Shutdown.** `_continue_shutdown_drain` (`8697`, `8711`), `_terminate_children` (`4651`, `4765`) and `_cleanup_task_resources` (`8104`) all run outside the scope. Termination signals are applied at the start of `process_once` (`base.py:1438`). Inside the scope, STOP only calls `_begin_shutdown_drain`, which never calls cleanup. So the spec sentence "child-cleanup lifecycle commits do not run inside this ordinary delivery scope" holds against the actual callers.
+- **Gate placement, including first delivery.**
+  - The gate sits after the busy-lane, startup, evidence and candidate early returns, and before admission (`5207`) and fetch/reservation (`super()` → `multiqueue_watcher.py:1413`).
+  - It runs per delivery with no earlier state needed, so it covers the first one. The yield test injects at the entry of the `queue_dispatch` phase. At that point the outer sweep has already seen the child alive or the retry not yet due, which is the boundary the acceptance matrix specifies.
+  - A yield returns `False` without adding the source to `inactive_candidates`. A pass with zero progress breaks cleanly and doesn't notify (`1587`), so it doesn't spin.
+- **Deadline predicate is serviced.** I walked `_cleanup_children` (`4529-4554`) and `_child_has_exited` (`4371-4385`). Each due deadline family is advanced or retired:
+  - A sentinel recheck sets `last_liveness_probe_ns`.
+  - Proof grace starts, then expires into publication.
+  - A due retry is consumed, then either commits or is re-armed with a future deadline.
+  - Retry-only projection (`8319-8323`) matches the skip at `4537`.
+  - The grace boundary is consistent: `<= 0` due versus `<` grace.
+- **Nonconsumption.** The gate only reads `Event.wait(0)` and builds the deadline list. The yield test checks readiness at the gate's return, and the `consume-sentinel` mutant fires. A gate that ran cleanup itself would be caught by the reuse test, which forbids any `_cleanup_children` call in dispatch phases.
+- **Classification continuation and first progress.** The gate ignores `_family_classification_pending` and the general `next_wait_timeout`. The test first establishes that the gate's own predicate is false, then shows a zero continuation timeout is still present, then checks authorization precedes convergence. The `general-due-veto` mutant fires.
+- **Mutations hit real owner boundaries, not setup.**
+  - All ten production mutants edit the three B owners: the flag/handler, the gate and the `finally`.
+  - Test faults are placed at real seams: `_build_child_spec` raises only for the exact reserved row, after the real reservation. The broker class's `write` fails only for the old child's `ctrl_out`. The clock is the module-owned binding, per the 2026-10-06 lesson.
+  - The other wrappers only observe and delegate to the real methods.
+  - The old child is staged at the cleanup owner, not launched through the Manager (an accepted limit). The new child goes through the full real launch path.
+
+## The three questions
+
+1. **Is the implementation correct?** Yes, judged by reading the code and your supplied test and mutant evidence. The scope is exception-safe. It covers exactly the two ordinary delivery routes. It leaves standalone, convergence and shutdown cleanup intact. The gate runs before admission and reservation on every spawn delivery, including the first. Its predicate is one that the cleanup owner always services, so a yield cannot stall indefinitely.
+2. **Is it elegant, something an expert systems programmer would be proud of?** Yes:
+   - One reactor-owned bit, scoped with `try/finally`.
+   - One predicate placed at the single per-delivery owner that both routes share.
+   - No new wake, timer, counter, API or abstraction.
+
+   The tests are much larger than the ~25 production lines. Even so, each case maps to an acceptance-matrix row and at least one firing mutant, so this is coverage rather than ceremony. F3 and F4 are the only trims I found.
+3. **Are the underlying data structures and primitives used properly, without overcomplication?** Yes. The gate reuses the adapter's existing `threading.Event` and the existing `_manager_child_timeouts` deadline projection, which `next_wait_timeout` already uses. It doesn't consume anything, and it relies on the observer's existing `notify_activity` and the zero-timeout wake from deadlines. The projection is O(children) per delivery attempt, which is an accepted limit.
+
+## Observations (not actionable this pass)
+
+- **Immediacy of the post-yield wake has no direct test.** It rests on the existing owners: the observer's `notify_activity` after `set()`, and due deadlines returning a zero timeout from `next_wait_timeout`. B deliberately adds no wake. `drive_until` with a 30-second bound would also pass a delayed wake, so the A/B/A latency and yield-turn series are what actually guard this.
+- **A backwards wall-clock step is pre-existing and bounded.** If `sentinel_observed_ns < launched_ns`, the recheck deadline can fall due while `_child_has_exited`'s shortcut (`4378-4384`) skips the probe. The reactor then spins for up to `MANAGER_PID_LIVENESS_RECHECK_INTERVAL`. That spin predates B. Under B, dispatch is also held for the same bounded window.
+- **No test separates "gate before admission" from "gate after admission".** The difference is cost only: one extra admission observation per yielded attempt. Correctness and custody are the same either way.
+- **The tests depend on `_timed_manager_call` phase names** (`child_cleanup`, `queue_dispatch`, `public_dispatch`, `service_convergence`) as observation and injection points. Renaming a phase fails loudly (`assert injected and yields`) rather than silently.
+- **The offset Manager clock shifts the Manager's wall time by about one grace period** relative to broker hybrid IDs during the terminal-retry case. The plan prescribed this and it passed on both backends. Still, it's a Manager-local deviation of wall time from broker-ID time to remember if that test ever becomes flaky (see the 2026-06-10 lesson).
+- **Accepted limits not reopened:**
+  - One authorization per turn; a receipt consumes the turn.
+  - One worker.
+  - Startup, admission and custody policy unchanged.
+  - O(children) projection.
+  - The gate observes but doesn't consume.
+  - Later convergence may settle the yielded child in the same outer turn.
+  - The old child is staged rather than launched by the Manager.
+  - No change to worker count, timeouts or capacity.
+- **Standing constraints, none reversed:** WT2/4, ALT-WT-001/002/015/017/019, MA-1.8/MA-3, MF-5/6, MANAGER.11/18, IMPL.8/10 and TS-0 all hold, as do queue-truth, single owner per worker, fresh admission before each reservation, the final pre-seed STOP fence (the handler's `_control_allows_child_launch` is unchanged and still runs before validation), no post-seed replay, no treating missing evidence as death, no source inactivation on a maintenance yield, and full original concurrency. No RECONSIDERATION REQUESTED.
+- **Performance is not accepted.** B is pending the A/B/A gate. Only the first A batches are retained, and the B and returning-A measurements are still running.
+
+**Verdict: no blocker**
+
+</details>
+
+B review corrections verified: classification continuation plus plan/spec hygiene7passed on SQLite1.98s; the real classification case passed on PostgreSQL6.59s at normal12workers. Environment restored. Production Manager hash is unchanged from the measured/reviewed B. B is retained as the current serial baseline; the harness-policy repair and latest-head full/CI gates remain open, so this is neither plan closure nor release approval.

@@ -643,6 +643,7 @@ class Manager(ServiceTask):
         self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_started_this_turn = False
+        self._dispatch_cleanup_scope = False
         self._active_cleanup_deadline: float | None = None
         self._last_child_cleanup_survivors: tuple[dict[str, Any], ...] = ()
         self._idle_timeout: float = float(
@@ -5169,7 +5170,10 @@ class Manager(ServiceTask):
     def _process_queue_message(
         self, queue_name: str, inactive_candidates: set[str]
     ) -> bool:
-        """Single-flight selection, validation under pressure, and no custody PEEK spin."""
+        """Gate spawn delivery before reservation and preserve custody.
+
+        Spec: [MA-3], [MF-6]
+        """
         reserved_names = {name for name, _source in self._spawn_reserved_queue_pairs()}
         if queue_name in reserved_names:
             return False
@@ -5189,6 +5193,14 @@ class Manager(ServiceTask):
                     return False
                 if not self._family_invalid and self._peek_family_candidate() is None:
                     return False
+            if self._dispatch_cleanup_scope and (
+                self._child_sentinel_adapter.wait(0)
+                or any(
+                    timeout <= 0
+                    for timeout in self._manager_child_timeouts(now_ns=time.time_ns())
+                )
+            ):
+                return False
             invalid_only = queue_name == self._queue_names["inbox"] and bool(
                 self._family_invalid
             )
@@ -5459,10 +5471,11 @@ class Manager(ServiceTask):
         work. Registry leadership remains advisory and is not a pre-launch
         fence for work this manager has already reserved.
 
-        Spec: [MA-1.1], [MA-2], [MF-6]
+        Spec: [MA-1.1], [MA-2], [MA-3], [MF-6]
         """
         self._last_activity_ns = time.time_ns()
-        self._cleanup_children()
+        if not self._dispatch_cleanup_scope:
+            self._cleanup_children()
         source_queue = context.queue_name
         reserved_queue = context.reserved_queue_name or self._queue_names["reserved"]
         self._emit_serve_log(
@@ -8345,6 +8358,7 @@ class Manager(ServiceTask):
 
         Spec:
         - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
+        - docs/specifications/03-Manager_Architecture.md [MA-3]
         - docs/specifications/05-Message_Flow_and_State.md [MF-6]
         """
         self._loop_iteration += 1
@@ -8392,26 +8406,34 @@ class Manager(ServiceTask):
                 self._continue_shutdown_drain()
                 self._drain_worker_results()
                 return
-        if not self._has_active_child_launches():
-            self._timed_manager_call("queue_dispatch", super()._process_reactor_turn)
-        else:
-            self._drain_worker_results()
-            self._maybe_emit_poll_report()
-        public_inbox = self._queue_names.get("inbox")
-        public_drained = 0
-        if (
-            not self._has_active_child_launches()
-            and not self._child_launch_started_this_turn
-            and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
-            and any(
-                name in self._active_queues for name in self._spawn_inbox_queue_names()
-            )
-        ):
-            public_drained += self._timed_manager_call(
-                "public_dispatch", self._drain_public_spawn_requests
-            )
-        if public_drained:
-            self._last_activity_ns = time.time_ns()
+        # Reuse the completed turn sweep only during ordinary delivery [MA-3].
+        self._dispatch_cleanup_scope = True
+        try:
+            if not self._has_active_child_launches():
+                self._timed_manager_call(
+                    "queue_dispatch", super()._process_reactor_turn
+                )
+            else:
+                self._drain_worker_results()
+                self._maybe_emit_poll_report()
+            public_inbox = self._queue_names.get("inbox")
+            public_drained = 0
+            if (
+                not self._has_active_child_launches()
+                and not self._child_launch_started_this_turn
+                and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
+                and any(
+                    name in self._active_queues
+                    for name in self._spawn_inbox_queue_names()
+                )
+            ):
+                public_drained += self._timed_manager_call(
+                    "public_dispatch", self._drain_public_spawn_requests
+                )
+            if public_drained:
+                self._last_activity_ns = time.time_ns()
+        finally:
+            self._dispatch_cleanup_scope = False
         if self._draining:
             self._continue_shutdown_drain()
             self._drain_worker_results()

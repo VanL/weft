@@ -879,6 +879,26 @@ _Implementation mapping_:
   lifecycle reader for manager views.
 - Foreground supervision command and process-log diagnostics — `weft/commands/serve.py` :: `cmd_manager_serve` and `_serve_manager_context` (preserves explicit client broker/config), registered in `weft/cli/app.py` as `weft manager serve`; structured process-log emission lives in `weft/core/serve_log.py`, `weft/core/manager.py`, and `weft/core/monitor/task_monitor.py`.
 
+Manager queue delivery may reuse child cleanup already performed at that turn's
+maintenance boundary. The work handler omits its duplicate sweep only within an
+explicit reactor-owned scope covering ordinary queue delivery; standalone handler
+calls, service convergence and shutdown retain their cleanup. The scope is cleared
+on failure. Before each spawn delivery in the scope, including the first, a ready
+child-sentinel observation or a due child sentinel/post-exit maintenance deadline
+yields to immediate normal settlement. Child-cleanup lifecycle commits do not run
+inside this ordinary delivery scope. Reusing this child cleanup does not change
+the normal phases or deadlines of other maintenance owners or make a serviced
+classification-page continuation a veto on the first eligible dispatch.
+
+See the [measured dispatch plan](../plans/2026-10-22-bounded-concurrent-manager-launches.md),
+B promotion against baseline `8123b129`.
+
+_Implementation mapping_: `weft/core/manager.py::Manager._process_manager_reactor_turn`
+owns the ordinary delivery scope and clears it with `try/finally`;
+`Manager._process_queue_message` checks the existing child-sentinel observation
+and `Manager._manager_child_timeouts` before reservation;
+`Manager._handle_work_message` retains cleanup outside that scope.
+
 ## Scope Boundary [MA-4]
 
 The current manager architecture favors one canonical manager per context and a
