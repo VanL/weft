@@ -505,7 +505,7 @@ and test cleanup failures are not passes. Independent review must confirm this
 small owner repair before admission B begins. Include it in the common repaired
 baseline for all measurement arms so its effect is not attributed to B.
 
-### 4. Repair and consolidate the demonstrated test gaps (T1–T4)
+### 4. Repair and consolidate the demonstrated test gaps (T1–T5)
 
 Files to modify: `tests/specs/taskspec/test_state_transitions.py`,
 `tests/core/test_state_machines.py`, `tests/core/test_agent_validation.py`, and
@@ -546,6 +546,30 @@ behavior changes belong in this task.
   transaction-wait control while the local fake clock is active: its own timeout
   still advances. Do not add production clock injection or broaden this into an
   unproven repository-wide clock claim.
+
+T5 (2026-10-28 CI follow-up; fixture-only, no product/spec delta): in
+`tests/tasks/test_runner.py::_write_descendant_scripts`, remove the unused
+repository and collections imports from the two generated programs. They need
+only stdlib process/file operations. In
+`test_command_session_terminate_kills_descendants`, acquire cleanup ownership
+immediately after `start_session`, before waiting for readiness. On readiness
+failure, preserve the original assertion and add session return-code/stderr
+context. Always clean up the owned root/tree and any pinned descendant using
+existing identity-verified primitives independently of the `terminate` method
+under test, then stop the monitor. Preserve the two-second readiness budget,
+worker count, actual termination call and descendant-exit oracle. Governing
+contract: `docs/specifications/08-Testing_Strategy.md` [TS-0] resource ownership
+and meaningful test sensitivity; this does not alter command-session behavior.
+
+The observed CI failure did not capture root status/stderr, so its cause is
+unresolved. A local real-session comparison established avoidable import work
+(original readiness 0.320 s; stdlib-only 0.051 s), not that imports caused the CI
+failure. The failed-readiness cleanup omission is independently confirmed in
+code. Before landing, demonstrate that an injected readiness failure leaks with
+the old fixture but cleans up with the candidate, and that a broken terminate
+still fails the descendant-exit assertion while cleanup completes. Exercise both
+callers of the shared generated scripts and the canonical PG path. Review the
+small fixture delta independently. Do not call a passing rerun a causal diagnosis.
 
 Run mutation controls in isolated subprocesses or bounded monkeypatch scopes,
 never leave mutant code in the repository, and record exact failure assertions.
@@ -1859,7 +1883,9 @@ scope flag, dispatch change or new timer store is included. Seven focused
 SQLite cases passed in 2.23 seconds with 12 configured workers; the canonical
 PG slice passed the same seven cases in 7.56 seconds without changing worker
 policy or pressure settings. No PG pressure failure occurred in this focused
-run; full standard-load acceptance remains pending.
+run. At that point full standard-load acceptance remained pending; the later
+S2 completed-work record below records the completed local backend runs and the
+still-open CI gate.
 
 Parent inspected both isolated controls: removing the reset restores `[0.0]`
 and fails the positive-timeout assertion; moving it before the future guard
@@ -1868,11 +1894,347 @@ and test hashes were unchanged by controls. Targeted mypy, Ruff/format and
 diff checks passed. One initial PG wrapper command rejected unsupported `-v`
 before running tests; removing that flag produced the valid run. It was not a
 product failure or passing test run. All owned test/probe processes were cleaned
-up. Completed-work cross-family review and full backend/platform gates remain
-pending.
+up. Completed-work cross-family review and full backend/platform gates were
+pending at this focused-check milestone; see the subsequent S2 review and gate
+record below for their current status.
 
 Capture CB1/CB2 exact GREEN command (evidence clarification, no rerun):
 `./.venv/bin/python -m pytest tests/core/test_subprocess_runner.py::test_terminal_capture_delivers_backlog_after_capture_budget tests/core/test_subprocess_runner.py::test_late_captured_output_callback_failure_preserves_exception_and_cleanup tests/core/test_subprocess_runner.py::test_capture_join_reports_adapter_error_before_delivering_callbacks tests/core/test_subprocess_runner.py::test_root_completion_bounds_inherited_pipe_drain --tb=short`
 ran after loading `.envrc`, with 12 configured workers, and returned 10 passed
 in 3.28 seconds. The command is recorded here to close the review's evidence
 traceability note; the original result and log remain unchanged.
+
+
+### S2 completed-work cross-family review and dispositions (2026-10-28)
+
+Independent Tier-1 reviewer: Claude Opus 5.5 (Anthropic), separate from the
+OpenAI implementation author. Review completed in 395.43 seconds, exit 0,
+verdict **no blocker**. Unit: the consumed-retry reset and its regression at
+`784d6b7aad893c77bd69cf9323db0d0a185bda2c`, against source baseline
+`4c49004320bb281a6557cd80072356dae225d047`. The review checked the actual owners
+and classified its F1 pressure concern as an inference, not an observed failure.
+It did not execute tests; the author and parent separately inspected the actual
+RED/GREEN and isolated-control failures. This is completed-work approval for
+S2, not approval of unimplemented admission B or closure of this whole plan.
+
+Review artifact: `/tmp/weft-implementation-20261027/s2-implementation.result.json`.
+Artifact SHA-256: fb3e1ead40803a309020ba2443be71d85fdc5f80aefa31ec55fceaf4299face5.
+The complete review is retained verbatim so it does not depend on that temporary
+path remaining available.
+
+<details>
+<summary>Verbatim independent S2 completed-work review</summary>
+
+# S2 completed-work review: due-retry reset in `_cleanup_children`
+
+**Verdict: no blocker.** The production change is correct, minimal and placed at the right owner. All four findings are in the new regression, and none is a defect in the reset itself.
+
+**Unit and baseline.** The unit is the S2 delta at head `784d6b7a` against source baseline `4c490043`: `weft/core/manager.py::_cleanup_children` (lines 4521–4553) and `tests/core/test_manager.py::test_cleanup_children_retires_due_retry_before_clean_exit_proof_grace` (lines 10228–10413).
+
+**What this review is based on.** I read files only and ran no tests, probes or git commands. Everything below is either "verified by reading" (current tree) or labeled as inference. I did not re-establish the supplied RED/GREEN/control logs; I only checked that they are internally consistent:
+- `addopts` contains `-q`, so `-v` cancels it. That explains the non-verbose output in logs whose commands passed `-v`.
+- The 7 items are 1 + 1 + 1 + 2 + 2, from two parametrized tests.
+- The new test is collected as `shared`.
+
+**Context I read, per the README read order:**
+- `docs/program-theory.md`: WT-2, WT-4, and ALT-WT-002, -015, -017 and -019.
+- `docs/agent-context/` `README.md`, `decision-hierarchy.md`, `principles.md` and `engineering-principles.md`.
+- `review-loops-and-agent-bootstrap.md` in full.
+- `testing-patterns.md`: Test Design Rules, Manual Reactor Test Drivers, and Patterns 10–12.
+- `hardening-plans.md`: section headings only. This unit has no hardening trigger.
+- `agent-context/lessons.md`.
+- `docs/lessons.md`: the Golden Rules and the dated sections from 2026-09-14 through 2026-10-15. The lessons watermark is "(none)", so I did not reread the older dated sections.
+- There are no module theory files (glob).
+- The [MA-1.6a] spec text (lines 336–349), its implementation mapping (line 573), and the S2 records in the repair plan.
+
+## Verification of the owner change (by reading)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Outer-deadline break comes before the reset | Yes | `manager.py:4529-4530` |
+| Retained-survivor guard comes before the reset | Yes | `:4532-4535` |
+| A future retry is never consumed | Yes | The `> time.time_ns()` guard at `:4536-4537` comes first, and the reset at `:4539` only runs when the retry is due or unarmed. |
+| A serviced retry always ends in grace, retirement or a fresh re-arm | Yes | See the four cases below. |
+| A failed publication re-arms a bounded retry | Yes | The unconditional re-arm at `:4549-4553` is reached after the reset on every failed write, including when a deadline-limited write returns False at `:4494-4495`. |
+| No custody acknowledged early | Yes | The exact `delete(message_id=…)` at `:4578-4591` is reachable only after `committed` is True: task proof at `:4477-4478`, or a committed failsafe at `:4497-4499`. |
+| No second policy owner | Yes | `_manager_child_timeouts` (`:8297-8326`) is unchanged. The test asserts the owner state (`terminal_retry_after_ns == 0`, test `:10327`), so a mutant that filtered expired retries in the projection would also fail. |
+
+The four cases after the reset:
+- **Proof read fails (None):** grace returns False (`:4457-4458`), then the envelope write.
+- **Proof is True:** the envelope write returns True; the child is retired and the reservation acknowledged.
+- **Proof is False with no grace started:** grace starts (`:4460-4462`). The grace deadline at `:8323-8325` becomes the only child deadline, because the sentinel branch requires `missing_since <= 0`.
+- **Proof is False with grace started earlier:** a retry can only be armed after grace has returned False, so the earlier grace has already expired and the code publishes immediately. The one exception is a backwards wall-clock step, and even then the active deadline is positive.
+
+The reset therefore cannot consume future or unserviced work. It turns `terminal_retry_after_ns` into a one-shot timer: cleared when serviced, re-armed only by a new failure.
+
+## Verification of the regression (by reading)
+
+- **Real dependency faults.** The test patches the backend class's `peek_generator` and `write`, filtered to the exact `ctrl_out` name. The proof read fails through the real `except` clause at `:4437`; the write fails through the real retry loop at `:4493-4507`. No owner result is replaced with a constant.
+- **Owner-local clock.** Only `manager_mod.time` is replaced, as the 2026-10-06 lesson recommends. A grep of `manager.py` shows it only calls `time_ns`, `monotonic`, `perf_counter` and `sleep`, so the facade is complete. Real time is restored before `stop`/`cleanup`. Fixture teardown order (monkeypatch undone before `manager_setup`) is also safe.
+- **Exact reserved row.** Retention is checked by `exact_timestamp` at `:10311`, `:10329` and `:10382`, and acknowledgement at `:10392`.
+- **Sensitivity.**
+  - Removing the reset fails at `:10325`.
+  - Moving the reset before the future guard fails at `:10316`.
+  - Moving it after the grace check would fail at `:10325`/`:10327`.
+  - Deleting the re-arm fails at `:10310`.
+  - Filtering in the projection fails at `:10327`.
+- **Cleanup ordering in `finally`.** The test's own `stop()`/`cleanup()` duplicates the fixture, but the ordering is justified: the Manager's sentinel adapter must release the process sentinel before `process.close()`. The supplied RED and mutant logs show no teardown error.
+
+## Findings
+
+| ID | Severity | Location | Finding and evidence | Strongest counterargument | Suggested smallest disposition |
+|---|---|---|---|---|---|
+| S2-F1 | P2 (test robustness under the declared full-load gate; inference, not observed) | `test_manager.py:10357-10370`, with `manager.py:2219-2231`, `:2829-2835`, `:2906-2913`, `:2941` | The witness phase requires the second request to dispatch within one `process_once()`. On PostgreSQL, admission measures **global** server usage (`usage["total"]`). One denial leaves the inbox row in place, so `:10358` fails immediately. Even a relaxed oracle could not recover, for three reasons: the denial sets `_admission_retry_after_ns` from the frozen `time_ns`, so `_expire_admission_retry_if_due` never fires; `_admission_allows_queue` short-circuits on the blocked lane (`:2941`); and nothing in the witness phase calls `_clear_admission_retry` (no reap, launch or resident change). The test does not own its PG headroom, which conflicts with the 2026-10-15 lesson (a progress proof must fit headroom it owns). | The focused PG run passed under the normal worker policy. The window is about one turn. A denial needs near-ceiling server usage, which the suite may not reach. The approved S2 task explicitly required this witness. | **OWNER DECISION.** Either move the witness to B's slice (see F2), or keep it. If kept and the parent's full-load PG run fails at `:10358`/`:10364`, apply the TS-0 stop condition: the oracle assumed headroom it does not own. That is not a product defect and not grounds for reducing workers. |
+| S2-F2 | P3 (unnecessary work for this unit) | `test_manager.py:10263-10264`, `:10337-10383` | The witness phase cannot detect any S2 regression. Both controls fail before it, and the probe table shows the **unrepaired** owner also dispatched in one turn. It costs about 50 lines, a real spawned task, and the F1 exposure. Its real value is as B's future discriminator, where B's deadline veto could stall dispatch. | The approved task required "normal second request dispatch". The custody assertions at `:10381-10383` do add that ordinary reactor turns (not only direct calls) preserve grace. | **OWNER DECISION.** Prefer moving the witness to B's acceptance test, where it discriminates. Otherwise keep it with a one-line comment saying it guards B, not S2. |
+| S2-F3 | nit | `test_manager.py:10324-10326` | `min > 0` / `max <= GRACE` is looser than the state it checks. With `retry == 0` and `grace_started == now` asserted, the projection is exactly `[MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS]`. Asserting that equality would state the [MA-1.6a] rule "proof-grace becomes the active deadline" directly. | It matches the existing bounds style at `test_manager_burst_bookkeeping.py:148-149`, and `:10322-10327` already pin the result together. | Optional. No change needed. |
+| S2-F4 | nit | `test_manager.py:10306-10335` against spec line 344 | The new spec clause "another failed publication installs a fresh retry" is not fired *after* a serviced retry. Only the initial failure's re-arm is asserted (`:10309-10310`). | It is the same unconditional line `:4549-4553`, so no realistic mutant separates the two paths. The early-reset control log incidentally shows a fresh re-arm. | Optional. Treat `:10309-10310` as the equivalence owner. |
+
+## Answers
+
+1. **Is it correct?** Yes. The reset runs only after exit is confirmed, after the outer-deadline and survivor guards, and after the future-retry guard. Every path after it ends in a positive grace deadline, retirement after task proof or a committed failsafe, or a fresh bounded retry. Custody, grace length, proof classification and dispatch are unchanged. It restores [MA-1.6a]'s rule against spinning on an expired deadline without touching MF-5/MF-6, MANAGER.11/.18 or IMPL.8/.10. It adds no local-to-global authority (ALT-WT-015), no polling cap (ALT-WT-002) and no queue retention (ALT-WT-019).
+2. **Is it elegant enough for an expert Python/systems programmer?** The production change, yes: one assignment at the single point where the retry is serviced, with an accurate one-line comment and a `Spec:` docstring in the house style. Rejecting a snapshot, latch or projection filter was right. The test is coherent and falsifiable through the post-recovery assertions. The witness phase (F2) is the part an expert would question as S2 evidence.
+3. **Does it use the underlying data structures and primitives properly?** Yes. It reuses the existing `ManagedChild` convention that a zero ns field means "unarmed", the existing projection, and the existing re-arm. It adds no new state, index or wake mechanism. The test uses real spawn processes, real broker queues with dependency faults, exact-ID reservation checks, the owner-local clock pattern, and a causal file-based ready/release fence.
+
+## Observations (not actionable for this unit)
+
+- **Wall-clock child deadlines (pre-existing).** Retry and grace use `time.time_ns()`, so an NTP step stretches or collapses them. Monotonic time is the classical choice, but that is outside S2.
+- **Exception escaping after the reset.** If an exception outside `(BrokerError, OSError, RuntimeError)` escaped between the reset and the re-arm, the retry would already be cleared. The fallback is then a past-due sentinel recheck, the same zero timeout as before S2. It is no worse than before, and such an exception already aborts the turn.
+- **Frozen clock freezes other Manager timers.** During the witness phase, stale-launch recovery, leadership, heartbeat and admission timers are frozen as well. `drive_until`'s 20 ms wait slice keeps the loop live; the effect only matters on failure paths.
+- **Process-wide broker patch.** The class-level patch applies to every thread in the xdist worker, but the exact queue-name filter keeps unrelated writes (including the witness's) unaffected.
+
+**Scoped verdict: no blocker.** This review does not close the unrun full-suite SQLite/PostgreSQL or platform gates. That full-load PostgreSQL run is the evidence that decides whether F1 actually fires.
+
+</details>
+
+#### S2 finding dispositions
+
+| Finding | Disposition | Rationale, evidence, and required action |
+|---|---|---|
+| S2-F1 | Accept as a residual test risk; retain the witness for imminent B, no source/test change in this record | The witness assumes one-turn PG admission without owning global server headroom, and its frozen Manager `time_ns` would prevent a denied wall-ns admission retry from expiring. The focused PG run and subsequent full standard-load PG run passed; that establishes non-occurrence in those runs, not that the hypothesis is false. Preserve the normal concurrency and pressure settings. If the witness fails at its source-retention or launch assertion, stop acceptance/corrective reruns under [TS-0]/[ALT-WT-017], preserve the original load and admission state, and distinguish legitimate pressure denial from a product or clock-fixture defect before changing the oracle. Do not reduce workers, bypass admission, invent capacity, or enlarge a timeout to obtain green. This CI investigation is not pre-decided by the hypothesis. |
+| S2-F2 | Accept the coverage distinction; deliberately retain the witness for B | The unrepaired owner dispatched the second request in the disposable baseline, and both S2 mutation controls fail before the witness. Therefore the witness is not credited with sensitivity to the S2 reset. It is a retained first-dispatch/retained-custody baseline for B's upcoming child-deadline gate, where an overbroad gate can newly withhold eligible work. The intervening real reactor turns also check that proof grace and exact custody survive ordinary dispatch. At the B slice, explicitly carry this keeper into the B acceptance mapping and prove its B-specific discriminator; do not claim that unimplemented B has already been verified. No test move or comment edit is authorized by this documentation-only record. |
+| S2-F3 | Decline optional exact-list assertion | Positive bounded timeout, exact grace-start time, and zero consumed retry together express the relevant owner-state contract; both intended reset controls fire. Replacing these with exact singleton-list equality adds representation coupling without repairing a demonstrated coverage gap. Keep the existing assertions. |
+| S2-F4 | Accept the equivalence-owner analysis; no additional case now | Initial publication failure exercises the same unconditional re-arm assignment that follows every failed publication after the reset. The early-reset mutation also produced a second real failed publication and fresh retry, but that incidental control evidence is not mislabeled as a dedicated committed post-recovery test. No separate production branch distinguishes the two re-arms. If that owner is later split or gains conditional behavior, add the corresponding distinct fault control then. |
+
+The witness retention is an explicit scope decision with a stated cost (one real
+spawn and an unowned-headroom assumption). It is not a claim that passing full
+suites removes that cost or uncertainty. No production or test changes were made
+for these dispositions.
+
+#### Distinct author fresh-eyes S2 review
+
+Reviewer: the OpenAI S2 implementation author, re-reading the committed owner,
+proof/grace helpers, deadline projection, acknowledgement path and regression
+after the independent review. This is an author fresh-eyes pass, not a second
+independent or cross-family approval. Scope and baseline are the same S2 delta
+above; verdict **no production blocker**, with S2-F1/F2 retained as explicitly
+dispositioned test limits.
+
+1. **Is it correct?** Yes. `_cleanup_children` first respects its absolute
+   cleanup deadline, confirms exit, and retains any still-live managed survivors.
+   Its future-retry guard precedes the reset, so unserviced/future work remains
+   armed. Clearing the consumed retry before the grace helper prevents a fresh
+   grace interval from being hidden by an expired retry in
+   `_manager_child_timeouts`. Unknown proof still follows the existing failsafe
+   attempt; an unsuccessful write re-arms the bounded retry. Task-owned proof or
+   a committed failsafe is still required before exact reserved acknowledgement.
+   The real dependency-fault RED failed on `[0.0]`; removing the reset reproduces
+   it, while moving the reset earlier fails the preserved-future-deadline
+   assertion. The fix restores [MA-1.6a] without changing proof classification,
+   grace length, admission, or dispatch. F1 concerns the witness oracle, not a
+   defect demonstrated in this owner repair.
+2. **Is it elegant enough for an expert Python and systems programmer?** The
+   production repair is direct: consume a one-shot timer at its existing service
+   point and let the existing failure path re-arm it. A snapshot, latch, or
+   timeout-projection filter would duplicate policy and leave stale owner state.
+   The reason comment and method-level spec reference explain the boundary
+   without adding a helper. The test is longer than the minimum S2 owner proof;
+   its extra witness is retained deliberately for imminent B, not defended as
+   S2 mutation coverage. That distinction and its headroom risk remain visible.
+3. **Does it use the underlying data structures and primitives properly?** Yes.
+   It reuses `ManagedChild.terminal_retry_after_ns == 0` as the existing unarmed
+   state, the unchanged child-timeout projection, the existing sentinel owner,
+   and exact-ID queue custody. It introduces no index, cache, queue, worker,
+   polling cap, or second scheduler. The projection remains an O(tracked
+   children) read; the reset is local owner bookkeeping. The real broker faults
+   and ready/release file fence verify dependency and execution boundaries
+   without making process hints authoritative lifecycle facts.
+
+No standing invariant or refused alternative is reversed, so no
+`RECONSIDERATION REQUESTED` applies. This fresh-eyes conclusion does not promote
+B's scope flag, pre-fetch gate, receipt policy or batching.
+
+#### Current acceptance status after S2
+
+At head `784d6b7a`, the completed local standard-load SQLite run reported
+**5,970 passed, 49 skipped in 196.44 seconds**
+(`/tmp/weft-implementation-20261027/repair-v2-sqlite.log`). The completed local
+standard-load PostgreSQL run reported **5,921 passed, 27 skipped in 388.33
+seconds** (`/tmp/weft-implementation-20261027/repair-v2-pg.log`). These runs
+include S2 and preserved the configured concurrency. Neither observed the
+S2-F1 pressure/frozen-clock failure. This is bounded run evidence, not proof
+that every future global-pressure schedule satisfies the witness's assumption.
+
+The parent verified local final mypy (478 files), Ruff, formatting (506 files),
+suppression-registry checks, and six documentation tests (1.10 seconds) passed
+before this review-record update. This update itself has a clean `git diff --check`; it does
+not claim those earlier documentation tests ran against the newly appended
+record.
+
+CI run `40715396491` completed with failure. All Windows/POSIX core groups,
+including all Windows Python 3.14 groups, passed. The PostgreSQL remaining shard
+failed `tests/tasks/test_runner.py::test_command_session_terminate_kills_descendants`
+while waiting for `interactive-child.pid`; its log is
+`/tmp/weft-implementation-20261027/ci-v2-pg-remaining.log`. That is a different
+test from S2, and its cause remains under investigation. This record does not
+label it flaky or establish a causal relationship to the changes. All four
+dependent extension/integration jobs were skipped, not passed. The parent
+successfully dispatched the same-head failed-job rerun with
+`gh run rerun 40715396491 --failed`; its result is outstanding at this record.
+Keep this plan **draft** and keep completion, merge, and dependent admission
+implementation/measurement gated on the parent's CI investigation and remaining
+required verification. Do not mark the plan index completed based on local
+full-suite passes alone, a rerun request, or skipped dependent jobs.
+
+
+### T5 fixture repair evidence and author fresh-eyes pass (2026-10-28)
+
+The independent review is running; this record does not claim its approval.
+Parent verified the exact diff, actual control driver and four-arm results in
+`/tmp/weft-implementation-20261027/t5-review-evidence.md`. The old fixture leaves
+the live root and descendant and three reader/exit threads after the injected
+readiness assertion. The candidate preserves that exact exception object, adds
+status/stderr context, and leaves no live owned process or thread. A no-op
+`CommandSession.terminate` still fails exactly at
+`assert _wait_for_pid_exit(child_pid)` after the existing exit guard; independent
+cleanup then completes. The probe compiled old AST definitions using the
+candidate filename, so the old traceback's filename is a label limitation, not
+evidence that it ran the candidate. Parent inspected the source selection.
+
+Both generated-script consumers passed on SQLite (2 passed in 4.01 s) and the
+canonical PostgreSQL wrapper (2 passed in 5.33 s), with normal worker settings.
+Targeted mypy, Ruff and formatting passed; all-extras environment restored.
+Exact commands and logs are retained in the evidence artifact. Final file SHA256:
+`401b5376991f80f2a0e664f8c6bd0b25c54571af4bada7d94f0cbe6e5b6c9012`.
+
+Distinct parent fresh-eyes assessment after implementation: the fixture repair
+is correct for these generated programs. Cleanup ownership now starts immediately
+after session acquisition, the failure remains visible, and cleanup cannot make
+the earlier termination assertion pass. It is simpler to remove the unused
+imports than to grant startup more time. The existing identity-verified tree
+primitive plus a pinned descendant covers root-alive readiness failure and a
+broken termination that leaves a descendant after the root exits. No new helper,
+production seam or timer is introduced. This is appropriate use of existing
+process identity primitives. The cleanup helper signals and waits boundedly; it
+is not a general proof against arbitrary OS refusal to kill. The actual controls
+verified no remaining owned processes or threads. No product runtime defect or
+CI timeout cause is claimed by these fixture changes.
+
+T5 exact focused commands, after `. ./.envrc`:
+
+```bash
+./.venv/bin/python -m pytest tests/tasks/test_runner.py::test_command_session_terminate_kills_descendants tests/tasks/test_runner.py::test_task_runner_timeout_terminates_command_descendants --tb=short
+./.venv/bin/python bin/pytest-pg --all tests/tasks/test_runner.py::test_command_session_terminate_kills_descendants tests/tasks/test_runner.py::test_task_runner_timeout_terminates_command_descendants
+./.venv/bin/mypy tests/tasks/test_runner.py --config-file pyproject.toml
+./.venv/bin/ruff check tests/tasks/test_runner.py
+./.venv/bin/ruff format --check tests/tasks/test_runner.py
+```
+
+The original CI test used five configured workers on Ubuntu/Python 3.14.8;
+local gates used twelve configured workers on macOS/Python 3.14.9. Neither was
+overridden. The interactive `start_session` path does not call the repaired
+one-shot subprocess supervisor; its implementation and this test were unchanged
+from the repair baseline. That narrows the path but does not prove the CI cause.
+
+
+### Runtime head CI gate, attempt 2 (2026-10-28)
+
+Actions run `40715396491`, attempt 2, completed **success** at exact head
+`784d6b7aad893c77bd69cf9323db0d0a185bda2c`. All core groups, lint, coverage,
+Django integration, Docker, macOS sandbox and Microsandbox jobs report success.
+The four dependent jobs ran and passed; they are not the skipped jobs from
+attempt 1. Verified result is retained in
+`/tmp/weft-implementation-20261027/ci-v2-attempt2-final.json`.
+
+The same-head pass demonstrates that the original PostgreSQL readiness failure
+is intermittent; it does not establish its cause. The original Windows 3.14
+first-autostart failure at the earlier repair head likewise remains causally
+unresolved. This run verifies the runtime/S2 head, not the subsequent T5
+fixture-only working-tree delta. T5 review and new-head CI remain pending; the
+plan remains draft. No merge and no admission production change occurred.
+
+
+### T5 independent completed-work review (2026-10-28)
+
+Tier-1 Claude Opus 5.5 completed in 250.59 s, exit 0, **no blocker**; all three
+owner questions answered yes. Parent dispositions: F1 accepted as provenance
+clarification. The probed candidate differs from the integrated file only by
+Ruff's wrapping of the pinned-child cleanup call; parent independently compared
+full-module ASTs and verified equality and the final SHA recorded above. Focused
+backend greens ran after formatting. F2 left unchanged: the vestigial importorskip
+predates this delta, and removing one instance adds unrelated churn. No code
+change or control rerun is needed for either finding. Broader observations remain
+explicit below; no new runtime repair is implied.
+
+<details>
+<summary>Verbatim T5 cross-family review</summary>
+
+**Verdict: no blocker.** The T5 delta is correct, idiomatic, and as small as it can be. I have two low-severity findings and neither needs a code change.
+
+This review was read-only (Class 0). I didn't run any tests, the probe, mypy or ruff. Every claim marked "executed" below comes from the evidence you supplied, not from a rerun of mine.
+
+**Surfaces consulted:** `docs/program-theory.md` ([WT-2], [WT-4] §4.2–4.4, [ALT-WT-015], [ALT-WT-017], [WT-7]), `docs/agent-context/` README, decision-hierarchy, principles and engineering-principles, testing-patterns (rules 1–10, Patterns 1, 10, 12), review-loops (completed-work and scoped-change prompts), `docs/lessons.md` (Golden Rules plus the dated sections from 2026-09-11 on; the coalescing watermark is "(none)"), `08-Testing_Strategy.md` [TS-0], and the plan's Task 4 T5 text (`docs/plans/2026-10-27-runtime-and-test-repair-plan.md:550-572`).
+
+## Code paths I checked
+
+- **`start_session`** (`weft/core/runners/host.py:1046-1144`): starts a `Popen` with inherited `os.environ` and three pipes. Three daemon threads are attached: two readers and a `process.wait()` thread. The handle comes from `_host_handle(pid)` (`host.py:111-124`), which records the root's `create_time` right after `Popen`. That gives the cleanup a root identity fixed at birth, not one reconstructed later.
+- **`CommandSession.terminate`** (`weft/core/tasks/sessions.py:141-176`): uses the unverified `terminate_process_tree(pid)` and then waits on `Popen`. The cleanup never calls it.
+- **`RunnerHandle.scoped_host_processes`** (`weft/ext.py:125-151`): returns `(pid, create_time)` pairs. It falls back to `(pid, None)`, which the verified primitive refuses.
+- **`terminate_verified_process_tree`** (`weft/helpers/__init__.py:425-461`, verified by `_verified_host_process` at `:402-422`):
+  - It refuses a missing or non-finite identity, a zombie, or a `create_time` mismatch beyond 1 ms.
+  - It acquires descendants from the verified root instance and observes death without `waitpid`, so it doesn't steal the reap from `Popen`.
+  - It catches every `psutil.Error`. Its own contract tests are at `tests/tasks/test_runner.py:148-250`.
+- **Both callers of the generated scripts**:
+  - `test_task_runner_timeout_terminates_command_descendants` (`test_runner.py:2056`) and `test_command_session_terminate_kills_descendants` (`:2552`).
+  - Neither script uses `record_and_return`, `Iterator` or `Mapping`. The module-level imports at `:13` and `:25` are still used elsewhere (14 occurrences), and no other generated string in the file carries the injected import.
+
+## Your specific questions
+
+| Question | Answer and evidence |
+|---|---|
+| Is cleanup independent of the termination oracle? | **Yes.** `finally` runs only after `assert _wait_for_pid_exit(child_pid)` has been evaluated, so the cleanup can't make the oracle pass. The cleanup uses the verified primitive, never `session.terminate`. (Executed, supplied) The no-op-terminate arm fails at `:2585` after about 5.1 s, then cleans up fully. |
+| Does it avoid acting on a reused PID? | **Yes.** The root identity comes from `_host_handle` at spawn. The child identity is pinned while the child is provably alive: it wrote its pidfile and then sleeps for 30 s. Both go through the `create_time` match. In the normal path the root is already reaped or a zombie, and the child is dead, so both calls return `False` without sending a signal. |
+| Is the original failure preserved? | **Yes.** `add_note` plus a bare `raise` keeps the same exception object (the repo already uses `add_note` in 5 test files; `requires-python>=3.12`). The cleanup calls catch `psutil.Error` internally, and `stop_monitor` catches too, so in practice the cleanup can't replace the original exception. (Executed, supplied) `is_readiness_marker: true` holds in both readiness arms. |
+| Any leak on readiness failure? | **No.** Before the fix, a readiness failure skipped cleanup entirely. Now the handle is captured at `start_session` and the tree kill covers the live root and its child. (Executed, supplied) The old arm left the root, the child and 3 threads behind; the candidate arm left nothing. The reader threads exit because the child, which inherited the pipes, is killed too. |
+| Does a no-op terminate still fail before cleanup? | **Yes**, as shown above. Root-tree cleanup comes first and the pinned child second. That order is what catches the real bug this test exists for: terminate kills the root but orphans the child, which the tree walk can no longer see. |
+| What if the root exits before readiness? | The tree call is a safe no-op, because a zombie or `NoSuchProcess` gives `None`. `returncode()` reports correctly: the `wait` thread reaps the root as soon as it exits, and before that `poll()` returns `None` because the `waitpid` lock is held. stderr includes the child's stderr too, through the inherited pipe. One gap remains: a root that dies after spawning the child but before the pidfile appears would leave an orphan that isn't covered. These scripts can't do that without an external kill, so I'm not asking for a change. |
+| What if cleanup itself fails? | The primitive swallows `psutil.Error` and returns a boolean. Because the test ignores the return value, a refused identity only produces a warning. That is right for cleanup that must not mask the subject's failure. |
+| Are timeouts and concurrency unchanged? | **Yes.** 2 s readiness, 5 s exit guard, no retry, no change to the worker count. The only extra waiting is the primitive's default 0.5 s, and only when something survives. The old 0.1 s probe and bare `.kill()` are gone. |
+
+**Is it correct?** Yes.
+
+**Is it elegant, expert systems programming?** Yes. It reuses the identity-verified primitive and the handle's own scoped identities. Readiness moves inside the try that owns the session, the failure is annotated in place, and there's no new abstraction, fixture API or production seam.
+
+**Proper data structures and primitives, without overcomplication?** Yes. `tuple[int, float] | None` matches the primitive's `(pid, create_time)` signature and the shape `scoped_host_processes()` returns. A `psutil.Process` object would have been worse, because the primitive deliberately re-verifies from the raw pair. The `handle is not None` guard is required by the `CommandSessionProtocol` type, not defensive clutter.
+
+## Findings
+
+| ID | Severity | Location | Finding and evidence | Strongest counterargument | Smallest disposition |
+|---|---|---|---|---|---|
+| F1 | P3 (evidence provenance) | Probe report `candidate_sha256 c94cf6c9…` vs the final file | The probe certified a candidate that is not byte-identical to the final tree. The driver's `new_tail` splits the call at `:2594` over three lines; the final file has it on one 86-character line (`line-length = 88`), consistent with `ruff format`. I compared the driver text with `test_runner.py:2572-2595` and `:1688-1739` by reading them, and found no other difference. The two hashes aren't the same object (one is the probed candidate, the other the final file), and I couldn't hash the file myself. | Formatter-only reflow can't change what a single call does. The focused SQLite/PG greens were presumably run on the formatted file. | Add one line to the T5 evidence: "probed candidate differs from final only by ruff-format wrap at `:2594`". No rerun needed. |
+| F2 | nit | `test_runner.py:2553` | `pytest.importorskip("psutil")` is vestigial: `psutil` is imported unconditionally at `:21`, and the diff now uses `psutil.Process` directly at `:2583`. Before the diff the inner rebinding at least made it look intentional. | It was already vestigial before the diff. The sibling at `:2057` and other tests share the pattern, so deleting one is incidental churn (Golden Rule 12). | Leave it (my recommendation), or delete it in a separate hygiene pass. |
+
+## Observations (not actionable this pass; owner decision)
+
+- **O1, sibling caller** (`:2077-2088`): it still kills a bare PID with `psutil.Process(child_pid).kill()` and no identity. Its readiness wait sits outside the try, so a readiness failure after `run()` would skip cleanup. That's the same pattern T5 just fixed for the session test. `run()` owns the root's lifetime there, so only a child orphaned by a real `run()` bug could leak. It's pre-existing and this diff doesn't make it worse; aligning it would be a scope expansion.
+- **O2, oracle uses a bare PID:** `_wait_for_pid_exit(child_pid)` could pass or fail wrongly if the PID were reused within 5 s. The pinned identity could tighten it, but the frame keeps the oracle unchanged, and the risk is negligible.
+- **O3, pipe and stdin file objects** on `CommandSession` are never closed in either path, which can raise `ResourceWarning` at GC. That's production session ownership and pre-existing; I'm not asking for a session IO redesign.
+- **O4, theoretical partial pidfile read:** `_wait_for_pidfile` could in theory read a partial write and pin the wrong PID. A small single write to a regular file makes this effectively atomic, the empty-read case is already handled, and the old code would have killed the same wrong PID with no verification. So it's pre-existing and not worse.
+- **O5, CI cause still unresolved, as you accepted:** one possibility consistent with the old missing evidence is that the generated parent failed its `tests.helpers.typing` import under a different `sys.path` and crashed before spawning. The new note (returncode plus stderr, which includes the child's stderr) would now show this. This is my inference, not a diagnosis, and a green rerun must not be called causal.
+- **O6, probe quirks, cosmetic:** the old arm's process list repeats child 39246 (once from the injected wait, once from the root walk). Its traceback cites the candidate filename while running the original AST; line 2581 matches the original source offset (the candidate line plus the 8 removed import lines), which supports your provenance caveat.
+- **O7:** the note covers only the readiness `AssertionError`. Any other exception still gets cleaned up, just without the extra context. That's adequate.
+
+No `RECONSIDERATION REQUESTED`. The diff leaves TS-0, WT-2/WT-4, process-identity verification and queue/state/custody contracts unchanged.
+
+**Scoped verdict: no blocker.** F1 and F2 are non-blocking. As you noted, the pending same-head CI rerun doesn't certify this uncommitted delta; a new head has to run after this review.
+
+</details>

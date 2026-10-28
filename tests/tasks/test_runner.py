@@ -1691,10 +1691,6 @@ def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
         """
 from __future__ import annotations
 
-from tests.helpers.typing import record_and_return
-
-from collections.abc import Iterator, Mapping
-
 import os
 import sys
 import time
@@ -1717,10 +1713,6 @@ if __name__ == "__main__":
     parent_script.write_text(
         """
 from __future__ import annotations
-
-from tests.helpers.typing import record_and_return
-
-from collections.abc import Iterator, Mapping
 
 import subprocess
 import sys
@@ -2578,18 +2570,29 @@ def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:
     )
 
     session = runner.start_session(on_activity=lambda: None)
-    child_pid = _wait_for_pidfile(pidfile)
+    child_identity: tuple[int, float] | None = None
     try:
+        try:
+            child_pid = _wait_for_pidfile(pidfile)
+        except AssertionError as error:
+            error.add_note(
+                f"Session returncode={session.returncode()!r}; "
+                f"stderr={''.join(session.poll_stderr())!r}"
+            )
+            raise
+        child_identity = (child_pid, psutil.Process(child_pid).create_time())
         session.terminate()
         assert _wait_for_pid_exit(child_pid)
     finally:
+        handle = session.handle
+        if handle is not None:
+            for pid, create_time in handle.scoped_host_processes():
+                helpers_module.terminate_verified_process_tree(
+                    pid, create_time, kill=True
+                )
+        if child_identity is not None:
+            helpers_module.terminate_verified_process_tree(*child_identity, kill=True)
         session.stop_monitor()
-        if not _wait_for_pid_exit(child_pid, timeout=0.1):
-            psutil = pytest.importorskip("psutil")
-            try:
-                psutil.Process(child_pid).kill()
-            except psutil.Error:
-                pass
 
 
 def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
