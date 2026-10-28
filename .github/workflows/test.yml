@@ -60,6 +60,7 @@ jobs:
       if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
       env:
         WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: ${{ matrix.os == 'windows-latest' && '120' || '' }}
+        WEFT_TEST_DIAGNOSTICS_DIR: ${{ matrix.os == 'windows-latest' && matrix.test_slice == 'cli' && format('{0}/weft-test-diagnostics', runner.temp) || '' }}
       run: |
         pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }}
 
@@ -78,6 +79,14 @@ jobs:
         path: .coverage.${{ matrix.test_slice }}
         if-no-files-found: warn
         include-hidden-files: true
+
+    - name: Upload Windows CLI diagnostics
+      if: ${{ always() && matrix.os == 'windows-latest' && matrix.test_slice == 'cli' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: diagnostics-windows-${{ matrix.python-version }}-cli
+        path: ${{ runner.temp }}/weft-test-diagnostics
+        if-no-files-found: warn
 
     - name: Test CLI installation
       if: ${{ matrix.test_slice == 'cli' }}

@@ -2612,3 +2612,256 @@ This is a comment-only change.
 Full SQLite passed5982tests with38skips in232.37s. Full PostgreSQL stopped after4751passes29skips on the separate admission startup-pressure setup, documented in the admission plan. The T7 notification regression did not fail in that run; the incomplete run is not a full PostgreSQL pass. Corrective-head CI and extension jobs remain required.
 
 Original-load PostgreSQL rerun after the startup-pressure setup correction:5934passed29skipped in338.95s (`c1-full-postgres-pressure-fixed.log`). No worker count, deadline, pressure or runtime behavior was relaxed. This closes the local full-PG gate for the current combined working tree; corrected-head CI remains separate. Full SQLite was5982passed38skipped232.37s before the PG-only setup correction.
+
+### Corrective-head CI result and Windows diagnostic boundary, 2026-10-28
+
+Pushed a385f3e86d620f3dcf783e535a22c0f221394382, run40769090681: all three PostgreSQL jobs, 26 of27 OS/Python jobs, lint and coverage passed. The original notification test passed in PostgreSQL remaining. Windows3.14 CLI job123101422111 failed because worker gw2 exited during `test_installed_console_function_handoffs_from_fresh_project`:292passed10skipped, one worker-loss failure. Django, Docker, macOS-sandbox and microsandbox dependent jobs were skipped, not passed.
+
+The installed-console test has a90-second module marker, overriding the workflow900-second default. Worker loss occurred approximately90.19seconds after controller logstart, strongly consistent with timeout but not a captured timer-fired event. Source tracing shows pytest-timeout thread expiry prints through the worker terminal writer and then calls os._exit(1); execnet worker stdout goes to the null device, so stacks may disappear. No stack or last test phase was retained. The cause could be a slow command, teardown, cumulative healthy work or another termination mechanism. Do not label it an interpreter crash, connect it to POSIX reap ownership, or relax timeout/workers based on this evidence. Diagnostic proposal and source trace are in `windows314-installed-console-ci-diagnosis.md`; a reviewed diagnostic-only change is required before diagnosing the blocked owner from a new full-load Windows run. No merge or final acceptance.
+
+### CI-D1: retain Windows worker-timeout evidence (proposed)
+
+# Retain Windows xdist timeout evidence (proposed slice, 2026-10-28)
+
+Status: cross-family plan review PASS; F1–F6 accepted below before implementation. RED-only acceptance is the next gate; the diagnostic plugin remains unchanged until the root verifies the intended RED assertion.
+Class: 4 under [DOM-15]: narrow multi-surface test/CI observability work touching pytest worker teardown. Source spec: `docs/specifications/08-Testing_Strategy.md` [TS-0]. Existing owning plan: `docs/plans/2026-10-27-runtime-and-test-repair-plan.md`; append this slice and its review/evidence there, not a new product runtime plan. No normative behavior change is intended; if a review finds one, reclassify before editing.
+
+## Outcome and evidence boundary
+
+Retain the existing pytest-timeout worker output in a persistent artifact so the next original-load Windows 3.14 CLI failure identifies the actual blocked stack/phase. Preserve test outcome, 90s item timeout, workflow 900s default, full CLI selection, normal worker-count computation (the failed runner selected five), xdist scheduling, command deadlines and cleanup behavior. No watchdog, new failure timer, retry, reduced-load acceptance, product runtime edits, or concurrency work.
+
+Known: the failing module's `timeout(90)` overrides CLI900, and thread timeout covers the full test protocol. The controller's heartbeat and worker-down timestamps suggest ~90.19s. Not yet known: whether pytest-timeout fired, which operation consumed time, whether the root cause is product or test, or whether a healthy aggregate of nine subprocesses plus cleanup exceeds90. A passing diagnostic rerun establishes intermittence only.
+
+## Verified source seams and lifetime
+
+Failure environment: pytest9.2.0, pytest-timeout2.4.0, pytest-xdist3.8.0, execnet2.1.2, Python3.14.9. Local installed pytest is9.1.1. The root has now inspected the exact pytest9.2.0 wheel and verified the same `Config.get_terminal_writer` → reporter `_tw` → writer `_file` path; the source-version prerequisite is satisfied, with provenance below. This source check does not establish Windows runtime behavior. Verify versions again from new CI installation logs; do not assume stability.
+
+- `pytest_timeout._get_item_settings`: closest marker first, fallbackCLI only for absent values. `pytest_runtest_protocol` starts the existing thread timer before setup when func_only=False. `timeout_timer` writes captured streams and `dump_stacks` using `item.config.get_terminal_writer()`, flushes, then calls `os._exit(1)`.
+- Verified in local pytest9.1.1 and extracted pytest9.2.0, `Config.get_terminal_writer()` returns `TerminalReporter._tw`; its TerminalWriter stores the stream in `_file`, uses `_file.write` and `_file.flush`, and has no public stream replacement API. `TerminalReporter` was initialized against worker sys.stdout.
+- Execnet `init_popen_io` redirects worker fd1 toNUL and replaces sys.stdout with that stream. The existing timeout writer therefore has a sink that cannot reach the controller's reports.
+- Existing `tests/helpers/run_diagnostics.py::_RunDiagnostics` owns per-process files and closes idempotently in sessionfinish/unconfigure. Keep ownership there. The actual extension point will be the one existing writer's `_file`: save it, assign a fail-open retained stream only for an xdist worker, restore it before closing any file. Do not replace Config.get_terminal_writer, pytest-timeout's timer hook, terminalreporter, or controller output. Isolate the private seam at one installation/restoration site with a comment naming the verified pytest version relationship and a real plugin integration test.
+
+## Minimal implementation
+
+1. Extend `_RunDiagnostics` with its `config`, an optional worker terminal-log file, original writer/stream references, and installed-stream reference. Open `<worker>-<pid>.terminal.log` only when `workerinput` is present, in the existing `pytest_configure` construction/registration ownership scope beside `.stacks.log`, with `encoding="utf-8", errors="backslashreplace"` and line buffering. On a later open or registration failure, close every already-acquired diagnostic file before disabling the plugin; ownership begins at each successful acquisition, not at completed construction. A controller keeps today's terminal writer. In the existing `pytest_sessionstart(self)`, find the reporter with `config.pluginmanager.get_plugin("terminalreporter")` and its writer with `getattr(reporter, "_tw", None)`, rather than the asserting `get_terminal_writer()`. Install only a compatible existing stream. Keep `.stacks.log` for fatal faulthandler evidence, and record sink installation/unavailability in the existing JSONL owner.
+
+   The retained stream needs a small fail-open write/flush adapter because a raw file flush failure inside pytest-timeout's `finally` would prevent its subsequent `os._exit(1)`, changing failure semantics. On OSError/ValueError from diagnostic write/flush, stop using the failed diagnostic sink and forward to the original stream. Do not swallow arbitrary programming exceptions. The original stream remains open and is never closed by this plugin. Keep the adapter local to run_diagnostics with only write and flush: writer formatting/isatty settings are already cached. UTF-8 backslash replacement prevents a lone surrogate from raising UnicodeEncodeError (a ValueError subclass) and incorrectly disabling a healthy sink. Preserve the existing writer object and formatting settings by swapping its stream, rather than constructing a replacement reporter or copying its settings.
+
+   Install only after all resources/references are ready. Missing/incompatible terminal writer/private stream means record diagnostic unavailability and leave the original path untouched; never fail the test. On `_close`, if the writer still owns this adapter, restore its original stream first, then close the retained file. Do not overwrite a later plugin's stream change. Close remains idempotent. A hard worker exit cannot run restoration, but the timeout callback flushes the retained file before its original os._exit. Fatal faulthandler stays independent.
+
+2. Add opt-in phase records to only the installed-console acceptance test, through the existing `_RunDiagnostics` record owner. Do not create another JSONL writer. Use a small public recording method on that plugin or a narrow module function that retrieves `weft-run-diagnostics` from the test's request.config and calls its existing recorder. No-op when absent. A public helper is warranted only as the real consumer seam, not a test-only export.
+
+   Record fresh initialization, each console command, harness-enter and harness-exit begin/return or raise, with nodeid/phase, monotonic elapsed and command argv/returncode. Never log environment dictionaries or credentials. Log subprocess timeout/exception type before rethrowing unchanged. Keep actual subprocess.run invocation, its captures, cwd, env and deadline unchanged. The eight existing `_run_console` calls share the same forwarding record wrapper. The duplicate initialization subprocess can use `_run_console(console,tmp_path,'init',str(root),env=env)` with the exact old30s timeout/cwd/argv. Do not rewrite harness lifecycle: explicit phase points surround the existing with harness boundary, and `finally` after it records completion/failure without suppressing exceptions. Remember the existing init-failure test directly calls this test function; if request becomes required, forward its existing request explicitly so that coverage remains real.
+
+   Enabling this directory enables the entire existing diagnostic plugin: fatal faulthandler stacks move into `.stacks.log`, harness exception diagnostics use this retained directory instead of disposable temporary paths, and pytest controller/workers write JSONL events. The upload must retain all of these files; inline fatal stacks may no longer appear in the job log. Product commands do not load this pytest plugin.
+
+   Phase instrumentation is diagnostic only. It should not read broker state, poll, spawn or add waits. It can identify the last entered owner even if os._exit bypasses finally; actual blocked stack comes from the retained timer dump.
+
+3. In `.github/workflows/test.yml`, enable `WEFT_TEST_DIAGNOSTICS_DIR` only for Windows CLI matrix jobs, rooted under runner.temp with a job-specific subdirectory. Add an `if: always() && matrix.os == 'windows-latest' && matrix.test_slice == 'cli'` artifact-upload step, using the existing pinned `actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9`. Unique artifact name includes Windows, Pythonversion andCLI. Upload that same directory; missing files warn, never convert a failed test to success. Do not change pytest command, markers, worker-count step, fail-fast setting, capture mode or timeout args. Keep artifacts outside harness roots so cleanup cannot remove them.
+
+## Falsifiable verification and review gates
+
+Before edits, root applies this reviewed slice to the runtime repair plan and records its fixed source baseline. Cross-family plan review verifies the stream lifetime/failure fallback, no timer-policy change, phase ownership, and correct upload path/condition. Fresh-eyes review is separate. Do not run tests alongside exclusive admission measurements.
+
+Use existing `tests/system/test_run_diagnostics.py` real subprocess acceptance. Extend its `_run_test` command construction with an explicit opt-in pytest-timeout plugin argument for the new probe (autoload remains disabled), retaining xdist.plugin and `-n1 --max-worker-restart=0` for that subprocess. One worker is the existing diagnostic-fixture boundary, not a reduction of the actual Windows CLI acceptance load. Run the outer repository test with normal configured workers.
+
+New timeout probe: a temporary test with `@pytest.mark.timeout(1,method='thread')` blocks inside a named function (`test_timeout_probe`, e.g. time.sleep60) and prints a unique captured-output token. The outer subprocess limit remains30s, independently bounding a broken diagnostic adapter. Require result.returncode1 and the same controller worker-crash report. With diagnostics enabled require exactly the crashing worker's terminal artifact, containing a Timeout banner, the unique captured token, and the named test in a thread stack. Require the existing JSONL test_start and controller worker_down. These are actual timer/xdist/TerminalWriter effects, not mock callback output.
+
+- **RED:** run that acceptance case against the unchanged diagnostic plugin. Before the intended failure, assert child exit1, the exact crashed item, and that neither a Timeout banner nor the unique captured token appears in controller stdout/stderr. The intended RED is the terminal-artifact count being zero rather than one, proving absent retained content. A startup/import/plugin/outer30s failure does not qualify.
+- **GREEN:** corrected plugin retains banner/token/stack, child exits1 as before, controller reports the same crashed item. No fresh timeout machinery is installed by our code.
+- **Sensitivity:** restoring only the original writer stream must make artifact-content assertion fail; restoration of candidate returns GREEN. Do not accept merely nonzero subprocess exit as evidence.
+- **Normal close:** extend existing passing-session test with distributed=True (preserve standalone arm) and require normal result0/sessionfinish/no INTERNALERROR. This verifies the normal outcome and worker terminal_sink_installed event. Restoration before close and idempotent unconfigure are verified by source inspection; fail-open fallback means a successful run does not prove restoration. No private-field equality-only test is added.
+- **Disabled/unwritable:** reuse `test_run_diagnostics_never_replaces_test_failure` unchanged for absent env and path occupied by a file; original assertion text and exit1 stay intact, no INTERNALERROR. A distributed duplicate does not exercise an additional boundary because the invalid directory fails before construction. Partial-open failure needs a focused ownership control proving already-open files close, not another invalid-directory case.
+- **Post-open sink failure:** from inside the child test, use `request.config.pluginmanager.get_plugin("weft-run-diagnostics")` to close the retained terminal file after installation, then block in the same real thread-timeout probe. The first write reaches the closed sink and switches later writes/flush to the original stream. This does not separately test the defensive flush exception guard. Preserve the 60s child block and 30s outer limit: an escaping flush would skip os._exit and hit the outer limit. Require exit1, the crashed-item report, and no ValueError or Traceback text in stderr. This is narrow dependency fault injection, not replacement of the timeout path; a mock write-call count is insufficient.
+- **Phase forwarding:** existing installed-init-failure test must still preserve original failure and avoid materializing harness context. A small existing diagnostics subprocess fixture can call the public phase recording seam then fail, asserting recorded begin/exception and unchanged outcome; do not duplicate full installed-console work merely to prove JSONL formatting. Actual next Windows run proves the real invocation records.
+
+Then Ruff/format/mypy/doc-policy checks appropriate to changed files, fresh-eyes and cross-family implementation review, and the original full Windows3.14 CLI job (normal computed five workers on the observed runner). AllWindowsCLIversions can receive same diagnostics without changing runtime acceptance. Do not claim success from a focused lower-load standalone console test.
+
+## Interpret the next evidence
+
+Captured Timeout banner at90 confirms the termination mechanism. The stack plus unmatched phase then decides the next repair:
+
+- healthy command completions followed by aggregate90 expiration: inspect whether independent contracts should be split while retaining the fresh-project and same-manager reuse witnesses; don't infer this merely from nine calls;
+- particular CLI stuck or30s TimeoutExpired: inspect that product/bootstrap/wait owner, preserve its output and cleanup evidence;
+- cleanup phase stack: investigate that cleanup owner and deadline accounting;
+- no timer banner but fatal stack or different exit: follow that evidence rather than the90s coincidence;
+- passing rerun: record intermittence, not a cause or fixed status.
+
+Risks accepted for this diagnostic slice: a private pytest writer seam isolated behind opt-in fail-open handling; extra small file writes can perturb timings, so diagnostic timing is not admission performance evidence; hard OS termination can prevent even a flush, so absent artifacts remain inconclusive. No unrelated diagnostics framework, timer ratchet or product behavior change is included.
+
+
+Root source-version verification: downloaded the exact PyPI pytest9.2.0 wheel, verified SHA256 `07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588`, and read `_pytest/config/__init__.py::Config.get_terminal_writer`, `terminal.py::TerminalReporter.__init__`, and `_io/terminalwriter.py::{write_raw,flush}`. The same reporter `_tw` / writer `_file` seam is present; write_raw calls only stream.write and flush calls stream.flush. Replacing the stream after construction preserves cached formatting. The preceding source-version prerequisite is now satisfied; this does not establish Windows runtime behavior. Provenance and extracted files are retained outside the repository at `/tmp/weft-implementation-20261027/pytest-9.2.0-source/` and `/tmp/weft-implementation-20261027/pytest-9.2.0-provenance.json`.
+
+Author fresh-eyes: persisting the existing timeout output is narrower than adding another watchdog. Opt-in ownership and restoration before close are essential, because a new stream failure must not interrupt timeout finalization. The real subprocess probe must fail on missing retained contents rather than mere child failure. Phase records reuse the existing recorder and must never read the broker or alter command/harness cleanup. The private seam and small diagnostic timing perturbation are explicit residual risks. Cross-family plan review returned PASS, with the accepted robustness and precision changes below; implementation review remains required.
+
+
+#### CI-D1 cross-family plan review dispositions, 2026-10-28
+
+| Finding | Disposition and operative correction |
+|---|---|
+| F1 | Accept. Open the UTF-8 terminal log with `errors="backslashreplace"`; an encoding error must not disable the sink. |
+| F2 | Accept, with explicit acquisition ownership. Open the worker file in the existing configure/construction scope, pass config into the plugin, inspect the optional reporter without assertions, and close already-open files if later construction or registration fails. Retain the existing disabled/unwritable tests rather than a redundant distributed variant. |
+| F3 | Accept. RED first proves the child exits1 and the controller lacks the banner/token, then fails specifically on zero retained terminal artifacts. |
+| F4 | Accept. The real child test closes the installed terminal file and reaches the existing timeout. Require unchanged exit/crash behavior and no diagnostic exception; the60s block versus30s outer limit detects a flush that prevents exit. |
+| F5 | Accept. The operative plan names all opt-in effects: fatal stacks, harness failure snapshots, and pytest event JSONL move into the retained/uploaded directory. |
+| F6 | Accept. Exact pytest9.2.0 source verification is marked satisfied; scratch provenance paths are absolute and explicitly outside the repository. |
+
+Fresh-eyes disposition: accept the independently identified partial-acquisition
+cleanup risk as part of F2. Close `.stacks.log` if the later terminal-file open
+fails, before installing the writer or faulthandler. This requires explicit
+local ownership, not a new lifetime abstraction.
+
+Test authoring gate: this new owner-boundary test protects retained timeout
+evidence while preserving the real child pytest failure. The existing fatal
+`os.abort()` case cannot catch missing output from pytest-timeout's ordinary
+TerminalWriter followed by `os._exit`. The probe uses the real plugin, timer,
+xdist worker and artifact files; no new product seam or mock timeout is added.
+The child pytest process exit closes the producer interval before artifact and
+absence assertions. Outer verification uses the normal12workers; the existing
+subprocess diagnostic fixture still owns one xdist worker.
+
+<details><summary>Verbatim CI-D1 cross-family plan review</summary>
+
+# Review verdict on CI-D1 (retain Windows worker-timeout evidence): **PASS**, with one required wording fix before implementation (F1)
+
+I read the live code and made no edits. The proposal's cause and effect hold up, its scope is narrow, and its tests can actually fail. F1 is a real robustness hole, but it's a one-line fix to the plan. None of the findings need a redesign.
+
+## Premise checked against live code
+
+- **Timer path:** In pytest-timeout (`.venv/.../pytest_timeout.py:505-542`), `timeout_timer` writes everything through `item.config.get_terminal_writer()`. A write error inside its `try` is caught and printed to stderr, so that one isn't fatal. The `finally` calls `terminal.flush()` before `os._exit(1)`. So only a failing **flush** can stop the exit, and the proposal's reason for a fail-open adapter is correct. The stack dump (`:545-558`) includes the main thread, so the named-test stack assertion will hold.
+- **Timer start and settings:** With `func_only=False`, the protocol hookwrapper starts the timer before setup (`:178-193`). That matches the plan's claims.
+- **Output is lost today:** execnet's `init_popen_io` (`gateway_base.py:1765-1800`) points fd1 at the null device and sets `sys.stdout` to it. `TerminalReporter` builds `_tw` from `sys.stdout` (`terminal.py:394`). So the timeout banner currently goes nowhere.
+- **The stream swap is safe:** `TerminalReporter.isatty` (`terminal.py:402`) and `TerminalWriter.hasmarkup` (`terminalwriter.py:86-87`) are cached when the objects are built. `_file` is only touched by `write` and `flush` (`:168,177,187`). I found no other code in pytest or xdist that reads `_tw._file`.
+- **No nested pytest runs in `tests/cli`**, so turning on the env var there doesn't spread to child test runs. Product code never reads `WEFT_TEST_DIAGNOSTICS_DIR`; only test helpers (`run_diagnostics.py`, `weft_harness.py`) do.
+
+## Findings and suggested fixes
+
+**F1 (required wording fix; robustness).** `UnicodeEncodeError` is a subclass of `ValueError`. As written, catching "OSError/ValueError" on write would treat a single unencodable string (for example a lone surrogate in captured subprocess output) as a dead sink. The diagnostic file would then be dropped for the rest of the session, and pytest's own escape fallback in `write_raw` would never run.
+- **Fix:** open `.terminal.log` with `encoding="utf-8", errors="backslashreplace"` so encoding can't fail.
+- Then the adapter only needs to catch `OSError` and the closed-file `ValueError`.
+
+**F2 (simplification; removes a failure branch).** Open the worker terminal log in `pytest_configure`, inside the existing `try`, next to `stacks.log`, only when `workerinput` is present.
+- An open failure then disables the whole plugin, the same way it does today. The existing unwritable-directory test already covers that.
+- That leaves one new branch: "terminal reporter missing or incompatible at `pytest_sessionstart`." Check it with `pluginmanager.get_plugin("terminalreporter")` and `getattr(..., "_tw", None)`, not `get_terminal_writer()`, which asserts.
+- Hand `config` to the plugin when it's constructed. The existing `pytest_sessionstart(self)` signature can then stay as it is.
+- Extending the "Disabled/unwritable" gate to distributed mode never reaches the new code anyway, because a directory occupied by a file fails before the worker is set up. Under F2 that extension can be dropped.
+
+**F3 (make the premise test falsifiable).** In the RED run, also assert that the Timeout banner and the unique token are **absent** from the controller's stdout and stderr. That directly tests the claim that the output is lost today.
+- With the unchanged plugin, RED fails on the terminal-artifact count being 0. Say so explicitly; that counts as the "absent retained content" failure.
+
+**F4 (make the sink-failure test precise).** The probe should close the plugin's retained file from inside the child test, using `request.config.pluginmanager.get_plugin("weft-run-diagnostics")`. That makes both write and flush hit the dead sink.
+- Keep the 60s sleep and the 30s outer limit. That gap is what tells the two outcomes apart: if flush raised, `os._exit` would be skipped and the run would hit the outer 30s timeout.
+- Assert exit code 1, the crash report, and no `ValueError` or `Traceback` text in stderr.
+
+**F5 (state a side effect).** Setting `WEFT_TEST_DIAGNOSTICS_DIR` turns on the whole existing plugin, not just the new terminal log:
+- Fatal faulthandler stacks move from the job log into `*.stacks.log`.
+- `WeftTestHarness._attach_failure_diagnostics` (`weft_harness.py:197-206`) writes into that directory instead of a throwaway temp directory.
+- Every Windows CLI process writes JSONL.
+
+These changes keep the evidence (the artifact upload retains it) and add some. The plan should still list them, because readers of the CI log will no longer see fatal stacks inline.
+
+**F6 (wording).** Two stale or unclear spots:
+- Line 2637 says "Do not claim the 9.2.0 seam has already been read", which contradicts the root verification at line 2691. Mark it as satisfied.
+- `pytest-9.2.0-source/` and the provenance JSON are not in the repository. Give their actual location or say they're kept outside the repo.
+
+## Other checks
+- **Phase records are worth keeping.** The timer stack shows which command is blocked, but only per-command elapsed times can tell "one command stuck" apart from "all nine took a combined 90s".
+- **Phase records: keep them minimal.** Record begin and end inside `_run_console` (elapsed, returncode or exception type), plus harness-exit begin and end. The harness-enter record adds nothing a stack trace can't show, so it's optional.
+- **Init-failure test still works after the change.** Routing init through `_run_console(console, tmp_path, "init", str(root), env=env)` keeps the existing test's `subprocess.run` monkeypatch effective. If you add `request`, that test must pass its own `request` along.
+- **Restore before close is ordered correctly.** Our `pytest_sessionfinish` runs before the terminal reporter writes its summary, which then goes to the null device as it does today. The "only restore if `_file` is still our adapter" check covers a later plugin swapping the stream.
+- **Workflow expression.** An expression like `${{ matrix.os == 'windows-latest' && matrix.test_slice == 'cli' && format('{0}\weft-test-diagnostics', runner.temp) || '' }}` on the existing pytest step works: an empty value disables the plugin (`run_diagnostics.py:106`) and the harness branch. `runner.temp` is already per-job.
+- **Upload step.** It is correct as specified: `always()`, the same path, `if-no-files-found: warn`, and the pinned `actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9`. It can't turn a failed job into a pass.
+
+## Primitives, correctness, elegance
+Swapping one existing writer's stream, behind a single install/restore point, is the smallest primitive that keeps pytest-timeout's own output. It adds no timer, hook override, or second recorder, and nothing in the list of constraints is violated. With F1 and F2 applied, the adapter is two methods, write and flush. Nothing else is needed: the cached `isatty`/markup state means no delegation is required.
+
+## Separate observations (not blockers)
+- An optional extra check: assert the distributed passing-run `.terminal.log` contains the `PASSED` line. That would show the sink is installed on ordinary runs too.
+- As the plan already says, a passing Windows rerun only shows the failure is intermittent.
+
+</details>
+
+#### CI-D1 implementation evidence, 2026-10-28
+
+The opt-in worker terminal sink and installed-console phase records are implemented. The controller stream is untouched. Existing worker TerminalWriter settings are preserved, the retained file uses UTF-8/backslashreplace, and normal close restores the original stream before closing owned files. A failed retained write/flush falls back to the original stream. Partial terminal-file acquisition closes the already-open fatal-stack file. Windows CLI jobs enable the existing diagnostic directory and upload all its artifacts through the workflow's existing pinned upload action; test commands, marks, deadlines, scheduling and worker counts are unchanged.
+
+Qualified RED (parent independently inspected): `ci-d1-timeout-red.log` failed specifically on zero retained worker terminal artifacts after proving child exit1, the crashed test identity, controller absence of banner/token, and worker-start/down events. GREEN at normal12 workers ran the eight diagnostics cases plus both installed-console tests:10passed8.16s. The original-writer mutation left the terminal artifact present but empty and failed at `assert "\\ud800" in output` with actual empty string (1failed2.39s), after the same crash/status/event guards. Restoring the implementation yielded10passed7.84s. Scoped mypy initially identified private-seam Any/None narrowing errors; explicit local annotations and reading the original stream before identity narrowing resolved them. Final diagnostics rerun after those typing-only changes:8passed2.59s. Ruff and scoped mypy (three changed Python files) pass.
+
+Coverage includes standalone and distributed normal finish, retained real pytest-timeout banner/captured token/blocked stack (including an unpaired surrogate), fatal worker stack, disabled/unwritable diagnostic roots, partial acquisition cleanup using the actual opened stack handle, and a real timeout after closing the installed terminal sink. The latter still exits1 with the original crashed-test report and no diagnostic traceback. The existing installed-init failure ownership test remains passing. Retained phase events from the restored full run contain ten console begin/end pairs: nine successful real console calls and the injected init-failure call, plus harness enter/exit phases. No environment dictionaries are recorded.
+
+Evidence files are under `/tmp/weft-implementation-20261027/`: `ci-d1-green.log`, `ci-d1-original-writer-mutation.log`, `ci-d1-restored-green.log`, `ci-d1-final-green.log`, `ci-d1-mypy.log`, and `ci-d1-restored-green-artifacts/`. These local results establish diagnostic behavior, not the cause of the Windows failure. Fresh-eyes and cross-family implementation review remain required before push, followed by the unchanged Windows CLI slice. A passing CI rerun establishes intermittence only. No concurrent launch workers were introduced.
+
+CI-D1 fresh-eyes implementation dispositions: accepted F1, because reporting whole harness lifetime as cleanup duration was misleading and a failed enter must not be labeled an exit. `harness_exit_begin` now captures its own timestamp; only an actual exit start permits `harness_exit_end`, whose elapsed measures cleanup. Enter failure records `harness_enter_end` with its error instead. Accepted F2: added a real distributed subprocess regression calling the existing `record_phase` consumer before an operation and on its exception, then rethrowing unchanged. It verifies original failure status/text and retained phase order, argv, exception type and nodeid. No new recorder or framework was added.
+
+After these corrections, the combined diagnostic and installed-console slice passed11tests6.99s at normal12 workers (`ci-d1-review-green.log`). A no-op `record_phase` mutation failed specifically at phase sequence comparison, actual `[]` versus `['operation_begin', 'operation_end']`, after the original failure status/text assertions (1failed1.48s, `ci-d1-phase-mutation.log`). The implementation was restored; the same combined slice passed11tests7.06s (`ci-d1-review-restored-green.log`). Ruff and scoped mypy remain clean. Artifacts are retained in `/tmp/weft-implementation-20261027/ci-d1-review-restored-artifacts/`. Test lane was released before this evidence update. Cross-family review and Windows CI remain open.
+
+
+#### CI-D1 cross-family implementation review dispositions, 2026-10-28
+
+The independent review returned no blocker. F1 accepted: the closed-sink probe demonstrates a write failure switching to fallback; it does not separately exercise the defensive flush exception guard. F2 accepted: normal distributed success proves the ordinary outcome, not stream restoration, which was verified by source inspection. The existing distributed arm now additionally asserts the worker terminal_sink_installed event. F3 accepted: harness_exit_begin records the body exception type, allowing comparison with the exception leaving cleanup. The partial-acquisition nit is accepted: test the constructor directly under pytest.raises(OSError), retaining the real stack handle closure assertion without risking registration into the live outer session.
+
+Optional contextmanager extraction is declined: this slice has one consumer and explicit phase points preserve the existing lifecycle without adding another abstraction. Optional console exception-flow rewrite is declined: no current caller runs inside an outer handled exception, and the current forwarding has real failure coverage; the latent concern is recorded rather than expanding this diagnostic slice. Detail-key collisions in record_phase are outside current scope: no caller supplies reserved keys. No claim is made that arbitrary new callers are supported.
+
+Verbatim independent review:
+
+```text
+# CI-D1 implementation review (read-only): **no blocker**
+
+The diff is correct, scoped and fail-open. It reuses the existing owners: the `_RunDiagnostics` recorder and file lifetime, the reporter's existing `_tw`, and the workflow's pinned upload action. It adds no timer, deadline, worker-count, scheduling, product or load change. I didn't edit anything or run any tests.
+
+## Checked against source
+
+- **Timeout ordering.** `pytest_timeout.py:513-542` writes everything through `get_terminal_writer()`. A write error is caught at `:536-537`. Only `terminal.flush()` at `:539` can stop `os._exit(1)` at `:542`. The guards in `_RetainedOutput` (`run_diagnostics.py:32-47`) are therefore the right size: they catch only `OSError`/`ValueError`, and the original stream is never closed.
+- **Writer seam.** In local pytest 9.1.1, `_file` is touched only at `terminalwriter.py:86,168,177,187`. Install (`run_diagnostics.py:94-108`) uses non-asserting lookups and runs only when a worker file exists. Restore (`:144-149`) runs before close, checks identity, and is idempotent.
+- **Resource acquisition.** A failed terminal open closes the stack file (`:61-68`). A failed registration closes everything (`:182-184`).
+- **Surrogate test is sensitive.** Without `backslashreplace`, the strict encoder raises inside the adapter's `write`. The adapter sets `failed`, so everything after goes to NUL, and the `"\\ud800"` assertion fails on empty content. pytest's escape fallback in `write_raw` can't rescue this, because the adapter has already absorbed the error.
+- **Workflow.**
+  - The expression yields `''` everywhere except Windows CLI, which leaves the plugin off.
+  - The `runner` context is valid in step `env`, and the upload path matches the env value.
+  - `always()` with `warn` can't turn a failed job into a pass.
+  - The heartbeat writes to `sys.__stderr__` (`conftest.py:622-627`), so the swap doesn't affect it.
+- **Phase forwarding.** `_run_console` keeps the same argv, cwd, env, capture and deadline. The init-failure test passes its real `request`, so the monkeypatched `subprocess.run` is still hit. Python ≥3.12 (`pyproject.toml:10`) supports `sys.exception()`. Inside a `finally` on the exceptional path it returns the exception in flight.
+
+## Findings (none blocking)
+
+**F1 – the closed-sink test never reaches the flush guard; the evidence overstates it.** Suggested fix: correct the wording only.
+- Closing the file makes the timer's first `terminal.sep` write raise `ValueError`, which sets `failed=True`. The flush at `:539` then goes straight to the original stream.
+- So a mutant that removes only the flush `try/except` (`run_diagnostics.py:41-46`) survives `test_run_diagnostics_closed_sink_preserves_worker_timeout`.
+- Both guards removed would still be caught: flush escapes, `os._exit` is skipped, and the 30s outer limit fires. Removing only the write guard should be caught by `print_exc` on stderr. I didn't verify either case by mutation.
+- The plan/F4 sentence "both write and flush reach the closed sink" is false. Keep the flush guard as defensive code. A flush-only failure can't be triggered reliably with real I/O, because line buffering flushes on the final `sep` newline. No new test is needed.
+
+**F2 – no test can detect missing normal restoration; the plan overstates this too.** Suggested fix: correct the wording, plus an optional assertion.
+- If restoration were removed, writes after close would hit the closed adapter file and silently fall back to the same original stream. The distributed normal-close test can't tell the difference.
+- This follows from the fail-open design: restoration is hygiene that can't be seen from outside. Don't cite that run as restoration evidence.
+- Optional cheap addition through the public JSONL owner: in the `distributed=True` arm, assert that gw0 recorded a `terminal_sink_installed` event. That proves the sink is installed on ordinary runs.
+
+**F3 – `harness_exit_end.error` mixes up body failure and cleanup failure.** Optional.
+- At `test_cli_run_installed_entrypoint.py:271-278`, `sys.exception()` reports anything leaving the `with`, including a body `AssertionError` followed by successful cleanup. It's the same kind of mislabel that fresh-eyes F1 fixed for enter.
+- Smallest fix: also record `error=` from `sys.exception()` at `harness_exit_begin` (`:268-269`), so a reader can compare the two.
+- This doesn't help the target 90s case, where `os._exit` skips both end records.
+
+## Elegance (optional, owner's call)
+
+- **Re-indent churn in the CLI test.** The two nested `try/finally` blocks with the `exit_started` sentinel force about 130 lines of re-indent. Moving exactly that logic into a local `@contextlib.contextmanager` named `_recorded_harness(harness, config)` would leave the test body at its original indent, with a one-line `with` change. `contextmanager` already forwards thrown exceptions and keeps `__exit__` suppression semantics. This doesn't change the lifecycle.
+- **`_run_console` (`:36-59`).** `try: ... except BaseException as error: record; raise`, followed by a success record, would drop both the `result` sentinel and `sys.exception()`. It also avoids a latent mislabel: in a `finally` on the success path, `sys.exception()` returns any outer *handled* exception. No current caller runs inside an `except`, so this is latent only.
+
+## Nits
+
+- **`record_phase` keys (`run_diagnostics.py:188-197`).** Passing `phase`, `nodeid` or `event` as detail keys would raise `TypeError` at the call, before `_record`'s guard. No caller does this today.
+- **Partial-acquisition test (`test_run_diagnostics.py:197-219`).** It drives module `pytest_configure` with the live outer `pytestconfig`. If a regression ever let construction succeed, it would register a second plugin into the outer session. Calling `_RunDiagnostics(tmp_path, "probe", pytestconfig)` under `pytest.raises(OSError)` is narrower. As written, the test does catch removal of the cleanup (`opened[0].closed`).
+
+## Test oracles
+
+- **Timeout probe: strong.** It uses the real timer, xdist worker, TerminalWriter and files, and checks absence on the controller and content in the artifact. The RED counts.
+- **Phase test: real subprocess, catches the no-op mutant.** As the plan accepted, it covers the `record_phase` seam, not the `_run_console`/harness wrappers. The next Windows run supplies that evidence.
+
+## Pre-existing observations (no action)
+
+`_record` reopens the JSONL file for every event. The harness failure snapshots now land in the uploaded directory, which is the accepted plan F5. Neither gets worse with this diff.
+
+On cause, I agree with the plan: the retained banner, stack and unmatched phase from the unchanged Windows CLI job should decide the next repair. A passing rerun only shows the failure is intermittent.
+```
+
+Final verification after cross-family dispositions: the unchanged selected diagnostics plus installed-console slice passed11tests6.56s at normal12 workers (`/tmp/weft-implementation-20261027/ci-d1-crossfamily-final-green.log`). Scoped Ruff, format check and mypy all pass for the three changed Python files. The test lane was released before recording this result. Both implementation review passes are complete with the explicit dispositions above; unchanged Windows CI remains the external diagnostic gate, and no cause of the original Windows failure has been claimed.
+
+Root closure verification: the final fresh-eyes pass confirmed every accepted cross-family disposition in the final source. Root independently inspected the qualified RED and both mutation failure logs, final11-pass result, and retained real phase events. Whole-repository Ruff/format (632files), full mypy (479files),164policy tests, documentation paths and DOM-15 fixture checks passed before the final small review dispositions; scoped Ruff/format/mypy and the full11-case slice passed again afterward. CI-D1 is ready for Windows evidence collection; it does not resolve the original failure cause.

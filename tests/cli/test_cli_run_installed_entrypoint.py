@@ -6,12 +6,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import sysconfig
+import time
 from pathlib import Path
 
 import psutil
 import pytest
 
+from tests.helpers.run_diagnostics import record_phase
 from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.ext import RunnerHandle
@@ -25,19 +28,35 @@ def _run_console(
     root: Path,
     *args: str,
     env: dict[str, str],
+    config: pytest.Config,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run the environment's installed console script from an external root."""
 
-    return subprocess.run(
-        [str(console), *args],
-        cwd=root,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    started = time.monotonic()
+    record_phase(config, "console_begin", argv=list(args))
+    result: subprocess.CompletedProcess[str] | None = None
+    try:
+        result = subprocess.run(
+            [str(console), *args],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result
+    finally:
+        error = sys.exception()
+        record_phase(
+            config,
+            "console_end",
+            argv=list(args),
+            elapsed=time.monotonic() - started,
+            returncode=result.returncode if result is not None else None,
+            error=type(error).__name__ if error is not None else None,
+        )
 
 
 def _assert_ok(completed: subprocess.CompletedProcess[str]) -> str:
@@ -48,6 +67,7 @@ def _assert_ok(completed: subprocess.CompletedProcess[str]) -> str:
 
 def test_installed_console_function_handoffs_from_fresh_project(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Fresh-project stdlib, local, stored, reuse, and no-wait paths complete."""
 
@@ -67,14 +87,8 @@ def test_installed_console_function_handoffs_from_fresh_project(
         root = prepare_project_root(harness.root, env=env)
         env.pop("BROKER_TEST_BACKEND", None)
 
-        initialized = subprocess.run(
-            [str(console), "init", str(root)],
-            cwd=tmp_path,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=30.0,
-            check=False,
+        initialized = _run_console(
+            console, tmp_path, "init", str(root), env=env, config=request.config
         )
         _assert_ok(initialized)
 
@@ -117,101 +131,163 @@ def ping() -> dict[str, bool]:
         harness._closed = True
         raise
 
-    with harness:
-        # Keep installed commands on the exact broker target owned by cleanup.
-        # The init above ran first, while the external project was still fresh.
-        env = dict(os.environ)
-        env.pop("PYTHONPATH", None)
-        env.pop("BROKER_TEST_BACKEND", None)
-        env["WEFT_TASK_MONITOR_MODE"] = "report_only"
-        env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
-        stdlib = _run_console(
-            console,
-            root,
-            "run",
-            "--function",
-            "json:dumps",
-            "--arg",
-            "[1,2]",
-            env=env,
-        )
-        assert _assert_ok(stdlib) == "[1, 2]"
-
-        first_local = _run_console(
-            console,
-            root,
-            "run",
-            "--function",
-            "registry_probe:ping",
-            env=env,
-        )
-        assert json.loads(_assert_ok(first_local)) == {"ok": True}
-        managers_before = json.loads(
-            _assert_ok(
-                _run_console(console, root, "manager", "list", "--json", env=env)
+    exit_started: float | None = None
+    harness_started = time.monotonic()
+    record_phase(request.config, "harness_enter_begin")
+    try:
+        with harness:
+            record_phase(
+                request.config,
+                "harness_enter_end",
+                elapsed=time.monotonic() - harness_started,
             )
-        )
+            try:
+                # Keep installed commands on the exact broker target owned by cleanup.
+                # The init above ran first, while the external project was still fresh.
+                env = dict(os.environ)
+                env.pop("PYTHONPATH", None)
+                env.pop("BROKER_TEST_BACKEND", None)
+                env["WEFT_TASK_MONITOR_MODE"] = "report_only"
+                env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
+                stdlib = _run_console(
+                    console,
+                    root,
+                    "run",
+                    "--function",
+                    "json:dumps",
+                    "--arg",
+                    "[1,2]",
+                    env=env,
+                    config=request.config,
+                )
+                assert _assert_ok(stdlib) == "[1, 2]"
 
-        assert managers_before, "reuse coverage requires an existing live manager"
+                first_local = _run_console(
+                    console,
+                    root,
+                    "run",
+                    "--function",
+                    "registry_probe:ping",
+                    env=env,
+                    config=request.config,
+                )
+                assert json.loads(_assert_ok(first_local)) == {"ok": True}
+                managers_before = json.loads(
+                    _assert_ok(
+                        _run_console(
+                            console,
+                            root,
+                            "manager",
+                            "list",
+                            "--json",
+                            env=env,
+                            config=request.config,
+                        )
+                    )
+                )
 
-        second_local = _run_console(
-            console,
-            root,
-            "run",
-            "--function",
-            "registry_probe:ping",
-            env=env,
-        )
-        assert json.loads(_assert_ok(second_local)) == {"ok": True}
-        managers_after = json.loads(
-            _assert_ok(
-                _run_console(console, root, "manager", "list", "--json", env=env)
+                assert managers_before, (
+                    "reuse coverage requires an existing live manager"
+                )
+
+                second_local = _run_console(
+                    console,
+                    root,
+                    "run",
+                    "--function",
+                    "registry_probe:ping",
+                    env=env,
+                    config=request.config,
+                )
+                assert json.loads(_assert_ok(second_local)) == {"ok": True}
+                managers_after = json.loads(
+                    _assert_ok(
+                        _run_console(
+                            console,
+                            root,
+                            "manager",
+                            "list",
+                            "--json",
+                            env=env,
+                            config=request.config,
+                        )
+                    )
+                )
+                assert [item["tid"] for item in managers_after] == [
+                    item["tid"] for item in managers_before
+                ]
+
+                stored = _run_console(
+                    console,
+                    root,
+                    "run",
+                    "--spec",
+                    ".weft/tasks/fire-check.json",
+                    env=env,
+                    config=request.config,
+                )
+                assert json.loads(_assert_ok(stored)) == {"ok": True}
+
+                submitted = _run_console(
+                    console,
+                    root,
+                    "run",
+                    "--no-wait",
+                    "--function",
+                    "registry_probe:ping",
+                    env=env,
+                    config=request.config,
+                )
+                tid = _assert_ok(submitted)
+                assert len(tid) == 19 and tid.isdigit()
+                collected = _run_console(
+                    console,
+                    root,
+                    "result",
+                    tid,
+                    "--timeout",
+                    "15",
+                    "--json",
+                    env=env,
+                    config=request.config,
+                )
+                payload = json.loads(_assert_ok(collected))
+                assert payload["status"] == "completed"
+                assert payload["result"] == {"ok": True}
+                for record in harness._list_active_manager_records():
+                    runtime_handle = record["runtime_handle"]
+                    assert isinstance(runtime_handle, dict)
+                    handle = RunnerHandle.from_dict(runtime_handle)
+                    managers.extend(
+                        psutil.Process(pid) for pid in handle.scoped_host_pids()
+                    )
+                assert managers, (
+                    "acceptance test must observe its real manager before cleanup"
+                )
+            finally:
+                exit_started = time.monotonic()
+                body_error = sys.exception()
+                record_phase(
+                    request.config,
+                    "harness_exit_begin",
+                    error=type(body_error).__name__ if body_error is not None else None,
+                )
+    finally:
+        error = sys.exception()
+        if exit_started is not None:
+            record_phase(
+                request.config,
+                "harness_exit_end",
+                elapsed=time.monotonic() - exit_started,
+                error=type(error).__name__ if error is not None else None,
             )
-        )
-        assert [item["tid"] for item in managers_after] == [
-            item["tid"] for item in managers_before
-        ]
-
-        stored = _run_console(
-            console,
-            root,
-            "run",
-            "--spec",
-            ".weft/tasks/fire-check.json",
-            env=env,
-        )
-        assert json.loads(_assert_ok(stored)) == {"ok": True}
-
-        submitted = _run_console(
-            console,
-            root,
-            "run",
-            "--no-wait",
-            "--function",
-            "registry_probe:ping",
-            env=env,
-        )
-        tid = _assert_ok(submitted)
-        assert len(tid) == 19 and tid.isdigit()
-        collected = _run_console(
-            console,
-            root,
-            "result",
-            tid,
-            "--timeout",
-            "15",
-            "--json",
-            env=env,
-        )
-        payload = json.loads(_assert_ok(collected))
-        assert payload["status"] == "completed"
-        assert payload["result"] == {"ok": True}
-        for record in harness._list_active_manager_records():
-            runtime_handle = record["runtime_handle"]
-            assert isinstance(runtime_handle, dict)
-            handle = RunnerHandle.from_dict(runtime_handle)
-            managers.extend(psutil.Process(pid) for pid in handle.scoped_host_pids())
-        assert managers, "acceptance test must observe its real manager before cleanup"
+        else:
+            record_phase(
+                request.config,
+                "harness_enter_end",
+                elapsed=time.monotonic() - harness_started,
+                error=type(error).__name__ if error is not None else None,
+            )
 
     assert all(
         not manager.is_running() or not pid_is_live(manager.pid) for manager in managers
@@ -220,7 +296,7 @@ def ping() -> dict[str, bool]:
 
 
 def test_installed_console_init_failure_does_not_materialize_harness_context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     """Before enter, cleanup owns files only, never inherited broker defaults."""
     harness = WeftTestHarness()
@@ -238,7 +314,7 @@ def test_installed_console_init_failure_does_not_materialize_harness_context(
         ),
     )
     with pytest.raises(AssertionError, match="injected init failure"):
-        test_installed_console_function_handoffs_from_fresh_project(tmp_path)
+        test_installed_console_function_handoffs_from_fresh_project(tmp_path, request)
     assert harness._context is None
     assert harness._closed
     assert not harness.root.exists()
