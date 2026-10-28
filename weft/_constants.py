@@ -1911,6 +1911,13 @@ SUBPROCESS_STREAM_READ_SIZE: Final[int] = 64 * 1024
 SUBPROCESS_TERMINATION_WAIT_TIMEOUT: Final[float] = 0.2
 """Short grace timeout between subprocess stop/kill escalation phases."""
 
+SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS: Final[int] = 16
+"""Maximum queued chunks per stream before returning to subprocess supervision.
+
+A continuously producing child must not monopolize cancellation, deadline,
+or other-stream handling. Each raw chunk is at most SUBPROCESS_STREAM_READ_SIZE.
+"""
+
 SUBPROCESS_STREAM_DRAIN_TIMEOUT: Final[float] = 0.25
 """Best-effort timeout for draining subprocess stdout/stderr after exit."""
 

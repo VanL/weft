@@ -145,7 +145,10 @@ _Implementation mapping_:
 `weft/core/runners/host.py::HostRunnerPlugin.stop`,
 `weft/core/runners/host.py::HostRunnerPlugin.kill`,
 `weft/core/runners/host.py::HostRunnerPlugin.describe`;
-`weft/core/runners/subprocess_runner.py::run_monitored_subprocess`;
+`weft/core/runners/subprocess_runner.py::run_monitored_subprocess` owns the
+post-spawn acquisition/rollback scope, `_PipeAdapter` owns cancellable pipe
+I/O and close, and `_drain_stream_queue` / `_drain_streams_until_closed` own
+finite per-stream work and the final drain deadline;
 `weft/ext.py::RunnerPlugin`, `weft/ext.py::RunnerHandle`;
 `weft/_runner_plugins.py::get_runner_plugin`,
 `weft/_runner_plugins.py::require_runner_plugin`.
@@ -159,6 +162,15 @@ Current responsibilities:
 - compare those metrics to configured limits
 - retain recent metrics so the task can publish peak or recent values
 - surface runner-specific stop/kill/describe hooks through the active plugin
+
+After successful process creation, the one-shot command runner owns rollback
+for later acquisition failures, including monitor loading and pipe-adapter
+setup. Before propagating such a failure, it stops and reaps the acquired root
+process and releases its started adapters and endpoints using the runtime's
+existing stop/kill hooks. The original failure remains primary. Monitor-class
+validation and constructor failures are not converted into successful
+execution without monitoring. This obligation does not broaden the
+psutil-visible process-tree enforcement boundary below.
 
 Enforcement mechanics and security boundary:
 
@@ -206,6 +218,26 @@ Enforcement mechanics and security boundary:
 `spec.timeout` is a work-execution timeout. It applies once the runner or
 persistent session is executing a concrete work item. It does not define every
 private startup, readiness, or teardown budget used inside the runtime.
+
+For one-shot command execution through the shared subprocess supervisor,
+delivering the work item's stdin is part of execution. The execution clock
+starts no later than input delivery, and input backpressure must not prevent
+cancellation, timeout, or resource-limit supervision. Closing input is owned
+by its I/O adapter; cancellation must not depend on another thread acquiring
+a buffered I/O lock held by a blocked operation.
+
+Root process completion and output-pipe EOF are separate observations. Once
+root completion is accepted, the supervisor drains captured output for the
+bounded private stream-drain budget even if descendants retain inherited
+stdout or stderr. Expiry of that budget does not convert the completed root
+outcome into an execution timeout. The supervisor then stops and joins its
+I/O adapters and closes their owned pipe endpoints. Output beyond this drain
+boundary is not promised. Incomplete EOF at the boundary is logged as a
+bounded diagnostic; it does not create a new terminal state or outcome field.
+Output drainage performs finite work per stream before returning to other
+streams and supervision; final-drain deadline checks also occur inside that
+work, so a continuously producing descendant cannot extend the budget. These
+bounds do not preempt an arbitrarily blocking user callback.
 
 Current behavior:
 
@@ -327,6 +359,8 @@ controls stay here only when they are already shipped and observable:
 - [`06A-Resource_Management_Planned.md`](06A-Resource_Management_Planned.md)
 
 ## Related Plans
+
+- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

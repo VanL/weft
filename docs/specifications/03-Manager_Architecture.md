@@ -33,6 +33,10 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+
+- [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
+
 - [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs the bounded low-usage startup window under [MA-1.8].
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
@@ -494,6 +498,14 @@ Validated persistent or interactive tasks use the ordinary primary source and me
 
 Classification advances in bounded pages even while admission is denied. A periodic resumable source repair covers explicit older request IDs and returned rows below the classification watermark. Completion and frontier reuse consume known indexed work directly; their broker-operation count must not grow with unrelated backlog. Cache contracted scheduling-parent pointers; do not derive a full graph per dispatch. Startup reconstructs living paths from task snapshots and surviving Manager checkpoints, then repairs source indexes. In-memory selection and path bookkeeping scale with live ancestry, not a fixed number of frontier places; no replacement concurrency cap or fixed FIFO visibility window is introduced.
 
+Derived pending indexes must not retain unbounded selection history while
+their live pending population stays bounded. Stale-entry reclamation must
+preserve selection order and cheap parent-bucket meld, operate on the affected
+bucket rather than scanning unrelated pending work, and leave broker custody
+unchanged. A bucket-local linear compaction is permitted with an amortized
+bound and measured latency evidence; this is not permission for a full pending
+graph or dictionary scan on each dispatch or exit.
+
 Reserve fraction is finite in `[0,1)` and defaults to `0.1`; reserve `R` is `max(ceil(C*f), 3 + int(liveness_monitor_enabled))`. Internal runtime work may use the reserve but still requires measured usage below C. Unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` selects the backend maximum on PostgreSQL and disables the resource gate only on SQLite. A positive configured ceiling overrides automatic capacity. The removed `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` and `WEFT_SCHEDULER_MAX_FRONTIERS` settings raise actionable configuration errors directing operators to measured admission and its global reserve.
 
 SQLite is context-scoped:
@@ -548,6 +560,7 @@ that the non-primary owns; existing reservations, active launches, locally
 tracked children, and actionable control remain owned work.
 
 _Implementation mapping_:
+- [MA-1.8] Pending-index reclamation — `weft/core/family_scheduling.py::_PendingIndex.remove`, `_compact`, and `_owns` preserve bucket-local physical bounds and current ownership while retaining leftist meld.
 - [MA-1.1] Spawn queue consumption — `Manager._build_queue_configs`, `Manager._handle_work_message`, `Manager._build_child_spec`, `Manager._drain_public_spawn_requests`, `Manager._drain_spawn_requests_from_queue`, `Manager._handle_child_launch_result`.
 - [MA-1.2] Child process launch — `Manager._launch_child_task` prepares the launch request, enqueues it through the registered `ServiceTask` child-launch worker group, `Manager._run_child_launch_service_worker` reads the local Python input queue, `Manager._run_child_launch_worker` calls `launch_task_process` (`weft/core/launcher.py`) on the broker-free worker lane, and `Manager._commit_child_launch_success` applies durable effects on the manager reactor.
 - [MA-1.3] Initial payload delivery — `Manager._launch_child_task` (inbox seeding block).

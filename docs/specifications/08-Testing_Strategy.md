@@ -416,6 +416,8 @@ bug evidence.
 
 ## Related Plans
 
+- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+
 - [Contention theory stop condition](../plans/2026-10-14-contention-theory-stop-condition.md) records the owner correction and its investigation rule.
 
 - [Xdist Title Contention Investigation](../plans/2026-09-14-xdist-title-contention-plan.md) records native evidence and the infrastructure-only title boundary.

@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import errno
+import io
 import logging
+import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -20,6 +24,7 @@ from typing import IO, Any, Literal
 from weft._constants import (
     ACTIVE_CONTROL_POLL_INTERVAL,
     SUBPROCESS_POLL_INTERVAL_FLOOR,
+    SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS,
     SUBPROCESS_STREAM_DRAIN_TIMEOUT,
     SUBPROCESS_STREAM_READ_SIZE,
     SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
@@ -95,6 +100,10 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
     """
     last_metrics: ResourceMetrics | None = None
     actual_worker_pid = worker_pid if worker_pid is not None else process.pid
+    start_time = time.monotonic()
+    adapters: list[_PipeAdapter] = []
+    cleanup_phase: _MonitorPhase = "startup cleanup"
+    primary_failure = False
     try:
         if on_worker_started is not None:
             try:
@@ -106,175 +115,106 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 on_runtime_handle_started(runtime_handle)
             except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-350] exception
                 logger.warning("Subprocess runtime-handle callback failed")
-    except BaseException:
-        # A fatal callback signal remains fatal, but the managed child must not
-        # outlive the call that owned it. Cleanup failures cannot replace the
-        # original signal.
-        with contextlib.suppress(BaseException):
-            _cleanup_after_callback_failure(
-                process,
-                stop_runtime=stop_runtime,
-                kill_runtime=kill_runtime,
+
+        if monitor is None and monitor_class and actual_worker_pid is not None:
+            monitor = load_resource_monitor(
+                monitor_class,
+                limits=limits,
+                polling_interval=monitor_interval,
             )
-        raise
-
-    if monitor is None and monitor_class and actual_worker_pid is not None:
-        monitor = load_resource_monitor(
-            monitor_class,
-            limits=limits,
-            polling_interval=monitor_interval,
-        )
-    if monitor is not None:
-        try:
-            monitor.start(actual_worker_pid if actual_worker_pid is not None else -1)
-        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
-            logger.warning("Subprocess resource monitor failed during startup")
-            _stop_monitor(monitor, phase="startup cleanup")
-            monitor = None
-
-    if process.stdout is None or process.stderr is None:
-        raise RuntimeError("Managed subprocess requires stdout and stderr pipes")
-
-    stdout_queue: queue.Queue[str | None] = queue.Queue()
-    stderr_queue: queue.Queue[str | None] = queue.Queue()
-    _start_stream_reader(process.stdout, stdout_queue)
-    _start_stream_reader(process.stderr, stderr_queue)
-    _write_process_input(process, stdin_data)
-
-    start_time = time.monotonic()
-    interval = monitor_interval or 1.0
-    next_monitor_at = start_time + interval
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
-    stdout_closed = False
-    stderr_closed = False
-
-    while True:
-        stdout_closed = _drain_stream_queue(
-            stdout_queue,
-            stdout_parts,
-            on_chunk=on_stdout_chunk,
-            closed=stdout_closed,
-        )
-        stderr_closed = _drain_stream_queue(
-            stderr_queue,
-            stderr_parts,
-            on_chunk=on_stderr_chunk,
-            closed=stderr_closed,
-        )
-
-        if safe_cancel(cancel_requested):
-            _stop_process_runtime(
-                process, stop_runtime=stop_runtime, kill_runtime=kill_runtime
-            )
-            stdout_closed, stderr_closed = _drain_streams_until_closed(
-                stdout_queue,
-                stderr_queue,
-                stdout_parts,
-                stderr_parts,
-                on_stdout_chunk=on_stdout_chunk,
-                on_stderr_chunk=on_stderr_chunk,
-                stdout_closed=stdout_closed,
-                stderr_closed=stderr_closed,
-            )
-            last_metrics = _last_monitor_metrics(
-                monitor,
-                last_metrics,
-                phase="cancellation cleanup",
-            )
-            _stop_monitor(monitor, phase="cancellation cleanup")
-            return RunnerOutcome(
-                status="cancelled",
-                value=None,
-                error="Target execution cancelled",
-                stdout="".join(stdout_parts),
-                stderr="".join(stderr_parts),
-                returncode=None,
-                duration=time.monotonic() - start_time,
-                metrics=last_metrics,
-                runtime_handle=runtime_handle,
-            )
-
-        process_returncode = process.poll()
-        if process_returncode is not None and stdout_closed and stderr_closed:
-            break
-
-        elapsed = time.monotonic() - start_time
-        timed_out = timeout is not None and elapsed >= timeout
-        if timed_out:
-            process_returncode = process.poll()
-        if timed_out and process_returncode is None:
-            assert timeout is not None
-            _kill_process_runtime(process, kill_runtime=kill_runtime)
-            stdout_closed, stderr_closed = _drain_streams_until_closed(
-                stdout_queue,
-                stderr_queue,
-                stdout_parts,
-                stderr_parts,
-                on_stdout_chunk=on_stdout_chunk,
-                on_stderr_chunk=on_stderr_chunk,
-                stdout_closed=stdout_closed,
-                stderr_closed=stderr_closed,
-            )
-            last_metrics = _last_monitor_metrics(
-                monitor,
-                last_metrics,
-                phase="timeout cleanup",
-            )
-            _stop_monitor(monitor, phase="timeout cleanup")
-            return RunnerOutcome(
-                status="timeout",
-                value=None,
-                error="Target execution timed out",
-                stdout="".join(stdout_parts),
-                stderr="".join(stderr_parts),
-                returncode=None,
-                duration=timeout,
-                metrics=last_metrics,
-                runtime_handle=runtime_handle,
-                diagnostics=runner_diagnostics(
-                    phase="execute",
-                    runner=runtime_handle.runner,
-                    target_type="command",
-                    pid=actual_worker_pid,
-                    exitcode=process.returncode,
-                    alive=process.poll() is None,
-                    duration_seconds=elapsed,
-                    timeout_seconds=timeout,
-                    message="Target execution timed out",
-                ),
-            )
-
-        sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
-        if timeout is not None:
-            remaining = timeout - elapsed
-            sleep_for = min(sleep_for, max(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining))
-        if process_returncode is not None:
-            sleep_for = min(sleep_for, SUBPROCESS_POLL_INTERVAL_FLOOR)
         if monitor is not None:
-            until_monitor = max(
-                SUBPROCESS_POLL_INTERVAL_FLOOR,
-                next_monitor_at - time.monotonic(),
-            )
-            sleep_for = min(sleep_for, until_monitor)
-
-        if (
-            monitor is not None
-            and process.poll() is None
-            and time.monotonic() >= next_monitor_at
-        ):
-            ok, violation = True, None
             try:
-                ok, violation = monitor.check_limits()
+                monitor.start(
+                    actual_worker_pid if actual_worker_pid is not None else -1
+                )
             except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
-                logger.warning("Subprocess resource monitor failed during limit check")
-            last_metrics = _last_monitor_metrics(
-                monitor,
-                last_metrics,
-                phase="limit check",
+                logger.warning("Subprocess resource monitor failed during startup")
+                _stop_monitor(monitor, phase="startup cleanup")
+                monitor = None
+
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("Managed subprocess requires stdout and stderr pipes")
+
+        stdout_queue: queue.Queue[str | None] = queue.Queue()
+        stderr_queue: queue.Queue[str | None] = queue.Queue()
+        adapters = [
+            _PipeAdapter(process.stdout, target_queue=stdout_queue),
+            _PipeAdapter(process.stderr, target_queue=stderr_queue),
+        ]
+        if process.stdin is not None:
+            adapters.append(_PipeAdapter(process.stdin, input_data=stdin_data))
+        # Register ownership before start: even a start interrupted after OS
+        # thread creation must be stopped and joined by the acquisition scope.
+        for adapter in adapters:
+            adapter.start()
+
+        interval = monitor_interval or 1.0
+        next_monitor_at = start_time + interval
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        stdout_closed = False
+        stderr_closed = False
+
+        cleanup_phase = "completion cleanup"
+        while True:
+            _raise_pipe_errors(adapters)
+            stdout_closed = _drain_stream_queue(
+                stdout_queue,
+                stdout_parts,
+                on_chunk=on_stdout_chunk,
+                closed=stdout_closed,
             )
-            next_monitor_at = time.monotonic() + interval
-            if not ok:
+            stderr_closed = _drain_stream_queue(
+                stderr_queue,
+                stderr_parts,
+                on_chunk=on_stderr_chunk,
+                closed=stderr_closed,
+            )
+
+            _raise_pipe_errors(adapters)
+            if safe_cancel(cancel_requested):
+                cleanup_phase = "cancellation cleanup"
+                _stop_process_runtime(
+                    process, stop_runtime=stop_runtime, kill_runtime=kill_runtime
+                )
+                stdout_closed, stderr_closed = _drain_streams_until_closed(
+                    stdout_queue,
+                    stderr_queue,
+                    stdout_parts,
+                    stderr_parts,
+                    on_stdout_chunk=on_stdout_chunk,
+                    on_stderr_chunk=on_stderr_chunk,
+                    stdout_closed=stdout_closed,
+                    stderr_closed=stderr_closed,
+                )
+                last_metrics = _last_monitor_metrics(
+                    monitor,
+                    last_metrics,
+                    phase="cancellation cleanup",
+                )
+                return RunnerOutcome(
+                    status="cancelled",
+                    value=None,
+                    error="Target execution cancelled",
+                    stdout="".join(stdout_parts),
+                    stderr="".join(stderr_parts),
+                    returncode=None,
+                    duration=time.monotonic() - start_time,
+                    metrics=last_metrics,
+                    runtime_handle=runtime_handle,
+                )
+
+            process_returncode = process.poll()
+            if process_returncode is not None:
+                break
+
+            elapsed = time.monotonic() - start_time
+            timed_out = timeout is not None and elapsed >= timeout
+            if timed_out:
+                process_returncode = process.poll()
+            if timed_out and process_returncode is None:
+                cleanup_phase = "timeout cleanup"
+                assert timeout is not None
                 _kill_process_runtime(process, kill_runtime=kill_runtime)
                 stdout_closed, stderr_closed = _drain_streams_until_closed(
                     stdout_queue,
@@ -289,17 +229,16 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 last_metrics = _last_monitor_metrics(
                     monitor,
                     last_metrics,
-                    phase="limit cleanup",
+                    phase="timeout cleanup",
                 )
-                _stop_monitor(monitor, phase="limit cleanup")
                 return RunnerOutcome(
-                    status="limit",
+                    status="timeout",
                     value=None,
-                    error=violation,
+                    error="Target execution timed out",
                     stdout="".join(stdout_parts),
                     stderr="".join(stderr_parts),
                     returncode=None,
-                    duration=time.monotonic() - start_time,
+                    duration=timeout,
                     metrics=last_metrics,
                     runtime_handle=runtime_handle,
                     diagnostics=runner_diagnostics(
@@ -309,106 +248,211 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                         pid=actual_worker_pid,
                         exitcode=process.returncode,
                         alive=process.poll() is None,
-                        duration_seconds=time.monotonic() - start_time,
-                        message=violation,
+                        duration_seconds=elapsed,
+                        timeout_seconds=timeout,
+                        message="Target execution timed out",
                     ),
                 )
 
-        time.sleep(sleep_for)
+            sleep_for = ACTIVE_CONTROL_POLL_INTERVAL
+            if timeout is not None:
+                remaining = timeout - elapsed
+                sleep_for = min(
+                    sleep_for, max(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining)
+                )
+            if process_returncode is not None:
+                sleep_for = min(sleep_for, SUBPROCESS_POLL_INTERVAL_FLOOR)
+            if monitor is not None:
+                until_monitor = max(
+                    SUBPROCESS_POLL_INTERVAL_FLOOR,
+                    next_monitor_at - time.monotonic(),
+                )
+                sleep_for = min(sleep_for, until_monitor)
 
-    _drain_streams_until_closed(
-        stdout_queue,
-        stderr_queue,
-        stdout_parts,
-        stderr_parts,
-        on_stdout_chunk=on_stdout_chunk,
-        on_stderr_chunk=on_stderr_chunk,
-        stdout_closed=stdout_closed,
-        stderr_closed=stderr_closed,
-    )
-    stdout = "".join(stdout_parts)
-    stderr = "".join(stderr_parts)
+            if (
+                monitor is not None
+                and process.poll() is None
+                and time.monotonic() >= next_monitor_at
+            ):
+                ok, violation = True, None
+                try:
+                    ok, violation = monitor.check_limits()
+                except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+                    logger.warning(
+                        "Subprocess resource monitor failed during limit check"
+                    )
+                last_metrics = _last_monitor_metrics(
+                    monitor,
+                    last_metrics,
+                    phase="limit check",
+                )
+                next_monitor_at = time.monotonic() + interval
+                if not ok:
+                    cleanup_phase = "limit cleanup"
+                    _kill_process_runtime(process, kill_runtime=kill_runtime)
+                    stdout_closed, stderr_closed = _drain_streams_until_closed(
+                        stdout_queue,
+                        stderr_queue,
+                        stdout_parts,
+                        stderr_parts,
+                        on_stdout_chunk=on_stdout_chunk,
+                        on_stderr_chunk=on_stderr_chunk,
+                        stdout_closed=stdout_closed,
+                        stderr_closed=stderr_closed,
+                    )
+                    last_metrics = _last_monitor_metrics(
+                        monitor,
+                        last_metrics,
+                        phase="limit cleanup",
+                    )
+                    return RunnerOutcome(
+                        status="limit",
+                        value=None,
+                        error=violation,
+                        stdout="".join(stdout_parts),
+                        stderr="".join(stderr_parts),
+                        returncode=None,
+                        duration=time.monotonic() - start_time,
+                        metrics=last_metrics,
+                        runtime_handle=runtime_handle,
+                        diagnostics=runner_diagnostics(
+                            phase="execute",
+                            runner=runtime_handle.runner,
+                            target_type="command",
+                            pid=actual_worker_pid,
+                            exitcode=process.returncode,
+                            alive=process.poll() is None,
+                            duration_seconds=time.monotonic() - start_time,
+                            message=violation,
+                        ),
+                    )
 
-    last_metrics = _last_monitor_metrics(
-        monitor,
-        last_metrics,
-        phase="completion cleanup",
-    )
-    if monitor is not None and last_metrics is None:
-        try:
-            last_metrics = monitor.snapshot()
-        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
-            logger.warning("Subprocess resource monitor failed during final snapshot")
-    _stop_monitor(monitor, phase="completion cleanup")
+            # As sole consumer, a non-empty queue guarantees next-pass progress.
+            # A put racing with an empty check costs at most one normal poll.
+            if stdout_queue.empty() and stderr_queue.empty():
+                time.sleep(sleep_for)
 
-    returncode = process.returncode
-    if returncode is None:
-        return RunnerOutcome(
-            status="error",
-            value=None,
-            error="Worker produced no result",
-            stdout=stdout,
-            stderr=stderr,
-            returncode=None,
-            duration=time.monotonic() - start_time,
-            metrics=last_metrics,
-            runtime_handle=runtime_handle,
-            diagnostics=runner_diagnostics(
-                phase="execute",
-                runner=runtime_handle.runner,
-                target_type="command",
-                pid=actual_worker_pid,
-                exitcode=returncode,
-                alive=process.poll() is None,
-                duration_seconds=time.monotonic() - start_time,
-                message="Worker produced no result",
-            ),
+        _drain_streams_until_closed(
+            stdout_queue,
+            stderr_queue,
+            stdout_parts,
+            stderr_parts,
+            on_stdout_chunk=on_stdout_chunk,
+            on_stderr_chunk=on_stderr_chunk,
+            stdout_closed=stdout_closed,
+            stderr_closed=stderr_closed,
         )
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
 
-    if returncode != 0:
-        message = f"Command exited with {returncode}: {(stderr or '').strip()}"
+        last_metrics = _last_monitor_metrics(
+            monitor,
+            last_metrics,
+            phase="completion cleanup",
+        )
+        if monitor is not None and last_metrics is None:
+            try:
+                last_metrics = monitor.snapshot()
+            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
+                logger.warning(
+                    "Subprocess resource monitor failed during final snapshot"
+                )
+
+        returncode = process.returncode
+        if returncode is None:
+            return RunnerOutcome(
+                status="error",
+                value=None,
+                error="Worker produced no result",
+                stdout=stdout,
+                stderr=stderr,
+                returncode=None,
+                duration=time.monotonic() - start_time,
+                metrics=last_metrics,
+                runtime_handle=runtime_handle,
+                diagnostics=runner_diagnostics(
+                    phase="execute",
+                    runner=runtime_handle.runner,
+                    target_type="command",
+                    pid=actual_worker_pid,
+                    exitcode=returncode,
+                    alive=process.poll() is None,
+                    duration_seconds=time.monotonic() - start_time,
+                    message="Worker produced no result",
+                ),
+            )
+
+        if returncode != 0:
+            message = f"Command exited with {returncode}: {(stderr or '').strip()}"
+            return RunnerOutcome(
+                status="error",
+                value=None,
+                error=message,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                duration=time.monotonic() - start_time,
+                metrics=last_metrics,
+                runtime_handle=runtime_handle,
+                diagnostics=runner_diagnostics(
+                    phase="execute",
+                    runner=runtime_handle.runner,
+                    target_type="command",
+                    pid=actual_worker_pid,
+                    exitcode=returncode,
+                    alive=False,
+                    duration_seconds=time.monotonic() - start_time,
+                    message=message,
+                ),
+            )
+
         return RunnerOutcome(
-            status="error",
-            value=None,
-            error=message,
+            status="ok",
+            value=stdout.strip() if stdout is not None else "",
+            error=None,
             stdout=stdout,
             stderr=stderr,
             returncode=returncode,
             duration=time.monotonic() - start_time,
             metrics=last_metrics,
             runtime_handle=runtime_handle,
-            diagnostics=runner_diagnostics(
-                phase="execute",
-                runner=runtime_handle.runner,
-                target_type="command",
-                pid=actual_worker_pid,
-                exitcode=returncode,
-                alive=False,
-                duration_seconds=time.monotonic() - start_time,
-                message=message,
-            ),
         )
 
-    return RunnerOutcome(
-        status="ok",
-        value=stdout.strip() if stdout is not None else "",
-        error=None,
-        stdout=stdout,
-        stderr=stderr,
-        returncode=returncode,
-        duration=time.monotonic() - start_time,
-        metrics=last_metrics,
-        runtime_handle=runtime_handle,
-    )
+    except BaseException:
+        primary_failure = True
+        with contextlib.suppress(BaseException):
+            _cleanup_after_execution_failure(
+                process, stop_runtime=stop_runtime, kill_runtime=kill_runtime
+            )
+        raise
+    finally:
+        # Request every stop before joining any adapter. No operation in an
+        # adapter waits for pipe readiness while holding a buffered-I/O lock.
+        for adapter in adapters:
+            adapter.stop.set()
+        for adapter in adapters:
+            if adapter.thread.ident is not None:
+                adapter.thread.join()
+        for stream_name in ("stdin", "stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None and not stream.closed:
+                _close_pipe(stream)
+        if not primary_failure:
+            _stop_monitor(monitor, phase=cleanup_phase)
+            _raise_pipe_errors(adapters)
+        else:
+            # A fatal cleanup signal cannot replace the failure being unwound.
+            with contextlib.suppress(BaseException):
+                _stop_monitor(monitor, phase=cleanup_phase)
 
 
-def _cleanup_after_callback_failure(
+def _cleanup_after_execution_failure(
     process: subprocess.Popen[str],
     *,
     stop_runtime: Callable[[], None],
     kill_runtime: Callable[[], None],
 ) -> None:
-    """Best-effort reap a child without replacing a callback fatal signal."""
+    """Reap a post-spawn acquisition or execution failure without masking it."""
 
     with contextlib.suppress(BaseException):
         _stop_process_runtime(
@@ -455,78 +499,114 @@ def _kill_process_runtime(
         process.wait(timeout=SUBPROCESS_TERMINATION_WAIT_TIMEOUT)
 
 
-def _start_stream_reader(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-037] exception
-    stream: IO[str],
-    target_queue: queue.Queue[str | None],
-) -> None:
-    def _reader() -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-037] exception
-        raw_stream = getattr(stream, "buffer", None)
-        encoding = getattr(stream, "encoding", None) or "utf-8"
-        errors = getattr(stream, "errors", None) or "replace"
-        decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
-        pending_cr = False
+class _PipeAdapter:
+    """Own one cancellable raw pipe endpoint for a command [RM-5.2].
 
-        def _normalize_chunk(chunk: str) -> str:
-            nonlocal pending_cr
-            if not chunk:
-                return ""
-            normalized = chunk
-            if pending_cr:
-                normalized = normalized.removeprefix("\n")
-                normalized = "\n" + normalized
-                pending_cr = False
-            normalized = normalized.replace("\r\n", "\n")
-            if normalized.endswith("\r"):
-                normalized = normalized[:-1]
-                pending_cr = True
-            return normalized.replace("\r", "\n")
+    The wrapper is used only for encoding metadata and owner-thread close, never
+    buffered reads or writes. Python 3.12+ supports nonblocking pipes on Windows
+    as well as POSIX. Each would-block wait is interrupted by the stop event.
+    """
 
+    def __init__(
+        self,
+        stream: IO[str],
+        *,
+        target_queue: queue.Queue[str | None] | None = None,
+        input_data: str | None = None,
+    ) -> None:
+        self.stream = stream
+        self.descriptor = stream.fileno()
+        self.encoding: str = getattr(stream, "encoding", None) or "utf-8"
+        self.errors: str = getattr(stream, "errors", None) or "replace"
+        self.target_queue = target_queue
+        self.input_data = input_data
+        self.stop = threading.Event()
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._run, name="weft-subprocess-pipe")
+
+    def start(self) -> None:
+        os.set_blocking(self.descriptor, False)
+        self.thread.start()
+
+    def _run(self) -> None:
         try:
-            while True:
-                if raw_stream is not None and hasattr(raw_stream, "read1"):
-                    raw_chunk = raw_stream.read1(SUBPROCESS_STREAM_READ_SIZE)
-                    if raw_chunk == b"":
-                        break
-                    chunk = decoder.decode(raw_chunk)
-                else:
-                    chunk = stream.read(SUBPROCESS_STREAM_READ_SIZE)
-                    if chunk == "":
-                        break
-                chunk = _normalize_chunk(chunk)
-                if not chunk:
-                    continue
-                target_queue.put(chunk)
-
-            final_chunk = _normalize_chunk(decoder.decode(b"", final=True))
-            if pending_cr:
-                final_chunk = "\n" + final_chunk
-                pending_cr = False
-            if final_chunk:
-                target_queue.put(final_chunk)
+            if self.target_queue is None:
+                self._write_input()
+            else:
+                self._read_output(self.target_queue)
+        except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-354] exception
+            # The supervisor owns failure handling; a failed adapter cannot
+            # silently turn incomplete I/O into a successful command result.
+            self.error = exc
         finally:
-            target_queue.put(None)
+            _close_pipe(self.stream)
 
-    threading.Thread(target=_reader, daemon=True).start()
+    def _read_output(self, target_queue: queue.Queue[str | None]) -> None:
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder(self.encoding)(errors=self.errors),
+            translate=True,
+        )
+        while not self.stop.is_set():
+            try:
+                raw_chunk = os.read(self.descriptor, SUBPROCESS_STREAM_READ_SIZE)
+            except BlockingIOError:
+                self.stop.wait(SUBPROCESS_POLL_INTERVAL_FLOOR)
+                continue
+            chunk = decoder.decode(raw_chunk, final=not raw_chunk)
+            if chunk:
+                target_queue.put(chunk)
+            if not raw_chunk:
+                # Forced stop and real EOF are distinct. Only an actual EOF
+                # flushes the decoder and emits the public final callback marker.
+                target_queue.put(None)
+                return
+
+    def _write_input(self) -> None:
+        if self.input_data is None:
+            return
+        encoder = codecs.getincrementalencoder(self.encoding)(errors=self.errors)
+        offset = 0
+        while not self.stop.is_set():
+            chunk = self.input_data[offset : offset + SUBPROCESS_STREAM_READ_SIZE]
+            offset += len(chunk)
+            final = offset == len(self.input_data)
+            # Popen's text=True wrapper defaults to newline=None: on Windows it
+            # translates every LF to CRLF, including the LF in an existing CRLF.
+            pending = memoryview(encoder.encode(chunk.replace("\n", os.linesep), final))
+            while pending and not self.stop.is_set():
+                try:
+                    written = os.write(
+                        self.descriptor, pending[:SUBPROCESS_STREAM_READ_SIZE]
+                    )
+                except BlockingIOError:
+                    self.stop.wait(SUBPROCESS_POLL_INTERVAL_FLOOR)
+                    continue
+                except BrokenPipeError:
+                    return
+                except OSError as exc:
+                    # CPython's Popen._stdin_write also accepts Windows EINVAL
+                    # when the child has exited or closed stdin (bpo-19612/30418).
+                    if sys.platform == "win32" and exc.errno == errno.EINVAL:
+                        return
+                    raise
+                if not written:
+                    self.stop.wait(SUBPROCESS_POLL_INTERVAL_FLOOR)
+                pending = pending[written:]
+            if final:
+                return
 
 
-def _write_process_input(
-    process: subprocess.Popen[str],
-    stdin_data: str | None,
-) -> None:
-    stdin = process.stdin
-    if stdin is None:
-        return
+def _raise_pipe_errors(adapters: Sequence[_PipeAdapter]) -> None:
+    for adapter in adapters:
+        if adapter.error is not None:
+            raise adapter.error
+
+
+def _close_pipe(stream: IO[str]) -> None:
     try:
-        if stdin_data is not None:
-            stdin.write(stdin_data)
-            stdin.flush()
-    except BrokenPipeError:
-        pass
-    finally:
-        try:
-            stdin.close()
-        except OSError:  # pragma: no cover - pipe close best effort
-            pass
+        stream.close()
+    except OSError:  # pragma: no cover - OS endpoint close failure
+        logger.warning("Failed to close an owned subprocess pipe")
 
 
 def _drain_stream_queue(
@@ -535,8 +615,11 @@ def _drain_stream_queue(
     *,
     on_chunk: Callable[[str, bool], None] | None,
     closed: bool,
+    deadline: float | None = None,
 ) -> bool:
-    while True:
+    for _ in range(SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         try:
             item = pending_queue.get_nowait()
         except queue.Empty:
@@ -574,16 +657,21 @@ def _drain_streams_until_closed(
             stdout_parts,
             on_chunk=on_stdout_chunk,
             closed=stdout_closed,
+            deadline=deadline,
         )
         stderr_closed = _drain_stream_queue(
             stderr_queue,
             stderr_parts,
             on_chunk=on_stderr_chunk,
             closed=stderr_closed,
+            deadline=deadline,
         )
         if stdout_closed and stderr_closed:
             break
-        time.sleep(SUBPROCESS_POLL_INTERVAL_FLOOR)
+        if stdout_queue.empty() and stderr_queue.empty():
+            time.sleep(SUBPROCESS_POLL_INTERVAL_FLOOR)
+    if not (stdout_closed and stderr_closed):
+        logger.warning("Subprocess stream drain ended before stdout/stderr EOF")
     return stdout_closed, stderr_closed
 
 
