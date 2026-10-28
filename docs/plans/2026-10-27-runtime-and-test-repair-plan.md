@@ -2480,3 +2480,8 @@ No standing constraint moves: [RM-5.1], [TS-0], WT-2/WT-4, durable queue/state/c
 </details>
 
 Final local integration checks: mypy passed 478 files; Ruff check, formatting (631 files), suppression registry and whitespace checks passed. Six plan/spec hygiene cases passed in 0.94 seconds and documentation paths passed. The focused SQLite/PostgreSQL evidence above is on the final test. No runtime behavior changed in T5/T6, so the existing full runtime suites remain applicable; new-head complete CI remains required.
+
+
+### Windows T6 CI confirmation (2026-10-28)
+
+At pushed head `8261a4b09f3dd2dcb92af02d3f5b926ab9efe10d`, Actions run `40730441608`, Windows3.12 remaining job `122987338501` passed, including the repaired process-ownership regression. This supplies actual Windows validation for T6. It does not establish the original marker-access failure's OS cause, and does not certify later admission commits. PostgreSQL remaining job `122987337842` started; other jobs and dependent extension checks remain pending. No merge or plan closure.

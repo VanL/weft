@@ -851,6 +851,9 @@ There is no module theory in the tree; `program-theory.md` is the only theory su
 
 </details>
 
+Correction (2026-10-28): the quoted BLE001/inventory claim above is false. See [harness policy correction proof](#harness-policy-correction-proof-2026-10-28) for the actual raw-audit failure and repaired ledger.
+
+
 
 DC-14–DC-20 dispositions before integration: accept DC-14 no-argument probe correction; accept DC-15 portable manifest keys; accept DC-16 explicit untracked-source accounting; accept DC-17 a fresh parent for each invocation. Accept DC-18 complete receipt-only-turn counts with partial-turn censoring and PostgreSQL benefit/both-backend nonregression criteria, now in the operative decision rule above. Accept DC-19 removal of vacuous closure flags/assertions; retain actual preflight ownership and manifest hash verification. Accept DC-20 simpler primary-exception rethrow without presenting later cleanup failure as its cause. Corrections and direct probes are pending; this disposition is not an implementation or measurement pass.
 
@@ -1080,3 +1083,487 @@ None of these findings is a correctness defect in the unit under review.
 </details>
 
 B review corrections verified: classification continuation plus plan/spec hygiene7passed on SQLite1.98s; the real classification case passed on PostgreSQL6.59s at normal12workers. Environment restored. Production Manager hash is unchanged from the measured/reviewed B. B is retained as the current serial baseline; the harness-policy repair and latest-head full/CI gates remain open, so this is neither plan closure nor release approval.
+
+
+### B PostgreSQL runtime verification (2026-10-28)
+
+Normal12-worker PostgreSQL run passed5925tests,29skipped in364.63s. Command: `bin/pytest-pg --all -- tests -k 'not test_weft_uses_only_supported_simplebroker_surfaces and not test_approved_suppressions_match_the_standalone_registry and not test_real_suppression_index_check_is_clean'`. Only the three known harness-policy failures were excluded; they remain explicit post-correction gates. The first invocation omitted argparse's `--` and was rejected before any test ran; it is not a pass. Environment restored after the real run. The two opt-in experiment skips are not measurement passes.
+
+### Harness policy correction proof (2026-10-28)
+
+The first explicit catch-retention review completed357.26s. It supports all three catches as NET POSITIVE versus the actual executor/narrowing alternatives, but did not finish required runbook/invariant context, so it does not close the review gate. Its two mechanical findings are accepted: new rows must remain inside the registry table and pinned policy IDs/counts must change atomically (198groups,329directives). F3 uses the offered minimum durable alternative: preserve the complete one-time fault controls and mutation definitions here instead of adding routine tests for an opt-in measurement harness. F4 qualifies the control catch's protection to the normal join path. F5 adds the fallback-summary content assertion. F6 corrects, without rewriting, the older quoted review claim that BLE001 was unselected or untagged suppressions were ignored: both were false; the raw aggregate includes these catches. F7 retains old-source measurements as such and requires identical new harness bytes in all future B/C1/B arms.
+
+The proposed correction uses standard `inspect.getfile` without changing the dependency guard. Actual manifest execution verifies exact module-path and sorted-source-hash equality with the old accessor. The original measured harness hash is `2a033aa341206bb82c1fae148e3806d85beae475c645af2e2073d722d5d33640`; corrected source is `e581597e4ad92df7c0bcb6232a976219a7cd342ba3013b53998654bf75484130`. The runtime/timing/observation code is unchanged. Eight positive fault controls pass; three isolated narrowing mutants fail their intended assertions. Review closure and post-correction policy checks remain pending.
+
+<details><summary>Verbatim harness policy review (required context incomplete)</summary>
+
+# Scoped-change review: TS-3.1 harness-policy correction (baseline `5c690ef0`)
+
+I didn't run anything. Everything below comes from reading the live source plus the evidence in your brief. I treat the author-run probe results as reported evidence, not as something I verified.
+
+**Context read, in order:** `docs/program-theory.md` (full), `agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md` (full), `agent-context/lessons.md`, and `docs/lessons.md` (full; the watermark is "(none)").
+
+Partial reads:
+- `testing-patterns.md`: lines 1–135 only (coverage policy, harness selection, design rules). I did not read Patterns 1–12.
+- `review-loops-and-agent-bootstrap.md`: lines 144–285 only (scoped-change prompt and output standard).
+- The plan: lines 110–154 and 756–830, plus grep hits. That covers the DC-11/DC-20 closure rows.
+
+`08-Testing_Strategy.md` [TS-3]/[TS-3.1]: read in full. Also read: the registry rows 1–40 and 200–229 and its inventory line, `bin/ruff_suppression_index.py` (parser and reconcile paths), `tests/specs/test_ruff_policy.py` (pinned constants), `tests/architecture/test_import_boundaries.py:492–626`, and the full harness owners (`_manifest`, `_control`, `_summary`, `_latencies`, `_sample_harness`, `_retire_control`, `_persist_sample`, `_sample`).
+
+**Not read:** `07-System_Invariants.md` and the test-audit skill. This unit touches no runtime invariant, so I judged the first low-relevance, but I have not confirmed that.
+
+## Findings
+
+| ID | Sev | Location | Evidence | Suggested disposition |
+|---|---|---|---|---|
+| F1 | **P1** | Proposed registry hunk `@@ -211,7 +211,10 @@` | The diff keeps the blank line after the `RUFF-SUP-378` row as context, then adds the 379/380 rows *after* it. `_table_rows` (`bin/ruff_suppression_index.py:231–235`) stops reading table rows at the first line that doesn't start with `\|`, so it never sees 379/380. `_index_directives` (`:595–599`) then fails with `unknown group RUFF-SUP-379`. `--write` refuses and `--check` fails. | Put the two rows directly under the 378 row, before the blank line. Keep the inventory edit where it is. |
+| F2 | **P1** | `tests/specs/test_ruff_policy.py:63–145` (not in the diff) | These are pinned: `EXPECTED_GROUP_IDS` ends at `"RUFF-SUP-378"`, `EXPECTED_GROUP_COUNT = 196`, `EXPECTED_DIRECTIVE_COUNT = 326`. `test_approved_suppressions_match_the_standalone_registry` (`:721–723`) asserts all three. Tagging adds 2 groups and 3 directives (`scan_source_directives` counts only tagged comments, `:447–453`), so this test fails even once F1 is fixed. Golden Rule 18 (folded lesson "Exact Policy Fixtures Are Part Of The Atomic Registry") requires these constants to change in the same commit. | Add `"RUFF-SUP-379", "RUFF-SUP-380"` and set the constants to 198 and 329. That number is my arithmetic from the current constants; it needs confirming by rerun. This makes the unit three files, not two. |
+| F3 | P2 | Proposed `Real proof` cells for 379/380 | The only proof is `/tmp/.../harness-policy-fault-probe.py`, which won't persist. TS-3.1 makes "the named real proof" the verification. The closest precedents (373, 366, 376–378) name committed tests. The eight controls need no broker or Manager, so they are cheap to keep. | **Owner decision.** Preferred: commit the eight controls as a fast test that is always collected. It should live outside the `skipif`-gated experiment function, e.g. a sibling module that imports the harness. Minimum alternative: put the verbatim probe source, the mutant definitions, the harness SHA tested and the results in the plan. Cite that section in `Real proof`, labelled as a one-time control rather than a standing gate. |
+| F4 | P3 | Proposed 379 `Protected invariant` | "The owner joins it and rejects a failed control" is true only when the body succeeds (`_sample:1516–1518`). If the body has already failed, `_retire_control` (`:1317–1333`) joins the thread but never reads `failures`, so the transferred throwable is dropped. This is pre-existing and not made worse, but the row overstates it. | Qualify the wording: "on the normal join path". The behaviour gap is listed under Observations. |
+| F5 | P3 | The author's probe, `_persist_sample` cases | It checks that `summary.json` exists but not that it contains the `summary_error` fallback. Verification step 3 asked for the fallback to be proven. The `assert not failures` check in `_sample` is never exercised (it is visible in source, so that's acceptable). | Add one assertion that `summary.json` contains `summary_error` in the summary-fault cases, then rerun. |
+| F6 | P3 | Plan `:825` (DC review record) | It says "BLE is not selected, and the suppression index ignores comments without an approval pointer." The failure evidence disproves this: raw `--ignore-noqa` reports BLE001 = 136, and the global inventory counts untagged reasoned directives (TS-3 lines 278–283). This false premise is why the earlier review missed the ledger. | When you update the plan for F3, add a correction note to that record. Don't rewrite it. |
+| F7 | nit | Measurement provenance | `_manifest` records `test_sha256` and `source_hashes`, so the edit changes the harness identity. The plan's batch rule (`:143–153`) needs one harness identity across every arm in a batch. | Record the old and new test SHA in the plan. Don't pool batches run with the old harness with batches run with the new one. Future B/C1/B batches use the new bytes in every arm. |
+
+**Verdict: `blocker: F1, F2`.** Both are mechanical. As written, the diff can't pass its own step-4 verification. After those two fixes, nothing else in this unit blocks.
+
+## Per-catch dispositions
+
+**C1, `_control` `except BaseException` (`:770`).** Keep it: **NET POSITIVE.**
+- The catch's job is to hand any throwable to the owning test, whatever its class. `threading.excepthook` silently ignores `SystemExit`. Pytest's outcome exceptions (`Failed`, `Skipped`) subclass `BaseException`. With an `Exception`-only catch, a dead control thread would leave `failures` empty.
+- The control mutant confirms it (reported): `FatalProbe` escaped.
+- Precedents: 347, 359, 376.
+
+Executor/Future refactor: **NET NEGATIVE.**
+- It doesn't remove the broad catch. CPython's `_WorkItem.run` does the same `except BaseException` → `set_exception`, so the catch just moves into the stdlib.
+- It adds executor lifecycle, including the atexit join of worker threads.
+- It changes failure shapes (`future.exception(timeout)` raises `TimeoutError`).
+- It changes what runs between the useful-work clock start and control start, which plan `:151–153` fixes for all arms. That's a comparability change.
+
+A bare Future still needs the catch. Narrowing to `Exception` loses fatal transfer.
+
+**C2, `_persist_sample` summary `except Exception` (`:1349`).** Keep it: **NET POSITIVE.**
+- What it protects: an active primary failure stays primary, and the later artifacts still get written. That holds whatever the error class.
+- The scratch 8-class tuple still misses classes the source can raise: `AttributeError`, `RuntimeError`/`RecursionError`, a bare `StopIteration`, and `MemoryError`. It also includes `AssertionError`, which `_summary` never raises. It's a partial list with no principle behind it.
+- The mutant confirms it (reported).
+
+The generic outcome/callback helper: **NET NEGATIVE.** It still needs one broad catch, adds callback and return-type plumbing, and moves the fallback summary and the per-artifact error records away from their owner.
+
+I also tried folding the summary computation into the write loop: **NET NEGATIVE.** It saves one directive but loses the self-describing fallback `summary.json` and needs a `nonlocal` capture for the success-path return.
+
+**C3, `_persist_sample` write-loop `except Exception` (`:1370`).** Keep it: **NET POSITIVE.** Same reasoning as C2, plus the per-iteration continuation: catching outside the loop would skip later artifacts (precedent 363). The write mutant confirms it (reported). Leaving `BaseException` uncaught is correct; the fatal probes show it propagates.
+
+## Groups, cardinality, and `inspect.getfile`
+
+**Groups are lawful.** 379 has 1 directive (`BaseException` transfer) and 380 has 2 (`Exception`-only diagnostic containment). They protect different things with different exception classes, so they should stay separate groups. Merging into 359 or 373 would change rows that are already approved and whose proof is different.
+
+The source tags match `_SOURCE_MARKER`, and the cardinality cells match `_APPROVED_CARDINALITY`. The IDs are unused (grep finds no live `RUFF-SUP-379/380`). Raw counts change only for BLE001 (133 → 136).
+
+On tagging versus leaving them untagged: reasoned untagged BLE001 is lawful outside TS-3.1. There are 10 live examples in `weft/core/`, and with that route only the inventory line would change. I still recommend tagging. This review is the explicit review TS-3.1 groups are meant to record, the same shapes in test code (359, 373) are tagged, and the inventory alone is "a tripwire, not a second identity registry".
+
+**`inspect.getfile(simplebroker)` versus `simplebroker.__file__`: use `inspect.getfile`.** The guard is meant to block coupling to SimpleBroker's non-exported API. `__file__` is set by Python's import system, not exported by SimpleBroker. `inspect.getfile` is the stdlib way to ask which file a module object was loaded from, and it returns that module's `__file__` when it has one. I don't consider it a lint-evading alias.
+
+The alternatives are worse:
+- `sys.modules[...].__file__` reaches the same dunder in disguise.
+- `importlib.metadata` locates the installed distribution, which can differ from the imported module in editable installs and so weakens provenance.
+
+Computing the string once, before the hash, keeps the emitted path and the sorted-tree hash algorithm unchanged in source.
+
+## Design approval versus verification still to run
+
+- **Approved as design:** keeping all three catches as tagged groups 379/380 with the corrected placement (F1) and policy constants (F2), and the `inspect.getfile` change.
+- **Not verified by me:** every runtime claim. That includes the eight controls, the three mutants, metadata equality, and Ruff/mypy/index/pytest results.
+
+**Required before the owner closes this:**
+1. Metadata equivalence probe (step 1). It's still pending.
+2. Rerun the eight controls and three mutants against the post-diff source with the F5 assertion added, and record the harness SHA tested.
+3. Resolve F3: commit the test, or record the verbatim proof in the plan. Then replace the pending/approval wording in 379/380 with this review result and that evidence.
+4. With F1 and F2 applied, run step 4. `--write` must exit 0 and add exactly the two expected index rows. `--check` must be clean. The architecture, policy and index tests must pass. Record the test SHA (F7).
+
+## Observations (not actionable this pass)
+
+- **Control failure lost on the primary path (pre-existing):** if the body fails, for example STOP's 60 s `control_seen` wait times out because the control thread failed first, `failures` is never reported. The root cause is lost. `_retire_control` could add each `failures` entry to the primary as a note.
+- **Fallback return is unobservable:** `_persist_sample`'s fallback `summary` return value never reaches a caller on failure paths, because the exception propagates or an `ExceptionGroup` is raised. It only matters as the content of `summary.json`.
+- **Guard over-matches dunders:** `_simplebroker_surface_violations` flags interpreter-set dunders other than `__all__`. Exempting import-system metadata may be a future guard refinement. Not proposed here, and no standing constraint is reversed.
+- **Possible latent `KeyError` in `_summary`:** at `:1068–1072`, when `pong_matched` exists, it reads `controls["control_write_enter"]`, which the PING path in `_control` doesn't record. If this fires, C2 would contain it. I didn't trace this further.
+- **Coverage pragmas:** the `testing-patterns.md` coverage policy asks for `# pragma: no cover` on broad `except Exception` arms. That's a coverage concern, not part of this lint unit.
+
+</details>
+
+The following is a one-time author-run control, not a standing CI gate. Run with the repo interpreter and `PYTHONPATH` set to the checkout root. Create the existing writable `ROOT` scratch directory first; the final JSON write is reporting, after assertions. It injects only at the diagnostic/probe dependencies and executes the actual thread and persistence owners.
+
+```python
+from __future__ import annotations
+
+import json
+import importlib.util
+import os
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+import tests.system.test_manager_dispatch_costs as subject
+
+if subject_path := os.environ.get("DISPATCH_PROBE_SUBJECT"):
+    spec = importlib.util.spec_from_file_location(
+        "dispatch_policy_subject", subject_path
+    )
+    assert spec is not None and spec.loader is not None
+    subject = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = subject
+    spec.loader.exec_module(subject)
+
+ROOT = Path("/tmp/weft-implementation-20261027")
+results: list[str] = []
+
+
+class ProbeFailure(Exception):
+    pass
+
+
+class FatalProbe(BaseException):
+    pass
+
+
+for error in (ProbeFailure("ordinary control"), FatalProbe("fatal control")):
+    observer = subject._Observe(set(), "probe")
+    observer.first_receipt.set()
+    observer.driver_ready.set()
+    observer.manager_tid = "123"
+    failures: list[BaseException] = []
+
+    def fail_probe(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(subject.control_probe_module, "send_keyed_ping_probe", fail_probe)
+        worker = threading.Thread(
+            target=subject._control, args=(None, observer, "PING", failures)
+        )
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive()
+        assert len(failures) == 1 and failures[0] is error, (
+            "thread failure identity not transferred"
+        )
+    results.append(type(error).__name__ + ": exact control error transferred")
+
+for site in ("summary", "first_write"):
+    for has_primary in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            observer = subject._Observe(set(), "probe")
+            error = ProbeFailure(site)
+            primary = ValueError("original sample failure") if has_primary else None
+            real_jsonl = subject._jsonl
+
+            def summary(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                if site == "summary":
+                    raise error
+                return {"test": "summary"}
+
+            def write(path: Path, rows: list[dict[str, Any]]) -> None:
+                if site == "first_write" and path.name == "family.jsonl":
+                    raise error
+                real_jsonl(path, rows)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(subject, "_summary", summary)
+                patch.setattr(subject, "_jsonl", write)
+                if primary is None:
+                    try:
+                        subject._persist_sample(
+                            destination, observer, [], 0, 1, "quiet", primary
+                        )
+                    except ExceptionGroup as grouped:
+                        assert grouped.exceptions == (error,), (
+                            "sole diagnostic failure lost"
+                        )
+                    except ProbeFailure as escaped:
+                        raise AssertionError(
+                            "diagnostic failure escaped before later artifacts"
+                        ) from escaped
+                    else:
+                        raise AssertionError("sole diagnostic error swallowed")
+                else:
+                    subject._persist_sample(
+                        destination, observer, [], 0, 1, "quiet", primary
+                    )
+                    assert len(primary.__notes__) == 1 and site in primary.__notes__[0]
+            assert (destination / "summary.json").exists(), (
+                "later summary artifact not attempted"
+            )
+            events = [
+                json.loads(line)
+                for line in (destination / "events.jsonl").read_text().splitlines()
+            ]
+            assert any(
+                row["event"]
+                == ("summary_error" if site == "summary" else "artifact_write_error")
+                for row in events
+            )
+            if site == "summary":
+                assert "summary_error" in json.loads(
+                    (destination / "summary.json").read_text()
+                ), "summary fallback missing"
+                assert (destination / "family.jsonl").exists()
+        results.append(
+            f"{site}, primary={has_primary}: later artifacts and error precedence preserved"
+        )
+
+for site in ("summary", "first_write"):
+    with tempfile.TemporaryDirectory() as directory:
+        observer = subject._Observe(set(), "probe")
+        fatal = FatalProbe(site)
+
+        def fail(*args: Any, **kwargs: Any) -> Any:
+            raise fatal
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(subject, "_summary", lambda *args: {})
+            patch.setattr(subject, "_summary" if site == "summary" else "_jsonl", fail)
+            try:
+                subject._persist_sample(
+                    Path(directory), observer, [], 0, 1, "quiet", ValueError("primary")
+                )
+            except FatalProbe as seen:
+                assert seen is fatal
+            else:
+                raise AssertionError("fatal diagnostic error swallowed")
+        results.append(site + ": fatal diagnostic exception propagated")
+
+(
+    ROOT
+    / (os.environ.get("DISPATCH_PROBE_RESULT", "harness-policy-fault-probe") + ".json")
+).write_text(json.dumps(results, indent=2) + "\n")
+print("\n".join(results))
+```
+
+Verified output and metadata:
+
+```json
+{
+  "old_harness_sha256": "2a033aa341206bb82c1fae148e3806d85beae475c645af2e2073d722d5d33640",
+  "new_harness_sha256": "e581597e4ad92df7c0bcb6232a976219a7cd342ba3013b53998654bf75484130",
+  "module_path_equal": true,
+  "source_tree_hash_equal": true,
+  "actual_manifest_equal": true,
+  "simplebroker_sha256": "5280db42103df9c96febba14e234c9080dcaa3a068e6c0ae2581181bd512760c",
+  "positive_cases": [
+    "ProbeFailure: exact control error transferred",
+    "FatalProbe: exact control error transferred",
+    "summary, primary=False: later artifacts and error precedence preserved",
+    "summary, primary=True: later artifacts and error precedence preserved",
+    "first_write, primary=False: later artifacts and error precedence preserved",
+    "first_write, primary=True: later artifacts and error precedence preserved",
+    "summary: fatal diagnostic exception propagated",
+    "first_write: fatal diagnostic exception propagated"
+  ],
+  "mutants": [
+    {
+      "mutant": "control",
+      "exit": 1,
+      "assertion": "thread failure identity not transferred"
+    },
+    {
+      "mutant": "summary",
+      "exit": 1,
+      "assertion": "diagnostic failure escaped before later artifacts"
+    },
+    {
+      "mutant": "write",
+      "exit": 1,
+      "assertion": "diagnostic failure escaped before later artifacts"
+    }
+  ]
+}
+```
+
+Mutation definitions, each applied alone to a disposable copy of the corrected full module: at RUFF-SUP-379 replace `except BaseException` with `except Exception`; at the first RUFF-SUP-380 catch replace `except Exception` with `except OSError`; at the second RUFF-SUP-380 catch do the same. Run the verbatim probe with `DISPATCH_PROBE_SUBJECT` pointing to that copy and a distinct `DISPATCH_PROBE_RESULT`. Require the exact assertion shown above, not only a nonzero exit. The unmutilated source passes all eight cases. These controls establish failure-policy sensitivity without creating a benchmark timing assertion.
+
+### C1 clarification review and smaller alternative (2026-10-28)
+
+The first C1 clarification review completed396.56s with required context complete. F4 accepted: the promoted spec must explicitly retain one new launch per turn. F1's preference for fewer broker reads is accepted, but its proposed active-branch assignment is not yet selected. A still smaller candidate keeps receipt handling unchanged and moves the existing allowance reset immediately after the initial bounded result drain. This makes only initial-phase receipts exempt; later receipts continue to block remaining dispatch exactly as B does. No new control read, fallback restructuring or state is needed. Source audit confirms no current initial-result callback authorizes a new launch. F2's categorical impossibility claim is not relied upon: pending-result and live-thread checks are separate observations, so stale recovery can clear an active entry before a now-queued result reaches the inherited pre-pass drain. The candidate retains late receipt fencing on that path.
+
+F3/F5/F6 accepted as test-design corrections: pin the real receipt phase, observe exact reservation history, hold both sources for late-receipt priority/STOP, and establish real startup publication before expecting a new public authorization. F7 accepted as a limit: failed-launch source retry deadlines exist only when admission is enabled; KEEP/REQUEUE semantics remain unchanged. F8/F9 accepted for precise reactivation and wake comments. A new scoped plan review will assess the reset relocation and revised one-authorization/initial-phase-only wording before promotion or runtime edits. No C1 code is implemented yet.
+
+<details><summary>Verbatim first C1 clarification review</summary>
+
+I've finished the review. I made no edits. I couldn't write the plan-mode file because no Write or ExitPlanMode tool is available here, so the full review is below.
+
+# C1 plan clarification review
+
+**Verdict: blocker: F4 (P2).** Fixing it only needs one added clause in the spec delta. Everything else is a suggested change, not a blocker.
+
+**Context read in order:** `docs/program-theory.md`, `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`, the runbooks `testing-patterns.md`, `review-loops-and-agent-bootstrap.md` and `hardening-plans.md`, `docs/agent-context/lessons.md`, and all of `docs/lessons.md` (watermark none). I also read the plan from the start through the Acceptance Matrix, [MF-6] in 05, [MA-1.8] in 03, [MANAGER.11], [MANAGER.18] and IMPL.8/10 in 07, and the live code in `manager.py`, `base.py` and `multiqueue_watcher.py`. The `manager.py` I reviewed is the working tree with B applied. I couldn't check the B SHA-256 digest because I had no shell.
+
+**Line numbers confirmed:** `_handle_child_launch_result` is at `weft/core/manager.py:1827`, and the receipt's flag assignment is at `:1839`. The launch's own flag assignment is at `:1481`. `_process_queue_message` is at `:5170`, with the flag gate at `:5183` and B's gate at `:5196-5203`. The two handler fences are at `:5489` and `:5557`. The turn function is at `:8356`, and the public fallback is at `:8419-8432`. `_drain_spawn_requests_from_queue` checks the flag at `:8597` and `:8609`. `_control_allows_child_launch` is at `:5157`.
+
+## How a turn runs today
+
+- **Turn start:** the turn drains worker results first (`:8370`), then control (`:8380`). It returns at `:8381-8387` if STOP set draining.
+- **Delivery choice:** the full BaseTask delivery pass runs only if no launch is active (`:8412`). Otherwise the turn drains results in the active-launch branch (`:8417`).
+- **Late work in the same turn:** after delivery, service convergence (`:8445`) can call `_drain_internal_spawn_requests` (`:8019`). That call goes through `_process_queue_message`, and today only the flag stops it after a late receipt.
+
+## Findings
+
+| ID | Sev | Location | Finding | Suggested disposition |
+|---|---|---|---|---|
+| F1 | P2 | Proposal steps 2–3 | **A smaller design exists that keeps control, priority and custody exactly as B has them.** Delete `:1839`. In the active-launch branch, set the existing `_child_launch_started_this_turn = True` after its result drain at `:8417`, with a comment: the dispatch point passed while a launch was running, so a receipt applied now continues next turn. An early receipt (`:8370`) is already followed by the turn's control drain (`:8380`) before any reservation, so no new fence is needed. A late receipt is then blocked from both the public-only fallback and convergence's internal drain, exactly as in B. This adds no state and no broker reads, and needs no restructured fallback. The original difference-register row ("B/C1 retain their call pattern") stays true, so the proposed correction can be dropped. It also stops the C1 arm from bundling a new control read on every spawn delivery with the receipt-allowance change, which would muddy the B/C1/B comparison. | Modify: adopt this design. **OWNER DECISION** if you want to keep the general pre-reservation fence for its own sake. |
+| F2 | P2 | Step 2 rationale | **The cited path can't happen.** "A receipt delivered by BaseTask's pre-pass drain" never occurs: the full pass runs only when `_active_child_launches` is empty (`:8412`), and launch receipts exist only for active requests. A receipt in the post-pass drain follows a launch that already set the flag at `:1481`. The real path where a late receipt is followed by a reservation is `:8417` → `:8445` convergence → `:8019` internal drain. The proposal never names it, and step 3 alone leaves it open. | If the fence is kept, give convergence's internal drain as its C1 justification and correct the rationale. |
+| F3 | P2 | Test "STOP already queued when the receipt is applied" | **The test as written would not fail if the fence were removed.** A receipt applied at `:8370` is followed by the control drain at `:8380`, which takes the STOP; the turn then returns at `:8387`. The successor is never reserved, with or without the fence. A public successor after a late receipt is already blocked by step 3. A falsifying setup exists only on the convergence path from F2: late receipt, STOP written after `:8380`, internal successor, convergence due or forced. The assertion should be that the exact message ID was never reserved, paired with a positive check that the observer works. Under F1, the test becomes: late receipt in the active-launch branch, STOP after `:8380`, both sources pending. Removing the `:8417` assignment then lets the fallback reserve the request and `:5489` release it, so the test fails as intended. | Modify: name the exact path in the test and target the mutation that applies to the chosen design. |
+| F4 | **P2, blocker** | C1 [MF-6] delta | **The delta drops the only normative per-turn rule.** "must not accept another spawn message in the same turn" (`05:1356-1358`) is the only per-turn statement in 03, 05 or 07; I searched for it. The replacement only forbids reservations *while a request is active*. On PostgreSQL, receipts commit inside the launching turn, so the new text would allow a second authorization in that turn. The code still forbids it (`:1481`), and C2's delta assumes the rule exists. This silently changes a standing constraint. | Add before promotion: "A turn authorizes at most one new launch; launch authorization, not receipt application, consumes that allowance." Under F1, also add: "A receipt applied after a dispatch boundary that found the lane occupied continues in an immediate turn." |
+| F5 | P3 | Test "internal priority after a late receipt" | Under the proposal, convergence at `:8445` can reserve the internal request in the *same* turn, depending on its schedule (`:7951-7961`). So "next-turn selection chooses internal" may be false or flaky. | Assert order instead: the internal ID is reserved before any public reservation, and public stays in source during the receipt turn. Under F1, "next turn" is deterministic. |
+| F6 | P3 | Test "ready prior receipt" | The test must show the receipt was applied at `:8370`. On PostgreSQL, receipts are usually applied in the launching turn, so hold the real worker past that turn and wait until its result is queued before driving the next turn. On SQLite, the startup window of 1 (`:1851-1856`) blocks public dispatch until the received child's startup settles. That happens only if the snapshot read at `:1844` sees it. | Run on PostgreSQL, or assert that the snapshot is visible. Otherwise the progression check can fail in both arms for startup reasons rather than the flag. |
+| F7 | P3 | "Error receipts keep their source retry deadline" | With admission disabled (`:2182-2188`, the SQLite default), `_schedule_admission_retry_for_source` returns early (`:2894`), so there is no deadline to keep. With the default KEEP policy nothing is re-dispatched. With a configured REQUEUE policy, C1 retries the restored row in the receipt's own turn (B retries it next turn). Still at most one retry per turn, and the missing deadline predates C1. | Limit the claim to admission-enabled configurations and note this case. No code change. |
+| F8 | P3 | [MA-1.8] replacement | "After receipt processing and controls" leaves out startup settlement, which the sentence before it also names as a reactivation trigger. | Reword to "After that reactivation and the turn's control processing…". |
+| F9 | nit | Comments | Update the `:1863-1865` comment. Under F1, add a comment at the new assignment, since the trace field `launch_started_this_turn` (`:878`) keeps its meaning of "allowance consumed". The harness defines receipt-only turns separately (`tests/system/test_manager_dispatch_costs.py:1110-1115`), so it is unaffected. | Apply. |
+
+The failed-post-launch-checkpoint test is sound: the public gate is `_scheduler_undurable` (`:5187-5193`), and internal work is correctly not gated by it. Make the checkpoint failure come from a receipt applied at `:8370` in the same turn. In B the flag hides that gate; in C1 the test then shows the gate itself is what blocks dispatch.
+
+## Answers to your questions
+
+1. **Correct?** Yes, apart from F4. With step 3 plus the fence, a late receipt that leads to convergence's internal drain still drains control before reserving. Priority holds because the public-only fallback is skipped, and `:1481` keeps one authorization per turn. The written rationale is wrong in one place (F2).
+2. **Elegant expert work?** Mostly, but it puts a general fence on every reservation to close a window that only exists in the active-launch branch. F1 handles that one boundary with the existing flag.
+3. **Reuses primitives without needless state?** Yes, it adds no new state. F1 also removes the extra read and the fallback restructuring.
+4. **Will the tests falsify the claimed boundaries?** Not as written for the STOP-before-reservation case (F3). The internal-priority test needs an order assertion (F5), and the progression test needs a pinned receipt point (F6).
+
+**Strongest counterargument to F1:** setting the flag in the active-launch branch keeps the "turn consumed" overload, and a fence at the shared reservation point is more robust to future dispatch paths. My answer: no current path needs it. F1 keeps B's exact behaviour for late receipts. And a general per-reservation fence is a scope expansion that applies to every turn, not just C1, so it should be a separate owner decision.
+
+**Smallest disposition:** adopt F1 (delete `:1839` and add one assignment at `:8417`). Add the F4 clause. Retarget the F3 and F5 tests to the F1 mutation. Make the F7 and F8 wording changes.
+
+## Observations (not actionable in this pass)
+
+- **PostgreSQL prediction:** all 72 traced PostgreSQL receipts committed in their launching turn, where `:1481` had already set the flag. So C1 does nothing structural on PostgreSQL. Under the proposal it would also add a ctrl_in read per gated spawn delivery. Worth writing down now that a PostgreSQL elapsed-time benefit is unlikely, so the outcome isn't read after the fact. This doesn't change the decision rule, and the B/C1/B arm still runs.
+- **SQLite:** serialized startup may make the structural benefit smaller than the 72 prior-turn receipts suggest (see F6).
+- **Redundant fence:** if the proposal's fence lands, the `:5489` handler fence becomes redundant, since it would run right after the new one. Removing it is an **OWNER DECISION**; I've kept it as you instructed.
+- **Spec drift:** the ambiguity clause about pre-launch references in `03:469` is missing from `07:1163`. This predates C1.
+
+No reconsideration requested.
+
+</details>
+
+Harness correction verification: the full default SQLite suite passed5976tests with38skips in177.15s after the correction, with no exclusions. The focused architecture/policy/index/plan/spec set passed144tests4.83s. Normal Ruff, full mypy479files, doc paths and whitespace passed. The formatter flagged only the newly preserved probe's Python code block; formatted that code and synchronized/re-executed the verbatim scratch probe after the full run. No production or measurement-observation semantics changed. Complete-context independent closure remains pending.
+
+
+### Harness policy complete-context closure review (2026-10-28)
+
+Claude completed297.00s, full required context confirmed, no blocker. F1-F7 all pass; all three catches independently reaffirmed NET POSITIVE. R1 accepted: record the immutable proof-containing commit in the ledger once created so plan retirement does not erase the retrieval cue. R2 accepted: a correction pointer now follows the old verbatim record. R3 accepted: probe instructions name the required writable scratch directory. Final SQLite5976pass38skip and full mypy479/format clean results postdate the review dispatch. Run the full PostgreSQL suite without exclusions before closing this correction. Future comparisons use one common corrected harness; no old/new measurements are pooled.
+
+<details><summary>Verbatim complete-context harness policy review</summary>
+
+**Verdict for this unit: `no blocker`.** All seven accepted round-1 fixes (F1–F7) check out against the current source: **PASS**. I made no edits, ran no commands or tests, and delegated nothing. I didn't write a plan file: you asked me not to, and this session has no write tool.
+
+## Context read
+I read these in the prescribed order, in full:
+1. `docs/program-theory.md`
+2. `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`
+3. Both runbooks, `testing-patterns.md` and `review-loops-and-agent-bootstrap.md`
+4. `docs/agent-context/lessons.md` and all of `docs/lessons.md`
+5. `08-Testing_Strategy.md` (all of it, including [TS-3] and [TS-3.1])
+6. All 1,506 lines of `07-System_Invariants.md`
+7. `skills/test-audit/SKILL.md`
+
+I also read `tests/architecture/test_import_boundaries.py` and parts of `bin/ruff_suppression_index.py` (the source-directive scanner and the group-reconciliation code).
+
+Partial reads, disclosed:
+- **Plan:** lines 1–300 (operative rules) and 560–1344 (the DC-11 and DC-20 records, the B record and the proof section). I didn't read 300–560, the superseded Oct 22/27 review history.
+- **Harness:** lines 1–230, 720–780 and 1310–1590.
+- **Registry:** the header, rows 195–224, the raw inventory line and the generated index.
+
+No module theory applies.
+
+## Identifier and count checks (by reading and grep, not by running the tools)
+- **Row placement:** rows 379 and 380 sit at `docs/ruff-suppression-registry.md:213-214`, directly after 378 with no blank line, so the registry parser will read them (F1).
+- **Index:** generated entries are at `:417-418`, on the right symbols `::_control` and `::_persist_sample`.
+- **Group count:** there are 198 human rows and 198 index rows, matching `EXPECTED_GROUP_COUNT = 198` (`tests/specs/test_ruff_policy.py:146`). IDs 379 and 380 are at `:143-144` (F2).
+- **Directive count:** 330 tagged lines in `*.py`, minus 6 string fixtures in `test_ruff_suppression_index.py`, plus 5 in extensionless `bin/` tools, gives 329. That matches `EXPECTED_DIRECTIVE_COUNT`.
+- **BLE001 count:** consistent with `BLE001=136`. I didn't run the raw audit, so this is grep-level only.
+- **Comment form:** the source tags at `test_manager_dispatch_costs.py:772, 1351, 1372` match the scanner's required pattern.
+- **Wording:** "on the normal join path" (F4) matches `_sample:1518-1520`. The fallback-content assertion (F5) is at plan `:1274`.
+- **Plan records:** the F6 note is at plan `:1091`, and the original `:825` text is left unrewritten. The F7 hashes are at `:1093` and `:1303-1304`, with the future-arm rule at `:1091`.
+- **Anchor:** `#harness-policy-correction-proof-2026-10-28` resolves to the heading at plan `:1089`.
+- **No other reaches:** the harness has no remaining `simplebroker.` attribute access.
+
+## Findings
+
+| ID | Sev | Location | Evidence | Suggested disposition |
+|---|---|---|---|---|
+| R1 | P3 | Registry rows 379 and 380, `Real proof` cells | They link to a plan anchor. Coalescing removes retired plan files, and [TS-3.1] says a plan "must not become the lasting source of truth for an adopted exception". After retirement the only proof would be a dangling link. | When the owner replaces the pending Approval wording, add the adopting commit SHA so a `git show <sha>:docs/plans/…` cue survives retirement. This is not a blocker and doesn't reopen F3. |
+| R2 | nit | Plan `:825` versus `:1091` | The F6 correction is about 270 lines away from the false claim, so someone reading the DC record won't see it. | Optionally add a one-line pointer after `</details>` at `:852`, outside the verbatim block. |
+| R3 | nit | Probe script, plan `:1213` and `:1295` | `ROOT = Path('/tmp/weft-implementation-20261027')` is a scratch path. A rerun without that directory exits nonzero *after* all assertions pass. | Optionally note that the final write is reporting only, or that ROOT must be an existing writable directory. |
+
+## Per-catch decisions (I independently affirm the prior decision)
+I didn't see the scratch refactor source itself. I judged the alternatives as the plan describes them (`:1128-1150`), against the live source.
+
+**`_control`, `except BaseException` (RUFF-SUP-379): keep, NET POSITIVE.**
+- This thread is the only path that delivers control failures to the owner, which rejects them at `:1520`.
+- With an `Exception`-only catch, `SystemExit` dies silently in the default `threading.excepthook`, and pytest's outcome exceptions are `BaseException` subclasses. `failures` would then stay empty and the check passes vacuously.
+- The executor/Future alternative is **NET NEGATIVE**:
+  - CPython's `_WorkItem.run` does the same `BaseException` catch, so the catch just moves into the stdlib.
+  - It adds atexit-joined lifecycle.
+  - It changes what runs inside the useful-work window, which starts before the control thread (plan `:151-153`). That breaks comparability across arms.
+- A `Thread` subclass or a global excepthook would be the forbidden "same catch behind a wrapper", or would touch process-wide state.
+
+**`_persist_sample` summary catch, `except Exception` (RUFF-SUP-380): keep, NET POSITIVE.**
+- `_summary` is an arbitrary derivation over raw rows. A finite exception list is a partial family with no principle behind it.
+- Fatal errors correctly propagate.
+- Folding the summary into the write loop is **NET NEGATIVE**. It saves one directive but loses the self-describing fallback `summary.json` and the return value.
+- A generic callback owner is also **NET NEGATIVE**. It separates the fallback and its recorded error from their owner.
+
+**`_persist_sample` write-loop catch, `except Exception` (RUFF-SUP-380): keep, NET POSITIVE.**
+- Each loop iteration must continue to the next artifact. An outer catch skips later artifacts, and `events.jsonl` is written last precisely so it records earlier write errors (precedent: 363).
+- Narrowing to an OSError/TypeError/ValueError list misses things like RecursionError and arbitrary values in the rows, for no gain.
+
+**Tagged groups versus leaving the catches untagged.** Untagged reasoned BLE001 suppressions are lawful under [TS-3]; with that route only the inventory line changes. Tagging is still justified:
+- An explicit review exists, and the registry is where it is meant to be recorded.
+- Similar test-harness catches (359, 366, 373) are tagged.
+- The cost is two rows plus the pinned constants.
+
+**Group boundaries are lawful.**
+- 379 is one directive about fatal-inclusive transfer from a thread.
+- 380 is two directives in one symbol with one invariant: ordinary-only containment, primary-failure precedence and continuation.
+- Merging the two would blur `BaseException` versus `Exception` semantics. Splitting 380 would duplicate one invariant. Both follow the 377 precedent, and the cardinality cells match the grammar.
+
+**`inspect.getfile(simplebroker)` versus `simplebroker.__file__`: use `inspect.getfile`.**
+- The guard (`test_import_boundaries.py:543-552`) protects against coupling to SimpleBroker's non-exported API. `__file__` is import-system metadata, not SimpleBroker API.
+- For a module, `inspect.getfile` returns exactly `module.__file__`. If there is none, it raises `TypeError`, an equivalent failure.
+- It is the documented stdlib way to ask where a module was loaded from, so it isn't an alias used to dodge the gate.
+- The alternatives are worse:
+  - `sys.modules[...].__file__` is the same dunder in disguise.
+  - `find_spec().origin` and distribution metadata can differ from the module actually imported.
+  - Exempting dunders in the guard would change the architecture test, which is out of scope.
+- No marker comment is needed: reverting fails the guard loudly.
+
+**The three questions.**
+- **Correctness:** yes. The changes are metadata access outside the timed window plus comment and registry governance. No runtime or timing code changed.
+- **Elegance and locality:** yes. The catches stay at their owners and no wrapper or framework is added.
+- **Primitives:** right ones. A stdlib accessor, `ExceptionGroup`, `add_note`, and the registry's existing grammar.
+
+## What I approved versus what I didn't verify
+- **Approved as design:** retaining all three catches, groups 379 and 380, the placement and constants, `inspect.getfile`, and the plan-hosted one-time proof.
+- **Not verified by me:** all of these are your claims, not my observations:
+  - the eight positive controls and three mutants;
+  - metadata, manifest and hash equality, including both harness SHAs;
+  - the 144 hygiene tests and the `--write`/`--check` exits.
+
+  The mutation definitions at `:1339` are falsifiable as written. A mutant that widens 380 to `BaseException` would fail the fatal-propagation positives, so I don't require one.
+
+## Required before the owner closes this
+1. Replace the "closure pending" Approval wording in rows 379 and 380 with this review result and the evidence, ideally with the SHA cue from R1. Rerun `bin/ruff_suppression_index.py --check` after that edit.
+2. Run `ruff format --check` and full mypy on the corrected harness. Neither appears in this round's evidence.
+3. Run the full suite on SQLite at normal concurrency, and rerun PostgreSQL `bin/pytest-pg --all` **without** the `-k` exclusion of the three policy tests (plan `:1087`). That shows the original failures are closed.
+4. Run every future B/C1/B arm on the new harness bytes. Don't pool them with results from the old harness (F7).
+
+## Observations (not actionable this pass)
+- These were already recorded and remain valid:
+  - if the main body fails first, a control-thread failure is lost because `_retire_control` never reads `failures`;
+  - the guard flags interpreter-set dunders other than `__all__`;
+  - the broad `except Exception` arms lack the coverage pragma the testing-patterns coverage policy asks for.
+- No standing constraint is crossed and no RECONSIDERATION REQUESTED.
+
+</details>
+
+Harness policy correction closed locally: full PostgreSQL `bin/pytest-pg --all` with no exclusions passed5928tests,29skipped in355.69s at normal12workers; environment restored. Together with the corrected full SQLite5976pass38skip,144focused policy checks, all eight fault controls/three mutants, metadata equivalence, lint/format/fullmypy and complete-context independent review, this closes the harness correction gate. It does not close admission C1/C2 or latest-head CI. The next B/C1/B sequence will use the corrected harness uniformly, with fresh B-before batches.

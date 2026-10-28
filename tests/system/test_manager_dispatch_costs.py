@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import inspect
 import json
 import os
 import platform
@@ -109,6 +110,7 @@ def _manifest(
 ) -> None:
     """Reject a shared editable install accidentally importing the wrong arm."""
     root = Path(request.config.rootpath).resolve()
+    simplebroker_file = inspect.getfile(simplebroker)
     imports = {
         "weft/__init__.py": weft.__file__,
         "weft/core/manager.py": manager_module.__file__,
@@ -163,12 +165,12 @@ def _manifest(
             "measurement_mode": mode,
             "test_file": str(Path(__file__).resolve()),
             "weft_file": weft.__file__,
-            "simplebroker_file": simplebroker.__file__,
+            "simplebroker_file": simplebroker_file,
             "simplebroker_sources_sha256": hashlib.sha256(
                 b"".join(
                     path.read_bytes()
                     for path in sorted(
-                        Path(simplebroker.__file__).resolve().parent.rglob("*.py")
+                        Path(simplebroker_file).resolve().parent.rglob("*.py")
                     )
                 )
             ).hexdigest(),
@@ -767,7 +769,7 @@ def _control(
                 "control_write_return", command=command, request_id=observer.control_id
             )
         assert observer.control_seen.wait(60), f"{command} was not handled"
-    except BaseException as exc:  # noqa: BLE001 - transfer worker failure to the owning test
+    except BaseException as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-379] exception
         failures.append(exc)
 
 
@@ -1346,7 +1348,7 @@ def _persist_sample(
     errors: list[Exception] = []
     try:
         summary = _summary(observer.rows, family, started, ended, mode)
-    except Exception as exc:  # noqa: BLE001 - diagnostic failure must not replace the sample failure
+    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-380] exception
         errors.append(exc)
         observer.record("summary_error", error=repr(exc))
         summary = {"measurement_mode": mode, "summary_error": repr(exc)}
@@ -1367,7 +1369,7 @@ def _persist_sample(
     for name, write in writes:
         try:
             write()
-        except Exception as exc:  # noqa: BLE001 - try the remaining artifacts before reporting failure
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-380] exception
             errors.append(exc)
             observer.record("artifact_write_error", artifact=name, error=repr(exc))
     if errors:
