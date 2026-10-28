@@ -177,7 +177,8 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 _stop_process_runtime(
                     process, stop_runtime=stop_runtime, kill_runtime=kill_runtime
                 )
-                stdout_closed, stderr_closed = _drain_streams_until_closed(
+                _finish_streams(
+                    adapters,
                     stdout_queue,
                     stderr_queue,
                     stdout_parts,
@@ -216,7 +217,8 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 cleanup_phase = "timeout cleanup"
                 assert timeout is not None
                 _kill_process_runtime(process, kill_runtime=kill_runtime)
-                stdout_closed, stderr_closed = _drain_streams_until_closed(
+                _finish_streams(
+                    adapters,
                     stdout_queue,
                     stderr_queue,
                     stdout_parts,
@@ -290,7 +292,8 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 if not ok:
                     cleanup_phase = "limit cleanup"
                     _kill_process_runtime(process, kill_runtime=kill_runtime)
-                    stdout_closed, stderr_closed = _drain_streams_until_closed(
+                    _finish_streams(
+                        adapters,
                         stdout_queue,
                         stderr_queue,
                         stdout_parts,
@@ -332,7 +335,8 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             if stdout_queue.empty() and stderr_queue.empty():
                 time.sleep(sleep_for)
 
-        _drain_streams_until_closed(
+        _finish_streams(
+            adapters,
             stdout_queue,
             stderr_queue,
             stdout_parts,
@@ -426,13 +430,7 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
             )
         raise
     finally:
-        # Request every stop before joining any adapter. No operation in an
-        # adapter waits for pipe readiness while holding a buffered-I/O lock.
-        for adapter in adapters:
-            adapter.stop.set()
-        for adapter in adapters:
-            if adapter.thread.ident is not None:
-                adapter.thread.join()
+        _stop_and_join_pipe_adapters(adapters)
         for stream_name in ("stdin", "stdout", "stderr"):
             stream = getattr(process, stream_name, None)
             if stream is not None and not stream.closed:
@@ -602,6 +600,15 @@ def _raise_pipe_errors(adapters: Sequence[_PipeAdapter]) -> None:
             raise adapter.error
 
 
+def _stop_and_join_pipe_adapters(adapters: Sequence[_PipeAdapter]) -> None:
+    """Stop all producers before joining their endpoint-close paths [RM-5.2]."""
+    for adapter in adapters:
+        adapter.stop.set()
+    for adapter in adapters:
+        if adapter.thread.ident is not None:
+            adapter.thread.join()
+
+
 def _close_pipe(stream: IO[str]) -> None:
     try:
         stream.close()
@@ -615,11 +622,8 @@ def _drain_stream_queue(
     *,
     on_chunk: Callable[[str, bool], None] | None,
     closed: bool,
-    deadline: float | None = None,
 ) -> bool:
     for _ in range(SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS):
-        if deadline is not None and time.monotonic() >= deadline:
-            break
         try:
             item = pending_queue.get_nowait()
         except queue.Empty:
@@ -638,7 +642,8 @@ def _drain_stream_queue(
     return closed
 
 
-def _drain_streams_until_closed(
+def _finish_streams(
+    adapters: Sequence[_PipeAdapter],
     stdout_queue: queue.Queue[str | None],
     stderr_queue: queue.Queue[str | None],
     stdout_parts: list[str],
@@ -648,31 +653,38 @@ def _drain_streams_until_closed(
     on_stderr_chunk: Callable[[str, bool], None] | None,
     stdout_closed: bool,
     stderr_closed: bool,
-    timeout: float = SUBPROCESS_STREAM_DRAIN_TIMEOUT,
-) -> tuple[bool, bool]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not (stdout_closed and stderr_closed):
+) -> None:
+    """Bound further capture, then deliver the frozen backlog [RM-5.2].
+
+    Waiting for reader completion shares one deadline. Once all producers are
+    joined, delivery is finite and cannot be cut short by a slow callback.
+    Only actual EOF markers close streams; stopping a reader does not create one.
+    """
+    deadline = time.monotonic() + SUBPROCESS_STREAM_DRAIN_TIMEOUT
+    for adapter in adapters:
+        if adapter.target_queue is not None:
+            adapter.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    _stop_and_join_pipe_adapters(adapters)
+    _raise_pipe_errors(adapters)
+
+    # No producer remains. A slow sink affects delivery time, not which already
+    # captured bytes belong to this outcome. Keep per-stream fairness without
+    # waiting between batches or treating a missing EOF marker as completion.
+    while not (stdout_queue.empty() and stderr_queue.empty()):
         stdout_closed = _drain_stream_queue(
             stdout_queue,
             stdout_parts,
             on_chunk=on_stdout_chunk,
             closed=stdout_closed,
-            deadline=deadline,
         )
         stderr_closed = _drain_stream_queue(
             stderr_queue,
             stderr_parts,
             on_chunk=on_stderr_chunk,
             closed=stderr_closed,
-            deadline=deadline,
         )
-        if stdout_closed and stderr_closed:
-            break
-        if stdout_queue.empty() and stderr_queue.empty():
-            time.sleep(SUBPROCESS_POLL_INTERVAL_FLOOR)
     if not (stdout_closed and stderr_closed):
-        logger.warning("Subprocess stream drain ended before stdout/stderr EOF")
-    return stdout_closed, stderr_closed
+        logger.warning("Subprocess stream capture ended before stdout/stderr EOF")
 
 
 def _last_monitor_metrics(

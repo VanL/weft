@@ -339,7 +339,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    Manager-source `wrapper_lost` envelope. A failed terminal-proof read is unknown, not
    terminal proof. A failed failsafe publication retains the existing exited-child
    record and any unacknowledged reservation, with a bounded retry deadline through the
-   existing reactor timeout path. It neither spins on an expired grace deadline nor
+   existing reactor timeout path. Cleanup retires a due publication-retry deadline
+   when servicing it, so any proof-grace interval that then starts becomes the
+   active deadline; another failed publication installs a fresh retry. It neither spins
+   on an expired grace deadline nor
    waits for unrelated queue activity. Task-owned terminal proof still wins if it
    arrives later. Bounded Manager shutdown may end retries at its existing deadline; it
    leaves unresolved reserved work under the existing recovery policy rather than

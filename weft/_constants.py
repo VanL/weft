@@ -1919,7 +1919,11 @@ or other-stream handling. Each raw chunk is at most SUBPROCESS_STREAM_READ_SIZE.
 """
 
 SUBPROCESS_STREAM_DRAIN_TIMEOUT: Final[float] = 0.25
-"""Best-effort timeout for draining subprocess stdout/stderr after exit."""
+"""Output-capture grace after a subprocess terminal decision.
+
+Bounds waiting for pipe EOF before stopping adapters. Delivery of the frozen
+captured backlog is separate and may take longer according to sink throughput.
+"""
 
 SUBPROCESS_POLL_INTERVAL_FLOOR: Final[float] = 0.01
 """Minimum sleep interval for subprocess coordination loops."""

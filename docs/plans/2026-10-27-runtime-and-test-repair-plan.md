@@ -1,7 +1,7 @@
 # Runtime Ownership and Test Evidence Repairs
 
 Status: draft
-Source specs: docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2]; docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md [STATE.1]–[STATE.6], [REDUCER.1]–[REDUCER.4]; docs/specifications/13-Agent_Runtime.md [AR-7]; docs/specifications/08-Testing_Strategy.md [TS-0], [TS-2]
+Source specs: docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2]; docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8]; docs/specifications/07-System_Invariants.md [STATE.1]–[STATE.6], [REDUCER.1]–[REDUCER.4]; docs/specifications/13-Agent_Runtime.md [AR-7]; docs/specifications/08-Testing_Strategy.md [TS-0], [TS-2]
 Superseded by: none
 
 Class: 5. Execution supervision, process and pipe ownership, and scheduler
@@ -122,7 +122,7 @@ supervisor, including completion observed before an unaccepted timeout.
 Input delivery is part of concrete command execution. Pipe backpressure cannot
 disable supervision. Root exit, pipe EOF, and adapter completion are distinct
 facts: an inherited descriptor is not evidence that the root still executes.
-Bounded drain must also release this runner's adapters and descriptors. Returning
+Bounded capture must also release this runner's adapters and descriptors. Returning
 while daemon threads remain stuck in buffered I/O is not a fix. The resource
 monitor's psutil-visible-tree boundary remains unchanged; this plan does not
 promise to kill already reparented or deliberately detached descendants.
@@ -133,7 +133,8 @@ remain unchanged. Keep the real
 `TaskSpec -> Consumer -> TaskRunner -> outbox/task log` path in end-to-end proof.
 Do not add a second state store, queue reader, hidden provider probe, timeout
 polling cap to the steady task reactor, dependency, public flag, or new outcome
-schema. Outbox output remains the bytes/text captured within the drain boundary.
+schema. Outbox output preserves all bytes/text captured before producer shutdown,
+subject to existing error/shutdown delivery rules; delivery has no 250 ms cap.
 
 For S1 preserve round-robin branches, newest eligible tip selection, independent
 root FIFO, oldest sibling borrowing, cached parent contraction, exact-ID broker
@@ -151,7 +152,7 @@ generic supervisor extraction or unrelated test sweep belongs in this scope.
 | Existing difference | Disposition and reason |
 |---|---|
 | Shared command runner receives stdin in one bounded work invocation; interactive sessions accept later messages over their lifetime. | Preserve. Share a phase/ownership rule where useful, not the interactive session API or a new common framework. |
-| Interactive exit notification is independent of stream EOF; shared command normal completion currently waits for EOF. | Unify the root-exit fact and bounded-drain policy. Reuse `_drain_streams_until_closed`; retain separate adapters and session behavior. |
+| Interactive exit notification is independent of stream EOF; shared command normal completion currently waits for EOF. | Unify root-exit handling and bounded capture. Reuse finite per-stream draining after producer shutdown, ending on empty queues rather than EOF; retain separate adapters and session behavior. |
 | Cancellation/timeout/limit branches already use bounded drain, while normal completion's drain is reached too late. | Apply the same finite drain owner to normal completion and preserve each branch's accepted outcome. |
 | Fatal start callbacks already use `_cleanup_after_callback_failure`; monitor construction and pipe setup do not. | Unify post-spawn rollback coverage with existing stop/kill/reap mechanics, retaining original exception identity. Avoid two competing cleanup owners. |
 | Monitor loading/type errors propagate; ordinary monitor start/poll/stop errors are logged and tolerated. | Preserve. A blanket catch-and-default monitor would conceal configuration errors. |
@@ -182,17 +183,42 @@ Insert after the opening paragraph ending “used inside the runtime.”:
 > a buffered I/O lock held by a blocked operation.
 >
 > Root process completion and output-pipe EOF are separate observations. Once
-> root completion is accepted, the supervisor drains captured output for the
-> bounded private stream-drain budget even if descendants retain inherited
-> stdout or stderr. Expiry of that budget does not convert the completed root
-> outcome into an execution timeout. The supervisor then stops and joins its
-> I/O adapters and closes their owned pipe endpoints. Output beyond this drain
-> boundary is not promised. Incomplete EOF at the boundary is logged as a
-> bounded diagnostic; it does not create a new terminal state or outcome field.
-> Output drainage performs finite work per stream before returning to other
-> streams and supervision; final-drain deadline checks also occur inside that
-> work, so a continuously producing descendant cannot extend the budget. These
-> bounds do not preempt an arbitrarily blocking user callback.
+> root completion is accepted, the supervisor uses the bounded private
+> stream-drain budget to await output EOF and finish accepting output from
+> inherited pipes. When both output adapters finish or that budget expires, it
+> stops and joins its owned I/O adapters and closes their owned endpoints. This
+> freezes a finite set of captured output. The supervisor delivers that captured
+> output before forming its returned outcome; expiry must not discard output
+> already captured in its local queues. The same capture, shutdown and delivery
+> sequence follows the existing runtime stop/kill hooks for cancellation, timeout
+> and resource-limit outcomes, preserving those outcomes.
+>
+> The capture budget is not a total result-delivery or teardown timeout. Delivery
+> duration depends on captured volume and sink throughput and may exceed the
+> private budget. Output produced after capture is stopped is not promised.
+> Budget expiry neither converts a completed root into an execution timeout nor
+> asserts physical EOF. Missing physical EOF remains a bounded diagnostic, with
+> no new terminal state or outcome field.
+>
+> While execution is active, output drainage performs finite work per stream
+> before returning to other streams and supervision. After producer shutdown,
+> delivery repeatedly drains the finite queues without idle waits. These rules
+> do not preempt an arbitrarily blocking callback. A callback exception follows
+> the existing execution-failure cleanup and exception-precedence contract; it
+> does not guarantee delivery to the failed callback. Existing Consumer shutdown
+> rules still govern a publisher that has stopped accepting worker events.
+
+### Manager terminal retry [MA-1.6a] (S2 clarification)
+
+Strategy A: before the S2 owner repair, insert after the sentence ending
+“existing reactor timeout path.” in `03-Manager_Architecture.md` [MA-1.6a]:
+
+> Cleanup retires a due publication-retry deadline when servicing it, so any
+> proof-grace interval that then starts becomes the active deadline; another
+> failed publication installs a fresh retry.
+
+This makes the existing no-expired-grace-spin contract explicit. It does not
+require a grace interval after every retry or alter custody/publication policy.
 
 ### Resource Management [RM-5.1]
 
@@ -228,7 +254,7 @@ the expected answers. A mismatch blocks edits until the cited owner is reread.
 1. Why can an exited root still leave the runner blocked, and why is setting
    status to timeout an incorrect repair? Expected: descendants can own pipe
    writers independently of the root; completion already observed has priority
-   over an unaccepted timeout. Bound stream teardown and preserve root status.
+   over an unaccepted timeout. Bound stream capture and preserve root status.
 2. Why is “put stdin on a thread, then close it in `finally`” insufficient?
    Expected: a buffered write can hold its lock, so cross-thread close can block;
    the adapter needs a cancellable I/O primitive and must own close and join.
@@ -311,7 +337,8 @@ failure and must never kill unrelated processes.
   output, successful root outcome, finite return, diagnostic and released
   adapter resources while the descendant is still held. Release that descendant
   in test cleanup. Add a descendant that continuously produces output, not just
-  one silently holding descriptors; the same return/resource bound must hold.
+  one silently holding descriptors; the same capture/resource bound must hold,
+  with total delivery allowed to scale with the finite captured volume.
   Repeat the root-outcome assertion with nonzero exit and
   preserve the existing timeout-wake-boundary test. Finite process-test safety
   deadlines are generous cleanup bounds, not assertions of exact scheduling.
@@ -323,24 +350,39 @@ failure and must never kill unrelated processes.
   and best-effort behavior were not replaced.
 
 Start the execution clock before input delivery, keep cancellation/timeout/limit
-checks live, and accept root completion independently from EOF. Reuse
-`_drain_streams_until_closed` and `SUBPROCESS_STREAM_DRAIN_TIMEOUT`; extend their
-ownership integration rather than copying a second drain loop. The existing
-`_drain_stream_queue` drains until empty and is not bounded under continuing
-production. Give each queue drain a finite chunk/work budget, with any new
-internal constant in `weft/_constants.py`, and also check the final-drain absolute
-deadline inside that loop. Return to stderr and supervision between finite
-batches; the main supervisor must use bounded drains too. Preserve ordered text,
-callback behavior and exactly-once EOF markers without treating budget exhaustion
-as EOF. A slow callback may consume time and must be followed by a deadline check;
-this repair does not promise to interrupt arbitrary blocking callback code.
+checks live, and accept root completion independently from EOF. Keep finite
+per-stream work in the running loop. After accepting root completion or invoking
+the terminal stop/kill hook, use the existing output adapter threads' joins with
+one shared absolute SUBPROCESS_STREAM_DRAIN_TIMEOUT deadline to await capture
+completion. Then stop all acquired adapters before joining any, close owned
+endpoints, check finalized adapter errors before callbacks, and drain the
+now-finite captured queues completely without sleeps or a delivery deadline.
+Terminate this frozen phase when both queues are empty, not when EOF flags are
+set; inherited pipes may never produce physical EOF. Reuse the stop/join/close owner in finally; handle partial
+acquisition and preserve primary exceptions. Do not create a new watcher,
+output store, deadline thread or synthetic physical EOF marker.
 
-Add a deterministic helper control using a real queue and a bounded callback
-that replenishes it: the drain must return with backlog remaining, and an expired
-final deadline must stop further draining. Add real sustained-output child cases
-proving timeout/cancellation checks still run and a completed root still finishes
-while its descendant writes. Reverting only the finite inner bound must fail the
-intended assertion. Adapt `test_stream_reader_normalizes_crlf_split_across_chunks`
+Consumer's existing per-work-item callback closures track actual final callbacks.
+After a successful live command outcome, publish a missing logical final for
+each still-open stream through the same event publisher before the successful
+work result. Preserve chunk indices, stdout strip transform and exactly-once
+finals. Publish any missing stderr final before the missing stdout final, since
+the CLI result reader stops at the latter. A returned supervisor outcome implies
+all collected chunks have reached their callbacks; callback failure propagates
+instead. Land captured-backlog preservation and the logical seal together. Do not change result readers, add an outcome field, or unconditionally
+publish finals during failure unwinding. Non-ok outcome settlement stays as-is.
+
+Keep the deterministic real-queue finite-batch control and its mutation proof.
+Replace the old final-delivery-deadline test because its contract was superseded,
+not because it was tautological. Add captured-backlog delivery with a controlled
+slow sink and real process; preserve exact data and genuine EOF. Add real
+Consumer/public-result empty/nonempty inherited-pipe cases and exact large-result
+evidence. Removing frozen-backlog delivery or the Consumer logical seal must
+recreate the respective missing-output assertion. Cover cancellation, timeout,
+limit outcomes and callback failure during final delivery with owned-resource
+cleanup. Keep sustained-output fairness and controlled descendant tests; assert
+finite capture and producer shutdown rather than a 250 ms total delivery bound.
+Adapt `test_stream_reader_normalizes_crlf_split_across_chunks`
 to preserve normalized text and EOF through a decoder-level or real-pipe proof;
 its fake stream without `fileno` and exact chunk splits are not public adapter
 requirements. Do not add production fake-stream support or freeze OS read
@@ -358,7 +400,7 @@ Stop and review if any test can pass by returning with blocked daemon readers,
 if teardown changes an accepted outcome, or if resource-limit/control precedence
 changes. Run the focused runtime and Docker gates before continuing.
 
-### 3. Bound lazy heap retention without losing cheap meld (S1)
+### 3. Repair derived scheduler bookkeeping (S1–S2)
 
 Files to modify: `weft/core/family_scheduling.py`,
 `tests/core/test_family_scheduling.py`, and the [MA-1.8] implementation note.
@@ -424,6 +466,44 @@ in a real Manager exercise, stop and review an explicitly specified incremental
 reclamation design, including mutations and meld during rebuild. Do not invent
 a per-dispatch global scan, a fixed family cap, or unproved exact-deletion bound
 to make the local benchmark green. Run reducer and real Manager family gates.
+
+#### S2: retire a serviced terminal-publication retry deadline
+
+Admission B's pre-implementation review identified a prerequisite repair in the
+existing Manager owner. Governing contract: `03-Manager_Architecture.md`
+[MA-1.6a], the paragraph requiring failed terminal publication to retain custody
+with a bounded retry and explicitly forbidding an expired-grace spin. This
+restores that contract; it does not promote B's dispatch policy.
+
+Confirmed baseline sequence: a real cleanly exited process with exact staged
+reserved custody encounters named broker proof-read and failsafe-write failures.
+The retry is future and respected. Once due after broker recovery, absence of
+proof starts a fresh proof-grace interval, but the old expired retry remains
+positive. `_manager_child_timeouts` prioritizes it and reports zero throughout
+the new grace. A second valid request still dispatches in the baseline; B's
+proposed deadline veto would additionally stall it. The first child's staging is
+an owner-boundary test, not a claim of naturally inducing this whole sequence
+through a complete first-task launch.
+
+Files: `weft/core/manager.py`, the nearest existing terminal-publication/custody
+regression in `tests/core/test_manager.py`, and the [MA-1.6a] normative
+clarification plus implementation mapping. In `_cleanup_children`, after confirming exit, respecting retained
+survivors and skipping a future retry, clear the consumed retry deadline before
+the proof-grace check. A later failed publication must install its normal fresh
+retry. Do not clear a future or unserviced deadline, shorten grace, acknowledge
+custody early, add a timer snapshot/latch, change `_manager_child_timeouts` into a
+second policy owner, or modify dispatch/worker counts.
+
+Before editing production, obtain RED through a real clean exit and actual
+broker failure dependencies. Verify future retry retention, due retry consumption
+into a positive proof-grace timeout, exact reserved-row retention, normal second
+request dispatch, later genuine failsafe publication and acknowledgement. Remove
+only the deadline reset to obtain the intended timeout/custody assertion failure.
+Use an owner-local clock facade, never patch stdlib time globally. Keep all
+process and Manager/harness ownership explicit even on failed assertions. Probe
+and test cleanup failures are not passes. Independent review must confirm this
+small owner repair before admission B begins. Include it in the common repaired
+baseline for all measurement arms so its effect is not attributed to B.
 
 ### 4. Repair and consolidate the demonstrated test gaps (T1–T4)
 
@@ -688,7 +768,7 @@ The reducer tracks physical/live counts, reclaims only its local heap when H > 2
 
 Alternating baseline/repaired measurements covered L=100/1,000/10,000, unrelated backlog 0/10,000, three repetitions per cell (36 runs). Largest instrumented compaction times were 0.072/0.640/6.037 ms respectively. At L=10,000, each measured reclamation visited 19,999 local nodes with 22,893 meld calls, independent of unrelated backlog. Retained nodes peaked at 19,999 instead of 40,000 after 30,000 churn cycles. Median total loop time increased from 146.5–147.6 ms to 168.4–169.5 ms: this repairs a memory bound at CPU cost, not a throughput improvement. Scripts/raw samples: `heap-measure.py`, `heap-measure.jsonl`; mutations: `heap-mutations.jsonl` and `heap-mutants/*/result.log` under the execution evidence directory.
 
-The staged real-Manager gate used actual broker classification, exact competing reservations, production stale-hint removal, and normal process_once admission/launch. The observer queued a keyed PING immediately before production compaction. Warmup L=100 compacted H=201 to 100 in 0.107 ms with PONG observed in 3.004 ms; L=10,000 compacted H=20,001 to 10,000 in 5.422 ms with PONG observed in 7.434 ms, in the same turn. Exact source absence, reserved custody and hint deletion were checked before compaction; each case launched root, descendant tip and witness processes, with a completed witness/outbox and all six owned PIDs absent after cleanup. This is staged integration, not a natural 20,000-process workload or a universal latency bound. The first probe mistakenly registered its in-process Manager for harness termination and exited by SIGTERM without a result; it is retained as failed evidence. The corrected probe follows the existing explicit Manager-owner fixture and exited zero. Artifacts: `heap-manager-gate.py`, `.jsonl`, `.stderr`, plus preserved `.attempt1` files. The observed 5.4 ms pause and 7.4 ms control response support retaining local geometric compaction; larger buckets retain the disclosed linear pause risk.
+The staged real-Manager gate used actual broker classification, exact competing reservations, production stale-hint removal, and normal process_once admission/launch. The observer queued a keyed PING immediately before production compaction. Warmup L=100 compacted H=201 to 100 in 0.107 ms with PONG observed in 3.004 ms; L=10,000 compacted H=20,001 to 10,000 in 5.422 ms with PONG observed in 7.434 ms, in the same turn. Exact source absence, reserved custody and hint deletion were checked before compaction; each case launched root, descendant tip and witness processes, with a completed witness/outbox and all six owned PIDs absent after cleanup. This is staged integration, not a natural 20,000-process workload or a universal latency bound. The first probe mistakenly registered its in-process Manager for harness termination and exited by SIGTERM without a result; it is retained as failed evidence. The corrected probe follows the existing explicit Manager-owner fixture and exited zero. Artifacts: `heap-manager-gate.py`, `.jsonl`, `.stderr`, plus preserved `.attempt 1` files. The observed 5.4 ms pause and 7.4 ms control response support retaining local geometric compaction; larger buckets retain the disclosed linear pause risk.
 
 
 Real Docker command proof used the production plugin/runner/shared-supervisor call path with the existing `python:3.12-bookworm` image, network disabled and no mounts. A 500,000-character Unicode roundtrip plus independent stderr SHA-256 passed in 0.593 s. A 32 MiB write to a nonreader reached observed EAGAIN and returned timeout in 0.606 s for a 0.3 s execution limit. Cancellation after observed EAGAIN returned in 2.499 s through the existing Docker stop hook. All three calls removed their uniquely owned containers, reaped the actual CLI process and joined adapters. The initial probe misused DockerClient as a context manager and was corrected to `contextlib.closing` before these valid runs; final label inspection found no owned containers. Evidence: `runtime_docker_smoke.py`, `runtime-docker-smoke.log`, `.json`. This validates Docker command cleanup locally, not Windows host semantics or container descendant pipe inheritance.
@@ -1008,3 +1088,791 @@ Counterarguments retained: portable nonblocking adapters poll idle pipes at the 
 Runtime R2-1–R2-3 closure: the explicit platform/error matrix now includes Windows EIO rejection with exact exception identity and owned-resource cleanup. The existing five output/error cases pass in 1.91 s. A platform-only suppression mutant still passes the old two matrix rows (1.03 s), but the new Windows EIO row fails “DID NOT RAISE OSError” (0.98 s). Full mypy passes 478 files; Ruff/format and whitespace checks pass. The only production edit since the passing full suites is the single-consumer explanatory comment. Separate focused round-three review and integrated repair review are pending.
 
 CI sequencing: open a draft pull request for this locally verified repair snapshot while integrated review runs, to execute the owner-required Windows jobs. Neither draft publication nor CI startup closes this plan. Repair acceptance still precedes admission measurements; concurrent launch workers remain deferred.
+
+
+### Integrated repair Tier-1 review: drain semantics under reconsideration
+
+Contained Claude review completed successfully in 411.21 s, verdict **blocker: F1**, with F2 also requesting owner disposition. The reviewer flags a potential conflict between bounded output-delivery time and already-captured output, plus the Consumer's logical stream-finalization boundary. No runtime edits were made in response. Actual Consumer/broker reproductions and the governing stream contracts are being checked before accepting the claims. Verbatim review:
+
+<details>
+<summary>Integrated repair findings and three-question assessment</summary>
+
+# Integrated review: Task5 repair unit (e220748f → 4c490043)
+
+**Verdict: blocker: F1.** The heap change, the test repairs, and most of the runtime change are correct. F1 is a new regression where a command that exits cleanly can lose output Weft has already read. F1's fix changes the meaning of a spec sentence that has already been promoted, so it is flagged RECONSIDERATION REQUESTED.
+
+**What this review is based on:** I read the source myself at the current checkout; the tree is clean at HEAD 4c490043. I did not run any tests and did not recompute file hashes. Execution results come only from the logs you supplied. Windows CI, Linux-owned extension CI, and PR48 run 40699715283 are still pending. Nothing here certifies them.
+
+## Findings
+
+| ID | Severity | Location | Causal evidence | Suggested disposition |
+|---|---|---|---|---|
+| F1 | [P1] | `weft/core/runners/subprocess_runner.py:207-209`, `:335-344`, `:620-622`, `:653-675`; `weft/_constants.py:1921` | **Mechanism.** The supervisor now stops its main loop as soon as the root process exits. It then gets one 0.25 s budget (`SUBPROCESS_STREAM_DRAIN_TIMEOUT`), and the new deadline check (`:621`) stops pulling chunks off the local queues when that budget runs out. But the reader threads drain the pipe into an *unbounded* queue, so a fast child is never slowed down by how quickly callbacks run. At root exit, the queue can therefore hold a large backlog that has already been captured, with the reader's EOF marker queued behind it.<br>**Why callbacks are slow in practice.** With Consumer live streaming, each callback posts to a worker-result queue capped at 256 entries (`base.py:805-812`). The reactor turns each entry into an outbox broker write (`consumer.py:581-603`), so callbacks run at broker speed.<br>**Result.** A command with no descendants that writes a few MiB, or many small flushed chunks, faster than the broker can absorb them comes back `ok` with truncated `stdout`. Its final callback marker is never sent, even though the reader did see EOF.<br>**Why this is a regression.** The old loop only broke when the root had exited *and* both streams had closed, and it drained each queue until it was empty. All captured output was delivered.<br>**Why it is new evidence.** The accepted risk was justified by descendants holding pipes open. Here there is no descendant, EOF has already been observed, and the data is already in Weft's memory.<br>**No test covers it.** `test_ready_output_drains_without_waiting_between_batches[exits-unprompted]` only uses fast callbacks. | **Fix (smallest I see):** the deadline should limit *waiting for pipe EOF*, not *processing data already captured*. At EOF or deadline, stop and join the output adapters (move stop/join into a small idempotent helper that `finally` reuses). Then drain the now-finite queues until empty. Emit final markers only where the reader actually queued `None`. A descendant still cannot extend the budget, because readers stop at the deadline. Apply the same rule to the cancel/timeout/limit paths for consistency.<br>**RED test:** a real child writes 64 × 64 KiB and exits; the callback sleeps 10 ms per chunk. Assert the full stdout and exactly one `("", True)` marker.<br>**RECONSIDERATION REQUESTED:** RM text says the supervisor "drains captured output for the bounded private stream-drain budget". It should say the budget bounds the EOF wait and that captured data is processed fully. |
+| F2 | [P2] | Interaction of `subprocess_runner.py:558-562`/`:673-674` with `consumer.py:309-312` and `weft/core/outbox.py:78-87` | When a live-streaming command's descendant holds the pipes open past the boundary (the accepted R2 case), the root's `ok` outcome is committed with no stdout `final=True` envelope. Live streaming doesn't publish a separate result (`_serialized_result_bytes`). `process_outbox_message` only produces a value when it sees the final envelope. So the *entire* streamed result is lost, not just output past the boundary. Before this change that run hung until timeout, so the new behavior is a new kind of outcome rather than a worsening of an old one. | **Owner decision, RECONSIDERATION REQUESTED.** The plan says budget exhaustion must not be treated as EOF. Options:<br>(a) Separate "stream complete" from "pipe EOF": the Consumer emits the stdout terminal envelope when it commits an `ok` live-stream outcome that never received one.<br>(b) Accept and document the risk.<br>Fixing F1 does not change this case. |
+| N1 | nit | `subprocess_runner.py:570-579` | The input writer uses `SUBPROCESS_STREAM_READ_SIZE` both as its character-chunk size and its write-slice size. | Optional: add a short comment, or reuse it under a neutral name. |
+| N2 | nit | `family_scheduling.py:124` | `heads: list[_Head \| None]` exists only because `_meld` returns an Optional. | Leave as is, or narrow the type after the first pairing. |
+
+## Answers to your three questions
+
+### 1. Is the implementation correct?
+
+**Heap: yes.** I traced add, `remove_pending`, `remove`, `candidate`, `merge`, and `_compact`:
+- **Counts.** H (stored nodes, `physical_count`) is exact under add, root pop, stale pruning, rebuild, and merge. L (live entries, `count`) equals the number of pending IDs whose handle resolves to the bucket, because `remove_pending` decrements the resolved owner.
+- **Bounds.** H ≤ 2L holds at every public operation boundary. Merge preserves it by summation, so contraction needs no scan.
+- **Order.** Rebuilding with pairwise leftist meld keeps heap order, so FIFO/LIFO selection is unchanged.
+- **Ownership.** `_owns` (pending *and* current owner) closes the late-recovery case where the old bucket offered a re-added ID. Old stale/new live duplicates after a later meld are handled two ways: candidate returns the right request, and compaction deduplicates.
+- **Locality.** Only point lookups, so no global scan. That matches [ALT-WT-016].
+- **Custody.** The broker reservation path is untouched.
+
+**Test repairs (T1–T4): yes.**
+- Forbidden pairs now go through the real `validate_task_status_transition`.
+- The retained spec table carries literal action/ID/target. The duplicate core table was removed without losing assertions, and the generic `StateMachine` coverage checks are kept.
+- The `TaskSpec` same-state and terminal checks compare whole state.
+- The T2 observation seam wraps the real resolver, with a competing executable on `PATH` as a trap.
+- T3 uses a module-local `time` facade.
+
+**Runtime: correct except at the drain boundary (F1, F2).** Correct parts:
+- The clock starts before input delivery.
+- Input backpressure can no longer block supervision.
+- Root exit is accepted separately from EOF.
+- One `except BaseException` owner handles rollback, and it runs before `finally` stops and joins the adapters. So readers see EOF from the killed tree, and the primary exception stays primary.
+- Monitor load/type errors propagate; ordinary monitor errors are still tolerated.
+- Adapters registered before `start()` are joined, including an interrupted start.
+- Each adapter closes its own endpoint. Close never contends with a blocked buffered operation, because no buffered I/O is ever used.
+- An adapter error after an `ok` return is re-raised from `finally`, so a failed adapter cannot report success.
+- Decoder and newline handling matches `TextIOWrapper(newline=None)` on both read and write, including the Windows LF→CRLF translation.
+
+Unverified on Windows: CPython's nonblocking-pipe `os.read`/`os.write` errno behavior and zero-length writes. This rests on the pending CI.
+
+### 2. Is it elegant — would an expert systems programmer be proud of it?
+
+- **Heap: yes.** It is textbook lazy deletion with global rebuilding: rebuild once more than half the stored nodes are stale, and the cost is paid for by the discarded history. The rebuild is a linear bottom-up meld that reuses the existing nodes, and owner handles reuse the existing path compression. It adds about 60 lines and no new structures. The cost claims in the docstring are honest.
+- **Runtime: mostly.** `_PipeAdapter` is a small, well-bounded primitive. It reuses `io.IncrementalNewlineDecoder` and the incremental codecs, and it deletes a hand-written CR/LF state machine along with its C901 suppression. Two things keep it from being exemplary:
+  - The drain semantics bound the wrong quantity (F1).
+  - The supervisor function is still about 370 lines, with three near-identical terminal branches. That predates this change and wasn't worsened.
+
+  The 10 ms stop-event polling per pipe is a plan-approved trade-off for Windows parity, not a defect (see Observations).
+
+### 3. Does it use the underlying data structures properly, or overcomplicate things?
+
+- **Heap:** proper use. There is no second liveness index or generation store. The temporary `seen` set is local to the bucket and discarded afterwards.
+- **Runtime:** the queue-plus-finite-batch structure is right. The mistake is putting the deadline on dequeue instead of on the EOF wait. The fix makes it simpler, not more complex.
+
+## Integration and preserved differences
+
+**Preserved:**
+- **Host vs Docker.** Both still have distinct stop/kill hooks, using `terminate_process_tree`/`kill_process_tree` on host and container stop/kill on Docker. Docker's outer `_cleanup_process`/`_remove_container` is idempotent after the supervisor's close and reap, so it doesn't compete as a second owner. Its `poll()` guard makes it a no-op.
+- **Interactive sessions.** Their lifetime, API, and blocking `readline` readers are unchanged.
+- **Monitor errors.** Fatal vs ordinary handling is preserved.
+- **Consumer failure path.** The test proves the real failure path: `builtins.str` is rejected by real validation, the task ends `failed`, KEEP/CLEAR reserved policy is applied, and the child is reaped by the runner rather than by a second Consumer owner.
+- **Heap integration.** The only caller is `manager.py:5780`.
+- **Traceability.** Spec → mapping → symbols match: `_PipeAdapter`, `_drain_*`, `_PendingIndex.remove`/`_compact`/`_owns`. The registry swaps RUFF-SUP-037 for RUFF-SUP-354 consistently with the policy-test inventory.
+
+**Changed:** the outbox at the drain boundary, covered by F1 and F2.
+
+## Observations (not actionable this pass)
+
+- **Idle polling cost.** Each idle pipe wakes every 10 ms; that's up to about 300 wakeups/s per running command, where the old daemon readers had none. On POSIX, selectors with a self-pipe wake would avoid this. Owner decision if large fleets of mostly idle commands matter.
+- **Unbounded joins.** `finally` uses `join()` with no timeout. That is correct given nonblocking I/O, but an asynchronous `KeyboardInterrupt` arriving mid-join would skip the remaining joins and closes.
+- **Pre-existing:** unbounded local output queues, which are an accepted risk and part of the cause of F1.
+
+## Evidence status
+
+| Source | Status |
+|---|---|
+| Local full SQLite suite | 5958 passed, 49 skipped |
+| PG suite | 5909 passed, 27 skipped (log excerpt) |
+| mypy / ruff / docs | Clean |
+| Django / Docker / macOS / microsandbox | Clean |
+| Runtime-round3 and heap/test-repair sensitivity controls | As summarized in the supplied logs |
+| Windows, Linux-owned extension CI, PR48 CI | Pending; not passed |
+
+</details>
+
+Initial disposition: investigation pending. A slow synthetic callback alone does not establish a new finding beyond the explicitly accepted bounded-drain risk noted in the earlier runtime review. The additional claim about actual Consumer queue backpressure and public result completion must be demonstrated. F2 must distinguish physical pipe EOF from completion of the captured logical outbox stream, whose finalization is required before task completion by [MF-5]. If the proposed fix reverses the promoted [RM-5.2] budget rule, the review-loops runbook Feedback Loop step 5 requires a human decision before changing that rule. Admission work remains behind repair acceptance.
+
+
+### Integrated review reproduction and reconsideration (2026-10-28)
+
+F1 is confirmed through the actual Consumer, its 256-slot worker-result queue,
+and SQLite broker, without artificial callback sleeps or altered chunk sizes.
+The 32 MiB control completed intact. At 128 MiB, the repaired supervisor captured
+all 134,217,728 characters but returned only 81,330,176; 808 queue items remained,
+including the genuine EOF marker. The public result was `completed` with
+`value=None`. The exact e220748f supervisor, explicitly rebound into HostRunner,
+delivered all 134,217,728 characters and a final frame. Thus this is actual
+captured-data loss under ordinary Consumer backpressure, not merely the already
+accepted possibility of missing future descendant output.
+
+F2 is separately confirmed with 14 characters of root output and a silent
+inherited-pipe descendant: all data was delivered, but no final frame was
+published, and the public completed result again had `value=None`. Root and owned
+adapter cleanup succeeded. Physical EOF and logical output finalization must
+remain distinct. The governing completion-order sentence is [MF-3]; [MF-5]
+requires producer-owned stream envelopes and does not authorize a reader to
+invent an end frame. The earlier disposition's attribution of the ordering
+sentence to [MF-5] was imprecise.
+
+Evidence lives under `/tmp/weft-implementation-20261027/`:
+`runtime-integrated-stream-flood-current-134217728.json`,
+`runtime-integrated-stream-flood-baseline-134217728.json`, and
+`runtime-integrated-stream-inherited-current.json`. Current supervisor source
+SHA256 is c156dcd08e4770eb2c0588b2f1bdad0b7b6c9b8be84f93e6eb74a73b09a6c54a.
+These are diagnostic probes, not yet committed regression tests.
+
+**RECONSIDERATION REQUESTED; owner decision pending.** Proposed correction:
+bound further pipe capture/waiting by the private drain budget, stop and join
+readers to freeze the finite captured backlog, then deliver that backlog fully.
+Reuse the same stop/join ownership operation on normal and exceptional cleanup.
+Consumer must finalize the logical stream before publishing its completion,
+without manufacturing physical EOF. This changes the promoted [RM-5.2] rule
+that bounds delivery of already-captured output. Large captured results or slow
+callbacks may extend final delivery beyond 250 ms. No production change has been
+made pending the human decision required by Feedback Loop step 5 of the review
+runbook. Admission measurements remain gated on repair acceptance.
+
+CI at 4c490043: 31 checks succeeded, one failed, five skipped. The failure is
+Windows/Python 3.14 `test_manager_autostart_ensure_restarts_after_abrupt_child_kill`:
+its first autostart-spawn observation expired before the kill/restart stage.
+Cause remains under investigation; neither a timing flake nor an unrelated
+failure is established. Run 40699715283, job 122856145718. Skipped dependent
+extension checks are not passes.
+
+
+### Runtime round 3 closure record (review completed before integrated review)
+
+Claude Opus 5.5, Tier 1, 45.56 seconds: PASS for R2-1/R2-2/R2-3.
+This scoped pass does not close the later integrated F1/F2 findings. R3-1 optional
+test-name nit declined: the existing name remains accurate and its docstring
+and explicit three-row matrix state both conditions. No behavioral ambiguity
+justifies another edit.
+
+<details>
+<summary>Verbatim cross-family runtime round 3 review</summary>
+
+**Findings**
+
+| ID | Severity | Location | Finding | Suggested disposition |
+|---|---|---|---|---|
+| R3-1 | nit | `tests/core/test_subprocess_runner.py:1539` | The test is still named `test_closed_input_einval_is_only_ignored_on_windows`. The new `windows-eio` row tests the other half of the rule: on Windows, only EINVAL is ignored. The name now covers only the platform side. The docstring at `:1546` ("Partition … from real I/O faults") already describes both sides, so nothing is wrong. | Optional. Declining is fine. If the test is renamed, something like `..._only_windows_einval_is_ignored` fits. Not a blocker. |
+
+The fixes introduced no new defects.
+
+**Verification per ID**
+
+- **R2-1: verified.**
+  - **Production check:** the rule is still `sys.platform == "win32" and exc.errno == errno.EINVAL` (`subprocess_runner.py:589`), and it is the only use of `sys` in that module. So swapping in `SimpleNamespace(platform=...)` is still safe.
+  - **Expected outcomes are written out:** each row states its result as a literal `ignore_error` value (`:1534-1536`). The test never recomputes the production condition.
+  - **Three cases are enough:** for a two-part "A and B" rule, three cases (both true; platform false; errno false) isolate each part. With them:
+    - removing the errno part fails `windows-eio` (your control shows exactly this);
+    - removing the platform part fails `non-windows-einval`;
+    - turning `and` into `or` fails both negative rows;
+    - forcing the condition to false fails `windows-einval`.
+
+    A fourth `linux/EIO` row would catch no additional mutant, so leaving it out is right.
+  - **Assertions:** both negative rows check `caught.value is failure`. This works because `_raise_pipe_errors` re-raises the stored instance (`:602`), and each row builds its own `failure`. The real process, the adapter ownership, `write_attempted` and `_assert_owned_pipes_released` are all unchanged (`:1569-1588`).
+  - **Portability:** `errno.EIO` exists on Windows, so the parameter table imports cleanly on every platform.
+  - **Fits the plan:** this matches the plan's disposition (plan `:919`). There is no new helper or framework.
+- **R2-2: verified.**
+  - **Sole consumer holds:** the two queues are local (`:138-139`). The adapters only `put` (`:557`, `:561`), and only the supervisor thread calls `get_nowait` (`:624`).
+  - **Next-pass progress holds:** a queue that is not empty at `:332` stays non-empty, so the next pass drains at least one item at `:161-172`.
+  - **Race cost holds:** a `put` that lands after an empty check costs at most one `sleep_for`, which is never more than `ACTIVE_CONTROL_POLL_INTERVAL`.
+  - **No code change:** the guard itself is unchanged; only the comment moved from producer to consumer reasoning.
+- **R2-3: verified.**
+  - **Output cases:** `exits-unprompted` is the case where the child exits without waiting for the release file. `awaits-release` is the case where the loop at `:1403-1406` makes it wait.
+  - **Matrix rows:** `windows-einval`, `non-windows-einval` and `windows-eio` name the injected branch, not the host OS. That fixes the original complaint that "linux" ran on darwin. Using `non-windows` instead of the suggested `posix` is more accurate, since the branch is just "not Windows".
+
+**Evidence check**
+- The current file contents match the embedded diff exactly at `subprocess_runner.py:330-333` and `test_subprocess_runner.py:1374-1376, 1531-1588`.
+- I couldn't recompute the SHA256 hashes with read-only tools, so the hash claims rest on your embedded evidence.
+- The mutant script swaps exactly one occurrence of the production condition and asserts the source hashes are unchanged before and after. The mutant results are consistent with the analysis above.
+
+**Verdict: PASS** for R2-1, R2-2 and R2-3.
+
+**Your three questions**
+1. **Is it correct?** Yes. The new row catches the one mutant that used to survive, the comment's reasoning is accurate, and the labels match what each case does.
+2. **Is it elegant?** Yes. It is a minimal extension of the existing parameter table: one new row, explicit expected outcomes, and the real-process scaffolding left alone. The name nit (R3-1) is the only rough edge.
+3. **Does it use the data structures properly?** Yes. The two-queue, single-consumer design is unchanged and is now described correctly. The test table is a flat set of parameters with nothing added.
+
+**Observations (not actionable this pass)**
+- `_drain_streams_until_closed` (`subprocess_runner.py:671`) uses the same empty-check-then-sleep idiom without a comment. That predates this delta and is a cosmetic consistency point only.
+- The open risk you already accepted still applies: the injected platform branch is not proof of real Windows behaviour, so Windows CI remains the required acceptance gate.
+
+</details>
+
+
+### Windows failure disposition, bounded investigation (2026-10-28)
+
+Root cause remains unknown. The first-spawn assertion expired before child kill;
+therefore the run does not demonstrate broken restart behavior. The fixture is
+a function target and does not enter the repaired command-pipe supervisor.
+Manager and this test are unchanged from e220748f. Neither fact rules out shared
+load or exposed timing behavior. The old successful Windows 3.14 run used a
+different Python patch release, pytest release and runner image, so it is not a
+controlled baseline. Same-head Windows 3.12 and 3.13 core shards passed.
+
+The failed run lacks per-turn timing, pending/reserved custody, admission and
+launch-receipt state before cleanup; those are the discriminating observations
+if failure repeats. Do not increase timeouts, reduce concurrency or declare a
+flake from the current evidence. One same-head, unchanged failed-job rerun was
+dispatched (run 40699715283 attempt 2). A ten-minute thread heartbeat monitors it
+and dependent checks, stays quiet on unchanged status, and stops on completion.
+Evidence and full read-only diagnosis: `/tmp/weft-implementation-20261027/windows314-autostart-diagnosis.md`.
+
+
+### Concrete pending correction for owner review
+
+This is a proposed replacement, not an approved change to the operative repair
+steps or spec. The preferred algorithm separates capture from delivery using
+existing thread joins: after accepting root completion (or selecting a terminal
+stop/kill path), wait for output reader completion against one shared absolute
+capture deadline. Then signal every acquired adapter to stop before joining any
+of them. Reuse that idempotent stop/join operation in exceptional cleanup. With
+producers joined, repeatedly alternate the existing finite per-stream drain
+helper until both local queues are empty, without sleeps or a delivery deadline.
+Only reader-produced None markers count as physical EOF. This avoids a new
+watcher, deadline thread or second output store. Callback exceptions preserve
+existing primary-exception cleanup and do not promise delivery to a failed sink.
+The budget starts when completion is accepted, not retrospectively at OS exit;
+callbacks already blocking the supervisor remain outside a preemption guarantee.
+
+Proposed [RM-5.2] replacement, subject to owner decision:
+
+> Root process completion and output-pipe EOF are separate observations. Once
+> root completion is accepted, the supervisor uses the bounded private
+> stream-drain budget to await output EOF and finish accepting output from
+> inherited pipes. When both output adapters finish or that budget expires, it
+> stops and joins its owned I/O adapters and closes their owned endpoints. This
+> freezes a finite set of captured output. The supervisor delivers that captured
+> output before forming its returned outcome; expiry must not discard output
+> already captured in its local queues.
+>
+> The capture budget is not a total result-delivery or teardown timeout. Delivery
+> duration depends on captured volume and sink throughput and may exceed the
+> private budget. Output produced after capture is stopped is not promised.
+> Budget expiry neither converts a completed root into an execution timeout nor
+> asserts physical EOF. Missing physical EOF remains a bounded diagnostic, with
+> no new terminal state or outcome field.
+
+Apply the same freeze/delivery owner after cancellation, timeout and limit hooks,
+while preserving their outcomes. Do not promise broker delivery through an
+already-stopped Consumer publisher. For successful live command outcomes,
+Consumer's existing per-work-item callback closure can track each final frame
+and publish a missing logical final through the same event publisher before
+returning its successful work result. Preserve indices, stdout strip transform,
+and exactly-once finals. Do not synthesize physical EOF, alter result readers,
+or emit finals unconditionally during exception unwinding. Non-ok logical-seal
+policy is not expanded by this success-result repair.
+
+Verification after approval: real Consumer/public result checks for exact large
+output and empty/nonempty inherited-pipe results; controlled finite captured
+backlog with slow delivery; genuine EOF exactly once; continuing descendants
+stopped at the capture boundary; all terminal branches and callback failure
+cleanup; removal mutations that recreate lost data/missing final. Replace the
+old delivery-deadline test as a superseded contract test, not as a tautological
+or bad test. Re-run appropriate runtime/Consumer/Docker suites, integrated
+review and platform CI. Existing full-suite passes predate this proposal.
+
+An uninstrumented 128 MiB run independently returned only 70,385,664 characters
+and public `value=None`, ruling out observer wrappers as the cause. The default
+10 MiB output_size_limit_mb is a spill threshold, not a total live-stream cap;
+individual live frames use the existing streaming path. All probe roots,
+descendants, adapters and harnesses were cleaned up, with source unchanged.
+Full disposable proposal and evidence inventory:
+`/tmp/weft-implementation-20261027/runtime-integrated-reconsideration-proposal.md`.
+
+
+### Owner approval and promotion of capture-boundary revision (2026-10-28)
+
+After the explanation of where, when and how the 250 ms budget applies, the
+owner replied: “Ok, this sounds reasonable”. This approves the proposed RM-5.2
+revision: bounded further capture, full delivery of captured output, and the
+explicit tradeoff that large output or slow sinks can extend delivery beyond
+250 ms. The reconsideration is resolved. The operative spec delta and Task 2
+instructions above were updated with this promotion, not only this log entry.
+Implementation and regression/review gates remain open. Earlier pending records
+are historical and do not supersede this approval.
+
+CI run 40699715283 attempt 2 at4c490043 completed successfully, including
+Windows 3.14/core-commands and all four dependent extension/integration jobs.
+The unchanged rerun establishes intermittence, not the cause of attempt 1's
+autostart failure. No timeout or worker-count change was made. The completed-run
+monitor was deleted; the new correction requires its own CI and review gates.
+
+
+### Approved correction: pre-implementation cross-family review
+
+Claude Opus5.5 Tier 1,313.18 seconds: no blocker. C1/C2/C4 accepted and applied
+to operative Task2: finalized adapter-error check before delivery; frozen loop
+ends on queue emptiness; returned-outcome callback invariant and joint landing.
+C3 accepted: controlled sink is mutation proof,128 MiB is integration evidence
+with exact length/hash. C5 accepted for symbol reconciliation after implementation.
+C6 accepted for missing-final ordering (stderr before stdout); no claim changes
+pre-existing genuine EOF ordering. C7 already satisfied by the terminal-path
+parameter table, including nonzero-root error. Duration continues to include
+delivery as the existing calculation dictates; backend callback support outside
+Host/Docker is an out-of-scope observation, not new fallback behavior.
+
+RED:10 cases,8 intended failures/2 controls pass in 1.59 s. Five terminal-path
+rows lost stdout; late callback error did not fire; two inherited-success rows
+had zero final frames. PhysicalEOF and failed-root no-seal controls passed.
+The timeout row was then made readiness-gated using an owner-local clock facade,
+without mutating stdlib time; its isolated RED still failed exact-output equality
+in 2.04 s. No setup/cleanup failures. Logs: runtime-capture-red.log and
+runtime-capture-timeout-red.log under the implementation evidence directory.
+
+<details>
+<summary>Verbatim capture-boundary design review</summary>
+
+# Review: approved capture-boundary correction (repair 4c490043)
+
+I checked that every cited identifier exists: `run_monitored_subprocess`, `_PipeAdapter`, `_drain_stream_queue`, `_drain_streams_until_closed`, `SUBPROCESS_STREAM_DRAIN_TIMEOUT` (`_constants.py:1921`, 0.25), `Consumer._run_task_for_reactor`, `_emit_live_stream_chunk`, `BaseTask._publish_worker_result`, `process_outbox_message`, and the [MF-3] text at `05-Message_Flow_and_State.md:287-293`. The cause of F1 is confirmed in the source:
+
+- After the root exits, `_drain_streams_until_closed` (`subprocess_runner.py:335`) runs callbacks under a 250 ms deadline (`:621`, `:654`).
+- `finally` then stops the adapters (`:431-435`) and throws away whatever is still in the local queues.
+
+`docs/program-theory.md` [WT-6] has no rejected alternative that covers this algorithm.
+
+## Findings
+
+| ID | Severity | Location | Evidence | Suggested disposition |
+|---|---|---|---|---|
+| C1 | minor | Plan Task 2 `:338-347`; `subprocess_runner.py:160,174,442` | **The plan doesn't say when adapter errors are raised in the new final phase.** The running loop checks `_raise_pipe_errors` before every drain. In the new frozen phase the first check is in `finally`. So a reader that fails during capture would first push the whole frozen backlog into callbacks (writing outbox frames), and only then raise. If a callback fails during that delivery, its exception replaces the adapter's. | Call `_raise_pipe_errors(adapters)` once, right after the capture-boundary stop/join and before delivery. Every adapter outcome is final at that point, and this matches the loop's existing check-before-drain order. No new mechanism. |
+| C2 | minor | Plan `:155` (Difference Register: "Reuse `_drain_streams_until_closed`"); `subprocess_runner.py:654,671` | **Reusing that helper without its deadline would hang.** Its loop runs until both EOF flags are set, and sleeps when the queues are empty. With the deadline and sleep removed, a run with no physical EOF (the inherited-pipe case) never ends and busy-spins. | Frozen delivery should stop when both queues are empty, which is reliable only because the producers are joined. Do not stop on the `closed` flags. Update the stale register row so it no longer points implementers at the deadline helper. |
+| C3 | minor | Plan verification (128 MiB integration test); Task 2 `:361` | **The 128 MiB test can't reliably catch a regression.** A backlog only appears when the sink is slower than the producer within 250 ms; 32 MiB already passed on the same machine, so a faster CI host may pass even with the bug. And once the seal lands, removing frozen delivery gives a truncated value, not `value=None`, so a "missing output" check would pass. | Make the supervisor-level controlled-sink test the mutation proof for frozen delivery. Its delay must fall after root completion is accepted. Keep the 128 MiB run as recorded evidence; if it is committed, assert only the exact hash and length, and don't count it as a mutation proof. |
+| C4 | minor | Plan Task 2 `:349-354` | **The seal relies on an invariant the plan doesn't state, and depends on F1.** The invariant: on any returned outcome, every collected chunk has gone to its callback. This holds because `_drain_stream_queue` appends a chunk and then calls the callback, so a callback failure propagates instead of returning an outcome. If the seal lands without F1, today's visibly empty result becomes a silently truncated one. | State the invariant in the docstring or plan. Land F1 before or together with the seal, never the seal alone. |
+| C5 | nit | `06-Resource_Management.md:150-151`; plan Comprehension Gate Q1 | The implementation mapping says `_drain_streams_until_closed` owns "bounded final capture". Under the approved design, `Thread.join` owns capture and that helper is removed or renamed ("until closed" ≠ "until empty"). Q1's expected answer "Bound stream teardown" is now "bound capture". | Update the mapping and the gate answer to the real helper names when Task 5 is reconciled. |
+| C6 | nit | `consumer.py:437-461`; `commands/result.py:159-165` | `weft result` consumes only up to the last stdout final. A stderr seal published after the stdout seal would stay in the outbox on that path. The `await_task_result` path claims through the completion boundary, so it is unaffected. | Publish the stderr seal before the stdout seal. It costs nothing and keeps the stdout final last. |
+| C7 | nit | Plan verification ("exercise all three paths with captured backlog") | If all four exits (ok, cancel, timeout, limit) call one finalize helper, separate backlog tests per branch just repeat the helper's proof. | Use one test parametrized over the four branches, asserting the captured output plus the owned-resource checks. Keep the existing per-branch outcome and continuous-output tests. |
+
+## What I verified holds
+
+- **One shared deadline on output joins.**
+  - Compute `deadline` once, then call `t.join(max(0.0, deadline - time.monotonic()))` for the stdout and stderr adapters only.
+  - Leaving out the stdin adapter matters. A descendant that holds stdin without reading would otherwise use the whole budget every time.
+  - Joins after stop are bounded:
+    - Reads are nonblocking (`:551`).
+    - `put` goes to an unbounded queue and can't block (`:138-139`).
+    - Every iteration of the read loop checks the stop event (`:549`).
+- **Partial acquisition and error cleanup.**
+  - The capture phase is only reached after every `adapter.start()` has succeeded.
+  - The stop/join/close helper used by `finally` must keep the `thread.ident is not None` guard (`:434`). It is idempotent: `Event.set`, joining a finished thread, and `_close_pipe` behind `stream.closed` (`:438`) are all safe to repeat.
+  - If a callback raises during delivery, it goes through `except BaseException` → `_cleanup_after_execution_failure` → `finally` with `primary_failure=True`, so the original exception stays primary.
+- **No callback coupling during capture.** No callback runs while the joins wait. In the common case (no descendant) the joins return as soon as the readers hit EOF, which doesn't depend on how fast the sink is. So there is no added delay.
+- **Frozen delivery is finite.** With the producers joined, the queues are a fixed set. Alternating calls to `_drain_stream_queue` until both are empty (see C2) need no sleep and no deadline. The `deadline` parameter (`:618`) and `test_stream_queue_drain_checks_deadline_after_callback` (`test_subprocess_runner.py:1224`) are then dead, so remove them as a superseded contract. Keep the fairness test at `:1101`.
+- **Consumer event ordering.**
+  - Stream events and the active work result share one FIFO queue (`base.py:284-285, 807`).
+  - The seal is published on the worker thread before the lane wrapper publishes the result (`base.py:754-763`). So every frame, seals included, is written to the outbox before `_handle_active_work_result` commits completion ([MF-3]).
+  - If the publisher has stopped, `_publish_worker_result` returns `False` at once (`base.py:805`). Frozen delivery therefore can't hang on a Consumer that is stopping.
+- **Per-work-item final tracking.**
+  - The callback closures are created fresh on each `_run_task_for_reactor` call. They run synchronously on the same worker thread that later seals, so there is no race.
+  - The seal should reuse `_on_stdout_chunk("", True)` / `_on_stderr_chunk("", True)`, which gives the right indices and the `strip` transform (`consumer.py:601-602`) for free.
+  - Restrict it to the live branch, after a normal return, when `outcome.status == "ok"`.
+  - An empty stdout final decodes to `""` (`outbox.py:83-87`).
+
+## Answers to your three questions
+
+1. **Is the implementation plan correct?** Yes. Join-first capture with one deadline, then stop all adapters before joining any, then exhaustive delivery from the frozen queues, removes the loss mechanism without adding new machinery. The cancel/timeout/limit statuses, `duration=timeout`, and Host/Docker hook ownership are untouched. C1 and C2 are precision gaps in the plan text, not design errors.
+2. **Is it elegant?** Yes. It reuses `Thread.join` as the completion primitive and the existing batch drain as the delivery step. It turns four drain call sites into one finalize helper, and the seal reuses the existing closure. It deletes code: the deadline parameter, the sleep-and-poll loop and the obsolete test. An expert systems programmer would sign it.
+3. **Does it use the data structures properly?** Yes. The local queues are still the only transport. The reader-produced `None` is still the only physical-EOF signal. The logical seal belongs to the task, which owns the output's lifetime. There is no watcher, deadline thread, second store or synthetic EOF.
+
+**Verdict: no blocker** within this scope.
+
+## Observations (out of scope)
+
+- `RunnerOutcome.duration` for ok, cancelled and limit outcomes now includes frozen delivery time, which depends on the sink; before, that part was at most 250 ms. No field is added. If you want duration to mean execution plus capture only, take the end time at the capture boundary.
+- `supports_stream_callbacks` only inspects the backend's signature (`runner.py:176-179`). A backend that accepts the callbacks but never calls them would now produce a public value of `""` instead of `None`. In this repo only Host and Docker accept them, and both use this supervisor. The test fake at `test_task_execution.py:3987` will now get a sealed final, but it asserts only completion.
+- A continuously writing descendant can add up to 250 ms of pipe throughput to the frozen backlog. That is the volume you already accepted, and the join-first form doesn't increase it: readers fill an unbounded queue whether or not anything is draining it.
+
+The plan-file and exit-plan tools weren't available in this session, so this review exists only in this reply. I made no repository edits.
+
+</details>
+
+
+### Capture correction: implementation evidence and author fresh-eyes pass
+
+Implemented `_finish_streams` using the existing reader thread joins with one
+absolute deadline, shared `_stop_and_join_pipe_adapters`, finalized adapter-error
+check before callbacks, and exhaustive alternating finite-queue delivery. Removed
+the obsolete per-chunk final-delivery deadline and its superseded test. Consumer
+keeps per-work final flags and reuses its callbacks for success-only missing
+logical finals, stderr before stdout. No new state store, worker or public field.
+
+Focused GREEN (normal configured workers):
+`./.venv/bin/python -m pytest tests/core/test_subprocess_runner.py tests/tasks/test_runner.py tests/tasks/test_consumer_terminal_events.py tests/tasks/test_command_runner_parity.py tests/tasks/test_task_execution.py tests/commands/test_result.py tests/commands/test_consuming_result_collection.py tests/commands/test_result_settlement_policy.py --tb=short`
+returned 662 passed in 32.26 s. The two Docker owner/parity modules with their normal
+`-n 0` recipe returned 87 passed in 0.32 s. Full mypy:478 files clean. Ruff, format
+(631 files), suppression inventory and diff checks passed. Full backend/platform
+acceptance for this new correction remains pending.
+
+Six isolated mutation controls fired on the intended assertions: discarded
+frozen backlog (exact output mismatch), removed early adapter-error check
+(competing callback RuntimeError replaces expected OSError), removed logical
+seals (zero finals), reversed seals (broker timestamp ordering), sealed failed
+outcome (one final where zero is required), skipped data callbacks (empty
+callback output). Parent inspected all six failure logs, not merely exit codes.
+Source/test hashes before and after were identical. The C1 test gates actual
+reader dependencies until a real root poll observes exit; captured stderr
+provides the competing callback, without a production-only test seam.
+
+Real Consumer/broker evidence, no injected chunk/callback delays: corrected
+128 MiB runner/direct/public values all contain134,217,728 characters with SHA256
+8fb4c93e9cdd636cfe06929df7ec7cc521fe3fd3affdfe81fc13d8fcb737d26a, matching
+the exact baseline. Both physical EOFs were consumed and no local backlog
+remained. The complete post-terminal finalization call took0.5442435s; this
+includes capture/join and delivery, not an isolated delivery measurement. The
+uninstrumented repeat also returned the complete public string. Inherited-pipe
+case preserved physicalEOF=false on both streams, delivered14 characters, emitted
+one logical final per stream and returned the13 character stripped public value.
+All roots, pinned descendants, adapters and harnesses were cleaned up. Original
+reproduction artifacts are untouched. New evidence uses runtime-capture-fixed-*
+and runtime_capture_fixed_* names under the implementation evidence directory.
+
+Author fresh-eyes pass, distinct from implementation and before cross-family
+closure: no new correctness finding. Checked all four terminal call sites,
+shared deadline (output readers only), producer shutdown before empty-queue
+termination, exception precedence, callback/result consistency, FIFO worker
+events before completion, exact-once successful seals and failed-outcome control.
+The design uses existing thread joins and FIFO queues with fewer timing rules;
+no second lifecycle framework is warranted. Repeating idempotent stop/join in
+finally is deliberate cleanup safety and costs completed-thread checks, avoiding
+an extra lifecycle flag. Limits remain explicit: delivery depends on volume/sink
+throughput, arbitrary callbacks cannot be preempted, unbounded local buffering
+is pre-existing, and non-ok logical seal policy is unchanged. Independent
+cross-family completed-work review is running; this self-pass does not replace it.
+
+
+### Admission prerequisite finding S2 (2026-10-28)
+
+Cross-family pre-B clarification review,Claude Opus 5.5,375.72s,blocked on B-F1.
+Baseline owner probe confirms an expired publication retry remains selected
+after broker recovery begins fresh proof grace: child timeouts are[0.0] despite
+retained custody and an unexpired proof-grace interval. The first combined probe
+terminated143 after writing baseline evidence; its reset arm and overall cleanup
+are not yet accepted. A corrected ownership probe/control is in progress.
+No Manager source change has been made. Operative S2 instructions above define
+the minimal repair and proof gates; no B code or measurements are authorized
+before the repaired baseline is accepted.
+
+<details>
+<summary>Verbatim pre-B cross-family clarification review</summary>
+
+# Tier-1 cross-family review: clarification of admission-plan Task 2 / arm B
+
+**Verdict: BLOCKED.** One finding (B-F1) blocks. It's narrow, and the fix is small. Everything else in the clarification holds up against the source at `4c490043`. With B-F1's disposition added, I'd expect a PASS; the other findings are P3 wording or simplification items.
+
+**What I checked:** I read the named owners directly with read-only tools: `manager.py`, `base.py`, `multiqueue_watcher.py` and `service.py`, plus the named test seams. For theory and specs I relied on the embedded excerpts, which are pinned to the baseline. I didn't open the agent-context runbooks separately. No tests or probes were run, and nothing here is executed proof.
+
+## Findings
+
+| ID | Severity | Location | Evidence and strongest counterargument | Suggested disposition |
+|---|---|---|---|---|
+| **B-F1** | **P2, in-scope, blocking** | Clarified B design paragraph ("a due child-maintenance deadline … yields to an immediate ordinary turn … performs normal settlement"); proposed gate `any(remaining <= 0 for remaining in _manager_child_timeouts(...))`; source `manager.py:4533-4536`, `4545`, `4457-4462`, `8301-8305` | **The flaw:** the clarification assumes the next turn's normal settlement clears every due child deadline. One source path breaks that. **Path:** (1) A child exits with code 0. The proof read raises a broker error, so `_child_terminal_proof_visible` returns None. `_child_terminal_proof_still_within_grace` then returns False and never sets `terminal_proof_missing_since_ns`. (2) The failsafe write also fails, so `terminal_retry_after_ns = now + 15s` (`:4545`). (3) The broker recovers, the retry comes due, and the outer sweep runs. The retry check passes, but the proof read now returns False, so the grace timer starts and the sweep skips the child (`:4535-4536`). Nothing ever resets `terminal_retry_after_ns`; the only assignment is `:4545`. (4) `_manager_child_timeouts` takes the retry branch and `continue`s (`:8301-8305`). It returns `0.0` for the whole 15 s grace window, even right after the outer sweep. **Effect under B:** every spawn delivery in every turn yields for up to 15 s after the broker recovers. Baseline would keep dispatching during that window; only its timeout spin is pre-existing. That is a new dispatch stall, which the review contract forbids as a tradeoff. **Counterargument:** it needs a broker outage covering both the proof read and the write, it only affects clean exits without proof, and it is bounded to `MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS` (15 s). Recipe 4 kills the wrapper (non-zero exit), so it can't catch this. | **Plan sentence:** "B's child-deadline yield relies on `_cleanup_children` retiring each due deadline it services." **Owner fix:** in `_cleanup_children`, set `child.terminal_retry_after_ns = 0` once a due retry is consumed; a failed write sets it again. This also removes the existing zero-timeout spin. **Falsifiable control:** a real child that exits 0, a named outage on the proof read and the write, then recovery. Assert `min(_manager_child_timeouts()) > 0` after the next sweep, and assert a pending valid request is reserved in that turn. Removing the reset must make the test fail. Don't use a timer snapshot or a "newly due" latch instead. |
+| B-F2 | P3 | Proposed [MA-3] B paragraph: "Ready child-exit evidence" | `wait(0)` reads an Event set by the sentinel observer (`:548`). The design text says a wake hint is not death evidence (WT-4, "availability and death are different questions"), but the normative sentence calls it exit evidence. | Reword to "a ready child-sentinel observation or a due child sentinel/post-exit maintenance deadline". |
+| B-F3 | P3 | Design paragraph "Before a further spawn delivery"; spec "yields before further spawn delivery" | Recipe 3 fences the exit between the outer sweep and the **first** delivery, so the gate has to run before every spawn delivery in the scope. The proposed code does that, but "further" can be read as "after the first". With one authorization per turn and `_child_launch_started_this_turn` (`:1480`), the gate only ever matters for the first delivery and for non-authorizing deliveries (malformed, rejected, failed seed). | Say "before each spawn delivery in the scope, including the first". |
+| B-F4 | P3 | Spec sentence "Lifecycle commits do not recurse into an active queue-delivery pass" | The scope wraps `super()._process_reactor_turn`, whose pre/post `_drain_worker_results` commit receipts and publish checkpoints inside the scope (`base.py:1488-1495`, `manager.py:1842-1844`). The handler can also call `_reconcile_launch_now` inside delivery (`:5588`). The scope flag doesn't affect any of this, but the sentence as written is broader than what's true. | Narrow it to "Child-cleanup lifecycle commits do not run inside the ordinary delivery scope." |
+| B-F5 | P3 (simplification) | Proposed gate body `self._strategy.notify_activity()` | Both yield causes already wake the reactor. The sentinel observer calls `notify_activity()` when it publishes (`:548-549`, and `:515` for failures). A due child deadline makes `next_wait_timeout()` return 0 (`:8144`). The extra call is redundant but harmless, since it coalesces. | Optional: remove it, or keep it with a comment that it's a coalescing no-op. No new wake mechanism is needed either way. |
+| B-F6 | P3, OWNER DECISION | Experiment decision rule: "Keep B … even if timing gain is small" | An exit that lands after the turn-start sentinel drain but before the gate now costs one extra turn before the next authorization. Baseline settled it inline. The 12-parent diagnostic spent about 74% of elapsed time inside turn spans, so this window isn't small. The cost is bounded and self-limiting (exits follow launches, at most one per turn), but it could cancel B's savings. | Count yield turns and yields per authorization in A/B. State what happens if B increases turns or latency. |
+
+## Answers to the three owner questions
+
+**1. Is it correct?**
+
+Yes, once B-F1 is fixed.
+
+- **Scope.** The scope runs after the outer sweep at `:8381` and after the forced convergence at `:8382`. It covers the BaseTask pass (`:8391`) and the explicit public fallback (`:8395-8407`). It ends before the post-delivery leadership and convergence phases (`:8414`). `process_once` rejects re-entrant turns (`base.py:1434`). Convergence and shutdown cleanup can't be reached from inside the scope: the only callers are `:8382` and `:8417`, and `_continue_shutdown_drain` / `_terminate_children` call `_cleanup_children` directly, not through the flag.
+- **Exceptions.** `_timed_manager_call` uses try/finally and doesn't swallow exceptions (`:833-841`), so a `try/finally` reset of the flag keeps direct calls correct after both success and an escaping exception.
+- **Gate placement.** Both routes reach `Manager._process_queue_message` before `_fetch_next_message` moves anything. The explicit drain goes through `_drain_round_robin_pass` (`watcher:1493`).
+- **Yield behaviour.** On a yield the row stays in its source. Nothing is reserved, so there's nothing to requeue and STOP/custody handling is untouched. Returning False without touching `inactive_candidates` leaves the queue active, and `_update_active_queues` keeps any queue that still has pending work (`watcher:1332-1336`). The priority loop, the round-robin pass and the explicit drain all stop on zero progress (`:1534`, `:8578`), so there's no spin.
+- **No latch needed.** Nothing inside the scope consumes the Event or advances child deadlines in a way that loses facts. `drain()` is called only at turn start and in shutdown. Child clocks change only in `_cleanup_children` and the sentinel drain, and any reap inside the scope is settlement, not loss.
+- **First dispatch after classification** is preserved because the gate never reads `_admission_retry_timeouts` or `next_wait_timeout`.
+- **Stricter than baseline.** Baseline selected and admitted the request (`:5185-5193`, `:5748-5763`) *before* its nested sweep. Gating before admission is therefore stricter than baseline freshness, not weaker.
+- **Convergence clock.** The service-convergence clock is left alone, so the startup state (`_last_managed_service_convergence_ns == 0`) adds no wait.
+- **The no-new-veto convergence control** kills a distinct plausible mutant (a gate that also checks convergence being due). Keep it.
+
+**2. Is it elegant enough?**
+
+Yes. It's one boolean with try/finally, one guarded line in the handler, and one predicate at the existing pre-reservation owner. There's no selector, helper, latch, timer store or BaseTask change. Two small improvements:
+
+- Optionally drop the redundant `notify_activity()` (B-F5).
+- Put the predicate just before the `invalid_only`/admission computation (`:5187`). That's after the cheap public startup/candidate early returns, so the O(children) walk doesn't run when nothing would be delivered, and malformed/internal deliveries are still covered.
+
+**3. Does it use the primitives properly?**
+
+Mostly yes. The one exception is the deadline projection, which can sit at a stale zero (B-F1).
+
+- **Event:** `Event.wait(0)` is a side-effect-free read, and the observer suppresses repeat sentinels (`:545`), so there are no spurious repeat wakes.
+- **Projection:** `_manager_child_timeouts` is reused rather than re-derived. It's an O(tracked children) integer walk, cheaper than the nested `_cleanup_children` it replaces, which made OS and broker calls. The B-F1 fix belongs in the owner, not in a snapshot.
+- **Single reactor:** queue custody and one launch lane are unchanged, and the wake comes from existing sources.
+
+## Observations (not actionable for this unit)
+
+- **Existing spin:** the stale-retry state in B-F1 already makes `next_wait_timeout()` return 0 for up to 15 s, with busy turns, at baseline.
+- **Misleading log:** a yield on the public fallback runs `_maybe_log_public_dispatch_stall` (`:8515`). That emits a rate-limited `public_dispatch_stalled` warning for what is really a maintenance yield. Every other gate denial already does the same.
+- **Remaining duplicate sweeps:** the internal drains during convergence still run the handler sweep right after the pass-top sweep (`:7983`, `:8001`). This is intentional and out of scope.
+- **Exit-to-zombie window:** an exit before the observer publishes leaves the Event clear. Baseline's `exitcode` probe could have caught that window. This is the disclosed, accepted finite-observation limit.
+- **Line drift:** the preparation's line numbers are off by about one at a few points (8337 is really `:8338`, 8389 is `:8390`, 5461 is `:5460`).
+- **Recipe 2:** S1's uncounted priority-drain loop is unchanged. Recipe 2 correctly uses a `BaseException`, but it leaves a reserved row behind that the test has to clean up.
+
+**Verdict: BLOCKED.** B-F1 is the only blocker. The smallest fix is the "deadlines must retire after servicing" plan sentence, the one-line `terminal_retry_after_ns` reset in `_cleanup_children`, and the falsifiable control described in the table. B-F2 to B-F6 are non-blocking.
+
+</details>
+
+
+### Capture correction completed-work cross-family review
+
+Claude Opus 5.5,Tier 1,292.03 seconds: no blocker; all three owner questions
+answered yes. CB1 accepted: removed unused private timeout parameter, reading
+the existing constant directly. CB2 accepted: strengthened the existing late
+callback failure test with zero calls after its first exception. A retrying
+mutant passes the immutable old keeper (1 pass,1.81s) but fails the strengthened
+keeper at 1 == 0 (2.25s). CB3 accepted: MF-3 explicitly requires stderr-before-stdout
+when both logical finals are missing. CB4 declined: equivalent flat guards are
+clear and avoid another branch under the existing complexity limit; a new
+suppression or extraction is not justified for stylistic nesting.
+
+Ten focused cases passed in 3.28 s after CB1/CB2, plus targeted Ruff/mypy. Original
+source/test hashes are preserved in runtime-capture-cb-controls.json; no new
+test or helper was introduced. A narrow cross-family closure review of CB1–3
+is running; the declined CB4 is closed. Broader backend/CI gates remain pending.
+
+<details>
+<summary>Verbatim capture correction completed-work review</summary>
+
+**Verdict: no blocker.** I found four nits and nothing that needs a reconsideration request. The delta keeps every standing constraint and adds no new mechanism.
+
+I had read-only tools only, so the review is in this reply and no repository file was touched. I did not re-run the full SQLite/PG/platform gates, and they are still pending. The 662 focused and 87 Docker passes cover only this delta.
+
+## Findings
+
+| ID | Severity | Location | Evidence | Suggested disposition |
+|---|---|---|---|---|
+| CB-1 | nit | `subprocess_runner.py:656` | `_finish_streams(timeout=SUBPROCESS_STREAM_DRAIN_TIMEOUT)` is a setting no caller or test changes. It was carried over from the removed helper. | Optional: delete the parameter and read the constant directly. |
+| CB-2 | nit | `test_subprocess_runner.py:1657` | `fail_late` raises the same `failure` object on every call once 64 KiB is reached. A mutant that swallowed the callback error, kept delivering and re-raised the first error at the end would still pass the identity check. The plan's "never retry a raising callback" rule is therefore not checked. | Optional: count calls after the first raise and assert the count is 0. |
+| CB-3 | nit | `05-Message_Flow_and_State.md:288-293` | The spec says only that "stream ordering remain[s] unchanged". The stderr-before-stdout order of the added finals is checked by the test (`final_rows["stderr"] < final_rows["stdout"]`). Readers that consume up to the last stdout final rely on that order (`result.py:159-165`; `outbox.py:81-82` returns no value for a stderr final). Today only a code comment records it. | Optional: add one clause such as "when both are missing, the stderr final precedes the stdout final." |
+| CB-4 | nit | `consumer.py:479-482` | `outcome.status == "ok"` is tested twice. | Optional: use one `if outcome.status == "ok":` block with the two flag checks inside it. |
+
+## What I checked against the code
+
+- **Shared deadline on output-thread joins.** The deadline is computed once (`:664`). The joins cover only the adapters that have a `target_queue` (`:665-667`), so stdin is excluded and a child that never reads its input cannot use up the budget.
+- **Stop all, then join all.**
+  - `_stop_and_join_pipe_adapters` (`:603-609`) sets every stop event before joining any thread. It keeps the `ident is not None` guard and is safe to call twice: once from `_finish_streams` and again from `finally` (`:433`).
+  - Joins after a stop are bounded: reads are non-blocking, `put` goes to an unbounded queue, and the read loop checks the stop event on every pass.
+- **Adapter error before callbacks.** `_raise_pipe_errors` at `:669` runs after the final join and before any delivery. A late stdin error now goes through the primary-failure path, which calls the stop hook again under `suppress(BaseException)`. The exception raised is the same one as before, so the precedence rules hold.
+- **Frozen loop ends when the queues are empty, even without EOF.** The loop at `:674` exits when both queues are empty, not on the closed flags. That is safe because both producers have been joined. There is no sleep and no deadline in the loop. Only a reader-produced `None` causes a final callback (`:632-636`), so no EOF is fabricated. The missing-EOF warning is kept.
+- **All four terminal paths.**
+  - Cancel, timeout, limit and root exit all call `_finish_streams` after the existing Host/Docker stop and kill hooks.
+  - Statuses are unchanged, and the timeout outcome still reports `duration=timeout`.
+  - Every return path goes through `_finish_streams`. The `_raise_pipe_errors` in `finally` (`:440`) is therefore effectively dead. It is cheap insurance against a future early return, so I would keep it.
+- **Exceptions and partial acquisition.** `_finish_streams` is only reached after every `start()` has succeeded. Acquisition failures, failures during the capture wait and callback failures all go through `except BaseException` → `finally`, so the original exception stays primary.
+- **Success-only seal: per-work flags, FIFO ordering, completion order.**
+  - The flags live in the closure, which is created fresh for each work item and runs on the single worker thread.
+  - The seal reuses the existing callbacks, so chunk indices and the `strip` transform come for free.
+  - Seal events go through the same FIFO queue as other events, ahead of the lane result (`base.py:754-763`). `_drain_worker_results` runs before commit (`consumer.py:538-540`).
+  - Deferred STOP/KILL finalizes only after the runner unwinds (`:718-723`). If the worker publisher has stopped, `_publish_worker_result` returns False, so delivery cannot hang.
+  - The earlier C4 invariant still holds: `_drain_stream_queue` appends a chunk and then calls the callback, so a returned outcome means every collected chunk reached its callback.
+- **Earlier review findings C1–C7.** All are addressed. The C5 gate answer now reads "Bound stream capture" (plan `:245`).
+
+## Are the tests falsifiable?
+
+Yes. The baseline RED run and the six mutation controls line up with the intended assertions:
+
+- **`test_terminal_capture_delivers_backlog_after_capture_budget`.** About 128 chunks × 15 ms is roughly 1.9 s of delivery, far beyond the 250 ms budget. It checks exact output and exactly one real-EOF final. Killing the root guarantees real EOF in the cancel, timeout and limit cases.
+  - `_OutputReadyClock` only delays when the timeout fires. It cannot hide lost data.
+- **Adapter-error test.** It gates reads on the supervisor's own root poll, which is immediately followed by `break`. So the error and the stderr data reliably appear after the loop's last check, and the RuntimeError-replacement mutant fails reliably.
+- **Consumer test.** The `physical-eof` case catches a duplicate seal (it requires exactly one final). The `failed-root` case catches a seal on a non-ok outcome. The broker timestamps are good enough to check ordering.
+- **128 MiB run.** I count it as integration evidence only, as you specified, not as a mutation proof.
+- **Removed `deadline-after-callback` test.** It was faithful to the old contract, and the contract changed; it was not a bad test.
+
+## Answers to your three questions
+
+1. **Is the implementation correct?** Yes. The separation between capture and delivery matches the approved RM-5.2 text. The physical-EOF and logical-final owners stay distinct, and exception precedence and hook ownership are unchanged.
+2. **Is it elegant?** Yes. It reuses `Thread.join` as the completion signal and the existing batch drain as the delivery step. It removes the deadline parameter, the sleep loop and a duplicated stop/join block. The seal is four lines that reuse the existing callbacks. An expert systems programmer would sign it; CB-1 and CB-4 are polish.
+3. **Does it use the data structures properly?** Yes. The local queues are still the only transport, a reader-produced `None` is still the only physical-EOF signal, and the task owns its logical stream end. There is no watcher, extra thread, extra store or outcome field.
+
+## Observations (out of scope, not blockers)
+
+- **Decoder state dropped on forced stop.** A trailing `\r` held by `IncrementalNewlineDecoder(translate=True)`, or a partial multibyte sequence, is lost when a reader is stopped without EOF (`:553`). This existed before the change and the delta does not make it worse.
+- **stderr final after stdout final.** In the frozen loop, physical EOF markers are delivered stdout first. So a real stderr final, or a stderr seal following a real stdout final, can still land after the stdout final. Readers that consume only up to the last stdout final (`_read_outbox_task_result`) then leave that row behind. This existed before the change.
+- **`duration` now includes delivery time** for ok, cancelled and limit outcomes, and that time depends on sink speed. This was already noted in the earlier review.
+- **Constant name.** `SUBPROCESS_STREAM_DRAIN_TIMEOUT` now means a capture grace period. The docstring explains this; renaming it is optional.
+
+</details>
+
+
+### S2 probe closure
+
+Corrected separate baseline and reset-control probes both exited 0, with all
+owned child/Manager/harness cleanup checked. At recovery, baseline timeout
+projection remains[0.0]; the process-local exact-owner clone with only the
+consumed-retry reset reports[15.0], then[14.0] one controlled second later.
+Both preserve the exact reserved row through proof grace, reserve/authorize a
+real second request yielding `deadline-witness`, then commit the real failsafe
+and acknowledge the original reservation. The reset does not clear a future
+retry. Source files were unchanged. The prospective B veto is inferred from
+these real deadline projections; no B gate was installed in either probe.
+
+Preserved failed probes: initial combined invocation exited 143 during harness
+cleanup after baseline evidence; a second reset setup had a wrong indentation
+anchor and escaped before ownership cleanup, also143. Neither is acceptance.
+The corrected probes register cleanup immediately after Manager construction
+and explicitly retire the Manager before harness teardown. Evidence:
+`b-child-deadline-probe.baseline.json`, `.reset.json`, and manifest in the
+implementation evidence directory. A committed RED regression is being prepared.
+
+
+### Capture correction final scoped closure
+
+Claude Opus 5.5,Tier 1,72.83 seconds: PASS for CB1/CB2/CB3; no introduced defect.
+All three owner questions answered yes. CB4 stays declined. Parent independently
+parsed the isolated retry plugin's embedded source and diffed it against current
+production: its only change wraps the data callback, retries it once after
+OSError under suppression, then re-raises the original. Thus the reported old
+keeper pass/newkeeper failure is attributable to the new zero-retry assertion.
+The reviewer's inability to read the external plugin is a containment limit,
+not unverified mutation semantics after this parent check. Full backend/platform
+gates remain open; the runtime implementation review loop itself is closed.
+
+<details>
+<summary>Verbatim capture correction scoped closure review</summary>
+
+**Verdict: PASS for CB1, CB2 and CB3, and none of them introduced a new defect.** I found nothing that calls for a reconsideration request.
+
+I used read-only tools and edited nothing. I re-ran no tests, so the evidence below is the logs you supplied. The full SQLite/PG/platform CI is still pending.
+
+## Results
+
+| ID | Verdict | What I checked |
+|---|---|---|
+| CB1 | PASS | `_finish_streams` (`subprocess_runner.py:645-656`) no longer takes a `timeout` parameter. It reads `SUBPROCESS_STREAM_DRAIN_TIMEOUT` directly (`:663`). None of the five call sites (`:180`, `:220`, `:295`, `:338`, plus the definition) passes a timeout. No test or other module refers to the constant or the function. The behaviour is the same: one shared deadline, joins only for output adapters (`:664-666`), then stop/join, then `_raise_pipe_errors`, then the frozen delivery loop. One small side effect is that the constant is now read when the function runs, not when it is defined, so monkeypatching it now works. That is harmless and slightly better. |
+| CB2 | PASS | `calls_after_failure` goes up on any callback call after the first raise, including `final=True` calls, and is checked to be 0 (`test_subprocess_runner.py:1666-1689`). The original identity check `caught.value is failure` is still there. In the runner, a callback exception leads to `except BaseException` and then `finally` (`:425-444`). `finally` stops and joins the adapters and closes the pipes, but delivers no more chunks. So the "never call a sink again after it raised" rule really holds, and the test asserts it. |
+| CB3 | PASS | The added sentence (`05-Message_Flow_and_State.md:292-294`) matches the code. `consumer.py:479-482` seals stderr before stdout, and the `inherited` case of the test checks it (`test_consumer_terminal_events.py:302-308`). In that case both finals are missing, because the descendant holds the pipes. The clause says "when both logical finals are missing", which is exactly right. It does not overstate the order when stdout already got a real final, which is the known pre-existing case. |
+
+## Is the test change what catches the mutant?
+
+Yes. The control evidence shows it:
+- **Old test against the retry mutant:** passes (`exit 0`). The original identity check alone does not catch the mutant, which confirms the gap CB2 described.
+- **New test against the same mutant:** fails at `:1689` with `assert 1 == 0`. That line is the new assertion, and the line number matches the current file.
+- **Sources unchanged by the controls:** the before and after hashes are equal (`6e279e…`, `fcdfdc…`) and match the current files. So the mutant was injected through the `-p` plugin and did not edit the sources.
+
+Two gaps in the evidence, neither a blocker:
+- **Mutant source:** the plugin `runtime_capture_cb2_retry_mutant` lives outside the repository, so I could only identify it by its hash (`f70e918b…`). I could not read it.
+- **Green log:** it says 10 tests passed, but the command is not recorded, so I can't tell which 10.
+
+## Observations (not blockers)
+
+- The CB2 test does not prove the failure happens during frozen delivery rather than in the running loop. With 1 KiB reads, 16 chunks per pass and an early child exit, it almost certainly does. The new assertion holds in either phase, so this does not affect CB2.
+- CB4 is declined as you directed. The repeated `outcome.status == "ok"` at `consumer.py:479-482` is unchanged.
+
+## Answers to your three questions
+
+1. **Is it correct?** Yes. The deltas only remove a parameter, strengthen a test and document an existing order. Physical EOF and the logical final remain separate, as do error precedence, hook and resource-cleanup ownership, and the 250 ms capture bound followed by unbounded delivery.
+2. **Is it elegant?** Yes. CB1 removes a setting nobody used. CB2 adds one counter and one assertion. CB3 is one sentence that states an order the code already guarantees.
+3. **Does it use the data structures properly?** Yes. Nothing new was added. The local queues are still the only transport, and a reader's `None` is still the only physical-EOF signal. The per-work closure flags still own the logical seal.
+
+</details>
+
+
+### S2 and B clarification review closure before implementation
+
+Claude Opus 5.5, Tier 1, 388.96 seconds: PASS for the revised plan. All six
+B-F1–B-F6 dispositions verified; all three owner questions answered yes. The
+reviewer read the previously omitted runbooks directly this pass. R2-F1 accepted:
+Source specs and strategy-A exact delta now name the normative MA-1.6a
+clarification, with conditional proof-grace wording. R2-F2 accepted in the
+admission acceptance matrix. R2-F3 accepted as predeclared distributions and
+repeatability rules, separate from correctness assertions. R2-F4 accepted:
+all three child deadline families must advance or retire when serviced; S2
+repairs publication retry, leaving existing sentinel/grace owners intact.
+
+Committed S2 regression RED: one failure in 1.85 seconds with 12 configured
+workers. Exact assertion `timeouts and min(timeouts) > 0` saw `[0.0]`, after
+real clean exit, both named broker failures, future-retry retention/no extra
+I/O, and fresh-grace start had all passed. Cleanup completed without teardown
+errors or surviving probe processes. Production reset authorized after this
+plan PASS; the implementation and completed-work review are still pending.
+
+<details>
+<summary>Verbatim S2 and B clarification round-2 plan review</summary>
+
+# Round-2 plan review: admission-plan arm B dispositions (B-F1 to B-F6) and S2 repair
+
+**Verdict: PASS for the revised plan. Implementation isn't done yet: S2 is still unapplied and arm B is uncoded.**
+
+- The source baseline is still `4c490043`. `_cleanup_children` at `manager.py:4533-4536` has no reset yet.
+- All six accepted dispositions are reflected in the operative plan body, and S2 is a correct, minimal owner repair.
+- I found four new P3 items. None blocks: each is wording or traceability, and none affects whether the plan can be implemented correctly or degrades the system.
+
+**What I read.** This time I read the required surfaces directly, read-only:
+- `docs/program-theory.md`: WT-2, WT-4, ALT-WT-001, ALT-WT-002 and ALT-WT-017.
+- The agent-context `README.md`, `decision-hierarchy.md`, `principles.md`, `lessons.md` and the relevant parts of `engineering-principles.md`.
+- Both required runbooks in full: `review-loops-and-agent-bootstrap.md` and `hardening-plans.md`.
+- The Golden Rules and the 2026-10-06 test-clock lesson in `docs/lessons.md`.
+- The repository has no module theory files.
+
+I also re-read the source owners in `manager.py`, `base.py` and `multiqueue_watcher.py`, the operative plan files, and the [MA-1.6a] spec text in the working tree. I ran no tests or probes. The probe JSON is treated as supplied evidence.
+
+## Checking each accepted disposition
+
+| ID | Result | Evidence |
+|---|---|---|
+| B-F1 / S2 | **Verified** | **Reset placement.** The proposed reset goes after the survivors guard and the future-retry guard (`:4529-4534`) and before the grace check (`:4535`). Below are the cases where a due retry gets serviced:<br>• Proof read returns None, or proof is True: grace returns False (`:4457-4458`), then the envelope write. On success the child is retired; on failure `:4545` re-arms the retry.<br>• Proof is False and no grace has started: grace starts. The projection's retry branch (`:8301`) is skipped, so the grace deadline at `:8318-8320` becomes active (+15 s).<br>• Proof is False and grace started earlier: that grace has already expired, because the retry interval equals the grace interval. So the envelope is written immediately.<br>**Other paths.** A future retry is never cleared. The shutdown survivors path keeps its retry, which is correct because it wasn't serviced. The `deadline` break at `:4526` runs before the reset.<br>**Other child deadline families.** I checked these too, since B's predicate covers all of them. A proof-grace deadline always ends in retirement or a re-arm. A sentinel-recheck deadline advances `last_liveness_probe_ns` once it is due (`:4377-4384`). The only branch that doesn't advance needs either `is_alive()` True after the sentinel has fired, or `pid is None` on a started process. Neither is reachable in practice.<br>**Proposed test.** The regression being prepared at `tests/core/test_manager.py:10228` would kill both relevant mutants:<br>• Removing the reset fails at `:10316` and `:10318`.<br>• Moving the reset before the future guard makes the outage counters change, which fails at `:10307-10308`.<br>It uses Manager's `time` binding, not the stdlib. |
+| B-F2 | Verified | Spec: "a ready child-sentinel observation or a due child sentinel/post-exit maintenance deadline". Plan: "A sentinel hint is not process-death evidence". This matches `_manager_child_timeouts`'s own docstring (`:8293`). |
+| B-F3 | Verified | Both the plan and the spec say "Before each spawn delivery in the scope, including the first". |
+| B-F4 | Verified | The only `_cleanup_children` callers are:<br>• `:5460`, the handler sweep that B suppresses<br>• `:7983`, convergence<br>• `:8381`, the outer turn sweep<br>• `:8670` and `:8684`, the shutdown drain<br>• `:4645` and `:4759`, termination<br>Termination requests are applied only at turn entry (`base.py:1438`), and convergence and drain run only at turn level (`:8382`, `:8418`, `:8366-8421`). So the narrowed sentence is exactly true. |
+| B-F5 | Verified | The plan no longer calls the extra notification a no-op; it relies on existing owners. If the Event is set, the observer has already notified the strategy or is about to (`:547-549`), and that local hint persists until the post-wait consume (`multiqueue_watcher.py:1196`). If a deadline is due, `next_wait_timeout()` reaches 0 (`:8144`) and `_wait_for_activity_body` returns immediately (`multiqueue_watcher.py:1142`). Every yield cause is drained at the next turn's start (`:8326`, plus `drain()` clearing at `:467`), so no yield can repeat forever. |
+| B-F6 | Verified | Yield-turn counts and yields per authorization are now metrics. Extra turns alone are not grounds for rejection. A material, reproducible latency regression means remove B or take the tradeoff to the owner. The 74% turn-span figure no longer appears as a cost claim. |
+
+## New findings
+
+| ID | Severity | Location | Evidence | Strongest counterargument | Suggested disposition |
+|---|---|---|---|---|---|
+| R2-F1 | P3 (traceability) | Repair plan: `Source specs:` (line 4), `## Proposed Spec Delta` (line 166 onward), S2 "Files" (lines 476-478). Spec `03-Manager_Architecture.md:342-345` (working tree). | The prepared S2 change edits **normative** [MA-1.6a] prose, but the S2 body says to edit only "[MA-1.6a]'s nearby implementation note". The plan's Source specs omit [MA-1.6a], and its Proposed Spec Delta has no [MA-1.6a] entry. That conflicts with decision-hierarchy's rule that normative edits carry an exact delta and a named strategy. Separately, "so a subsequent proof-grace interval becomes the active deadline" is accurate only when grace actually starts. When the proof read fails, or an earlier grace has already expired, cleanup publishes immediately. | The sentence is correct, small, under review now, and restores an existing contract. | Before S2 lands:<br>• Add [MA-1.6a] to Source specs.<br>• Add the exact sentence as a strategy-A insertion in the delta.<br>• Change the S2 Files wording to "normative clarification plus mapping".<br>• Optionally reword to "…so any proof-grace interval that then starts becomes the active deadline". |
+| R2-F2 | P3 / nit | Admission plan, Acceptance Matrix "Ready maintenance" row (line 155): "before further authorization" | This is leftover wording from B-F3. It can be read as "after the first authorization". | One authorization per turn makes the intent fairly clear. | Use "before the turn's next spawn delivery, including the first". |
+| R2-F3 | P3 | Admission plan decision rule: "meaningful reproducible latency regression" / "increases latency materially" | No threshold is set in advance, so an A/B outcome is open to post-hoc reading. Slice 1 asks to "predeclare comparison metrics" but not a decision criterion. | Escalating to the owner already bounds the risk. Tests must not hard-code machine-specific percentages anyway. | In Slice 1, name the distributions that decide the outcome (for example enqueue-to-start and completion-to-next-eligible-start), plus a reproducibility rule relative to A's observed spread across the alternating repetitions. This is a measurement criterion, not a test assertion. |
+| R2-F4 | P3 / nit | Admission plan: "B's deadline predicate relies on `_cleanup_children` retiring each due retry it services" | The sentence is accurate for the defect, but B's predicate covers all three child deadline families. The other two were verified above to retire or advance when serviced. | Narrow and correct as written. | Optional: add "sentinel-recheck and proof-grace deadlines already advance or retire when serviced; S2 makes the retry deadline do the same." |
+
+## The three owner questions
+
+1. **Is it correct?** Yes. S2 restores [MA-1.6a]'s no-spin requirement. It doesn't shorten grace, acknowledge early, or touch custody or dispatch, and the reset sits at the only point where a due retry is serviced. Once S2 is in the common baseline, every child deadline B checks is cleared or advanced by the next ordinary sweep. So B's gate causes a bounded number of yields: at most one per sentinel event or per due deadline. It no longer causes a stall.
+2. **Is it elegant?** Yes. It's a one-line reset in the owner, with no latch, timer snapshot or second policy in the projection. Making `_manager_child_timeouts` prefer grace over an expired retry was the alternative, and the plan rightly rejects it as a second policy owner. B stays a scoped flag plus one predicate that uses existing wakes.
+3. **Does it use the data structures properly?** Yes. `terminal_retry_after_ns` now behaves as a classic one-shot timer: cleared when it fires and re-armed only when a publication fails again. Before, it was a fired timer left armed. The projection stays an O(tracked children) read with no new index, and the sentinel Event stays a hint rather than death evidence.
+
+No RECONSIDERATION REQUESTED. Nothing here reverses ALT-WT-001, ALT-WT-002, ALT-WT-015, ALT-WT-017, ALT-WT-019 or any listed invariant.
+
+## Observations (not actionable for this unit)
+
+- **Frozen Manager clock in the prepared regression.** The test freezes Manager's `time_ns` (`test_manager.py:10256-10288`) while a real witness request dispatches. That also freezes `_expire_admission_retry_if_due` (`:2911`). If PostgreSQL pressure denies admission at standard concurrency, the retry would never come due, and `:10349` would fail. This is an untested hypothesis. If it happens, follow ALT-WT-017 rather than relaxing the test.
+- **Pre-existing spin during shutdown drain.** An exited child kept for its live survivors (`:4529-4532`) keeps a sentinel-recheck or retry deadline at zero, so `next_wait_timeout` spins during the drain. S2 is right not to reset before that guard, and drain has no delivery scope.
+- **Pre-existing fresh grace after a retry.** After a serviced retry, a fresh 15 s proof grace can start, so exit to failsafe can take about 30 s. S2 correctly leaves this alone.
+- **Pre-existing stdlib clock patches.** Several existing tests patch `manager_mod.time.time_ns` on the shared stdlib module (for example `test_manager.py:10204`), which the 2026-10-06 lesson warns against.
+- **Reset before the read.** If an unexpected, non-broker exception escaped between the reset and the re-arm, the retry would be dropped. That exception already aborts the turn, so this is negligible.
+
+</details>
+
+
+### S2 implementation and focused verification
+
+The owner now clears `terminal_retry_after_ns` after the future-retry guard and
+before proof grace. The existing failure path still re-arms it. No B gate,
+scope flag, dispatch change or new timer store is included. Seven focused
+SQLite cases passed in 2.23 seconds with 12 configured workers; the canonical
+PG slice passed the same seven cases in 7.56 seconds without changing worker
+policy or pressure settings. No PG pressure failure occurred in this focused
+run; full standard-load acceptance remains pending.
+
+Parent inspected both isolated controls: removing the reset restores `[0.0]`
+and fails the positive-timeout assertion; moving it before the future guard
+renews the retry too early and fails the preserved-deadline assertion. Source
+and test hashes were unchanged by controls. Targeted mypy, Ruff/format and
+diff checks passed. One initial PG wrapper command rejected unsupported `-v`
+before running tests; removing that flag produced the valid run. It was not a
+product failure or passing test run. All owned test/probe processes were cleaned
+up. Completed-work cross-family review and full backend/platform gates remain
+pending.
+
+Capture CB1/CB2 exact GREEN command (evidence clarification, no rerun):
+`./.venv/bin/python -m pytest tests/core/test_subprocess_runner.py::test_terminal_capture_delivers_backlog_after_capture_budget tests/core/test_subprocess_runner.py::test_late_captured_output_callback_failure_preserves_exception_and_cleanup tests/core/test_subprocess_runner.py::test_capture_join_reports_adapter_error_before_delivering_callbacks tests/core/test_subprocess_runner.py::test_root_completion_bounds_inherited_pipe_drain --tb=short`
+ran after loading `.envrc`, with 12 configured workers, and returned 10 passed
+in 3.28 seconds. The command is recorded here to close the review's evidence
+traceability note; the original result and log remain unchanged.

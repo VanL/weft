@@ -392,6 +392,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _run_task_for_reactor(self, work_item: Any) -> tuple[RunnerOutcome, bool]:
+        """Execute work and seal successful live command streams [MF-2], [MF-3]."""
         if self._uses_agent_session():
             session = self._agent_session
             if session is None:
@@ -423,6 +424,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
         stdout_index = 0
         stderr_index = 0
+        stdout_final = False
+        stderr_final = False
 
         def _publish_worker_started(pid: int | None) -> None:
             self._publish_consumer_worker_event(
@@ -435,7 +438,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         def _on_stdout_chunk(chunk: str, final: bool) -> None:
-            nonlocal stdout_index
+            nonlocal stdout_index, stdout_final
             self._publish_consumer_worker_event(
                 _ConsumerWorkerEvent(
                     kind="stream_chunk",
@@ -446,9 +449,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 )
             )
             stdout_index += 1
+            stdout_final = stdout_final or final
 
         def _on_stderr_chunk(chunk: str, final: bool) -> None:
-            nonlocal stderr_index
+            nonlocal stderr_index, stderr_final
             self._publish_consumer_worker_event(
                 _ConsumerWorkerEvent(
                     kind="stream_chunk",
@@ -459,19 +463,24 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 )
             )
             stderr_index += 1
+            stderr_final = stderr_final or final
 
         if live_command_streaming:
-            return (
-                runner.run_with_hooks(
-                    work_item,
-                    cancel_requested=self._worker_cancel_requested,
-                    on_worker_started=_publish_worker_started,
-                    on_runtime_handle_started=_publish_runtime_handle,
-                    on_stdout_chunk=_on_stdout_chunk,
-                    on_stderr_chunk=_on_stderr_chunk,
-                ),
-                live_command_streaming,
+            outcome = runner.run_with_hooks(
+                work_item,
+                cancel_requested=self._worker_cancel_requested,
+                on_worker_started=_publish_worker_started,
+                on_runtime_handle_started=_publish_runtime_handle,
+                on_stdout_chunk=_on_stdout_chunk,
+                on_stderr_chunk=_on_stderr_chunk,
             )
+            # Seal the work item's logical streams, not physical pipe EOF
+            # [MF-3]. Readers may finish at stdout final, so seal stderr first.
+            if outcome.status == "ok" and not stderr_final:
+                _on_stderr_chunk("", True)
+            if outcome.status == "ok" and not stdout_final:
+                _on_stdout_chunk("", True)
+            return outcome, live_command_streaming
 
         return (
             runner.run_with_hooks(

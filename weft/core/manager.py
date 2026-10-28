@@ -4518,7 +4518,10 @@ class Manager(ServiceTask):
         deadline: float | None = None,
         retain_managed_survivors: bool = False,
     ) -> bool:
-        """Reap exited wrappers without abandoning shutdown-owned descendants."""
+        """Reap exited wrappers without abandoning shutdown-owned descendants.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
 
         autostart_child_exited = False
         child_exited = False
@@ -4532,6 +4535,8 @@ class Manager(ServiceTask):
                     continue
                 if child.terminal_retry_after_ns > time.time_ns():
                     continue
+                # Consume this retry before proof grace can publish its own deadline.
+                child.terminal_retry_after_ns = 0
                 if self._child_terminal_proof_still_within_grace(tid, child):
                     continue
                 committed = (

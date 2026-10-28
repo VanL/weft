@@ -10225,6 +10225,194 @@ def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
     assert payload["error"] == WRAPPER_LOST_ERROR
 
 
+def test_cleanup_children_retires_due_retry_before_clean_exit_proof_grace(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recovery replaces an expired retry with proof grace, retaining custody.
+
+    Spec: [MA-1.6a]. The real exited wrapper and exact reservation are staged at
+    the cleanup owner. Unlike the killed-wrapper retry case, an unavailable
+    proof read has not started clean-exit grace before the write failure.
+    """
+    manager, make_queue = manager_setup
+    reserved = make_queue(manager._queue_names["reserved"])
+    timestamp = reserved.write(
+        json.dumps(
+            {
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:abrupt_exit",
+                }
+            }
+        )
+    )
+    tid = str(timestamp)
+    ctrl_out = make_queue(f"T{tid}.ctrl_out")
+    process = multiprocessing.get_context("spawn").Process(target=os._exit, args=(0,))
+    now_ns = time.time_ns()
+    child = ManagedChild(
+        process,
+        None,
+        ctrl_out_queue=ctrl_out.name,
+        reserved_queue=reserved.name,
+        message_timestamp=timestamp,
+        launched_ns=now_ns,
+    )
+    ready = tmp_path / "retry-recovery-child.ready"
+    release = tmp_path / "retry-recovery-child.release"
+    manager_clock = SimpleNamespace(
+        time=time.time,
+        time_ns=lambda: now_ns,
+        monotonic=time.monotonic,
+        perf_counter=time.perf_counter,
+        sleep=time.sleep,
+    )
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    real_peek = broker_type.peek_generator
+    real_write = broker_type.write
+    proof_reads_failed = 0
+    failsafe_writes_failed = 0
+    outage = True
+
+    def peek(db: Any, queue: str, **kwargs: Any) -> Any:
+        nonlocal proof_reads_failed
+        if outage and queue == ctrl_out.name:
+            proof_reads_failed += 1
+            raise RuntimeError("named clean-exit terminal-proof read outage")
+        return real_peek(db, queue, **kwargs)
+
+    def write(db: Any, queue: str, body: str, **kwargs: Any) -> int:
+        nonlocal failsafe_writes_failed
+        if outage and queue == ctrl_out.name:
+            failsafe_writes_failed += 1
+            raise RuntimeError("named clean-exit failsafe write outage")
+        return int(real_write(db, queue, body, **kwargs))
+
+    monkeypatch.setattr(broker_type, "peek_generator", peek)
+    monkeypatch.setattr(broker_type, "write", write)
+    # Replace only Manager's clock binding; broker and process waits remain real.
+    monkeypatch.setattr(manager_mod, "time", manager_clock)
+    try:
+        process.start()
+        manager._child_processes[tid] = child
+        manager._register_child_sentinel(tid, child)
+        process.join(timeout=15.0)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+        assert manager._cleanup_children() is False
+        assert proof_reads_failed > 0 and failsafe_writes_failed > 0
+        assert child.terminal_proof_missing_since_ns == 0
+        retry_after_ns = child.terminal_retry_after_ns
+        assert retry_after_ns > now_ns
+        assert reserved.peek_one(exact_timestamp=timestamp) is not None
+
+        failed_operations = (proof_reads_failed, failsafe_writes_failed)
+        now_ns = retry_after_ns - 1
+        assert manager._cleanup_children() is False
+        assert child.terminal_retry_after_ns == retry_after_ns
+        assert (proof_reads_failed, failsafe_writes_failed) == failed_operations
+
+        outage = False
+        now_ns = retry_after_ns + 1
+        assert manager._cleanup_children() is False
+        grace_started_ns = child.terminal_proof_missing_since_ns
+        assert grace_started_ns == now_ns
+        timeouts = manager._manager_child_timeouts(now_ns=now_ns)
+        assert timeouts and min(timeouts) > 0, timeouts
+        assert max(timeouts) <= MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS
+        assert child.terminal_retry_after_ns == 0
+        assert manager._child_processes[tid] is child
+        assert reserved.peek_one(exact_timestamp=timestamp) is not None
+        assert ctrl_out.peek_one() is None
+
+        now_ns += 1_000_000_000
+        assert manager._cleanup_children() is False
+        assert child.terminal_proof_missing_since_ns == grace_started_ns
+        assert min(manager._manager_child_timeouts(now_ns=now_ns)) > 0
+
+        inbox = make_queue(manager._queue_names["inbox"])
+        witness_id = inbox.write(
+            json.dumps(
+                {
+                    "spec": {
+                        "type": "function",
+                        "function_target": (
+                            "tests.tasks.sample_targets:signal_ready_and_wait_for_release"
+                        ),
+                    },
+                    "inbox_message": {
+                        "kwargs": {
+                            "ready_path": str(ready),
+                            "release_path": str(release),
+                        }
+                    },
+                }
+            )
+        )
+        witness_tid = str(witness_id)
+        manager.process_once()
+        assert inbox.peek_one(exact_timestamp=witness_id) is None
+        assert (
+            reserved.peek_one(exact_timestamp=witness_id) is not None
+            or witness_tid in manager._active_child_launches
+            or witness_tid in manager._child_processes
+        )
+        drive_until(
+            ready.exists,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+        release.touch()
+        outbox = make_queue(f"T{witness_tid}.outbox")
+        drive_until(
+            outbox.peek_one,
+            lambda body: body is not None,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+        assert outbox.peek_one() == "done"
+        assert manager._child_processes[tid] is child
+        assert reserved.peek_one(exact_timestamp=timestamp) is not None
+        assert ctrl_out.peek_one() is None
+
+        now_ns = (
+            grace_started_ns
+            + int(MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000)
+            + 1
+        )
+        assert manager._cleanup_children() is True
+        assert tid not in manager._child_processes
+        assert reserved.peek_one(exact_timestamp=timestamp) is None
+        terminal = json.loads(str(ctrl_out.peek_one()))
+        assert terminal["source"] == "manager"
+        assert terminal["error"] == WRAPPER_LOST_ERROR
+        assert terminal["return_code"] == 0
+    finally:
+        outage = False
+        release.touch()
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10.0)
+        now_ns = max(
+            now_ns, child.terminal_retry_after_ns, child.terminal_proof_missing_since_ns
+        ) + int((MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS + 1) * 1_000_000_000)
+        try:
+            manager._cleanup_children()
+        finally:
+            monkeypatch.setattr(manager_mod, "time", time)
+            manager.stop(join=False)
+            manager.cleanup()
+            assert not process.is_alive()
+            process.close()
+
+
 def test_child_has_exited_trusts_live_host_pid_before_process_view(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,

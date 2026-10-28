@@ -147,8 +147,10 @@ _Implementation mapping_:
 `weft/core/runners/host.py::HostRunnerPlugin.describe`;
 `weft/core/runners/subprocess_runner.py::run_monitored_subprocess` owns the
 post-spawn acquisition/rollback scope, `_PipeAdapter` owns cancellable pipe
-I/O and close, and `_drain_stream_queue` / `_drain_streams_until_closed` own
-finite per-stream work and the final drain deadline;
+I/O and close, `_stop_and_join_pipe_adapters` shares adapter retirement between
+normal and exceptional cleanup, `_drain_stream_queue` owns finite per-stream
+work, and `_finish_streams` owns bounded final capture and complete frozen-backlog
+delivery;
 `weft/ext.py::RunnerPlugin`, `weft/ext.py::RunnerHandle`;
 `weft/_runner_plugins.py::get_runner_plugin`,
 `weft/_runner_plugins.py::require_runner_plugin`.
@@ -227,17 +229,30 @@ by its I/O adapter; cancellation must not depend on another thread acquiring
 a buffered I/O lock held by a blocked operation.
 
 Root process completion and output-pipe EOF are separate observations. Once
-root completion is accepted, the supervisor drains captured output for the
-bounded private stream-drain budget even if descendants retain inherited
-stdout or stderr. Expiry of that budget does not convert the completed root
-outcome into an execution timeout. The supervisor then stops and joins its
-I/O adapters and closes their owned pipe endpoints. Output beyond this drain
-boundary is not promised. Incomplete EOF at the boundary is logged as a
-bounded diagnostic; it does not create a new terminal state or outcome field.
-Output drainage performs finite work per stream before returning to other
-streams and supervision; final-drain deadline checks also occur inside that
-work, so a continuously producing descendant cannot extend the budget. These
-bounds do not preempt an arbitrarily blocking user callback.
+root completion is accepted, the supervisor uses the bounded private
+stream-drain budget to await output EOF and finish accepting output from
+inherited pipes. When both output adapters finish or that budget expires, it
+stops and joins its owned I/O adapters and closes their owned endpoints. This
+freezes a finite set of captured output. The supervisor delivers that captured
+output before forming its returned outcome; expiry must not discard output
+already captured in its local queues. The same capture, shutdown and delivery
+sequence follows the existing runtime stop/kill hooks for cancellation, timeout
+and resource-limit outcomes, preserving those outcomes.
+
+The capture budget is not a total result-delivery or teardown timeout. Delivery
+duration depends on captured volume and sink throughput and may exceed the
+private budget. Output produced after capture is stopped is not promised.
+Budget expiry neither converts a completed root into an execution timeout nor
+asserts physical EOF. Missing physical EOF remains a bounded diagnostic, with
+no new terminal state or outcome field.
+
+While execution is active, output drainage performs finite work per stream
+before returning to other streams and supervision. After producer shutdown,
+delivery repeatedly drains the finite queues without idle waits. These rules
+do not preempt an arbitrarily blocking callback. A callback exception follows
+the existing execution-failure cleanup and exception-precedence contract; it
+does not guarantee delivery to the failed callback. Existing Consumer shutdown
+rules still govern a publisher that has stopped accepting worker events.
 
 Current behavior:
 

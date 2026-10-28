@@ -62,6 +62,28 @@ class _FatalCallbackSignal(BaseException):
     pass
 
 
+class _OutputReadyClock:
+    """Advance real elapsed time only after the fixture child produced output."""
+
+    def __init__(self, ready: Path) -> None:
+        self.ready = ready
+        self.origin = real_time.monotonic()
+        self.ready_at: float | None = None
+
+    def monotonic(self) -> float:
+        now = real_time.monotonic()
+        if self.ready_at is None:
+            assert now - self.origin < 5.0, "child did not finish fixture output"
+            if self.ready.exists():
+                self.ready_at = now
+            return self.origin
+        return self.origin + now - self.ready_at
+
+    @staticmethod
+    def sleep(seconds: float) -> None:
+        real_time.sleep(seconds)
+
+
 class _CallbackCleanupProcess:
     pid = 123
 
@@ -1048,7 +1070,7 @@ def test_root_completion_bounds_inherited_pipe_drain(
         assert (outcome.stdout or "").startswith("ROOT_OUT\n")
         assert (outcome.stderr or "").startswith("ROOT_ERR\n")
         assert descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE
-        assert "drain" in caplog.text and "EOF" in caplog.text
+        assert "capture" in caplog.text and "EOF" in caplog.text
         _assert_owned_pipes_released(process, owned_pipe_threads)
     finally:
         release.touch()
@@ -1219,33 +1241,6 @@ def test_partial_pipe_acquisition_or_read_failure_rolls_back(
         _assert_owned_pipes_released(process, owned_pipe_threads)
     finally:
         _reap_test_process(process)
-
-
-def test_stream_queue_drain_checks_deadline_after_callback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pending: queue.Queue[str | None] = queue.Queue()
-    pending.put("first")
-    pending.put("second")
-    chunks: list[str] = []
-    now = 0.0
-
-    def reach_deadline(_chunk: str, _final: bool) -> None:
-        nonlocal now
-        now = 1.0
-
-    monkeypatch.setattr(
-        subprocess_runner, "time", SimpleNamespace(monotonic=lambda: now)
-    )
-    assert not subprocess_runner._drain_stream_queue(
-        pending, chunks, on_chunk=reach_deadline, closed=False, deadline=1.0
-    )
-    assert chunks == ["first"]
-    assert pending.get_nowait() == "second"
-    assert not subprocess_runner._drain_stream_queue(
-        pending, chunks, on_chunk=reach_deadline, closed=False, deadline=1.0
-    )
-    assert chunks == ["first"]
 
 
 @pytest.mark.parametrize("stop_kind", ["timeout", "cancelled"])
@@ -1585,4 +1580,173 @@ def test_closed_input_einval_is_only_ignored_on_windows(
         assert write_attempted.is_set()
         _assert_owned_pipes_released(process, owned_pipe_threads)
     finally:
+        _reap_test_process(process)
+
+
+@pytest.mark.parametrize("terminal", ["ok", "error", "cancelled", "timeout", "limit"])
+def test_terminal_capture_delivers_backlog_after_capture_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owned_pipe_threads: list[threading.Thread],
+    terminal: str,
+) -> None:
+    """A slow sink cannot discard data captured before terminal shutdown [RM-5.2]."""
+    monkeypatch.setattr(subprocess_runner, "SUBPROCESS_STREAM_READ_SIZE", 1024)
+    ready = tmp_path / "output-written"
+    if terminal == "timeout":
+        # This case isolates retained output, not interpreter startup latency.
+        # The separate input-backpressure test owns the execution-clock proof.
+        monkeypatch.setattr(subprocess_runner, "time", _OutputReadyClock(ready))
+    expected = "x" * (128 * 1024)
+    script = (
+        "import pathlib, sys, threading\n"
+        "sys.stdout.buffer.write(b'x' * (128 * 1024)); sys.stdout.buffer.flush()\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
+        + (
+            f"sys.exit({7 if terminal == 'error' else 0})\n"
+            if terminal in {"ok", "error"}
+            else "threading.Event().wait(30)\n"
+        )
+    )
+    callbacks: list[tuple[str, bool]] = []
+
+    def slow_sink(chunk: str, final: bool) -> None:
+        callbacks.append((chunk, final))
+        if chunk:
+            # This is the sink's controlled latency, not child readiness. The
+            # revised contract must deliver a finite backlog beyond 250 ms.
+            threading.Event().wait(0.015)
+
+    class LimitAfterOutput:
+        def start(self, _pid: int) -> None:
+            pass
+
+        def check_limits(self) -> tuple[bool, str | None]:
+            return (False, "test resource limit") if ready.exists() else (True, None)
+
+        def last_metrics(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            pass
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        outcome = _supervise_real_process(
+            process,
+            timeout=0.3 if terminal == "timeout" else 5.0,
+            cancel_requested=ready.exists if terminal == "cancelled" else None,
+            monitor=LimitAfterOutput() if terminal == "limit" else None,
+            on_stdout_chunk=slow_sink,
+        )
+        assert ready.exists(), "the root must produce the complete fixture output"
+        assert outcome.status == terminal
+        assert outcome.stdout == expected
+        assert "".join(chunk for chunk, _ in callbacks) == expected
+        assert [chunk for chunk, final in callbacks if final] == [""]
+        _assert_owned_pipes_released(process, owned_pipe_threads)
+    finally:
+        _reap_test_process(process)
+
+
+def test_late_captured_output_callback_failure_preserves_exception_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_pipe_threads: list[threading.Thread],
+) -> None:
+    """Failure while delivering a frozen backlog remains an execution failure."""
+    monkeypatch.setattr(subprocess_runner, "SUBPROCESS_STREAM_READ_SIZE", 1024)
+    failure = OSError("captured-output sink failed")
+    delivered = 0
+    callback_failed = False
+    calls_after_failure = 0
+
+    def fail_late(chunk: str, _final: bool) -> None:
+        nonlocal delivered, callback_failed, calls_after_failure
+        if callback_failed:
+            calls_after_failure += 1
+        delivered += len(chunk)
+        if delivered >= 64 * 1024:
+            callback_failed = True
+            raise failure
+        if chunk:
+            threading.Event().wait(0.015)
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * (128 * 1024))"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        with pytest.raises(OSError) as caught:
+            _supervise_real_process(process, on_stdout_chunk=fail_late)
+        assert caught.value is failure
+        assert calls_after_failure == 0
+        _assert_owned_pipes_released(process, owned_pipe_threads)
+    finally:
+        _reap_test_process(process)
+
+
+def test_capture_join_reports_adapter_error_before_delivering_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_pipe_threads: list[threading.Thread],
+) -> None:
+    """An adapter failing at capture completion precedes sink errors [RM-5.1]."""
+    failure = OSError("read failed after root completion")
+    accepted_exit = threading.Event()
+    stderr_read = threading.Event()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stderr.write('queued diagnostic')"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    stdout_descriptor = process.stdout.fileno()
+    original_poll = process.poll
+
+    def observe_poll() -> int | None:
+        result = original_poll()
+        if result is not None:
+            accepted_exit.set()
+        return result
+
+    def fail_after_exit(descriptor: int, size: int) -> bytes:
+        # Hold only the read dependency until the actual owner's root poll.
+        # Both readers then finish during capture joins, after the loop checks.
+        assert accepted_exit.wait(5.0), "supervisor did not observe root completion"
+        if descriptor == stdout_descriptor:
+            raise failure
+        data = os.read(descriptor, size)
+        if data:
+            stderr_read.set()
+        return data
+
+    def fail_sink(_chunk: str, _final: bool) -> None:
+        raise RuntimeError("sink failure must not hide the adapter failure")
+
+    monkeypatch.setattr(process, "poll", observe_poll)
+    monkeypatch.setattr(
+        subprocess_runner,
+        "os",
+        SimpleNamespace(
+            read=fail_after_exit,
+            write=os.write,
+            set_blocking=os.set_blocking,
+            linesep=os.linesep,
+        ),
+    )
+    try:
+        with pytest.raises(OSError) as caught:
+            _supervise_real_process(process, on_stderr_chunk=fail_sink)
+        assert caught.value is failure
+        assert stderr_read.is_set(), "a competing callback must have captured data"
+        _assert_owned_pipes_released(process, owned_pipe_threads)
+    finally:
+        accepted_exit.set()
         _reap_test_process(process)
