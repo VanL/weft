@@ -2485,3 +2485,130 @@ Final local integration checks: mypy passed 478 files; Ruff check, formatting (6
 ### Windows T6 CI confirmation (2026-10-28)
 
 At pushed head `8261a4b09f3dd2dcb92af02d3f5b926ab9efe10d`, Actions run `40730441608`, Windows3.12 remaining job `122987338501` passed, including the repaired process-ownership regression. This supplies actual Windows validation for T6. It does not establish the original marker-access failure's OS cause, and does not certify later admission commits. PostgreSQL remaining job `122987337842` started; other jobs and dependent extension checks remain pending. No merge or plan closure.
+
+
+### T7: quiet-output CI diagnosis (2026-10-28, in progress)
+
+Current repair head `63dd4752fdff1e3a1da42187d881d0f1942565ce` failed
+Actions run `40743696948`, PostgreSQL remaining job `123012269327`, at
+`tests/tasks/test_task_interactive.py::test_production_driver_delivers_quiet_output_only_through_notify[muted]`:
+`assert delivered() is notify` observed True while notify was False. All 27
+OS/Python test matrix jobs, the other two PostgreSQL jobs, lint and coverage
+passed; the four dependent extension/integration jobs were skipped, not passed.
+The original failed log is retained as
+`/tmp/weft-implementation-20261027/ci-40743696948-failed.log`.
+
+This remains part of the existing class-5 repair unit, with no proposed product
+contract change. Governing behavior: `01-Core_Components.md` [CC-2.2.1],
+`07-System_Invariants.md` [IMPL.8]–[IMPL.11], and `08-Testing_Strategy.md` [TS-0].
+The reactor legitimately handles broker, local and timer inputs. Muting one
+source does not forbid turns caused by another source.
+
+Read-only diagnosis identified an unproved test premise: its barrier announces
+quiet waiting at entry to `_wait_for_activity_body`, before the retained
+strategy consumes the local wake armed by initial stdin delivery. The real
+`MultiQueueWatcher._drain_queue` arms that wake; SimpleBroker
+`PollingStrategy.wait_for_activity` consumes it immediately; Weft
+`_activity_hint_action` returns to the reactor on a local hint. A captured output
+frame can therefore be delivered on that legitimate follow-up turn with its
+own notification muted. The CI log does not identify its exact wake cause.
+
+Before correction, force this ordering using the real initial inbox wake:
+assert it is pending, release the child and wait for its actual capture callback,
+then forward the original wait. Require the original muted assertion to fail,
+not a setup or timeout failure. No additional wake, state clearing or substitute
+reactor is permitted. If confirmed, move test release to the actual strategy
+wait boundary after startup's local hint and follow-up turn; preserve the real
+wait/callback path. Prove capture before the muted absence assertion. Do not
+reduce workers, relax timing, change runtime, or classify a passing rerun as a
+cause. Validate both parameters and the owner/sibling suite on SQLite and
+PostgreSQL with the standard 12 workers, apply a notification-removal sensitivity
+control, obtain fresh-eyes and cross-family review, then rerun original CI load.
+Admission measurements and local runtime probes run sequentially.
+
+T7 diagnostic confirmed the exact bad oracle on both backends: the controlled
+original-order probe failed `assert delivered() is notify` with True versus
+False (SQLite 1.42 s, PostgreSQL 2.10 s, normal 12 workers). The prerequisite
+assertions proved the real startup local hint and actual capture, with no
+injected wake or hint clearing. This confirms a source-permitted causal path;
+the original CI log still does not identify that run's actual wake.
+
+The correction observes the retained strategy's hint-free wait after session
+readiness, then releases the child. Both cases observe the real capture callback;
+muted absence starts only after capture. The positive delivery budget stays
+five seconds from release; the muted interval stays 0.5 seconds. A sampling
+deadline crossing fails rather than passing via an unrelated timer. Full
+interactive module GREEN: SQLite 30 passed in 3.34 s; PostgreSQL 30 passed in
+5.52 s. The isolated Consumer callback-disconnection mutant failed the intended
+`assert delivered() is notify` (False versus True) in 6.52 s after capture;
+production was never mutated in the main checkout. Scratch source and log:
+`notify-no-consumer-wake/`, `notify-no-consumer-wake.log` in the evidence directory.
+Focused Ruff and mypy passed for both touched test modules.
+
+Author fresh-eyes: the original barrier confused entry with blocking. Retaining
+startup's actual hint consumption and follow-up turn is the smallest correction;
+clearing a hint or padding an absence window would alter the event model. The
+callback is shared with EOF/exit, but this fixed child emits only the selected
+stdout line and remains alive; no extra stream abstraction is justified.
+
+Tier-1 contained Claude implementation review completed in 214.78 s: no blocker,
+correct/elegant/appropriate primitive reuse. F1 accept: explain the hint-free
+wait's causal ordering at the edit point (comment updated). F2 reject expansion:
+this fixed producer never writes stderr and remains alive, so a stream-specific
+observer would add machinery without protecting a distinct exercised contract.
+The reviewer read the actual installed SimpleBroker wheel, not the neighboring
+source it could not access. Supplied execution evidence is not reviewer execution.
+Original-load full suites and latest-head CI remain open.
+
+<details><summary>T7 independent review verbatim</summary>
+
+**Verdict: no blockers. No blocker Fids.**
+
+I read the current diff, the Consumer, BaseTask and MultiQueueWatcher wait paths, the host runner and the governing spec text. My file tools are confined to this repository, so I could not open `/Users/van/Developer/simplebroker/simplebroker/watcher.py`. I read the copy the tests actually import instead: `.venv/.../simplebroker/watcher.py`, installed from a wheel as simplebroker 8.7.2, not an editable link to that path. I did not run anything.
+
+## Source and premise checks
+
+Each claim in the plan matches the source:
+
+- **Startup wake is armed.** `multiqueue_watcher.py:1587-1588` arms a local wake (`notify_activity()`) whenever a drain pass processes at least one message, so initial stdin delivery arms it.
+- **The strategy consumes it at once.** `PollingStrategy.wait_for_activity` consumes a pending local wake at `watcher.py:1411-1413` before any waiting. `start()` (`1576-1593`) does not clear `_local_activity_pending`.
+- **A local hint always returns to the reactor.** `_activity_hint_action` returns on a local hint (`multiqueue_watcher.py:1204-1207`). Weft never calls `mark_local_activity_as_empty_check`, so that path cannot downgrade the hint.
+- **Output is queued before the callback.** The host reader calls `target_queue.put(chunk)` and then `on_activity()` (`host.py:1102-1103`), matching CC-2.2.1 (`01-Core_Components.md:339-343`). The comment at test line 471 is accurate.
+- **Muted case has no hidden wake.** Consumer does not override `_has_pending_observation`. Backend and data-version hints, and native idle polls, only hand control back to the reactor when input messages are pending, and the outbox is not an input. With the process title disabled, the only remaining deadline is the sampling timer, which `Consumer.next_wait_timeout` exposes.
+- **The patch hits the real object.** `_strategy` is assigned once (`watcher.py:425`), so patching that instance covers every wait. The body passes `timeout=` as a keyword, which the wrapper's signature accepts.
+
+## Correctness of the new boundary
+
+- **The gate proves the follow-up turn finished.** The session, and therefore `child_ready`, can only exist after the dispatch turn. That turn armed a hint, and consuming a hint always gives the reactor another turn. So if `child_ready` exists at a strategy wait with no pending hint, both the dispatch turn and its follow-up turn are done. If the gate fires too early, the `child_ready` poll asserts on the reactor thread and the test fails loudly. It cannot pass silently.
+- **The sampling-deadline check errs on the strict side.** The test's `sampling_deadline` is computed later than the reactor's own deadline, so it is never later than the real wake. If `now < sampling_deadline`, no timer wake can have happened. Any error produces a false failure, never a false pass.
+- **The test is falsifiable both ways.** In the muted case, `captured` proves the chunk was queued before the 0.5 s absence window starts. In the notify case, delivery can now only come from the notification, so the planned notification-removal control will discriminate.
+- **Unexpected states fail rather than hang.** If `_local_activity_pending` were renamed, the reactor raises `AttributeError`. If the gate never fires, `reactor_waiting.wait(10.0)` fails and the observer's `finally: task.stop()` stops the reactor.
+
+## Findings
+
+**F1 (non-blocker, low). Suggested: modify.** The comment at lines 456-457 states the conclusion but not why it holds. The `child_ready` poll inside the reactor-thread hook is what proves the ordering. Moving it to the observer thread looks like an obvious tidy-up, but it would bring back the original race. Suggested wording:
+
+> "A hint-free strategy wait after the session exists follows the dispatch turn, whose drain armed a local hint that always returns for a follow-up turn."
+
+This is a comment-only change.
+
+**F2 (owner decision; expansion, not a blocker). Suggested: reject unless cheap.** `captured` fires on any `on_activity` call, including stderr chunks, end-of-stream and process exit. `is_alive()` rules out the exit path. A stderr chunk before release is the only theoretical false capture, and this child never writes to stderr. Narrowing it would need a stream-specific seam, which isn't worth the added complexity.
+
+## Answers to your questions
+
+1. **Correct?** Yes. The causal premise holds in source, and the new boundary sits exactly after the startup hint and its follow-up turn. It keeps the real wait, the real callback, the real child and the real timer composition, and it adds no wake, clears no state and substitutes nothing.
+2. **Elegant, expert systems programming?** Yes. One gate at the true strategy boundary, one capture event, and one check for the sampling deadline. The `release_at` versus capture-time asymmetry is deliberate: the notify case measures latency from release, the muted case measures absence after capture.
+3. **Proper reuse without overcomplication?** Yes. It reuses the existing `TaskRunner.start_session` hook point (`start_observed` wraps it for both cases), `next_wait_timeout()`, and the strategy's own pending flag. No public read-only accessor exists for that flag. Reading it is the accepted test seam, not a production change. There is nothing to remove: the `_interactive_session is not None` assert is needed so mypy accepts the `is_alive()` call.
+
+## Non-actionable observations
+
+- The test reads `_interactive_session` and calls `stop` from the observer thread. That predates this change and is not made worse.
+- The planned validation and CI rerun are still pending. I did not check the diff against ruff/mypy. Its longest lines are 87 characters.
+
+</details>
+
+### T7 original-load verification update, 2026-10-28
+
+Full SQLite passed5982tests with38skips in232.37s. Full PostgreSQL stopped after4751passes29skips on the separate admission startup-pressure setup, documented in the admission plan. The T7 notification regression did not fail in that run; the incomplete run is not a full PostgreSQL pass. Corrective-head CI and extension jobs remain required.
+
+Original-load PostgreSQL rerun after the startup-pressure setup correction:5934passed29skipped in338.95s (`c1-full-postgres-pressure-fixed.log`). No worker count, deadline, pressure or runtime behavior was relaxed. This closes the local full-PG gate for the current combined working tree; corrected-head CI remains separate. Full SQLite was5982passed38skipped232.37s before the PG-only setup correction.
