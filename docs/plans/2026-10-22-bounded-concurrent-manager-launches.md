@@ -75,17 +75,106 @@ Use the same fixed submitted workload, server capacity, resource configuration, 
 
 Budgets are internal implementation constants in `weft/_constants.py`, not user knobs, resource budgets, or aliases for W. One is the C1 control; select the smallest empirically supported budget. Six is an experiment ceiling inherited from the prior draft, not a proven optimum. C2 may legitimately be rejected because real serial receipts seldom arrive before the safe boundary.
 
-Record per arm: useful completions and elapsed time; enqueue-to-start and completion-to-next-eligible-start distributions; PING/STOP observation latency; turns and authorizations per turn; sweep calls and maintenance yields per authorization; yield-turn counts; inclusive/exclusive phase times with nesting declared; actual admission observations and checkpoint publications; worker-lane and startup membership maxima; global observed pressure; and time blocked by pressure, startup exposure, active launch, or uncertain custody. Use existing timing hooks and observer-only test wrappers. Preserve causal order and IDs; if block-reason intervals require instrumentation, keep it test-local unless an independently justified production diagnostic is needed.
+Record per arm: useful completions and elapsed time; enqueue-to-start and completion-to-next-authorized-start distributions; PING/STOP observation latency; turns and authorizations per turn; sweep calls and maintenance yields per authorization; yield-turn counts; inclusive/exclusive phase times with nesting declared; actual admission observations and checkpoint publications; worker-lane and startup membership maxima; global observed pressure; and time blocked by pressure, startup exposure, active launch, or uncertain custody. Use existing timing hooks and observer-only test wrappers. Preserve causal order and IDs; if block-reason intervals require instrumentation, keep it test-local unless an independently justified production diagnostic is needed.
 
 Keep B only with the scope/freshness proofs and without a meaningful reproducible latency/control regression. Count maintenance-yield turns and yields per authorization alongside removed sweeps. Neutral timing may still justify removing redundant lifecycle work; if B increases latency materially, remove it or bring the measured tradeoff to the owner before retaining it. Keep C1/C2 only when repeated measurements show fewer redundant turns or meaningful latency/completion gain without control, custody, or maintenance regressions. Do not hardcode machine-specific throughput percentages into correctness tests. Record a no-benefit result and remove an unhelpful C2 loop rather than leaving dormant switches.
 
-Predeclared comparison rule: primary latency distributions are enqueue-to-start and completion-to-next-eligible-start, reported as per-run median and p95 for the same fixed workload; also compare total workload elapsed time and PING/STOP latency. Before B runs, retain A's three measured values and their min/max spread for each summary. Treat a latency/elapsed regression as reproducible when all three B values for that summary exceed A's maximum and the alternating paired deltas are positive. A smaller operation count does not override that regression. If ranges overlap or control-latency evidence is ambiguous, report the uncertainty; use at most one additional predeclared set of three alternating repetitions before deciding, and do not keep changing the rule to obtain significance. Correctness/control failures reject the arm regardless of timing. Neutral timing may support B only through verified redundant-work removal without a demonstrated regression. This is an experiment decision rule, not a machine-specific pytest assertion. Preserve raw samples, yields and blocked-reason evidence rather than attributing an inclusive turn span to one unmeasured arrival window.
+Predeclared comparison rule: the primary performance series are quiet-mode
+useful-work elapsed, canonical PING call-to-return latency, and STOP write-to-
+handler-return latency. Other series, including trace enqueue-to-start and
+completion-to-next-authorized-start medians/p95, start spacing, drain/cleanup
+spans and operation counts, are secondary explanations and safety evidence;
+do not search them for a convenient speed win. A safety/custody/control failure
+rejects an arm regardless of timing. Trace overhead is not assumed neutral.
+
+Use A/B/A batch order on each backend and mode: each batch has one warmup and
+three measured repetitions with the same server lifetime. Retain the first A
+before implementing B. A primary-series regression is reproducible when all
+three B values exceed the maximum of both surrounding A batches. A claimed
+speed benefit must satisfy the symmetric rule on **quiet useful-work elapsed**:
+all three candidate values lie below the minimum of both surrounding baseline
+batches. Require claimed speed benefit on PostgreSQL; both PostgreSQL and SQLite
+must preserve the primary quiet nonregression gates. SQLite remains serialized.
+Apply B/C1/B to C1, and the equivalent surrounding baseline order to
+any C2 candidate. Matched repetition ordinals remain in the report, but add no
+independent criterion to the min/max rule. Disjoint surrounding baseline ranges
+indicate drift, so attribution remains uncertain. These are conservative
+experiment decisions, not statistical significance claims; the series are
+correlated and multiple comparisons remain a limitation.
+
+If ranges overlap or controls are ambiguous, allow at most one additional full
+surrounding-baseline batch set for that comparison, declared now, then report
+uncertainty rather than changing thresholds or collecting until a win appears.
+B may retain a proven redundant-sweep reduction with neutral quiet timing and
+no demonstrated primary regression. C1 may retain a proven reduction in
+receipt-only turns on PostgreSQL with neutral quiet timing and preserved
+control/custody on both backends. Require all three candidate receipt-only-turn
+counts below both surrounding baseline minima, using trace-mode complete observed
+turns. Every compared sample must have zero censored receipt turns; otherwise
+this structural-benefit evidence is unavailable. Otherwise its speed claim needs the symmetric elapsed-time rule. C2 must show
+that elapsed-time benefit and preserve all primary control series, or its loop
+is removed. A smaller operation count never excuses a primary quiet regression.
+This rule is not a machine-specific pytest assertion. Retain raw samples,
+missing/censored counts, yields and blocked-reason evidence. B trace batches
+must demonstrate actual gate-predicate observations; zero observed gate calls
+means the maintenance metrics are unavailable, not proof of zero yields, and
+cannot close the B measurement gate until instrumentation coverage is resolved.
+
+
+The repeated measurement cases are explicit opt-in experiments, not routine
+correctness coverage. At collection, skip them only when
+`PYTEST_WEFT_DISPATCH_ARTIFACT_DIR` is absent, before provisioning their backend
+fixture. A present empty, relative or unwritable destination is a configuration
+failure, not a skip. Measurement commands must select one quiet/trace case at a
+time, use a fresh destination parent for each invocation, and require a passing case plus complete retained warmup, three measured
+repetitions and raw artifacts. A skipped experiment is never a passing
+measurement gate. Existing six/eight-parent correctness tests remain unchanged
+in routine CI. This avoids multiplying repeated benchmark work across the full
+platform matrix while preserving explicit measurement and correctness gates.
+
+Measurement interpretation and control (declared before the first run): trace
+spans and observer wrappers have unmeasured overhead, which does not necessarily
+cancel across arms that remove or add observed work. Run a separate **quiet
+control** mode through the same fixed workload, harness, result assertions and
+control/custody lifecycle, with default logging. Retain only forwarding hooks
+at first parent launch receipt, matching control handling and STOP completion to
+preserve the causal probe placement. This is reduced instrumentation, not an
+unqualified uninstrumented claim. Invoke quiet and trace node IDs separately,
+with normal worker configuration, and apply the A/B/A (later B/C1/B) batch rule
+independently to each mode. Compare quiet useful-work elapsed and canonical PING
+call-to-return/STOP observation latency; trace data supplies phase/count and
+latency-distribution attribution. A reproducible quiet regression cannot be
+excused by better traced counts or spans. Missing quiet internal metrics are
+unavailable, not zero, and detailed post-STOP authorization checks remain the
+trace mode's proof rather than a vacuous quiet pass.
+
+Both modes start the same useful-work clock before the control thread and
+foreground Manager start, including normal autostart/convergence; stop it after
+all fixed parent results validate their leaves, before control-thread joins or
+cleanup. Canonical PING call-to-return includes its real setup and retirement;
+trace write-to-matched-PONG is a separate measurement. STOP handling, drain
+completion and cleanup remain separate intervals. The completion-to-next-start
+metric means the next actually authorized user launch after a parent completion;
+it establishes eligibility at that later authorization, not continuous eligibility
+since completion. Missing later launches are censored; report counts. Blocked
+intervals are overlapping, sample-held estimates. Nearest-rank p95 for this small
+workload is near the maximum, so retain raw samples and sample sizes. Before the four scenario repetitions, run a small source-provenance task
+inside the actual pytest invocation, using a separate normal WeftTestHarness
+and the real foreground Manager, Consumer and function-worker path. Compare
+the child-reported Manager/family module paths and hashes with
+the current checkout, verify child identity/interpreter, then clean up that
+preflight harness. Write its verified result as `source-provenance.json` in the
+batch and require it in completion. Missing or mismatched proof fails before
+samples. This extra preflight is outside every measured window and identical
+across arms; it does not replace the declared warmup. Parent manifests alone
+are insufficient. The earlier standalone probe is an unused diagnostic artifact,
+not the gate, avoiding a separate-entry/environment equivalence assumption.
 
 Concurrent-worker gate: after choosing the smallest serial result, show that eligible requests repeatedly wait specifically for process creation, with fresh capacity/startup headroom and no custody/control blocker; measure worker occupancy and the available overlap on supported runtimes. The 101 ms historical process-launch total alone does not satisfy this gate. Report the added failure surfaces and expected bounded benefit. If evidence is insufficient, close the serial work without adding workers. If sufficient, revise this plan or create an indexed successor with exact concurrent custody/ordering deltas, receive cross-family review, promote those deltas, and only then implement concurrency. No automatic jump from C2 to multiple workers.
 
 ## Serial Dispatch Design and Maintenance Boundaries
 
-B uses an explicit reactor-owned delivery-scope flag with `try/finally`. Set it only around the existing BaseTask delivery and explicit public-drain paths after turn-level cleanup and any forced convergence have completed. `_handle_work_message` skips its sweep only in that scope; standalone handler calls, service convergence and shutdown keep their cleanup. Clear the scope on exceptions. Before each spawn delivery in the scope, including the first, a ready child-sentinel observation (`_child_sentinel_adapter.wait(0)`) or a due child-maintenance deadline from `_manager_child_timeouts` yields to an immediate ordinary turn. That turn drains the sentinel hint and performs normal settlement; the gate does not consume observations or perform child cleanup. Existing sentinel wake and due-deadline readiness suffice; do not add a redundant wake call. Place the check after cheap startup/candidate early returns but before admission and fetch/reservation. A sentinel hint is not process-death evidence. B retains one new authorization per turn and receipt-consumes-turn behavior. Other maintenance owners retain their existing phases and deadlines; no blanket maintenance-due veto is introduced. A bounded classification/source-repair page may retain continuation while known eligible work receives its normal first dispatch; preserve its continuation wake. General due-maintenance checks before extra serial passes belong only to C2.
+B uses an explicit reactor-owned delivery-scope flag with `try/finally`. Set it only around the existing BaseTask delivery and explicit public-drain paths after turn-level cleanup and any forced convergence have completed. `_handle_work_message` skips its sweep only in that scope; standalone handler calls, service convergence and shutdown keep their cleanup. Clear the scope on exceptions. Before each spawn delivery in the scope, including the first, a ready child-sentinel observation (`_child_sentinel_adapter.wait(0)`) or a due child-maintenance deadline from `_manager_child_timeouts` yields to an immediate ordinary turn. That turn drains the sentinel hint and performs normal settlement; the gate does not consume observations or perform child cleanup. Existing sentinel wake and due-deadline readiness suffice; do not add a redundant wake call. Existing later service convergence may settle the yielded child in the same outer turn. Assert nonconsumption at the gate return and ordinary settlement before subsequent authorization, not that the child must survive until turn end; B does not change convergence ordering. Place the check after cheap startup/candidate early returns but before admission and fetch/reservation. A sentinel hint is not process-death evidence. B retains one new authorization per turn and receipt-consumes-turn behavior. Other maintenance owners retain their existing phases and deadlines; no blanket maintenance-due veto is introduced. A bounded classification/source-repair page may retain continuation while known eligible work receives its normal first dispatch; preserve its continuation wake. General due-maintenance checks before extra serial passes belong only to C2.
 
 B's deadline predicate relies on `_cleanup_children` advancing or retiring each child deadline it services. Sentinel-recheck and proof-grace deadlines already do so; S2 makes publication retry do the same. Repair S2 in `2026-10-27-runtime-and-test-repair-plan.md` clears a consumed terminal-publication retry before entering fresh proof grace, while preserving future retries, custody, and failed-publication rearming. It restores existing [MA-1.6a] no-spin behavior and belongs in the common repaired A/B baseline, not in B's measured delta. Include the real clean-exit/read-and-write-outage/recovery regression; a killed wrapper alone does not cover this transition.
 
@@ -496,3 +585,357 @@ plan and S2 prerequisite, not for unimplemented B. Nonblocking R2-F1–F4 were
 accepted: exact S2 normative-delta traceability, first-delivery wording,
 predeclared latency distributions/repeatability rule, and advancement/retirement
 for all child deadline families. Full review is retained in the repair plan.
+
+
+### B implementation preparation (2026-10-28; not executed)
+
+Parent inspected the proposed single-file source delta and four test families
+against the actual delivery/cleanup owners. The production scope remains the
+reviewed flag, pre-fetch Event/deadline check and exception-safe restoration.
+Before implementation, reuse `startup_pg_manager` in
+`tests/core/test_manager_family_maintenance.py` for the new B cases rather than
+copying it into burst bookkeeping. That existing fixture owns physical PG
+headroom, which a one-turn progress assertion needs. This is a test-path
+adjustment, not changed capacity or worker settings. Retain existing burst
+custody/shutdown and S2 keepers. Planned cases cover watcher/public dispatch,
+standalone and exception paths, actual sentinel/retry readiness before fetch,
+and bounded classification continuation with a first eligible dispatch.
+
+The old-child readiness case stages a real process and exact reservation at the
+cleanup owner; it does not claim a full initial launch path. The second request
+uses actual launch. For retry expiry use a Manager-local advancing offset clock,
+not a frozen global clock. Observe readiness nonconsumption at the gate return:
+later unchanged convergence may settle the child in the same outer turn. Source
+patch and test design are retained in
+`/tmp/weft-implementation-20261027/admission-b-proposed-source.patch` and
+`admission-b-implementation-design.md`. No B source change, test run or measurement
+is claimed by this preparation; repaired A measurements precede applying it.
+
+### Measurement harness review attempt 1 (2026-10-28)
+
+Tier-1 Claude review of the draft measurement harness timed out at the bounded
+540-second limit (540.58 s elapsed, exit 143), with no final result. Read/Grep
+progress confirms tool activity, not a verdict or root cause for the timeout.
+The invocation retained read-only containment and was terminated/cleaned up by
+the bounded driver. No approval is inferred. A tighter operative-scope brief
+and longer bounded window will be used for the next Tier-1 attempt; no fallback
+review or measurement execution has occurred. Artifact:
+`/tmp/weft-implementation-20261027/dispatch-harness-review.result.json`.
+
+
+Measurement harness attempt 2 is in progress against frozen candidate SHA256
+`6e77eb727158a343ceb8c9f120e2bef9028af782868841f73636535776abdb84`. The tighter
+brief embeds the operative plan and full candidate, including quiet/trace and
+opt-in/artifact-completeness additions, but excludes superseded review history.
+The same contained read-only Claude invocation has a 900-second bound. Ruff,
+format and AST checks passed; runtime validation, provenance warmup and all
+measurements remain unrun. This is not an approval record. Candidate:
+`/tmp/weft-implementation-20261027/dispatch_harness_quiet_draft.py`; invocation
+and result prefix: `dispatch-harness-review2` in that artifact directory.
+
+
+### Measurement harness review attempt 2: findings, gate still open
+
+Claude completed in 553.45 s, exit 0, with a conditional DC-1 blocker and
+additional findings. It explicitly did **not** read the required theory and
+governance context. Parent accepts its source-verification evidence and concrete
+findings, but not a completed review gate. The focused correction review must
+read that context first and assess the final candidate against it. No runtime
+measurement occurred before these dispositions.
+
+| Finding | Parent disposition before measurements |
+|---|---|
+| DC-1 | Accept the stronger proof, not inferred PYTHONPATH. Integrate a small real spawned-function preflight inside the pytest invocation and require its verified artifact at completion. The prepared standalone script remains unused. |
+| DC-2 | Accept a symmetric benefit rule before any data: all three candidate quiet elapsed values below both surrounding baseline minima. Explicit structural-neutral retention remains allowed for B/C1; C2 requires the elapsed benefit. |
+| DC-3 | Accept named primaries: quiet elapsed, PING call-to-return and STOP handling latency. Other series are secondary; remove redundant paired-sign criterion. No significance claim or assumed independence of metrics. |
+| DC-4 | Accept exact startup predicate guard; do not call a mutating owner merely to observe it. |
+| DC-5 | Require observed B gate calls; absent coverage means unavailable maintenance evidence and an open measurement gate. No production-arm switch is added. |
+| DC-6 / DC-7 | Accept derived handler-sweep counts and parent start-spacing as secondary evidence from existing raw records. |
+| DC-8 | Keep the exact current terminal-proof oracle pending actual smoke evidence; inspect the existing owner contract before any relaxation. |
+| DC-9 | Retain the declared 300-second experiment bound. No unmeasured increase; a timeout is a failed run to diagnose, not a passing sample. |
+| DC-10 / DC-11 | Accept STOP-only closure attribution and preserving primary failures while recording diagnostic/cleanup errors. Sole cleanup/summary errors must still fail. |
+| DC-12 / DC-13 | Accept accurate handoff/receipt naming and all four per-arm invocation recipes. |
+| Craft | Share simple control/receipt observation where useful; remove unused cleanup timing and redundant source copy. Do not introduce a hook-table framework solely to replace a local branch chain. Preserve sufficient source provenance. |
+
+<details>
+<summary>Verbatim source-focused review, with its context omission disclosed</summary>
+
+# Dispatch-cost harness review (frozen draft 6e77eb72…, Claude cross-family review)
+
+**Overall: one conditional blocker (DC-1), which can be cleared by rewording alone.** The draft can produce valid A-versus-B comparisons. Before the B/C1/B batch runs, the comparison rule also needs DC-2.
+
+**What this review is based on.** Everything below comes from reading code; I did not execute anything. Following your instruction to check source symbols first, I compared every symbol the draft touches against `weft/core/manager.py`, `tasks/base.py`, `tasks/service.py`, `tasks/multiqueue_watcher.py`, `control_probe.py`, `control_messages.py`, `task_evidence.py`, `serve_log.py`, `admission.py`, `tests/helpers/weft_harness.py`, `family_workload.py`, `pytest_pg_runtime.py`, `bin/pytest-pg` and simplebroker `_timestamp.py`.
+
+**Context docs not read.** I did not read the program-theory, agent-context, runbook and lessons documents in the required order. I spent the bounded time on source verification instead, so treat any constraint judgments that depend on those documents as not independently checked.
+
+## Symbol and boundary verification (all confirmed by reading)
+
+- **Wrapped methods.** All 13 `_forward` targets, `_timed_manager_call`, `_process_queue_message`, `_manager_child_timeouts(*, now_ns)`, `_ManagerChildSentinelAdapter.wait`, `_finish_graceful_shutdown`, and the probe's `_write_probe_request` / `_read_matching_pong` exist with compatible signatures.
+  - Call sites pass `child_spec`, `request` and `result` positionally, which matches `args[0]`.
+  - `_record_admission_decision` is called with keywords only.
+- **Patches take effect.** `install()` runs before `ensure_foreground_manager()` builds the Manager, so the handler and sentinel bindings resolve to the patched functions. `emit_serve_log_record` is looked up as a module global at `manager.py:816`, so the patch reaches it. Serve-log records are flat (`serve_log.py:139`), so `record["phase"]` and `record["elapsed_seconds"]` are valid.
+- **Span nesting is correct.** The wrapper pushes the span id before calling the original. The original emits in its `finally` while the span is still on the stack, so `stack[-1]` is the span itself. `process_launch` is emitted directly at `manager.py:1830`, and the draft correctly excludes it.
+- **Ready-receipt snapshot is correct.** Queue items are `TaskWorkerResult(value=ServiceWorkerEvent)`. The launch lane is started with `request_id=child_spec.tid` (`manager.py:1489`), so `ready_receipt_tids` really are child TIDs.
+- **Post-STOP fence check is valid.** There is only one `_launch_child_task` call site (`manager.py:5553`), and it comes after `_control_allows_child_launch()`, which drains controls. A launch attempt entered after STOP's `control_return` is therefore a real fence violation, not an artifact of the observer.
+- **Capacity and configuration.**
+  - `bin/pytest-pg:231` sets `max_connections=300`, and `_observe_admission_usage` installs it through `set_max_connections` when ADMISSION_MAX_CONNECTIONS is 0.
+  - `MANAGER_SERVE_LOG_ACTIVE` defaults to False.
+  - The 60 s PING timeout is under the 1200 s cap.
+- **Timestamps.** simplebroker hybrid timestamps keep nanosecond magnitude and are generated on the client host, so comparing them with `time.time_ns()` is a valid approximation.
+- **Driver and opt-in mechanics.** The harness driver's 10 ms wait bound matches the manifest. The `skipif` is evaluated before the PG fixture is set up, and `pytest_plugins` follows the existing pattern in `test_measured_admission_pg.py`.
+
+## Findings
+
+| ID | Sev | Location | Evidence / counterexample | Strongest counterargument | Smallest disposition |
+|---|---|---|---|---|---|
+| **DC-1** | **Major (conditional blocker)** | `_manifest` → `"child_import_provenance"`; `_verify_artifacts` | The plan says warmup **must** verify that child imports come from the intended checkout. The draft only writes a sentence saying a probe is "required". Nothing implements the check, and `completion.json` is written without it, so an operator could reasonably think it is covered. | The arm delta is in `manager.py`, which runs in-process and is verified by the import assertion. The absolute `PYTHONPATH` is inherited by spawned children, so actual risk is low. | Either (a) add a warmup task targeting a test-module function that returns `weft.__file__` and assert it in the completion gate, or (b) change the plan and manifest to say child provenance is inferred from the inherited `PYTHONPATH`, not verified. Option (b) clears the blocker. |
+| **DC-2** | Major (before C1 only) | Plan comparison rule | The rule defines a reproducible **regression** but has no symmetric **benefit** rule. "Keep C1/C2 only when … meaningful latency/completion gain" leaves "meaningful" undefined, which allows a post-hoc decision. | B is covered by the explicit neutral-timing clause, so A/B is unaffected. | Before B/C1/B runs, predeclare the mirror rule: all three C1 values below the minimum of both surrounding B batches. |
+| **DC-3** | Medium | Plan comparison rule (multiplicity) | Under the null hypothesis, P(all 3 B values > max of 6 A values) = 1/84 per metric. There are about 8 series × 2 modes × 2 backends ≈ 32 comparisons, giving roughly a 30% chance of at least one spurious "reproducible regression" (less with correlated metrics). | The extra batch set and owner review limit the damage. | Name the primary series per mode (quiet: elapsed, PING call-to-return; trace: the two latency medians) and treat the rest as secondary. Drop the matched-ordinal clause: it follows automatically from "all three exceed the max". |
+| **DC-4** | Medium | `_Observe.state` → `blocked_startup` | Real `_startup_dispatch_blocked()` returns False when `_startup_feedback` is empty, even if `_startup_blocked` is set (`manager.py:1848`). The copy omits that guard, so `held["blocked_startup"]` can count time when dispatch was not actually blocked. | It is a labelled diagnostic estimate. | Use `bool(startup) and (manager._startup_blocked or startup >= limit)`. |
+| **DC-5** | Medium | `_observe_maintenance` / `_maintenance_summary` | The observer only sees B's gate if B literally calls `adapter.wait(0)` and `_manager_child_timeouts`. A B that uses another helper would report `maintenance_yields: 0`, which looks the same as A's zero. | The plan names those exact calls. | Analysis rule: in B, every spawn delivery passes through the gate, so `maintenance_gate_calls_observed` must be > 0. Otherwise treat B's maintenance metrics as unavailable, not zero. |
+| **DC-6** | Medium-low | `_summary` | B's main operation-count witness is nested handler sweeps, but the summary only reports total sweeps. `inside_handler` exists only in the raw rows. | It can be derived from `events.jsonl`. | Add `handler_sweeps` and `handler_sweeps_per_launch_attempt`. |
+| **DC-7** | Medium-low | `_latencies` | The historical premise metric was parent start **spacing** (mean 328 ms). Enqueue-to-start includes Manager boot and autostart, because parents are queued before the Manager exists, which dilutes B/C1 sensitivity. | Spacing can be derived from the raw files. | Add a parent start-spacing distribution as a derived series. |
+| **DC-8** | Medium-low | `_stop_custody` "disappeared without terminal proof" | The terminal oracle reads only `ctrl_out`. A launched parent whose reservation was settled and which was force-reaped after the 15 s drain timeout needs `wrapper_lost` or task ctrl_out evidence. Any terminal that exists only in the task log would make the harness fail on a correct runtime. | Manager `wrapper_lost` failsafes probably cover this. | Check this on the first run, or align with the oracle used by the existing STOP custody tests. Not a blocker. |
+| **DC-9** | Low-medium | `pytest.mark.timeout(300)` | One invocation covers a PG container start, 8 harness lifecycles, 4 STOP drains (each up to the 15 s drain timeout) and trace I/O. That is close to the budget. A timeout fails safely (no `completion.json`) but wastes batches. | Hitting it means a failed run, not a false measurement. | Owner decision: either size the budget from the sample count up front or accept it. This is a harness budget choice, not a cure for runtime failures. |
+| DC-10 | Low | `_closure_summary` | Events are keyed only by name. If `_finish_graceful_shutdown` ever ran during PING-trial cleanup, `stop_write_begin_to_drain_finish_seconds` would be computed from the PING write. | Harness cleanup uses `stop_event` and `stop()`, not a drain. | Filter on `reason == "STOP command received"` and command `STOP`. |
+| DC-11 | Low | `_sample` `finally` blocks | `assert not thread.is_alive()` in the inner `finally`, and `_summary` in the outer `finally`, can replace the primary failure; it survives only as `__context__`. | Raw rows are written first. | Compute the summary in a `try` that records its own error. Do not assert in `finally`. |
+| DC-12 | Low | Naming and comments | `successful_launches_per_turn` counts worker handoff, not process success. The comment "including later … validation" is wrong: spec validation happens before `_launch_child_task`; only class resolution happens after. `ready_receipt_tids` ignores `kind="error"` receipts. | Cosmetic. | Rename or reword. |
+| DC-13 | Low | Docstring commands | The examples pair quiet with SQLite and trace with PG, then say to run both modes on each backend. | The prose clarifies. | List the four invocations per arm explicitly. |
+
+## Answers to the specific checks
+
+- **Instrumentation cost and contamination.** Trace mode wraps `_cleanup_children`, which is exactly the call B removes, so trace timings are biased in B's favour. This confirms quiet mode must be the timing authority, as the plan says. Quiet mode's three hooks run after the original call and only touch the observer lock.
+- **Failure cleanup.** The patch is held through harness teardown, and the control thread is released by the cancel events. DC-11 is the only gap.
+- **STOP: real acknowledgment vs observation.** The draft measures handler return, drain finish and driver retirement, and labels each honestly. It never reads the published STOP ack on `ctrl_out`; reading it read-only after the measurement window is an optional improvement.
+- **Reserved/source ownership.** The exact `peek_one(exact_timestamp=…)` reads on source and `manager._queue_names["reserved"]` are correct and read-only.
+- **Launch-attempt definition.** Entry to `_launch_child_task` sits after the final control drain in the handler, which matches the plan's definition of "attempt at the final pre-seed fence".
+- **Maintenance-yield attribution.** Sound as long as DC-5's rule is applied.
+- **Ready-receipt snapshots and censoring.** Correct. Repeated completions mapping to the same next launch produce correlated samples (minor).
+- **Phase nesting.** Correct.
+- **Warmup.** One fresh-server warmup per invocation is adequate.
+
+## The three questions
+
+1. **Is it correct?** Yes for producing A/B evidence, once DC-1 is clarified. Wrappers forward real calls and take no scheduling authority. DC-2 and DC-3 must be fixed in the plan before C1 decisions, and DC-4 through DC-8 tighten diagnostics.
+2. **Is it elegant enough for an expert systems programmer?** Adequate, not elegant.
+   - Receipt and control observation is written twice (quiet hooks and trace `_forward`); one could be built from the other.
+   - The long string-dispatch `if/elif` chains in `_before` / `_after` would read better as a per-method hook table.
+   - Provenance is triplicated (git diff, all-source hashes, and a copied `manager.py`). HEAD plus diff plus the untracked-file hashes is enough.
+   - The `harness_close_*` cleanup timing feeds no A/B/C decision and could be removed.
+3. **Does it use the right primitives rather than overcomplicating?** Mostly yes: thread-local frames, `threading.Event`, `Queue.mutex` snapshots, and module-global patching of the real probe. There are no mocks and no framework. The one exception is DC-4, which re-derives a predicate instead of mirroring it exactly.
+
+## Observations (not actionable for this unit)
+
+- Trace mode swaps the harness's private `_context` attribute. It also flips `detach_stdio` for TaskMonitor children; this is inert because the harness disables the monitors.
+- Under the harness, "normal autostart true" means `WEFT_TASK_MONITOR_ENABLED=0` and `WEFT_LIVENESS_MONITOR_ENABLED=0`, so few built-in launches occur.
+- `ensure_foreground_manager` polls the registry inside the measured window. This affects every arm equally.
+- There is one PING and one STOP per sample, so control-latency evidence is thin: 3 values per batch.
+
+## Disposition
+
+- **Scoped blocker:** DC-1. It is cleared by implementing the child probe or by rewording the plan and manifest.
+- **Must be fixed before the B/C1/B batch, not before A:** DC-2.
+- **Everything else:** not a blocker.
+- **Reconsideration:** none requested.
+- **Still required:** the unrun runtime validation remains mandatory after this review.
+
+</details>
+
+
+### Harness correction review, full-context pass (2026-10-28)
+
+Claude completed in 563.90 seconds, explicitly reading required context first. One blocker, DC-14: the source probe incorrectly expects a payload argument for an empty mapping. This is a harness defect before warmup, not a measured runtime result. Corrections are being verified before integration; no measurements have begun.
+
+<details><summary>Verbatim correction review</summary>
+
+# Dispatch-cost harness correction review (Claude, cross-family; final draft e6049f83… against quiet draft 6e77eb72…)
+
+**Verdict: one blocker, DC-14.** The new source preflight crashes on every run, so no measurement can ever complete. The fix is a one-line signature change. Everything else is P3 or a nit; two of those must be settled before the B/C1/B batch, not before A.
+
+Nothing was executed in this review. Each claim is labelled: **[read]** means I read it in the repository source, **[inferred]** means reasoning from that source, **[supplied]** means it comes from your brief (the Ruff/format/AST results).
+
+## Context actually read
+
+I read these in the required order, in full, before looking at source:
+
+- `docs/program-theory.md`
+- `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`
+- Runbooks: `testing-patterns.md`, `review-loops-and-agent-bootstrap.md`, `hardening-plans.md`
+- `docs/agent-context/lessons.md` (a pointer file only)
+- `docs/lessons.md`, all of it. Its watermark in `docs/coalescing.md` is "(none)", so every dated section counts as startup reading.
+- `08-Testing_Strategy.md` [TS-0], and the [TS-3.1] suppression-index section to check the new `noqa` comments.
+
+There is no module theory in the tree; `program-theory.md` is the only theory surface. I did not read `adversarial-acceptance-probes.md`, `writing-plans.md` or the test-audit skill. They govern plan authoring, not this harness unit.
+
+**How the corrected design measures up against that context:**
+
+- **Owner confinement and facts vs hints (WT-2, WT-4).** Hooks forward the real call and only read Manager state on its own reactor thread. They take no scheduling authority. The custody oracle reads queue facts. No production seam, state store or lane is added (ALT-WT-010, ALT-WT-001).
+- **Preflight uses the canonical path.** It runs the real TaskSpec → Manager → Consumer → host-worker path with real processes (engineering principles 1 and 4). The ALT-WT-011 "hidden preflight" ban does not apply: this is an opt-in test diagnostic, not the ordinary `weft run` path.
+- **Load and timeouts (ALT-WT-017, TS-0).** The standard worker configuration and the 300 s bound are unchanged. DC-14 is a deterministic harness defect, not contention, so fixing it does not trigger the TS-0 stop condition.
+- **Polling and queue use (ALT-WT-002, ALT-WT-019).** No new timers or caps. Artifacts are files, not queues.
+- **Lessons, all respected:**
+  - 2026-04-04: inherited `sys.executable` is now checked in the child.
+  - 2026-10-14: work is prequeued before the Manager starts.
+  - 2026-09-14: the inline Manager has titles off and shares the pytest GIL. That is the same for every arm.
+  - 2026-10-28: the preflight harness is owned through `with` from the moment it is created.
+  - 2026-10-06: no standard-library clock patches.
+  - 2026-05-15: the receipt-consumes-turn rule is preserved for B.
+- **testing-patterns:** Rule 7 holds; the expected paths are anchored to `rootpath` plus the manifest hashes, not just the same helper on both sides. Rule 9 is the weak spot: see DC-19.
+
+## Prior findings DC-1 to DC-13
+
+| ID | Status | Evidence |
+|---|---|---|
+| DC-1 | **Not closed (see DC-14).** The design is right: an integrated real preflight before warmup, and completion requires `source-provenance.json`. | [read] |
+| DC-2 | Closed for A/B. Residual scope gap, see DC-18. | manifest + plan [read] |
+| DC-3 | Closed. Primary series are named; matched ordinals are for reporting only. The residual multiplicity (3 primaries × 2 modes × 2 backends) is acknowledged as a limitation. | [read] |
+| DC-4 | Closed. The guard now matches `manager.py:1846-1855` exactly. | [read] |
+| DC-5 | Closed. In A, `_manager_child_timeouts` is only called from `next_wait_timeout` (`:8149`) and `adapter.wait` only from the shutdown loop (`:4767`), so neither runs inside a delivery. That makes `>0` observations specific to B's gate. | [read] |
+| DC-6 | Closed. Nit: the sum is computed twice. | [read] |
+| DC-7 | Closed. The mean spacing reduces to (last − first)/(n − 1), which matches the historical definition. | [inferred] |
+| DC-8, DC-9 | Accepted limits, pending smoke. The preflight adds a ninth harness lifecycle and one more process launch under the same 300 s. | [inferred] |
+| DC-10 | Closed. Filters on STOP command and the exact drain reason (`manager.py:4802`). | [read] |
+| DC-11 | Closed. Semantics are sound (detail below). DC-20 is a nit. | [read/inferred] |
+| DC-12 | Closed. `kind="error"` exists (`service.py:630`); the comment order matches `manager.py:5536-5553`. | [read] |
+| DC-13 | Closed. Four explicit recipes. | [read] |
+
+## New findings
+
+| ID | Sev | Location | Evidence | Strongest counterargument | Smallest disposition |
+|---|---|---|---|---|---|
+| **DC-14** | **P1 (blocker)** | `dispatch_source_probe(_payload)` plus `client.submit(..., payload={})` in `_source_preflight` | [read] The probe is always called with no arguments, so it raises `TypeError: missing 1 required positional argument '_payload'`. Every invocation then fails at `assert result.status == "completed"` before warmup. The path: `_snapshot_payload({})` keeps `{}`; `spawn_requests.py:362` keeps it as `inbox_message`; `manager.py:2089-2093` seeds `"{}"`; `decode_work_message` returns `{}` (`targets.py:24-32`); `prepare_call_arguments` (`targets.py:39-75`, documented: "The empty mapping is structural and means 'no payload'") produces no arguments; the host worker calls `func()` (`host.py:169-175`). A `None` payload ends up the same way, via the start envelope → `{}`. Static AST/Ruff checks cannot catch this. | It fails closed: no false measurement, and the first smoke run would expose it. | `def dispatch_source_probe() -> dict[str, Any]:` and drop `payload={}`. |
+| DC-15 | P3 | `_manifest` `source_hashes` keys vs the `_verify_artifacts` lookup | [read/inferred] Keys are built with `str(path.relative_to(root))`, which gives backslashes on Windows. The lookup uses `"weft/core/manager.py"`, so it raises `KeyError` on Windows. This lookup is new in this diff and goes against "one path on all platforms". | Fails closed; the experiment is currently run on macOS/Linux. | Key the dict by `relative` itself: `{relative: sha256((root / relative).read_bytes()) ...}`. This is simpler too. |
+| DC-16 | P3 | Reduced provenance (`source_hashes`, `source.diff`) | [inferred] `git diff HEAD` leaves out untracked files. The old `rglob` hashing covered untracked `weft/*.py`; the new five-file set does not. So the claim "HEAD + diff identify Weft state" fails if an untracked module is imported. | The plan forbids new modules for B/C1, and C2 only touches tracked `_constants.py`. The arm still comes from HEAD plus the diff. | Record `git ls-files --others --exclude-standard -- weft tests` in the manifest and require it to be empty, apart from this test file while it is untracked. |
+| DC-17 | P3 | Binding a completion to its invocation | [read/inferred] A skip cannot produce `completion.json`: `skipif` runs at collection, before any directory exists. That part holds. But a passing test's `DISPATCH_ARTIFACTS=` print is swallowed under default capture and xdist. If a parent directory is reused (for example for the allowed extra batch set), an earlier completion sits next to a failed or skipped rerun and can be miscounted. | The recipes already use a distinct directory per batch label. | Fail when the configured parent already contains a run directory, or state "fresh parent per invocation" in the recipes. |
+| DC-18 | P3 (before C1 only) | Comparison rule vs summary | [read] C1 may be kept on "verified fewer receipt-only turns", but no summary field measures that. It can be derived from the `turn` fields on `receipt_commit_return` and `launch_attempt_enter`. Separately, the benefit rule does not say which backend it applies to. C2 batching is PostgreSQL-only, because SQLite keeps one authorization per turn. | A/B decisions are unaffected. | Before B/C1/B: (1) add `receipt_only_turns` to the trace summary and `_run_spread`; (2) declare "benefit is required on PostgreSQL; SQLite must show no primary regression". |
+| DC-19 | nit | `_source_preflight` closure assert; `_verify_artifacts` flags | [read] The `all(...)` check runs on an empty list, so it always passes: `_stop_inline_managers` prunes to live entries or raises (`weft_harness.py:813-821`). `_closed` is necessarily true after a normal `with` exit (`:182-189`, `:786-798`). `checks_passed` and `harness_closed` are constants that the success path writes and `_verify_artifacts` then re-asserts. `code_filename` always equals `__file__`, because importlib fixes `co_filename` at import [inferred], so it adds no independent evidence. The real gates are the preflight raising and the manifest-hash cross-check. | Cheap, and it does check the artifact is intact. | Delete the vacuous parts, or keep them as integrity checks only. Optionally add the child's own test-module `__file__`. |
+| DC-20 | nit | `_sample_harness` re-raise | [read/inferred] In `raise primary.with_traceback(primary.__traceback__) from exc`, `with_traceback(...)` does nothing, and `from exc` presents the later cleanup error as the "direct cause" of the primary. The wrapper also overlaps `WeftTestHarness.__exit__`, which already keeps the primary on a `RuntimeError` cleanup failure. It only adds value for non-`RuntimeError` cleanup failures, plus the `sample_failure` row. | It works, and the notes carry the details. | `raise primary from None`. Optionally compute `ready_receipt_tids`/`kinds` and `handler_sweeps` once each. |
+
+**What I verified as correct in the changed code:**
+
+- **Python version.** `sys.exception()`, `add_note` and `ExceptionGroup` all exist on the declared `requires-python >= 3.12` [read].
+- **Exception capture in `finally`.** Inside a `finally` that runs during propagation, `sys.exception()` returns the propagating exception, because CPython pushes it on entry to the exceptional `finally` path. Inside a callee such as `_retire_control`, it sees the caller's active exception [inferred].
+- **contextlib propagation.** When the generator re-raises the identical exception, contextlib lets the original propagate [inferred].
+- **Sole errors still fail.** A lone summary or artifact error raises an `ExceptionGroup`; `events.jsonl` is written last, so it records any write errors.
+- **Process topology.** Function targets run in a separate daemon host worker spawned by the Consumer (`host.py:497-507`), so the `pid`/`ppid ≠ pytest` assertions are valid.
+- **Runtime identity.** It is installed in that worker from the transported payload (`host.py:166`, `:284-287`).
+- **Executable equality.** Both spawn sites set `set_executable(sys.executable)` (`launcher.py:203`, `host.py:463`), so the executable check is sound. Windows venv behaviour is inferred, not verified.
+- **Result round-trip.** Dict results come back as dicts (the existing workload relies on this).
+- **Import path.** `tests/system/__init__.py` exists, so the `function_target` import works.
+- **`noqa` comments.** Free-form `# noqa: BLE001 - …` matches existing repo practice. BLE is not selected, and the suppression index ignores comments without an approval pointer.
+
+## Answers
+
+1. **Is it correct?** Not yet. DC-14 makes every invocation fail before warmup. Once that one line is fixed, the integrated preflight correctly establishes child source selection and runs outside the timed windows. The failure handling keeps the primary error and still fails on lone diagnostic errors. Reduced provenance still identifies the arm through HEAD, the diff and the owner hashes (DC-16 is a small gap), and a skip cannot count as a passing measurement (DC-17 is about binding a result to its run, not about skips). DC-15 is a Windows defect that fails closed.
+2. **Is it elegant enough for an expert systems programmer?** Better than the previous draft, and adequate:
+   - Quiet and trace now share their causal records.
+   - The provenance copy and the cleanup timing are gone.
+   - The four recipes are explicit.
+   - The remaining ceremony is small: vacuous closure flags (DC-19), a slightly over-general re-raise wrapper (DC-20), and duplicated comprehensions.
+3. **Does it use the right data structures and primitives?** Yes:
+   - Harness `with` ownership, `Event`s, and the `Queue.mutex` snapshot.
+   - The real control probe.
+   - Plain exception notes and `ExceptionGroup` rather than a custom error framework.
+   - A real function task as the provenance witness, with no new seam.
+
+   The one primitive misused is the empty-payload calling convention (DC-14).
+
+## Observations (not actionable in this unit)
+
+- About 12 primary comparisons remain. Under the null, P(all three > both maxima) is 1/84 per comparison, so the family-wide false-regression rate is roughly 13% if the comparisons were independent. The limitation is already declared.
+- `simplebroker_pg` is not fingerprinted, only `simplebroker`. This predates the diff.
+- The function worker imports the whole test module, including pytest and the harness. This is untimed, so it is acceptable, but it is the import-weight pattern from the 2026-10-28 lesson.
+- A failed preflight leaves no artifact describing the failure; only pytest output records it. It still fails closed.
+
+**Disposition:** blocker: DC-14. DC-18 must be settled before the B/C1/B batch. Everything else is a non-blocking P3 or nit. No reconsideration requested. Runtime smoke, the full correctness gates and the measurements are still mandatory, and no performance number is claimed.
+
+</details>
+
+
+DC-14–DC-20 dispositions before integration: accept DC-14 no-argument probe correction; accept DC-15 portable manifest keys; accept DC-16 explicit untracked-source accounting; accept DC-17 a fresh parent for each invocation. Accept DC-18 complete receipt-only-turn counts with partial-turn censoring and PostgreSQL benefit/both-backend nonregression criteria, now in the operative decision rule above. Accept DC-19 removal of vacuous closure flags/assertions; retain actual preflight ownership and manifest hash verification. Accept DC-20 simpler primary-exception rethrow without presenting later cleanup failure as its cause. Corrections and direct probes are pending; this disposition is not an implementation or measurement pass.
+
+
+### Integrated harness smoke and author verification (2026-10-28)
+
+Implemented the accepted DC-14–DC-20 corrections in the measurement harness. Isolated probes reproduce the empty-payload calling error, Windows key shape, untracked-file provenance gap, reused-parent ambiguity, and misleading exception chaining; corrected controls pass. Removed vacuous closure assertions/flags and redundant code filenames, preserving actual harness ownership and independently compared parent/child source hashes. Receipt-only-turn counts require completed observed turns; partial receipt turns are censored and quiet internal counts unavailable. Final typed integration uses existing `functools.partial` for heterogeneous artifact writes and narrows result dictionaries without new suppressions.
+
+The first real smoke failed the exact custody-body assertion: low-level SimpleBroker `peek_one` defaults to `(body, timestamp)`. Both reads now request `with_timestamps=False`, verified against the actual backend API. This was a harness API error, not a scheduling failure. The failed run is retained at `/tmp/weft-implementation-20261027/dispatch-smoke-01.log`; it supplies no accepted measurements.
+
+DC-8 disposition after source/spec check: retain the terminal oracle. Explicit STOP terminates/reaps tracked children under [MA-3]; voluntary leadership drain is non-destructive. The initial general detached-survival concern did not apply to this STOP path. Do not admit running snapshots as a shortcut around required STOP settlement. All four SQLite quiet STOP trials showed eleven exact source rows and one cancelled terminal; all later smoke custody artifacts also validated twelve accepted requests.
+
+Final smoke source SHA-256 `aa038ff9529d279d060927be1e370b8ae66a30980ed9ac643b726d58df1d73d1`: SQLite quiet passed24.81s, trace24.38s; canonical PostgreSQL quiet45.01s, trace48.84s. Each selected case retained its real pipeline preflight, one warmup and three repetitions of throughput plus separate STOP. All32scenario directories and four completion markers were verified, with the same test hash and twelve custody rows in each of sixteen STOP artifacts. Normal12workers, capacity300/native admission, autostart and timeouts were preserved. The existing unmodified six/eight-parent acceptance also passed2SQLite6.65s and2PostgreSQL10.48s. Environment restored, owned test resources retired. These smoke runs validate the instrument and are not the accepted A baseline.
+
+Author fresh-eyes: actual process/queue paths remain authoritative; forwarding observations neither call admission again nor select work. Useful-work time ends at validated results before joins; the wider observation interval retains control evidence. The first smoke's API mismatch demonstrates why static review alone was insufficient. Current limitations remain finite workload, correlated comparisons, quiet-hook overhead, partial-turn censoring and sample-held blocking estimates. Full raw evidence and exact commands: `/tmp/weft-implementation-20261027/dispatch-harness-final-review-evidence.md`. Final focused cross-family correction review is pending before freezing the comparison baseline.
+
+
+### Final harness correction review (2026-10-28)
+
+Claude completed in312.54seconds, required context read, no blocker and all three craft/correctness/primitive questions passed. DC-14–DC-20, type fixes and the body-only API correction are closed. DC-21 accepted: neutral C1 structural retention uses trace counts only and requires zero censored receipt turns in every compared sample; the operative rule and manifest now say so. This final change is metadata text only, not an observation or runtime change. DC-22 declined as cosmetic: the three correct artifact name/path pairs are local and explicit, and changing the callable shape again adds no behavioral protection. Broader observations remain accepted limits; no stopping-trial receipt count drives a performance decision.
+
+<details><summary>Verbatim final harness correction review</summary>
+
+# Scoped correction review: the dispatch-cost harness, e6049f83 → integrated source
+
+**Verdict: no blocker.** The DC14–DC20 corrections, the type fixes and the `with_timestamps=False` fix are correct in the current source. I have two nits (DC21, DC22) and none of the corrections introduced a new correctness defect.
+
+I made no edits, ran no tests or commands, and delegated nothing. I wrote no plan file because no write tool was available in this session.
+
+Labels: **[read]** means I read it in the source myself; **[supplied]** means it comes from your evidence (smoke runs, probes, the git status snapshot); **[inferred]** means reasoning from the source.
+
+## Context read (confirmed complete, in order)
+
+1. `docs/program-theory.md`
+2. `docs/agent-context/README.md`, `decision-hierarchy.md`, `principles.md`, `engineering-principles.md`
+3. Runbooks: `testing-patterns.md` and `review-loops-and-agent-bootstrap.md` (I used its Scoped Change Review shape)
+4. `docs/agent-context/lessons.md` (a pointer file only)
+5. `docs/lessons.md`, the whole file. Its watermark in `docs/coalescing.md` is "(none)", so every dated section counts, through the 2026-10-28 entries.
+
+There is no module theory. A search for `*theory*.md` under `docs/`, `weft/` and `tests/` finds only `program-theory.md` and two plans.
+
+## Corrections, one by one
+
+| ID | Status | Evidence |
+|---|---|---|
+| DC14 | **Closed** | [read] The probe now takes no arguments (`:228`) and `payload=` is gone (`:253-261`). With no payload, the call path gives the probe no arguments: `targets.py:24-27` and `:48-49` treat the empty mapping as "no payload". [supplied] All four smokes passed the preflight. |
+| DC15 | **Closed** | [read] Hash keys are the forward-slash names from `imports` (`:121-124`). `_verify_artifacts` looks them up using `_source_modules` keys, which are the same literals (`:220-224`, `:1644-1647`). Path checks compare `Path`/`str(root / relative)` on both sides, so Windows separators normalise identically. |
+| DC16 | **Closed** | [read] `git ls-files --others --exclude-standard -z -- weft tests` runs with `cwd=root` and splits on `\0` (`:125-145`). Git always prints `/` separators. The only allowed untracked file is the test itself, which matches the snapshot's lone `??` entry [supplied]. `.gitignore` only covers bytecode and caches here, so no imported module is hidden. There is no root `conftest.py` (glob), so the `weft`/`tests` pathspec loses nothing. |
+| DC17 | **Closed** | [read] `parent.mkdir(parents=True)` with no `exist_ok` atomically claims a fresh parent (`:1688-1689`). Any existing parent raises `FileExistsError` → `pytest.fail`. `bin/pytest-pg --all` selects markers and is a single run (`bin/pytest-pg:546-548`), so the PG recipe does not reuse a parent. Selecting both nodes in one invocation now fails closed, which matches the docstring. |
+| DC18 | **Closed (DC21 nit)** | [read] Turn keys are consistent: `_loop_iteration` increments first in `_process_manager_reactor_turn` (`manager.py:8350`), and receipts drain inside that same call (`:8356`, and `:8396` via `BaseTask._process_reactor_turn`, `base.py:1488-1495`). So `receipt_commit_return.turn` equals that turn's `turn_exit.turn`. Counting with set algebra over `(manager_tid, turn)` (`:995-1005`, `:1110-1114`) is right: censored = receipts without a successful in-window turn exit, and they are never classified. The fields are nulled in quiet mode (`:955-957`), and `_run_spread` drops `None` (`:1592`). The backend rule now names PostgreSQL for the benefit and requires no regression on both backends (`:209`). |
+| DC19 | **Closed** | [read] `checks_passed`, `harness_closed`, `code_filename` and the empty-list closure assertion are gone. What remains is labelled as integrity checking (`:1642`): the worker-vs-expected equality and the cross-check against manifest hashes. Adding the worker-side `__file__` of the test module (`:223`) binds the module the child actually imported. |
+| DC20 | **Closed** | [read/inferred] `raise primary from None` (`:1313`) leaves `__cause__` unset and suppresses the context, so the cleanup error no longer shows as the cause. The cleanup error survives in the note and the event row. Contextlib's `exc is value` path restores the original traceback. A lone cleanup error re-raises bare. |
+| Type fixes | **Correct** | [read] The `isinstance(..., dict)` narrowings are real runtime checks (`:266`, `:1502`). The `span_id` ternary behaves the same as before, since `defaultdict.get(None, 0.0)` was already 0.0; it exists only for typing. The `partial` writers are typed `Callable[[], None]`. The `samples` rename stops reuse of the outer variable name. No suppressions were added. |
+| `with_timestamps=False` | **Correct** | [read] Installed SimpleBroker: in the `BrokerConnection` protocol (`_backend_plugins.py:314-322`) and in `BrokerCore.peek_one` (`db.py:2802-2847`), `with_timestamps` defaults to `True` and returns `(body, ts)`. `simplebroker_pg` has no override. `accepted` holds bodies only (`:1479-1483`), so comparing body to body is now type-correct. That makes the smoke01 failure a fixture API error, not lost custody. [supplied] There were 12 custody rows in every smoke. |
+
+The standing constraints are untouched: WT-2/4, ALT-WT-017/019, MA1.8/MA3, MF5 custody, TS-0, single owner, single worker, and fresh admission. The workers, timeouts and the 300 s bound are unchanged. No production file appears in the start-of-session git status [supplied]. No reconsideration requested.
+
+## New findings
+
+| ID | Sev | Location | Evidence | Strongest counterargument | Smallest disposition |
+|---|---|---|---|---|---|
+| DC21 | nit | `comparison_rule` (`:209`) vs. `receipt_only_turns` (`:1110-1115`) | [read] (1) The neutral-C1 rule compares receipt-only counts alone. An arm whose receipts are censored more often would show fewer receipt-only turns without any real gain, and the rule does not reference `receipt_turns_censored`, even though `_run_spread` records it (`:1576`). (2) The counts exist only in trace mode, and the rule does not say so. | In the PING window, censoring needs either a failed turn, which would almost certainly fail the sample, or a turn that straddles `ended`. `ended` falls after all results are in and the control thread has joined, so censoring is rare and visible in the series. | Append to the C1 clause: "(trace mode; every compared sample has `receipt_turns_censored == 0`, otherwise unavailable)". Alternatively, decline and record it as an accepted limit. |
+| DC22 | nit | `_persist_sample` writes (`:1353-1366`) | [read] Each artifact name appears twice: as the label and in the bound path. If one is edited without the other, the error row names the wrong file. | It is correct now and purely cosmetic. | `functools.partial(_jsonl, rows=family)` typed `Callable[[Path], None]`, then `write(destination / name)`. This removes three path expressions. Optional. |
+
+## Answers
+
+1. **Is it correct?** Yes. Each accepted correction does what its finding asked, checked against the actual SimpleBroker, Manager, BaseTask and targets source. I found no new defect in the changed lines. DC21 is a clarification to the decision rule, not a measurement error.
+2. **Is it elegant expert systems work?** Yes. Most corrections remove code: the redundant flags, the vacuous assertion and `code_filename` are gone. The rest uses the most direct mechanism available: an atomic `mkdir` claim, the existing body-only flag, `from None`, and stdlib `partial`. It adds no framework and no hooks. What remains is small: the duplicated names (DC22) and a typing-only ternary.
+3. **Are the underlying primitives and data structures used properly?** Yes:
+   - A filesystem `mkdir` acts as an exclusive claim.
+   - `git ls-files -z` gives NUL-safe provenance.
+   - `(manager_tid, turn)` set intersection and difference implement right-censoring correctly, given the verified place where the turn counter increments.
+   - `peek_one` uses its declared body-only mode rather than tuple unpacking.
+   - Exception chaining uses its intended semantics.
+
+## Observations (not actionable this pass)
+
+- **Stopping-turn receipts can be misattributed.** `BaseTask._process_stopping_reactor_turn` (`base.py:1440`, `:1498-1505`) drains worker results outside `_process_manager_reactor_turn`, so their receipts take the previous turn's number. This affects only receipt fields in STOP-trial summaries. `_run_spread` reads these metrics from `throughput` only, so no decision depends on them.
+- **The untracked-file check is strict.** It rejects any non-ignored untracked file under `weft/` or `tests/`, not only `.py` files. That fails closed, which is intended.
+- **One error message is broader than its cause.** An `OSError` from `_manifest`, such as git not being on PATH, now reports "require a fresh writable parent". The message does include the exception, and the wrapping predates this diff.
+- **Probe hash differs from the final hash.** The isolated probes report `new_sha256 5fa84d2b…`, but the final source and every smoke record `aa038ff9…`. The probes therefore checked an intermediate candidate. I reviewed the current worktree file directly, so my findings do not depend on the probes. I did not compute the file's SHA myself.
+- **Earlier observations still hold.** These are the roughly 12-comparison multiplicity, `simplebroker_pg` not being fingerprinted, the import weight of the function worker, and a failed preflight leaving no artifact.
+
+**Disposition:** no blocker.
+
+</details>
+
+Final gates: six plan/spec hygiene tests passed and the two experiments skipped without opt-in, as required; those skips are not measurements. Ruff/format, suppression registry, full mypy479files, documentation paths and whitespace checks passed. First A measurements will use a dedicated detached baseline worktree and its own virtual environment, with the same configuration, source-manifest and actual-child preflight. The local .envrc is ignored rather than tracked; copied its existing environment loader and linked the same operator .env. Initial setup selected the primary checkout uv wrapper; no measurement ran, and both editables were restored to their owning checkouts before comparison.
