@@ -83,10 +83,12 @@ from weft._constants import (
     MANAGER_LEADERSHIP_DRAIN_REVALIDATE_SECONDS,
     MANAGER_LEADERSHIP_PING_CACHE_TTL_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
+    MANAGER_POSTGRES_DISPATCH_MAX_PASSES,
     MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
     MANAGER_SERVE_LOG_CHILD_LIMIT,
     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+    MANAGER_SQLITE_DISPATCH_MAX_PASSES,
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_INTERVAL_SECONDS,
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_MESSAGE_LIMIT,
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
@@ -244,6 +246,22 @@ logger = logging.getLogger(__name__)
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
 ManagerLivenessState = Literal["live", "stale", "unknown"]
+
+
+@dataclass(slots=True)
+class _ManagerDispatchBudget:
+    """Outer-turn fetch limits and the current pass's submission proof [MF-6]."""
+
+    internal_remaining: int = MANAGER_INTERNAL_SPAWN_DRAIN_MAX_MESSAGES
+    public_remaining: int = MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES
+    submitted_in_pass: bool = False
+
+    def charge_fetch(self, *, internal: bool) -> None:
+        """Charge immediately before a real fetch, even when it finds no row."""
+        if internal:
+            self.internal_remaining -= 1
+        else:
+            self.public_remaining -= 1
 
 
 @dataclass
@@ -644,6 +662,7 @@ class Manager(ServiceTask):
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_started_this_turn = False
         self._dispatch_cleanup_scope = False
+        self._dispatch_budget: _ManagerDispatchBudget | None = None
         self._active_cleanup_deadline: float | None = None
         self._last_child_cleanup_survivors: tuple[dict[str, Any], ...] = ()
         self._idle_timeout: float = float(
@@ -1383,6 +1402,8 @@ class Manager(ServiceTask):
 
         Spec: [MF-1], [MF-6]
         """
+        # One attempt consumes the allowance, including failure before seeding.
+        self._child_launch_started_this_turn = True
         if self._draining or self.should_stop:
             logger.debug(
                 "Skipping child launch for %s while manager %s is draining",
@@ -1478,7 +1499,6 @@ class Manager(ServiceTask):
         )
         self._active_child_launches[child_spec.tid] = request
         self._child_launch_started_ns[child_spec.tid] = time.time_ns()
-        self._child_launch_started_this_turn = True
         try:
             self._timed_manager_call(
                 "launch_checkpoint",
@@ -1496,6 +1516,8 @@ class Manager(ServiceTask):
                 _ManagerChildLaunchResult(request=request, error=exc)
             )
             return False
+        if self._dispatch_cleanup_scope and self._dispatch_budget is not None:
+            self._dispatch_budget.submitted_in_pass = True
         return True
 
     def _publish_scheduler_checkpoint(self) -> bool:
@@ -5088,12 +5110,15 @@ class Manager(ServiceTask):
         if parse_control_request(body) is not None:
             self._last_activity_ns = time.time_ns()
 
-    def _drain_control_queue_first(self) -> None:
+    def _drain_control_queue_first(self) -> bool:
         """Handle pending manager control messages before new spawn work.
 
         The manager owns the global spawn inbox. Once STOP is pending, it must
         stop consuming new spawn requests before launching additional children,
-        otherwise cleanup can race with newly-created child tasks.
+        otherwise cleanup can race with newly-created child tasks. Return True only
+        after observing an empty queue; existing callers may ignore that evidence.
+
+        Spec: [MA-3], [MF-6]
         """
 
         ctrl_name = self._queue_names["ctrl_in"]
@@ -5105,23 +5130,23 @@ class Manager(ServiceTask):
             pending = ctrl_queue.peek_one(with_timestamps=True)
             if pending is None:
                 self._clear_stalled_control_message()
-                return
+                return True
 
             if isinstance(pending, tuple) and len(pending) == 2:
                 body, timestamp = pending
             else:  # pragma: no cover - defensive queue shape guard
                 body, timestamp = pending, None
 
-            if not isinstance(timestamp, int):
-                return
-            if self._stalled_control_retry_active(timestamp):
-                return
+            if not isinstance(timestamp, int) or self._stalled_control_retry_active(
+                timestamp
+            ):
+                return False
             if timestamp in seen_timestamps:
                 self._mark_stalled_control_message(
                     queue_name=ctrl_name,
                     timestamp=timestamp,
                 )
-                return
+                return False
             if (
                 self._stalled_control_message_id is not None
                 and self._stalled_control_message_id != timestamp
@@ -5139,20 +5164,24 @@ class Manager(ServiceTask):
             self._invalidate_leadership_work_cache()
             handled += 1
             if self._draining or self.should_stop:
-                return
+                return False
             seen_timestamps.add(timestamp)
             next_pending = ctrl_queue.peek_one(with_timestamps=True)
+            if next_pending is None:
+                self._clear_stalled_control_message()
+                return True
             if self._peeked_message_timestamp(next_pending) == timestamp:
                 self._mark_stalled_control_message(
                     queue_name=ctrl_name,
                     timestamp=timestamp,
                 )
-                return
+                return False
 
         logger.warning(
             "Manager yielded after handling %s control messages in one turn",
             MANAGER_CONTROL_DRAIN_MAX_MESSAGES,
         )
+        return False
 
     def _control_allows_child_launch(self) -> bool:
         """Return whether spawn work may still launch a new child.
@@ -5167,6 +5196,28 @@ class Manager(ServiceTask):
         self._drain_control_queue_first()
         return not self._draining and not self.should_stop
 
+    def _spawn_dispatch_allowance_open(
+        self, queue_name: str, inactive_candidates: set[str]
+    ) -> bool:
+        """Apply the turn's work bounds without dropping deferred sources [MF-6]."""
+        budget = self._dispatch_budget
+        if self._has_active_child_launches() or self._child_launch_started_this_turn:
+            if not (
+                self._dispatch_cleanup_scope
+                and budget is not None
+                and budget.submitted_in_pass
+            ):
+                inactive_candidates.add(queue_name)
+            return False
+        if budget is None:
+            return True
+        if queue_name == self._queue_names.get("internal_inbox"):
+            return budget.internal_remaining > 0
+        return budget.public_remaining > 0 and (
+            budget.internal_remaining > 0
+            or not self._internal_spawn_pending(unknown_is_pending=True)
+        )
+
     def _process_queue_message(
         self, queue_name: str, inactive_candidates: set[str]
     ) -> bool:
@@ -5178,11 +5229,7 @@ class Manager(ServiceTask):
         if queue_name in reserved_names:
             return False
         if queue_name in self._spawn_inbox_queue_names():
-            if (
-                self._has_active_child_launches()
-                or self._child_launch_started_this_turn
-            ):
-                inactive_candidates.add(queue_name)
+            if not self._spawn_dispatch_allowance_open(queue_name, inactive_candidates):
                 return False
             if queue_name == self._queue_names["inbox"]:
                 if (
@@ -5208,6 +5255,10 @@ class Manager(ServiceTask):
                 "admission", lambda: self._admission_allows_queue(queue_name)
             ):
                 return False
+            if self._dispatch_budget is not None:
+                self._dispatch_budget.charge_fetch(
+                    internal=queue_name == self._queue_names.get("internal_inbox")
+                )
         return super()._process_queue_message(queue_name, inactive_candidates)
 
     def _read_broker_timestamp(self, *, force: bool = False) -> int:
@@ -8339,10 +8390,14 @@ class Manager(ServiceTask):
         return timeouts
 
     def _process_reactor_turn(self) -> None:
-        """Run one Manager reactor turn."""
+        """Own one bounded dispatch budget for the complete turn [MA-3], [MF-6]."""
 
-        self._drain_child_sentinel_events()
-        self._timed_manager_call("turn", self._process_manager_reactor_turn)
+        self._dispatch_budget = _ManagerDispatchBudget()
+        try:
+            self._drain_child_sentinel_events()
+            self._timed_manager_call("turn", self._process_manager_reactor_turn)
+        finally:
+            self._dispatch_budget = None
 
     def _wait_for_reactor_activity(self, timeout: float | None) -> None:
         """Measure the existing arbiter wait, without adding a deadline [MA-3]."""
@@ -8406,32 +8461,33 @@ class Manager(ServiceTask):
                 self._continue_shutdown_drain()
                 self._drain_worker_results()
                 return
-        # Reuse the completed turn sweep only during ordinary delivery [MA-3].
+        # Reuse the completed sweep across bounded ordinary passes [MA-3].
         self._dispatch_cleanup_scope = True
+        budget = self._dispatch_budget
+        assert budget is not None
+        max_passes = (
+            MANAGER_POSTGRES_DISPATCH_MAX_PASSES
+            if self._admission_backend_name() == "postgres"
+            else MANAGER_SQLITE_DISPATCH_MAX_PASSES
+        )
         try:
-            if not self._has_active_child_launches():
-                self._timed_manager_call(
-                    "queue_dispatch", super()._process_reactor_turn
-                )
-            else:
-                self._drain_worker_results()
-                self._maybe_emit_poll_report()
-            public_inbox = self._queue_names.get("inbox")
-            public_drained = 0
-            if (
-                not self._has_active_child_launches()
-                and not self._child_launch_started_this_turn
-                and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
-                and any(
-                    name in self._active_queues
-                    for name in self._spawn_inbox_queue_names()
-                )
-            ):
-                public_drained += self._timed_manager_call(
-                    "public_dispatch", self._drain_public_spawn_requests
-                )
-            if public_drained:
-                self._last_activity_ns = time.time_ns()
+            for pass_index in range(max_passes):
+                if pass_index:
+                    if not self._extra_dispatch_pass_ready(budget):
+                        break
+                    if not self._drain_control_queue_first():
+                        break
+                    if not self._extra_dispatch_pass_ready(budget):
+                        break
+                    self._child_launch_started_this_turn = False
+                budget.submitted_in_pass = False
+                try:
+                    self._process_manager_delivery_pass()
+                finally:
+                    if pass_index:
+                        # The extra grant belongs to ordinary dispatch, not tail
+                        # convergence, even when admission denied its attempt.
+                        self._child_launch_started_this_turn = True
         finally:
             self._dispatch_cleanup_scope = False
         if self._draining:
@@ -8494,8 +8550,42 @@ class Manager(ServiceTask):
                 self._idle_shutdown_logged = True
             self.should_stop = True
 
-    def _internal_spawn_pending(self) -> bool:
-        """Return whether the manager-owned internal spawn inbox has work."""
+    def _extra_dispatch_pass_ready(self, budget: _ManagerDispatchBudget) -> bool:
+        """Require actual same-pass settlement and an open lifecycle [MF-6]."""
+        return (
+            budget.submitted_in_pass
+            and not self._has_active_child_launches()
+            and not self.should_stop
+            and not self._draining
+            and not self._has_pending_termination_request()
+            and not self._family_classification_pending
+        )
+
+    def _process_manager_delivery_pass(self) -> None:
+        """Run the inherited delivery and explicit public fallback once [MA-3]."""
+        if not self._has_active_child_launches():
+            self._timed_manager_call("queue_dispatch", super()._process_reactor_turn)
+        else:
+            self._drain_worker_results()
+            self._maybe_emit_poll_report()
+        public_inbox = self._queue_names.get("inbox")
+        public_drained = 0
+        if (
+            not self._has_active_child_launches()
+            and not self._child_launch_started_this_turn
+            and public_inbox == WEFT_SPAWN_REQUESTS_QUEUE
+            and any(
+                name in self._active_queues for name in self._spawn_inbox_queue_names()
+            )
+        ):
+            public_drained += self._timed_manager_call(
+                "public_dispatch", self._drain_public_spawn_requests
+            )
+        if public_drained:
+            self._last_activity_ns = time.time_ns()
+
+    def _internal_spawn_pending(self, *, unknown_is_pending: bool = False) -> bool:
+        """Observe internal work; the quota boundary treats failed reads as pending."""
 
         internal_inbox = self._queue_names.get("internal_inbox")
         if internal_inbox is None:
@@ -8507,7 +8597,7 @@ class Manager(ServiceTask):
                 "Failed to inspect internal spawn inbox pending state",
                 exc_info=True,
             )
-            return False
+            return unknown_is_pending
 
     def _drain_internal_spawn_requests(self) -> int:
         """Drain manager-owned internal spawn work without consuming public work."""

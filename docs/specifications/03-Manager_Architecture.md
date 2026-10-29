@@ -469,9 +469,12 @@ does not start or reset the resource-exhaustion drain-wait episode.
 Because initial task-state publication is best-effort, if `MANAGER_ADMISSION_RECHECK_SECONDS` elapses while the launched wrapper remains alive without a visible snapshot, the Manager retries snapshot observation once and falls back to retaining the live task in local state and a successfully published Manager checkpoint from launch-time `RuntimeIdentity` and scoped process evidence, emits a rate-limited diagnostic, refreshes observed usage, and clears that TID's startup feedback. Gate release does not acknowledge the reserved request. Before another ordinary dispatch, task-owned snapshot handoff/positive settlement or a successful post-launch checkpoint must preserve recovery custody; failed checkpoint publication gates dispatch and retries through bounded maintenance. If a retained pre-launch reference has no durable post-launch process receipt, a successor preserves its validated identity, unresolved reservation, and finite frontier where applicable. It blocks further ordinary dispatch until a matching positive task-owned snapshot or durable scoped receipt resolves the ambiguity. Absence of a PID or snapshot does not prove the request was unlaunched once its pre-launch reference exists. This crash window can require operator resolution and is outside the conditional drain guarantee. Startup feedback does not certify a task's future maximum use. Admission waiting, classification, reconciliation, controls, and reaping remain non-blocking and use bounded reactor work. A bounded classification page must not become a fixed FIFO visibility window.
 
 Startup settlement and a successful launch-worker receipt with room remaining
-in the startup window reactivate the ordinary public source. The next reactor
-turn reevaluates known work through normal measured admission and custody gates
-without waiting for inactive-source rediscovery. The normal pending check makes
+in the startup window reactivate the ordinary public source. Known work is reevaluated through normal measured admission and custody gates
+without waiting for inactive-source rediscovery. This normally occurs on the next
+reactor turn. The bounded additional PostgreSQL pass in [MF-6] may reevaluate work
+only after a successful new submission settles within the preceding ordinary
+pass and the boundary control drain reaches empty. A prior receipt applied at
+turn start does not qualify that exception. The normal pending check makes
 the source idle again when empty. A negative startup-readiness decision suppresses
 unchanged blocked backlog as ordinary wait activity.
 
@@ -890,14 +893,63 @@ inside this ordinary delivery scope. Reusing this child cleanup does not change
 the normal phases or deadlines of other maintenance owners or make a serviced
 classification-page continuation a veto on the first eligible dispatch.
 
+Ordinary dispatch uses at most two complete delivery passes on PostgreSQL and
+one on SQLite. Each pass permits at most one attempted authorization and closes
+its allowance before seeding, including on failure. Only successful submission
+and receipt settlement within the preceding pass may open the one additional
+PostgreSQL pass, after a bounded control drain proves empty and stop, draining,
+termination and classification-continuation checks permit it. The complete pass
+retains BaseTask's existing pre- and post-delivery result drains; no extra result
+drain or wait is added to obtain a receipt. The inherited queue-delivery call
+returns before its post-delivery receipt handling; that handling may qualify the
+next complete pass.
+
+Separate Manager-owned public and internal attempted-fetch allowances each cap
+work at 128 per outer turn, across inherited watcher and explicit drain paths.
+They include unsuccessful fetches and malformed or rejected requests, including
+Manager requeue dispositions, and reset only at outer-turn entry. Existing
+per-call result and control limits remain; no aggregate outer-turn result or
+control quota is imposed. When the internal allowance is exhausted, pending or
+unknown internal work prevents public reservation; positively observed empty
+permits normal public gates. The additional pass reuses the classified frontier
+without refilling classification; later unclassified arrivals await normal
+classification, while known indexed work retains [MA-1.8] ordering. A failed
+worker result may qualify after successful submission and receipt settlement.
+An explicit public fallback without a subsequent result drain cannot qualify.
+First-pass control handling remains unchanged; the
+observed-empty requirement applies only before an additional pass.
+
+The existing child-maintenance gate remains active before every reservation in
+both passes. Other maintenance owners retain their normal phases and clocks;
+the tail runs after at most one additional bounded pass. Extra passes do not add
+publication observation or a second maintenance scheduler. Exact receipt
+reconciliation, durable custody, the startup exposure window and fresh
+per-request admission remain independent gates. Source hints deferred only by
+a successful submission remain available to the next full priority pass. On
+leaving an opened extra pass its allowance closes even if it made no attempt,
+so tail convergence cannot attempt another authorization after an opened extra
+pass. Existing event sources
+provide continuation; unchanged blocked backlog gains no new wake.
+
 See the [measured dispatch plan](../plans/2026-10-22-bounded-concurrent-manager-launches.md),
 B promotion against baseline `8123b129`.
 
-_Implementation mapping_: `weft/core/manager.py::Manager._process_manager_reactor_turn`
-owns the ordinary delivery scope and clears it with `try/finally`;
-`Manager._process_queue_message` checks the existing child-sentinel observation
-and `Manager._manager_child_timeouts` before reservation;
-`Manager._handle_work_message` retains cleanup outside that scope.
+_Implementation mapping_: `weft/core/manager.py::Manager._process_reactor_turn`
+owns the outer-turn dispatch budget and clears it with `try/finally`;
+`Manager._process_manager_reactor_turn` owns the ordinary delivery scope,
+bounded passes, extra-pass boundary and unconditional allowance reclosure.
+`Manager._spawn_dispatch_allowance_open` owns attempted-fetch limits,
+exhausted-internal priority and deferred source-hint retention;
+`Manager._process_queue_message` applies that allowance, the existing
+child-sentinel/deadline gate and fresh admission before charging each fetch.
+`Manager._extra_dispatch_pass_ready` checks settlement and lifecycle evidence;
+`Manager._process_manager_delivery_pass` reuses inherited delivery and public fallback.
+`Manager._internal_spawn_pending` supplies the existing queue observation with
+fail-closed unknown handling at the quota boundary; existing convergence uses
+its default policy. `Manager._drain_control_queue_first` supplies bounded
+observed emptiness. `Manager._handle_work_message` retains cleanup outside the
+scope; `Manager._launch_child_task` closes allowance before seed and records
+actual successful worker submission.
 
 ## Scope Boundary [MA-4]
 

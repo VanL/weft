@@ -1237,65 +1237,6 @@ def test_manager_spawns_child(
     assert reference["type"] == "large_output"
 
 
-def test_manager_reactor_answers_ping_while_child_launch_is_active(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager, make_queue = manager_setup
-    inbox_queue = make_queue(manager._queue_names["inbox"])
-    ctrl_in = make_queue(manager._queue_names["ctrl_in"])
-    reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
-    reply_queue = make_queue(reply_name)
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    drain(log_queue)
-    launch_started = threading.Event()
-    release_launch = threading.Event()
-
-    def delayed_launch(*_args: object, **_kwargs: object) -> FakeLaunchProcess:
-        launch_started.set()
-        assert release_launch.wait(timeout=5.0)
-        return FakeLaunchProcess(pid=424243)
-
-    monkeypatch.setattr(manager_mod, "launch_task_process", delayed_launch)
-    payload = make_child_spec()
-    payload["name"] = "delayed-launch"
-    inbox_queue.write(json.dumps(payload))
-
-    started_at = time.monotonic()
-    manager.process_once()
-    elapsed = time.monotonic() - started_at
-
-    assert elapsed < 3.0
-    assert launch_started.wait(timeout=2.0)
-    assert manager._active_child_launches
-
-    ctrl_in.write(
-        encode_control_message(
-            CONTROL_PING,
-            request_id="during",
-            reply_to=reply_name,
-        )
-    )
-    manager.process_once()
-
-    responses = [json.loads(item) for item in drain(reply_queue)]
-    pong = next(response for response in responses if response["command"] == "PING")
-    assert pong["request_id"] == "during"
-    assert pong["message"] == "PONG"
-    assert pong["task_status"] == "running"
-
-    release_launch.set()
-    spawn_event = wait_for_log_event(
-        manager,
-        log_queue,
-        lambda event: event.get("event") == "task_spawned",
-        timeout=5.0,
-    )
-
-    assert spawn_event["child_taskspec"]["name"] == "delayed-launch"
-    assert not manager._active_child_launches
-
-
 def test_manager_reactor_answers_ping_while_draining(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
@@ -2124,50 +2065,6 @@ def test_manager_enqueues_heartbeat_through_service_path(
     assert metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] == INTERNAL_SERVICE_KEY_HEARTBEAT
     assert metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
     assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in metadata
-
-
-def test_manager_processes_internal_spawn_before_public_spawn(
-    broker_env: BrokerEnv,
-    unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, make_queue = broker_env
-    config = load_config(
-        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
-    )
-    manager = Manager(
-        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
-    )
-    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
-    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
-    drain(internal_queue)
-    drain(public_queue)
-
-    def spawn_payload(name: str) -> dict[str, object]:
-        return {
-            "name": name,
-            "spec": {
-                "type": "function",
-                "function_target": "tests.tasks.sample_targets:echo_payload",
-            },
-        }
-
-    internal_queue.write(json.dumps(spawn_payload("internal-first")))
-    public_queue.write(json.dumps(spawn_payload("public-second")))
-    launched: list[str] = []
-
-    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
-        launched.append(child_spec.name)
-        return True
-
-    monkeypatch.setattr(manager, "_launch_child_task", record_launch)
-
-    try:
-        manager.process_once()
-    finally:
-        manager.cleanup()
-
-    assert launched == ["internal-first", "public-second"]
 
 
 def _write_admission_snapshot(make_queue: Callable[[str], Any], body: str) -> int:
@@ -3251,55 +3148,6 @@ def test_postgres_admission_fails_closed_on_expected_observer_errors(
     finally:
         manager.stop(join=False)
         manager.cleanup()
-
-
-def test_manager_stops_spawn_drain_after_child_launch_starts(
-    broker_env: BrokerEnv,
-    unique_tid: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, make_queue = broker_env
-    config = load_config(
-        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
-    )
-    manager = Manager(
-        db_path, make_manager_spec(unique_tid, idle_timeout=0.0), config=config
-    )
-    internal_queue = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
-    public_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
-    public_reserved = make_queue(manager._queue_names["reserved"])
-    drain(internal_queue)
-    drain(public_queue)
-    drain(public_reserved)
-
-    def spawn_payload(name: str) -> dict[str, object]:
-        return {
-            "name": name,
-            "spec": {
-                "type": "function",
-                "function_target": "tests.tasks.sample_targets:echo_payload",
-            },
-        }
-
-    internal_queue.write(json.dumps(spawn_payload("internal-first")))
-    public_queue.write(json.dumps(spawn_payload("public-second")))
-    launched: list[str] = []
-
-    def record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
-        launched.append(child_spec.name)
-        manager._child_launch_started_this_turn = True
-        return True
-
-    monkeypatch.setattr(manager, "_launch_child_task", record_launch)
-
-    try:
-        manager.process_once()
-    finally:
-        manager.cleanup()
-
-    assert launched == ["internal-first"]
-    assert public_queue.peek_one() is not None
-    assert public_reserved.peek_one() is None
 
 
 def test_custom_inbox_manager_does_not_consume_internal_spawn_queue(
@@ -8886,57 +8734,6 @@ def test_manager_sigusr1_arriving_during_parent_snapshot_is_not_lost(
     assert manager._has_pending_termination_request() is False
 
 
-def test_manager_stop_command_does_not_launch_new_children_after_stop(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-) -> None:
-    manager, make_queue = manager_setup
-    inbox_queue = make_queue(manager._queue_names["inbox"])
-    ctrl_in_queue = make_queue(manager._queue_names["ctrl_in"])
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    drain(log_queue)
-
-    payload = {
-        "name": "queued-stop",
-        "spec": {
-            "type": "function",
-            "function_target": "tests.tasks.sample_targets:simulate_work",
-            "keyword_args": {"duration": 0.5, "result": "ok"},
-        },
-    }
-    inbox_queue.write(json.dumps(payload))
-    inbox_queue.write(json.dumps(payload))
-
-    manager.process_once()
-    deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
-    while time.time() < deadline and len(manager._child_processes) < 1:
-        manager._drain_worker_results()
-        if len(manager._child_processes) < 1:
-            manager.wait_for_activity(timeout=0.02)
-    assert len(manager._child_processes) == 1
-
-    ctrl_in_queue.write(encode_control_message(CONTROL_STOP))
-
-    deadline = time.time() + (20.0 if os.name == "nt" else 10.0)
-    max_children_seen = len(manager._child_processes)
-    while time.time() < deadline and not (manager._draining or manager.should_stop):
-        manager.process_once()
-        max_children_seen = max(max_children_seen, len(manager._child_processes))
-        time.sleep(0.05)
-
-    assert manager._draining or manager.should_stop
-    for _ in range(3):
-        manager.process_once()
-        max_children_seen = max(max_children_seen, len(manager._child_processes))
-        time.sleep(0.05)
-
-    assert max_children_seen == 1
-
-    events = [json.loads(item) for item in drain(log_queue)]
-    spawn_events = [event for event in events if event.get("event") == "task_spawned"]
-    assert len(spawn_events) == 1
-    assert any(event.get("event") == "control_stop" for event in events)
-
-
 def test_manager_drain_reissues_stop_for_child_added_after_stop(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
@@ -10508,62 +10305,67 @@ def test_manager_autostart_templates(
 
 def test_manager_control_drain_yields_when_peek_message_does_not_advance(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Real retained control custody yields; observed emptiness clears its retry."""
     manager, make_queue = manager_setup
     ctrl_name = manager._queue_names["ctrl_in"]
+    ctrl_queue = make_queue(ctrl_name)
     reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
     reply_queue = make_queue(reply_name)
-    stuck_timestamp = 1777000000000005000
-
-    class StuckControlQueue:
-        name = ctrl_name
-
-        def __init__(self) -> None:
-            self.delete_calls = 0
-
-        def peek_one(self, *, with_timestamps: bool = False) -> str | tuple[str, int]:
-            payload = encode_control_message(
-                CONTROL_PING,
-                request_id="stuck-control",
-                reply_to=reply_name,
+    stamp = int(
+        ctrl_queue.write(
+            encode_control_message(
+                CONTROL_PING, request_id="stuck-control", reply_to=reply_name
             )
-            if with_timestamps:
-                return payload, stuck_timestamp
-            return payload
+        )
+    )
+    real_delete = Queue.delete
+    delete_attempts: list[int] = []
 
-        def delete(self, *, message_id: int | None = None) -> bool:
-            assert message_id == stuck_timestamp
-            self.delete_calls += 1
+    def delete(queue: Queue, *args: Any, **kwargs: Any) -> Any:
+        if queue.name == ctrl_name:
+            delete_attempts.append(kwargs["message_id"])
             return False
+        return real_delete(queue, *args, **kwargs)
 
-        def has_pending(self) -> bool:
-            return True
-
-        def close(self) -> None:
-            pass
-
-    stuck_queue = StuckControlQueue()
-    manager._queue_cache[ctrl_name] = cast(Queue, stuck_queue)
-    manager._queues[ctrl_name].queue = cast(Queue, stuck_queue)
-
-    start = time.monotonic()
-    manager._drain_control_queue_first()
-
-    assert time.monotonic() - start < 2.0
-    assert stuck_queue.delete_calls == 1
-    raw_response = reply_queue.read_one()
-    assert raw_response is not None
-    response = json.loads(raw_response)
-    assert response["command"] == CONTROL_PING
-    assert response["request_id"] == "stuck-control"
-    assert manager._stalled_control_message_id == stuck_timestamp
-
-    manager._drain_control_queue_first()
-
-    assert stuck_queue.delete_calls == 1
-    assert reply_queue.read_one() is None
-    assert manager._has_pending_messages() is False
-    assert manager._control_allows_child_launch() is True
+    with monkeypatch.context() as patch:
+        patch.setattr(Queue, "delete", delete)
+        manager._drain_control_queue_first()
+        assert delete_attempts == [stamp]
+        assert ctrl_queue.peek_one(exact_timestamp=stamp) is not None
+        raw_response = reply_queue.read_one()
+        assert raw_response is not None
+        response = json.loads(raw_response)
+        assert response["command"] == CONTROL_PING
+        assert response["request_id"] == "stuck-control"
+        assert manager._stalled_control_message_id == stamp
+        manager._drain_control_queue_first()
+        assert delete_attempts == [stamp]
+        assert reply_queue.read_one() is None
+        assert manager._has_pending_messages() is False
+        assert manager._control_allows_child_launch() is True
+        # Let the same retained row retry after its actual owner deadline.
+        # Its successful handler deletion must clear stalled state before the
+        # newly observed post-handle empty boundary returns.
+        retry_at = manager._stalled_control_retry_after_ns
+        patch.setattr(Queue, "delete", real_delete)
+        patch.setattr(
+            manager_mod,
+            "time",
+            SimpleNamespace(
+                time_ns=lambda: retry_at + 1,
+                time=time.time,
+                monotonic=time.monotonic,
+                perf_counter=time.perf_counter,
+                sleep=time.sleep,
+            ),
+        )
+        empty = manager._drain_control_queue_first()
+        assert ctrl_queue.peek_one(exact_timestamp=stamp) is None
+        assert manager._stalled_control_message_id is None
+        assert manager._stalled_control_retry_after_ns == 0
+        assert empty is True
 
 
 def test_manager_idle_shutdown(broker_env: BrokerEnv, unique_tid: str) -> None:

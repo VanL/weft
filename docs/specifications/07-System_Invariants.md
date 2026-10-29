@@ -1191,7 +1191,13 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`,
 For [MANAGER.18], `weft/core/admission.py::_startup_window_allows_launch`
 owns the bounded overlap predicate. `Manager._startup_dispatch_blocked` and
 `Manager._resume_startup_dispatch` in `weft/core/manager.py` own negative
-readiness and next-turn reactivation, separately from resource drain-wait policy.
+readiness and source reactivation, separately from resource drain-wait policy.
+`Manager._process_manager_reactor_turn` owns the bounded serial-pass exception
+in [MF-6]: only a new submission settled within an ordinary pass may qualify
+one additional PostgreSQL pass after controls reach empty. Initial receipts
+retain next-turn continuation. `Manager._process_queue_message` preserves
+per-delivery startup, custody, admission and child-maintenance gates and the
+aggregate source-attempt bounds.
 
 The measured PostgreSQL tests exercise coherent actual pressure and bounded
 parent/leaf progress. `tests/system/test_family_recovery.py` exercises missing
