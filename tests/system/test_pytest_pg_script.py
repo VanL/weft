@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import importlib.machinery
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -726,3 +727,122 @@ def test_run_pytest_command_escalates_after_interrupt_timeout(
     ]
     assert "terminating process tree" in captured.err
     assert "killing process tree" in captured.err
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("fault", ["none", "timeout", "unwritable"])
+def test_isolated_pg_retains_evidence_before_cleanup(
+    tmp_path: Path, fails: bool, fault: str
+) -> None:
+    """Real pytest failure resumes the yield fixture without throwing into it."""
+    directory = tmp_path / "diagnostics"
+    if fault == "unwritable":
+        directory.write_text("occupied")
+    else:
+        directory.mkdir()
+    (tmp_path / "server-token").write_bytes(b"isolated-server-evidence\xff\n")
+    (tmp_path / "conftest.py").write_text(
+        """import os
+import subprocess
+import re
+from pathlib import Path
+from types import SimpleNamespace
+import pytest
+from tests.helpers import pytest_pg_runtime
+
+pytest_plugins = ['tests.helpers.pytest_pg_runtime']
+
+@pytest.fixture(autouse=True)
+def docker_boundary(monkeypatch):
+    real_loader = pytest_pg_runtime.load_pytest_pg_module
+    root = Path(__file__).parent
+    def load():
+        runtime = real_loader()
+        runtime._start_postgres_container = lambda: ('owned-probe', 'postgresql://localhost/probe')
+        runtime._initialize_broker_schema = lambda **kwargs: None
+        ticks = iter([0.0, 0.0, 10.0 if os.environ['PROBE_FAULT'] == 'timeout' else 3.0])
+        runtime.time = SimpleNamespace(monotonic=lambda: next(ticks), time_ns=lambda: 1)
+        def run(argv, **kwargs):
+            if argv[:3] == ['docker', 'rm', '-f']:
+                (root / 'server-token').unlink()
+                (root / 'removed').write_text('owned-probe')
+                return subprocess.CompletedProcess(argv, 0)
+            if argv[:2] == ['docker', 'inspect']:
+                assert argv[2] == '--format' and argv[-1] == 'owned-probe'
+                assert set(re.findall(r'\\.State\\.(\\w+)', argv[3])) == {
+                    'Status', 'ExitCode', 'OOMKilled', 'Error', 'StartedAt', 'FinishedAt',
+                }
+                assert '.Config' not in argv[3] and '.Env' not in argv[3]
+                assert kwargs['timeout'] == 10
+                if os.environ['PROBE_FAULT'] == 'timeout':
+                    raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+                os.write(kwargs['stdout'].fileno(), b'STATE running exit=0 oom=false\\n')
+                return subprocess.CompletedProcess(argv, 0)
+            if argv[:2] == ['docker', 'logs']:
+                assert argv == ['docker', 'logs', '--timestamps', '--tail', '2000', 'owned-probe']
+                assert kwargs['timeout'] == 7
+                token = root / 'server-token'
+                payload = token.read_bytes() if token.exists() else b'container gone\\n'
+                os.write(kwargs['stdout'].fileno(), payload)
+                return subprocess.CompletedProcess(argv, 0 if token.exists() else 1)
+            (root / 'unexpected').write_text(repr(argv))
+            raise AssertionError('unexpected command')
+        runtime.subprocess = SimpleNamespace(
+            run=run, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT,
+            TimeoutExpired=subprocess.TimeoutExpired, SubprocessError=subprocess.SubprocessError,
+        )
+        return runtime
+    monkeypatch.setattr(pytest_pg_runtime, 'load_pytest_pg_module', load)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_probe.py").write_text(
+        "def test_probe(isolated_postgres_server):\n"
+        + (
+            "    raise AssertionError('original isolated failure')\n"
+            if fails
+            else "    pass\n"
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["PROBE_FAULT"] = fault
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = "1"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    env["WEFT_TEST_DIAGNOSTICS_DIR"] = str(directory)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_probe.py"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == int(fails), result.stdout + result.stderr
+    if fails:
+        assert "original isolated failure" in result.stdout
+    assert ("1 failed" if fails else "1 passed") in result.stdout
+    assert "ERROR" not in result.stdout + result.stderr
+    assert (tmp_path / "removed").read_text() == "owned-probe"
+    assert not (tmp_path / "server-token").exists()
+    assert not (tmp_path / "unexpected").exists()
+    artifact = directory / "postgres-owned-probe.log"
+    if fault == "unwritable":
+        return
+    assert artifact.exists(), "isolated server evidence lost before cleanup"
+    retained = artifact.read_bytes()
+    assert b"owned-probe" in retained
+    if fault == "timeout":
+        assert b"collection error=TimeoutExpired" in retained
+        assert b"skipped budget exhausted" in retained
+        assert b"isolated-server-evidence" not in retained
+    else:
+        assert b"isolated-server-evidence\xff" in retained
+        assert retained.index(b"command=") < retained.index(b"STATE running")
+        assert retained.index(b"STATE running") < retained.index(b"returncode=0")
+        assert retained.index(b"returncode=0") < retained.index(
+            b"isolated-server-evidence"
+        )

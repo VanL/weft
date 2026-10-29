@@ -26,6 +26,9 @@ POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:18")
 POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "weft_test")
 POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("SIMPLEBROKER_PG_TEST_PASSWORD", "postgres")
+POSTGRES_DIAGNOSTIC_WAIT_SECONDS: Final[float] = 10.0
+"""Shared Docker wait budget for retained evidence; excludes file I/O and cleanup."""
+
 PYTEST_INTERRUPT_GRACE_SECONDS: Final[float] = 8.0
 """Wait after forwarding Ctrl-C before escalating pytest shutdown."""
 
@@ -156,6 +159,49 @@ def _print_container_logs(container_name: str) -> None:
             f"Unable to read logs for Postgres container {container_name}",
             file=sys.stderr,
         )
+
+
+def _retain_container_evidence(container_name: str, artifact: Path) -> None:
+    """Retain bounded pre-removal State and logs without replacing failures [TS-0]."""
+    state_format = (
+        "Status={{json .State.Status}} ExitCode={{json .State.ExitCode}} "
+        "OOMKilled={{json .State.OOMKilled}} Error={{json .State.Error}} "
+        "StartedAt={{json .State.StartedAt}} FinishedAt={{json .State.FinishedAt}}"
+    )
+    commands = (
+        ["docker", "inspect", "--format", state_format, container_name],
+        ["docker", "logs", "--timestamps", "--tail", "2000", container_name],
+    )
+    try:
+        with artifact.open("ab") as stream:
+            stream.write(
+                f"container={container_name} time_ns={time.time_ns()} "
+                f"test={os.environ.get('PYTEST_CURRENT_TEST', '')}\n".encode(
+                    "utf-8", errors="backslashreplace"
+                )
+            )
+            deadline = time.monotonic() + POSTGRES_DIAGNOSTIC_WAIT_SECONDS
+            for command in commands:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stream.write(f"skipped budget exhausted: {command!r}\n".encode())
+                    break
+                stream.write(f"command={command!r}\n".encode())
+                stream.flush()
+                try:
+                    result = subprocess.run(
+                        command,
+                        cwd=ROOT,
+                        check=False,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        timeout=remaining,
+                    )
+                    stream.write(f"\nreturncode={result.returncode}\n".encode())
+                except (OSError, subprocess.SubprocessError) as exc:
+                    stream.write(f"\ncollection error={type(exc).__name__}\n".encode())
+    except (OSError, ValueError):
+        pass  # Optional evidence must not replace the test outcome or cleanup.
 
 
 def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:

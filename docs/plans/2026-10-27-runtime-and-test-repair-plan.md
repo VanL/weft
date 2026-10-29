@@ -3000,3 +3000,99 @@ The plan is sound and mostly lean. It puts collection inside the owner that alre
   - `_wait_for_postgres` uses `time.time()` rather than a monotonic clock.
   - The fixture's `except BaseException` also catches `GeneratorExit`.
 - Possible scope expansion, owner decision only: the outer `main()` container (`bin/pytest-pg:603-606`) still gets only the legacy stderr logs. The new helper could retain that too. The evidence doesn't require it.
+
+### CI-D2 implementation and local verification (2026-10-29)
+
+After C2 comparison completed, implemented the reviewed collector in `bin/pytest-pg`, invoked from the isolated fixture's `else` before unconditional cleanup; PG matrix opts into existing diagnostics and uploads each slice's artifacts. No runtime, worker-count, load or test timeout changes. The actual child-pytest RED failed at missing artifact after original failure and cleanup guards (1 failed,1.25s). A first malformed after-delete mutant hit SyntaxError and is explicitly unqualified; the corrected mutant failed on missing raw server token after outcome/cleanup guards (1 failed,1.21s). Restored focused checks passed43cases in2.41s. Parent inspected both qualified assertions. Raw logs and `ci-d2-implementation-evidence.md` are under `/tmp/weft-implementation-20261027`.
+
+The retained B test tree passes29SQLite cases21.94s and34PostgreSQL cases44.24s, normal12 workers/native300. The PG run opted into diagnostics and produced16 isolated-server artifacts for actual Docker containers. Mypy passed480files; Ruff check and format633files pass. Full-tree verification and both independent review closures remain pending. No cause is assigned to the earlier Windows or PostgreSQL failures; CI-D2 repairs evidence lifetime, not an inferred server failure.
+
+
+### CI-D2 cross-family implementation review closure (2026-10-29)
+
+Claude completed201.52s, no blocker/noP1/P2. Parent accepts the causal and ownership assessment. O1 no change: diagnostics requires an absolute path and CI supplies one; expanding relative-path semantics is outside this slice. O2/O3 decline cosmetic extra assertion/constant. No scope expansion to outer-container logging or legacy cleanup timeout. The review did not rerun tests; its mutation table describes source-based expectations except the empirical RED/after-delete controls recorded above. Parent additionally inspected all16 real local PostgreSQL artifacts: selected State, readiness logs, both Docker commands return0, no collector errors. CI remains separate. Full verdict:
+
+**Verdict: no blocker.**
+
+I found no P1 or P2 findings. The four-file diff matches the reviewed CI-D2 plan tail (`docs/plans/2026-10-27-runtime-and-test-repair-plan.md:2878-2916`) and its accepted F1–F8 dispositions. No standing constraint is reversed, so there is no RECONSIDERATION REQUESTED. I only read code; I ran nothing. The test results you quote are your evidence, not mine. Real Docker CI is still the open gate.
+
+## Causal premise, checked against the actual code
+
+- **Pytest never sends a test failure into the fixture.** `.venv/.../_pytest/fixtures.py:1009-1016` resumes the fixture with `next(it)` and never calls `throw()`. So the fixture's `except BaseException` (`tests/helpers/pytest_pg_runtime.py:57`) only ever sees setup failures. I checked this locally against pytest 9.1.x; the plan records the same for CI's pytest 9.2.0.
+- **The container keeps its evidence until cleanup removes it.** `_start_postgres_container` (`bin/pytest-pg:261-280`) runs `docker run --detach` without `--rm`. A server that exits keeps its State and logs until `_cleanup_container` runs `rm -f`. Retaining evidence just before `rm -f` therefore fixes exactly the lifetime defect you described, and the diff claims nothing about the cause.
+- **The diagnostics directory exists before any fixture writes to it.** The PG pytest picks up `tests/conftest.py:29`, which loads the plugin, and `run_diagnostics.py:175-176` creates the directory in `pytest_configure`. `_build_test_env` copies `os.environ`, so the variable reaches the workers.
+
+## Implementation
+
+- **Fixture (`pytest_pg_runtime.py:56-67`).** `try/except/else/finally` is the right primitive.
+  - `else` runs exactly on a normal resume, whether the test passed or failed.
+  - An exception raised in `else` can't reach the legacy `except`, so the legacy logs are never fetched twice.
+  - The existing `finally` cleanup is unchanged.
+  - The disabled path makes no new calls.
+  - There are no flags, no hooks and no added fixture parameters. This is the smallest correct shape.
+- **Raw bytes and flush order (`bin/pytest-pg:176-202`).**
+  - The file opens in `ab` mode and metadata is encoded to bytes.
+  - It flushes after each `command=` line, immediately before the child writes to the descriptor.
+  - Result lines are written later and flushed in order by the next loop's flush or by `close()`.
+  - Because the child gets `stdout=stream` with no `text`/`encoding`, Docker's bytes are stored as-is.
+- **Bounded budget.**
+  - One monotonic deadline is taken after the header write. Each command gets the remaining time, and the second is skipped when nothing is left.
+  - On timeout, `subprocess.run` kills and reaps the child, so the wait stays bounded. File I/O and cleanup are excluded, as accepted.
+  - Inspect runs first, which keeps the small, decisive State evidence (exit code, OOMKilled) if `logs` stalls.
+- **Error containment.**
+  - The inner handler catches `OSError` (Docker missing) and `SubprocessError` (timeouts) and records them.
+  - The outer handler catches `OSError`/`ValueError` from open/write: a missing or unwritable directory, or a NUL in the path.
+  - `KeyboardInterrupt` and helper bugs propagate out of `else`, and `finally` still cleans up.
+- **Security.** Only the six State fields and a 2000-line log tail are collected. No Config, Env or DSN is captured, and the header holds only the container name, a timestamp and `PYTEST_CURRENT_TEST`.
+- **Workflow.** The variable is added to the single PG step, and the upload uses the existing pinned action with an `always()` condition. The artifact name is unique per slice and follows the Windows CLI precedent (`test.yml:83-89`). Turning on the whole plugin for the PG job was accepted as plan F5.
+
+## Is the test falsifiable?
+
+Each defensive branch fails visibly if removed. The outcome, cleanup, source-absent, unexpected-command and no-`ERROR` guards all run before any artifact assertion.
+
+| Mutation | What catches it |
+|---|---|
+| Collect after cleanup | Token gone, so the `\xff` content assertion fails (your corrected mutation) |
+| Remove the flush before the child call | Order assertions (`command=` before `STATE`, `returncode=0` before the token) |
+| Remove the inner `SubprocessError` catch | `TimeoutExpired` escapes as a teardown ERROR |
+| Remove the outer `OSError` catch (unwritable arm) | `NotADirectoryError` becomes a teardown ERROR |
+| Remove the budget skip | Stub sees `timeout=0`, its assertion fails, teardown ERROR |
+| Extra clock read or command | The ticks iterator runs out; inside the generator fixture `StopIteration` becomes `RuntimeError`, giving ERROR. Unknown commands also leave the unexpected-command witness file |
+| Wider inspect template | Exact field-set and no-`.Config`/`.Env` checks |
+
+Patching through the loader wrapper is correct, because each fixture call reloads the module. The autouse `docker_boundary` fixture is set up before the requested fixture and its monkeypatch is undone after it, so the patch covers the whole lifetime. The child environment matches `tests/system/test_run_diagnostics.py:29-35` and pins the worker count.
+
+## Optional observations (P3, none needed for this slice)
+
+- **O1: relative-path resolution.** The fixture resolves `WEFT_TEST_DIAGNOSTICS_DIR` at teardown without `.resolve()`. The plugin (`run_diagnostics.py:175`) and the harness (`weft_harness.py:199`) resolve it at configure time. A relative path combined with a test that calls `monkeypatch.chdir` would put the artifact somewhere else, because this fixture's teardown runs before monkeypatch undoes the chdir. CI uses an absolute path, and the plugin's docstring requires one. Suggested disposition: none.
+- **O2: unwritable arm.** It could also assert `directory.read_text() == "occupied"`. That's cosmetic, since the no-`ERROR` guard already makes the arm falsifiable. Suggested disposition: decline.
+- **O3: `state_format` could be a module constant.** Purely stylistic. Suggested disposition: decline.
+
+## Pre-existing issues, not worsened
+
+- The legacy `_print_container_logs` and `_cleanup_container` calls still have no timeout.
+- The setup-failure path still prints to stderr only.
+- The outer `main()` container still only gets the legacy stderr logs. Retaining it too would be an expansion and is your decision.
+- A worker killed by pytest-timeout's thread method cannot finalize, as accepted.
+
+Plan mode asked me to write a plan file and exit through a tool, but neither tool was available in this session, so this review is only here.
+
+
+Fresh-eyes CI-D2 review: no actionable findings; reviewer did not author CI-D2 and previously reviewed CI-D1. Full record follows.
+
+# CI-D2 fresh-eyes implementation review
+
+Verdict: no actionable findings in the four-file CI-D2 delta against359d8d8f. Read-only; no tests or edits. I did not author this slice or its plan. Prior role: reviewed CI-D1 diagnostics and worked on separate admission tests; this is not cross-family review.
+
+Correctness: isolated_postgres_server keeps the existing setup-error except and unconditional cleanup. The new else runs on normal generator resumption, including after a test assertion fails, so evidence is captured before container removal without pretending the fixture receives the test exception. The collector catches expected I/O/subprocess failures locally. Actual cleanup remains unconditional. The shared monotonic budget bounds the two Docker waits, with state collected first; it accurately excludes artifact file I/O and cleanup. The binary append stream is flushed before handing its descriptor to the child, preserving metadata/log ordering and undecodable server bytes. Selected State fields exclude container environment/config. Workflow opt-in and always-upload paths match and names distinguish matrix slices.
+
+Elegance and primitives: reuse is appropriate. Container lifecycle stays in the existing script/fixture, artifact retention uses ordinary subprocess stdout redirection and one append file, and try/except/else/finally expresses the lifecycle without a new state flag, report hook, watcher, timer or generic Docker abstraction. Existing runtime/control/load behavior is untouched.
+
+Test value: the child pytest executes the real fixture loader, collector and cleanup. Only Docker/schema endpoints and the collector-local monotonic clock are replaced. Source-token deletion makes after-cleanup collection observably wrong; raw os.write plus invalid byte exercises descriptor output rather than Python-buffer mirroring. Success/failure × normal/timeout/unwritable checks original outcome, actual cleanup, no unexpected command/error, shared remaining budget and retained data. Parent-reported RED and corrected after-delete mutant target the intended missing-artifact/content assertions. The malformed first mutant is explicitly excluded, correctly. I did not independently execute these runs.
+
+Limits: subprocess timeout cannot strictly bound OS process creation, arbitrary artifact filesystem delay, or the pre-existing cleanup call; the docstring correctly scopes the budget. Abrupt worker/process termination can bypass fixture teardown, so missing evidence remains inconclusive. Evidence retention does not diagnose the original CI failures by itself. Root records a separate actual-Docker opt-in run; the narrow boundary tests alone would not establish Docker integration.
+
+
+### Final local integration gate (2026-10-29)
+
+FullSQLite5987passed51skipped296.31s; final retained-test simplifications29passed23.63s. FullPostgreSQL5938passed29skipped408.61s, normal12/native300, opt-in diagnostics enabled. Parent verified all16 isolated-server artifacts contain selected live State, readiness logs and both Docker commands return0, without collection errors. Finalsource fingerprints match `retained-final-source-manifest.json`. Mypy480files/Ruff/format633files, suppressionindex and documentation paths pass. Fresh-eyes and cross-family CI-D2 implementation reviews are clear; retained-test reviews and dispositions are recorded in the admission plan. Final-head CI and four dependent extension jobs remain external gates. Original intermittent failure causes remain unresolved; no timeout/load reduction, automatic retry, merge or concurrent-worker change.
