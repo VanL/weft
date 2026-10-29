@@ -6,8 +6,11 @@ import builtins
 import importlib.machinery
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -541,57 +544,33 @@ def test_start_postgres_container_keeps_container_until_cleanup(
     assert "--rm" not in docker_run
 
 
-def test_wait_for_postgres_ignores_unpublished_entrypoint_bootstrap_server(
+def test_wait_for_postgres_requires_published_port_and_successful_tcp_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Readiness requires the published server and target database."""
-
-    pytest_pg = _load_pytest_pg_module()
-    commands: list[list[str]] = []
-    host_checks: list[str] = []
-    host_results = iter(
-        (
-            (False, "connection refused"),
-            (True, ""),
-        )
-    )
-
-    def fake_run(
-        cmd: list[str],
-        **_kwargs: Any,
-    ) -> subprocess.CompletedProcess[str]:
-        commands.append(cmd)
-        if "psql" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
-        raise AssertionError(f"unexpected readiness command: {cmd}")
-
-    def host_ready(port: str) -> tuple[bool, str]:
-        host_checks.append(port)
-        return next(host_results)
-
-    monkeypatch.setattr(pytest_pg, "_docker_port", lambda _name: "54321")
-    monkeypatch.setattr(pytest_pg, "_host_port_accepts_connections", host_ready)
-    monkeypatch.setattr(pytest_pg.subprocess, "run", fake_run)
-    monkeypatch.setattr(pytest_pg.time, "sleep", lambda _seconds: None)
-
-    port = pytest_pg._wait_for_postgres("weft-pg-test-example")
-
-    assert port == "54321"
-    assert host_checks == ["54321", "54321"]
-    assert commands == [
+    """Port discovery alone and a rejected SQL connection are not readiness."""
+    runtime = _load_pytest_pg_module()
+    ports = iter([None, "54321", "54321"])
+    results = iter(
         [
-            "docker",
-            "exec",
-            "weft-pg-test-example",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "weft_test",
-            "-tAc",
-            "SELECT 1",
-        ],
-    ]
+            subprocess.CompletedProcess([], 1, stdout="", stderr="starting up"),
+            subprocess.CompletedProcess([], 0, stdout="1\n", stderr=""),
+        ]
+    )
+    commands: list[list[str]] = []
+
+    def query(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert command[command.index("-h") + 1] == "127.0.0.1"
+        assert command[command.index("-d") + 1] == runtime.POSTGRES_DB
+        return next(results)
+
+    monkeypatch.setattr(runtime, "_docker_port", lambda _name: next(ports))
+    monkeypatch.setattr(runtime, "subprocess", SimpleNamespace(run=query))
+    monkeypatch.setattr(
+        runtime, "time", SimpleNamespace(time=time.time, sleep=lambda _: None)
+    )
+    assert runtime._wait_for_postgres("owned-server") == "54321"
+    assert len(commands) == 2
 
 
 def test_print_container_logs_includes_stdout_and_stderr(
@@ -846,3 +825,122 @@ def docker_boundary(monkeypatch):
         assert retained.index(b"returncode=0") < retained.index(
             b"isolated-server-evidence"
         )
+
+
+@pytest.mark.skipif(
+    os.environ.get("BROKER_TEST_BACKEND") != "postgres", reason="requires bin/pytest-pg"
+)
+def test_postgres_readiness_rejects_bootstrap_then_initializes_schema(
+    tmp_path: Path,
+) -> None:
+    """The temporary Unix server cannot authorize host-side fixture startup."""
+    runtime = _load_pytest_pg_module()
+    name = f"weft-readiness-test-{uuid.uuid4().hex[:8]}"
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    # The official image runs init scripts as postgres, not the host runner UID.
+    probe.chmod(0o777)
+    script = tmp_path / "hold.sh"
+    script.write_text(
+        "#!/bin/sh\ntouch /probe/bootstrap-ready\n"
+        "while [ ! -f /probe/release ]; do sleep 0.05; done\n",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--env",
+                f"POSTGRES_PASSWORD={runtime.POSTGRES_PASSWORD}",
+                "--env",
+                f"POSTGRES_USER={runtime.POSTGRES_USER}",
+                "--env",
+                f"POSTGRES_DB={runtime.POSTGRES_DB}",
+                "--publish-all",
+                "--volume",
+                f"{probe}:/probe",
+                "--volume",
+                f"{script}:/docker-entrypoint-initdb.d/hold.sh:ro",
+                runtime.POSTGRES_IMAGE,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        deadline = time.monotonic() + 30.0
+        while not (probe / "bootstrap-ready").exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError("actual bootstrap barrier was not reached")
+            time.sleep(0.05)
+        port = runtime._docker_port(name)
+        assert port is not None
+        # Unix SQL proves the temporary server is ready while final TCP is held.
+        unix = subprocess.run(
+            [
+                "docker",
+                "exec",
+                name,
+                "psql",
+                "-U",
+                runtime.POSTGRES_USER,
+                "-d",
+                runtime.POSTGRES_DB,
+                "-tAc",
+                "SELECT 1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert unix.stdout.strip() == "1"
+        with pytest.raises(RuntimeError, match="Connection refused"):
+            runtime._wait_for_postgres(name, timeout_seconds=3.0)
+        (probe / "release").touch()
+        assert runtime._wait_for_postgres(name) == port
+        dsn = (
+            f"postgresql://{runtime.POSTGRES_USER}:{runtime.POSTGRES_PASSWORD}"
+            f"@127.0.0.1:{port}/{runtime.POSTGRES_DB}"
+        )
+        runtime._initialize_broker_schema(env=runtime._build_test_env(dsn=dsn))
+        meta = subprocess.run(
+            [
+                "docker",
+                "exec",
+                name,
+                "psql",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                runtime.POSTGRES_USER,
+                "-d",
+                runtime.POSTGRES_DB,
+                "-tAc",
+                "SELECT count(*) FROM simplebroker_pg_v1.meta",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert meta.stdout.strip() == "1"
+    finally:
+        (probe / "release").touch()
+        runtime._cleanup_container(name)
+
+
+@pytest.mark.skipif(
+    os.environ.get("BROKER_TEST_BACKEND") != "postgres", reason="requires bin/pytest-pg"
+)
+def test_schema_preflight_requires_real_backend_operation() -> None:
+    """A lazy Queue constructor must not masquerade as schema initialization."""
+    runtime = _load_pytest_pg_module()
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        port = unavailable.getsockname()[1]
+        env = runtime._build_test_env(
+            dsn=f"postgresql://postgres:postgres@127.0.0.1:{port}/weft_test"
+        )
+        with pytest.raises(subprocess.CalledProcessError):
+            runtime._initialize_broker_schema(env=env)

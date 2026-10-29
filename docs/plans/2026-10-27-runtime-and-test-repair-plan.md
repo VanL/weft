@@ -3096,3 +3096,284 @@ Limits: subprocess timeout cannot strictly bound OS process creation, arbitrary 
 ### Final local integration gate (2026-10-29)
 
 FullSQLite5987passed51skipped296.31s; final retained-test simplifications29passed23.63s. FullPostgreSQL5938passed29skipped408.61s, normal12/native300, opt-in diagnostics enabled. Parent verified all16 isolated-server artifacts contain selected live State, readiness logs and both Docker commands return0, without collection errors. Finalsource fingerprints match `retained-final-source-manifest.json`. Mypy480files/Ruff/format633files, suppressionindex and documentation paths pass. Fresh-eyes and cross-family CI-D2 implementation reviews are clear; retained-test reviews and dispositions are recorded in the admission plan. Final-head CI and four dependent extension jobs remain external gates. Original intermittent failure causes remain unresolved; no timeout/load reduction, automatic retry, merge or concurrent-worker change.
+
+
+### Final-head CI result and retained evidence (2026-10-29)
+
+Head `b4afe36e1c56ce4c3448b0b4fff69563e69221fb`, Actions `40890367466`, completed with failure. All27 OS/Python jobs, PostgreSQL CLI/remaining, lint and coverage passed. PostgreSQL core-commands job123505625501 failed during setup of `test_manager_services_control_while_real_launch_receipt_is_held[PING]`: connection to isolatedserver port32781 rejected with `FATAL: the database system is starting up`, before PING assertions. Four dependent extension/integration jobs were skipped, not passed. Monitor deleted because the run and dependent checks are complete. No rerun or behavior change.
+
+New retained artifact `postgres-weft-pg-test-2962-25cf2916.log` proves container running, exit0, OOMKilledfalse. Its logs show normal temporary initialization-server shutdown, finalserver starting14:30:25.052UTC, rejectedconnection14:30:25.064UTC, finalready14:30:25.070UTC (6ms later). This provides concrete startup-boundary evidence, not an OOM/crash attribution. Current readiness code combines host TCP accept with container-local psql over Unixsocket; exact premature-readiness/preflight path still needs reproduction before repair. The earlier Windows and PG failures are not retroactively explained by this evidence. Raw joblog and downloaded diagnostics are under `/tmp/weft-implementation-20261027/ci-b4afe-pg-core*`. FinalCI/extension gates remain open.
+### CI-D3: PostgreSQL startup must prove the consumer endpoint is queryable
+
+Class4 harness startup-boundary repair, parent plan runtime-and-test-repair, contract docs/specifications/08-Testing_Strategy.md [TS-0]. No Manager/admission behavior changes. Base b4afe36e. Existing CI-D1/D2 and C2 rejection records remain intact.
+
+Confirmed evidence: b4afe core PG failed before Manager setup: final server reported FATAL starting up at14:30:25.064, ready25.070. Retained State running/noOOM/noerror does not support a crash claim. Scratch actual-owner probe held official postgres18 at init-script barrier; _wait_for_postgres returned33156 while actual host psycopgSELECT1 failed serverclosed. Exact failure `AssertionError: READINESS FALSE POSITIVE: helper returned while actual host query failed`, pg-bootstrap-boundary-probe.log. Separate actual _initialize_broker_schema against bound nonlistening49217 returnedsuccess, pg-startup-preflight-probe.log. Parent independently verified both.
+
+Ranked hypotheses: (1) mismatched readiness endpoints plus lazy preflight: predicts helper returns while bootstrap Unix SQL works but hostSQLfails (reproduced). (2) stale/wrong environment target: predicts preflight/harness DSNs differ; inspected _build_test_env assigns both targetkeys plus WEFT_PG_TEST_DSN from supplied isolatedDSN, no override observed; unavailable-target preflight proves no connection instead. (3) abnormal restart/OOM: predicts retainedState/log restart after final readiness; no evidence, normal temporaryserver shutdown followed by final startup. (4) transient finalserver startup: predicts listener before SQLready; actuallog confirms, but it becomes a failure only because readiness proof is insufficient. Do not generalize to unrelated prior Windows failure.
+
+Selected repair: replace weak host socket + container Unix psql conjunction with one authenticated real query through published127.0.0.1:port to configured database/user. Use existing optional psycopg dependency provisioned by the same `uv run --extra dev --with-editable . --with simplebroker-pg[dev] python` mechanism already used for schema preflight; no new dependency or wire-protocol implementation. Keep dependency import in the subprocess script, not unconditional bin import. A small host-query helper invokes one psycopg connection with connect_timeout=1, autocommit and SELECT1, closes it, returns readiness/detail from completed process. Password only in copied child env PGPASSWORD, not argv/log; clear inherited libpq service/host routing by explicit host/port/user/dbname arguments. _wait retains published-port discovery, existing60s deadline and1s retry delay; no added sleep, retries outside readiness, or testdeadline/worker/load changes. Remove dead socket helper/import and containerpsql path. Subprocess startup failure such as missinguv propagates; completed unsuccessful query remains existing bounded readiness retry semantics. Child query subprocess gets remaining readiness time as timeout, so a stalled executable cannot evade the existing deadline; timeout converted to readiness failure and owner raises with lastdiagnostic. Use monotonic deadline for this wait only, not unrelated time cleanup.
+
+Schema preflight: force actual backend operation with `queue.peek_one()` beforeclose inside try/finally. This is non-destructive and validates/initializes the actual shared schema; no message writes to avoidpreflight pollution. Preserve current caller, target/env, and subprocesserrorpropagation. It is a distinct schema contract, not a second retryloop. Narrow stdlib commandconstruction reuse between query and schema optionalPGpythoninvocations allowed only if it removes realduplication without framework. Alternative `docker exec psql -h127.0.0.1` would exclude bootstrap but still prove a different networkendpoint than consumer; selectedhostquery is stronger and avoids a redundant listenerprobe. Cost of uv runner per startup poll is accepted, measured focusedtest timing must be recorded; no permanent worker or pool.
+
+Tests first: replace existing readiness test that mocks socketFalseTrue and Unixpsqlsuccess with deterministic realowner dependency-boundary outcomes (publishedport absent, actualhostquery unavailable, thenready) and deadline/failure tests. Primary actualboundary RED uses officialpostgres18 container with init-script filebarrier. While bootstrap held, call actual _wait_for_postgres with short explicit testcaller timeout and require RuntimeError (old helper incorrectlyreturns). Releasebarrier in finally and alwaysremoveownedcontainer. After release, samehelper mustreturn and realhostSQL+schema operation succeeds. This Docker-dependent regression runs in existing PGbackend selection; no localDockeravailability fallback disguises requiredCIgate. Exact fixture-bound timeout is a test of readiness's callerbound, not modification of production60s/testsuite budgets. Reuse existing container helpers for cleanup/logging, actual subprocess/SQL/server untouched; only environment/barrier supplies controlledstate.
+
+Additional schema RED: run actual _initialize_broker_schema with bound nonlistening socket; require CalledProcessError. Pre-fix succeeds, intendedRED. Positive schema control use real readyserver; wrongpassword or wrongdatabase mustnotreturn readinesssuccess, tested at realqueryboundary or existingserver with directhelper. Deadline control uses isolated moduleclock/subprocessfailure, doesnotmockalgorithm. Ensure bounded-child timeout andsecret-notinargv contract hasboundarytests. No exact command snapshot that locks incidentalordering.
+
+Review/gates: externalcrossfamilyplan and separatefresheyes before implementation; recordverbatim/dispositions. QualifiedRED thenfix; revertfocusedowner mutation (old readiness or omitpeek) mustrestorefailure; actual originalprobe rerunGREEN updated oracle uses heldtimeout thenrelease. Focused helpertests normalworkers, realPG selected cases, full requiredSQLite/PG/statics; all testsclosed beforeedits. Fresh-eyes andcrossfamilyimplementation gates. Commit/pushPR48 authorized, monitor exacthead all27matrix/3PG/lintcoverage/4dependentjobs; skippednotpassed. No merging orblindrerun. Anynewfailure diagnosed independently.
+
+Rollback: revertstartuphelper/preflight change if confirmed regression; retain diagnosticartifactcollection. No persistedformat oronewaydoor. Stop/reconsider if actualquerydepends onnewdependency, secretleaks, deadline changes, orfixture requires broadmocking. Remaininguncertainty: earlier359d unexpectedclose same false-readiness mechanism is plausible but not provenidentical; currentcapturedstartupfailure anddeterministicbug are proven.
+
+Authorfresh-eyes: endpoint consistency and forced backendoperation address separate provenfalseproofs. Avoid simplysleepinglonger orretryingHarnessfailures. Mainrisk is uv subprocessstartupoverhead; bounded existingdeadline andexisting optionalenv provider containit. Keeptests at actualprotocolboundary.
+
+#### CI-D3 reviewed correction: simpler endpoint-proof split
+
+Cross-family plan review returned PASS (311.93s). Accept F1's simpler alternative, explicitly superseding the host-psycopg-per-poll design above: remove the weak host-socket helper/import; add `-h 127.0.0.1` to existing container psql query. Official image's temporary initialization server exposes only Unix sockets, so TCP SELECT1 proves the final server is queryable. Then force `queue.peek_one()` in the existing host-DSN schema preflight inside try/finally before close. Together these prove final-server readiness and the actual consumer endpoint before any fixture uses it. Host forwarding/auth failure surfaces immediately in the existing preflight, not in a new retry layer. No new uv polling, libpq routing cleanup, credential handling, query helper, deadline, clock, or subprocess timeout machinery. Existing60s readiness deadline/1s retry and existing startup cleanup retained. This selection is the explicit reviewed alternative, not a silent weakening of endpoint proof.
+
+F2 accepted: actual Docker barrier regression asserts published host socket acceptance and real Unix psql success while initialization is held (old false-proof preconditions), then requires actual readiness helper's RuntimeError attributable to TCP query refusal. Use the production-default wait after release. Test-owned Docker run uses module constants and mounts one small init-script barrier, no new production parameter. Finally releases barrier and removes owned container. Local held-query timeout permits completed Docker queries; no suite/production timeout change. F3/F4 no longer apply because uv-per-poll/directchild timeout design was removed. F5 host-probe routing/connect-timeout wording is obsolete for the same reason; no ambient libpq environment scrub added. F6 accepted: positive control verifies the default schema's meta table after actual preflight, separately from the negative no-listener connection proof. Optional clock/sleep changes declined as unrelated. Existing credential logging is not expanded.
+
+Author fresh-eyes correction: the readiness test must distinguish the temporary server from the final server through the protocol, not timing guesses. Bootstrap file barrier proves a controlled interval; qualified RED must fail because old helper returns, not import/setup issues. The unavailable-target preflight RED is a separate laziness proof, and real meta-table positive control verifies schema initialization. Reviewer could not read external scratch evidence due containment; parent independently verified both actual probes. No old Windows cause claim.
+
+Verbatim cross-family CI-D3 plan review:
+
+```text
+# CI-D3 plan review: **PASS**
+
+**Can it be implemented correctly?** Yes. I found no P1 findings. There are six [P2] findings below, mostly about how sharp the tests are and how precisely the plan states its claims. **Does it meaningfully degrade robustness?** No. The deadline, workers, load and product runtime are unchanged. Per-poll `uv` overhead is already an accepted risk. F3 describes one narrow cost that is new. No standing constraint is reversed, so there is no RECONSIDERATION REQUESTED.
+
+I only read code; I ran nothing and edited nothing. This session has no tools to write a plan file or exit plan mode, so the review is only in this reply.
+
+## What I checked against the code
+
+- **The causal premise holds.** Readiness is a host TCP accept (`bin/pytest-pg:116-123`) combined with `docker exec psql` with no `-h` (`bin/pytest-pg:228-249`). That psql connects over the container's Unix socket, so it can reach the entrypoint's temporary server.
+  - The existing test's name, `test_wait_for_postgres_ignores_unpublished_entrypoint_bootstrap_server` (`tests/system/test_pytest_pg_script.py:544`), shows the original design assumed a host TCP accept means a container listener exists. The probe disproves that.
+- **The preflight is lazy.** `Queue(persistent=True)` only builds a `DBConnection` (`.venv/.../simplebroker/sbqueue.py:289-295`), and `close()` releases a lease that was never acquired. `peek_one` does acquire a connection through `get_connection()` (`sbqueue.py:1082`). This matches the plan.
+- **Endpoint identity holds.** Readiness and the DSN use the same module constants and the same `port` (`bin/pytest-pg:289-295`). Both callers (`main()` at `:628-631` and the fixture at `pytest_pg_runtime.py:43-55`) run the preflight right after startup. No other caller exists.
+- **The schema RED will fail fast rather than slowly.** In simplebroker-pg, only SQLSTATEs 40001, 40P01 and 55P03 are retryable (`.venv/.../simplebroker_pg/runner.py:206-225`). A refused connection is not retried.
+- **Selection works.** `test_pytest_pg_script.py` is classified as shared (`tests/conftest.py:78`) and sits in the `remaining` slice. Gating with `skipif(active_test_backend() != "postgres")` has a precedent at `tests/system/test_measured_admission_pg.py:53-59`.
+- **Not verified:**
+  - I couldn't read `/tmp/weft-implementation-20261027/` because the file tools are confined to the repo. So the CI log, both probe logs, port 33156/49217 and the container identifiers are unchecked.
+  - The official image's entrypoint behaviour (a temporary server with no TCP listener, and `trust` for in-container 127.0.0.1) is outside the repo.
+
+## Findings
+
+**F1 [P2] The comparison with the container-TCP option leaves out the fixed preflight. Owner decides; I lean slightly toward the simpler option.**
+- Once `peek_one` forces the preflight, it already proves the full consumer endpoint before any consumer runs: host port, password, database, and the real `resolve_config` path.
+- So the readiness loop only has to prove that the final server is up. `docker exec … psql -h 127.0.0.1 -U … -d …` proves that, because the temporary server has no TCP listener. This would be a one-argument change plus deleting the socket probe.
+- What host-query readiness adds is a retry across host forwarding and authentication. But an authentication failure is permanent, and Docker sets up port forwarding when the container starts. Under the alternative, either failure surfaces at once as a `CalledProcessError` from the preflight, not as a false pass. So the alternative does not weaken the final proof. It moves the consumer-endpoint proof to the one-shot preflight.
+- What the alternative avoids:
+  - the embedded script;
+  - handling `PGPASSWORD`;
+  - a `uv` overlay per poll, including cold provisioning that can now be killed inside the 60 s window;
+  - timeout plumbing for the child and grandchild (F4);
+  - exposure to ambient libpq variables (F5);
+  - about four boundary tests: secret not in argv, wrong password, child timeout, deadline.
+- Suggested disposition: choose explicitly. If you keep the host query, record why retrying host-side failures justifies the extra machinery. If you switch, the barrier RED (F2) carries over unchanged.
+
+**F2 [P2] The barrier RED needs witnesses, or it can pass for the wrong reason.**
+- **(a) Precondition.** While the barrier is held, assert that the old proof would pass: the published port accepts a host TCP connection, and in-container Unix psql returns `1`. Without this, on a Docker host that refuses rather than accepts-and-closes, the old helper also raises, and the RED passes against unfixed code.
+- **(b) Attribution.** Require the `RuntimeError` message to carry the host-query failure, not `waiting for published port` or a `uv` timeout.
+- **(c) Timing.**
+  - The held-phase caller timeout must allow at least one completed query attempt, including `uv` startup. Record the measured value.
+  - The call after release should use the production default.
+- **(d) Seam.** `_start_postgres_container` has no way to inject an init script. Name the test-owned startup that applies the barrier and say how you'll avoid duplicating `bin/pytest-pg:261-280`. Options are `docker create` with the module constants, then `docker cp`, then `docker start`, or a bind mount. Release with `docker exec … touch`. Don't add a production parameter.
+
+**F3 [P2] Every non-zero exit is retried until the deadline.**
+- An `ImportError`, a `uv` resolution failure or a script bug now burns the full 60 s and is reported as "did not become ready".
+- Before, the first `uv` call was the preflight, which failed immediately.
+- Suggestion: the child exits with a dedicated code only for `psycopg.OperationalError`, and only that code is retried. Any other completed failure raises at once with stderr. A wrong password is still an `OperationalError`, so it still retries and then fails, which meets the plan's contract.
+- Owner may decline by citing the existing semantics (psql currently retries every failure). If so, document that.
+
+**F4 [P2] The claim that a stalled child can't evade the deadline is too broad.**
+- On POSIX, `subprocess.run(timeout=…)` kills `uv` and then waits only for `uv`. The interpreter that `uv run` supervises can survive as an orphan.
+  - The psycopg connect is bounded; `SELECT 1` has no statement bound.
+  - I couldn't confirm in the repo whether `uv` spawns or execs the interpreter.
+- On Windows, `run()` calls `communicate()` after the kill, which blocks until the pipes reach EOF. An orphaned grandchild holds them open, so the deadline can be evaded there. The PG harness only runs on Linux CI.
+- Suggestions:
+  - State the claim as "bounds the direct child's wait; on POSIX the grandchild is bounded by the connect timeout".
+  - In the boundary test, use a direct stalled child and don't assert anything about the grandchild.
+  - Check that the remaining time is positive before spawning.
+
+**F5 [P2] Two wording corrections.**
+- **Connect timeout.** psycopg raises `connect_timeout=1` to 2 s (`.venv/.../psycopg/conninfo.py:147-149`). The worst-case poll is roughly `uv` startup + 2 s + 1 s sleep.
+- **libpq routing.** Passing explicit host, port, user, dbname and password overrides only those settings. `PGSSLMODE`, `PGOPTIONS`, `PGTARGETSESSIONATTRS` and other values supplied through a service definition still apply. The consumer inherits them the same way through the copied `os.environ` (`bin/pytest-pg:303`), so that is the right fidelity. Reword the claim instead of scrubbing the environment.
+
+**F6 [P2] The preflight RED doesn't test the "validates/initializes schema" claim.**
+- A `CalledProcessError` against a port that isn't listening proves a connection was attempted, not that the schema was initialized.
+- Either have the positive control on the real server check the default schema's `meta` table, or reword the claim to "forces a real backend connection and operation".
+
+## Optional (not blockers)
+
+- With the monotonic deadline in place, clip the final 1 s sleep to the remaining time. Today it can overrun by up to 1 s; this predates the plan.
+
+## Separate, non-actionable observations
+
+- The password is already logged, independent of this plan:
+  - `_run` prints the `docker run` argv containing `POSTGRES_PASSWORD` (`bin/pytest-pg:83`, `:269`).
+  - `main()` prints the full DSN (`:629`).
+  - Scope the "secret leaks → stop" condition to new leaks.
+- These predate the plan and are not worsened by it:
+  - `_docker_port` takes the last line when Docker prints several mappings.
+  - `docker port`, `logs` and `rm` have no timeouts.
+  - The fixture's `except BaseException` also catches `GeneratorExit`.
+- I agree with the plan that the earlier 359d close and the Windows failures are not explained by this mechanism.
+```
+
+#### CI-D3 schema-target amendment discovered by independent positive control
+
+Initial GREEN correctly rejected held bootstrap, but both schema assertions remained red: unavailable host still returned success and real PostgreSQL meta table was absent (ci-d3-green.log,34passed2failed8.11s). Source trace explains why: Queue's explicit string db_path is a SQLite filename; only BrokerTarget or the omitted/configured default selects PostgreSQL. Thus the old preflight had TWO defects: lazy constructor/close and wrong backend binding. Forcedpeek alone created a local SQLite tree named postgresql:/, proving actual misrouting. Only this run's two generated directories postgres@127.0.0.1:33159 and :49753 were removed after verifying the exact inventory; prior gitstatus had no such tree.
+
+Narrow amendment: omit db_path and its unused target assignment from embedded preflight, keeping public Queue(name,persistent=True,config=resolve_config(env=os.environ)), realpeek, finallyclose. Queue's documented configured-default path resolves canonical BrokerTarget through target_for_directory; no manual backend registry or private API. Existing _build_test_env pins postgres and target, clears stale backendconfig; no new environment convention. Negative unavailablehost and positive actualPGmeta tests already failed on initial incomplete fix and remain the required oracle. This updates causal claim, not testexpectations. Review amendment before editing the owner. No speculative retry or product change.
+
+CI-D3 targeted schema amendment cross-family PASS122.48s; separate author-independent fresh-eyes PASS for revised TCP+hostpeek combination and configuredtarget amendment. Accept F1 wording: configureddefault has same precedence as weft/context.py; repo .broker.toml or BROKER_PROJECT_CONFIG_* can override ambient backendtarget, detected by unavailablehost/actualmeta oracles. No new environment scrubbing or guard needed in this slice. Verbatim targeted review:
+
+```text
+# CI-D3 schema-target amendment review: **PASS**
+
+**Can it be implemented correctly?** Yes. I found no [P1] findings and one [P2].
+
+**Does it degrade robustness?** No. It only removes code: the `target = …` line and the `db_path=target` argument from the embedded preflight. The deadline, readiness loop, cleanup, worker and test timeouts, and product runtime are all unchanged. Nothing here reverses a standing constraint, so there is no RECONSIDERATION REQUESTED.
+
+I only used Read, Grep and Glob, and edited nothing. I couldn't read `/tmp/weft-implementation-20261027/` because the file tools are confined to the repo. So `ci-d3-green.log`, the 34 passed / 2 failed result and the ports 33159 and 49753 are unchecked, and I rely on your verification for them. Plan mode has no write or exit tool in this session, so this review is only in this reply.
+
+## What I checked
+
+- **The misrouting cause holds.**
+  - In `Queue.__init__`, the config-default path is used only when `db_path` is `None` or `""` (`sbqueue.py:272-276`). Otherwise the string goes to `_canonicalize_queue_target`.
+  - For a non-`BrokerTarget` string with no runner, that function validates and returns `normalize_sqlite_target(str(target))` (`sbqueue.py:144-149,167`). So the old `db_path=os.environ['BROKER_BACKEND_TARGET']` bound SQLite, whatever the env said.
+  - "Two defects" is accurate: a lazy constructor plus close, and the wrong backend binding.
+- **The fixed route goes to PostgreSQL.**
+  - With `db_path` omitted, `_default_target_from_config` uses `Path.cwd()`, because the backend isn't SQLite (`sbqueue.py:170-178`).
+  - `target_for_directory` checks only the project TOML at that root, then the configured backend (`project.py:152-165`). It does no legacy `.broker.db` discovery, so the repo-root `.broker.db` can't capture it. Unlike `target_for_directory`, `resolve_broker_target` (`project.py:126`) would do that discovery.
+  - The PG plugin's `init_backend` and `verify_env` are pure. They take `BROKER_BACKEND_TARGET` plus `BROKER_BACKEND_PASSWORD`, with schema `BACKEND_SCHEMA` (`simplebroker_pg/plugin.py:283-322,481-523`). Construction stays lazy, so forcing `peek_one` is still needed.
+- **It is the consumers' own route.** Weft resolves through the same public `target_for_directory` (`weft/context.py:378`). The amendment therefore improves fidelity to the consumer path, not just correctness. It uses no private API and no manual registry.
+- **The oracle is sharp as a pair.** Both tests sit in the dirty tree at `tests/system/test_pytest_pg_script.py:900-925,934-944`.
+  - The negative test (a port that is bound but not listening, must raise `CalledProcessError`) fails if the preflight is lazy or bound to SQLite.
+  - The positive test (`SELECT count(*) FROM simplebroker_pg_v1.meta` == 1 over container TCP) fails if schema initialization went somewhere else.
+  - A preflight that always fails would break the positive test. The pair is jointly falsifying, and "updates causal claim, not test expectations" is correct.
+  - `simplebroker_pg_v1` is the right expected schema, because `_build_test_env` pops `BROKER_BACKEND_SCHEMA` (`bin/pytest-pg:287-288`).
+- **Cleanup claim.** There is no `postgresql:`-named tree at the repo root now.
+
+## Finding
+
+**F1 [P2] "Clears stale backend config" is slightly broader than what the code does. A project TOML outranks the env target.**
+- The omitted-path route is `target_for_directory(cwd=ROOT)`. Two things outrank `BROKER_BACKEND_TARGET` there (`project.py:155-157`):
+  - a `ROOT/.broker.toml`. This would be invisible to `git status`, because `.gitignore:24` ignores `.broker*`;
+  - ambient `BROKER_PROJECT_CONFIG_PATH` or `BROKER_PROJECT_CONFIG_NAME`. Neither is in `BACKEND_ENV_KEYS` (`bin/pytest-pg:51-68`).
+- If either were present, the preflight could pass against a SQLite target again: the same class of defect, silently.
+- Impact is low:
+  - A fresh CI checkout has no such TOML.
+  - The weft consumers share the same precedence.
+  - The new negative test would fail in any environment where this happens, so the suite already detects it.
+- Suggested disposition (owner decides): reword the claim along these lines: "the configured-default route, with the same precedence as `weft/context.py:378`; a project TOML at the repo root or `BROKER_PROJECT_CONFIG_*` takes precedence and is detected by the unavailable-host oracle."
+  - Optional, not a blocker: a one-line public-API guard in the embedded script that raises if `queue.db_target.backend_name != "postgres"`.
+  - I lean toward rewording only. The oracle already covers this, and adding scrubbing would invent a new environment convention.
+
+## Separate, non-actionable observations
+
+- The amendment's evidence implies that before CI-D3, the PG preflight never initialized the PostgreSQL schema. The xdist workers have always raced on first-use schema initialization. That fits the plan's "no old Windows cause claim", and the record should not turn it into a causal claim about earlier PG or Windows failures.
+- Previous PG runs probably left a stray `postgresql:`-named SQLite tree under the CI checkout root. This is harmless and ephemeral.
+- The embedded code is still echoed through `_run`'s argv print (`bin/pytest-pg:82`). It contains no secret, and the password stays in env. Credential logging is not expanded.
+- I couldn't check the committed `b4afe36e` text separately from the dirty tree, because I can't run git. The dirty tree still has `db_path=target` (`bin/pytest-pg:382,385`), which is consistent with the amendment's description.
+```
+
+CI-D3 implementation proof: initial qualified RED2failed3.73s at DIDNOTRAISE RuntimeError (after realhostsocket+UnixSQL bootstrap premises) and DIDNOTRAISE CalledProcessError (boundnonlistener), ci-d3-red.log. Parent inspected exact failures. Initial forcedpeek-only GREEN34pass2fail discovered wrong string targetbinding; no assertions weakened. After configureddefault correction, all36 helpertests passed97.16s normal12, including actualDockerheldbootstrap/release/defaultreadiness/PGmeta proof and realunavailablehost error. Unavailable-host negative took roughly90s through existingbackendconnectionfailure behavior; no retry or timeout changed. Omitpeek mutation failed intended DIDNOTRAISE CalledProcessError1.08s; removeTCP-h mutation failed intended DIDNOTRAISE RuntimeError3.75s. Ownerbytes restored from exactbackup. FullRuff andformat633files pass; fullmypy recorded ci-d3-mypy.log. External/fresh-eyes implementation and fullsuite/CI gates next. No Docker container from probes/tests retained.
+
+
+### CI-D3 implementation review and portable regression closure
+
+Independent cross-family implementation review returned one blocker: native Linux postgres UID cannot write pytest's mode0700 barrier directory. Accepted: use a dedicated test-owned mode0777 bind root. Also accepted the native fresh-eyes findings to place Docker allocation inside the existing cleanup try/finally and remove the mandatory published-host socket premise. Native Linux DNAT can correctly refuse that connection during Unix-only bootstrap; the recorded macOS original RED remains a conditional witness of the old conjunction, while the portable regression proves actual Unix SQL success, held initialization, and rejection by the corrected owner.
+
+Cross-family F2 optional context-manager rewrite declined: the current small try/finally already owns the exact Queue lifetime correctly, and no new consumer requires a refactor. F3 wording accepted: TS-0 explicitly says in-container loopback TCP, followed by host preflight. No deadline, worker, load, or product runtime changes.
+
+Portable final regression passed 1 in7.98s. Removing only psql -h from the corrected owner failed the exact RuntimeError DID NOT RAISE assertion at test899 (1failed3.62s); owner restored exactly. Full SQLite before these PG-only fixture corrections passed5987/skipped53 in211.04s; do not claim it exercised the changed PG regression. Final full Ruff, format633files, and mypy480files pass.
+
+Verbatim ci-d3-implementation-review (149.36s):
+
+```text
+**Verdict: one blocker (F1).** It probably breaks the new Docker regression on Linux CI, which is a correctness risk for the gate, not for the product. The production change to `bin/pytest-pg` is correct and simple, and it uses the real primitives. Apart from F1, the tests do what they need to.
+
+I only used Read, Grep and Glob. I ran nothing, edited nothing, and didn't write a plan file. I couldn't read the external logs you listed, so I'm relying on your verification for those numbers.
+
+## Checked against the code
+
+- **Readiness.** Adding `-h 127.0.0.1` to the existing container `psql` is enough (`bin/pytest-pg:209-232`). The official image's temporary init server only listens on a Unix socket, so a TCP `SELECT 1` can only succeed on the final server. It also prevents the b4afe failure (`FATAL: the database system is starting up`): readiness now needs a completed query on the final server, not just a published listener. The 60 s deadline, 1 s retry and startup cleanup in `_start_postgres_container` are unchanged. Removing `socket` and the host-accept helper leaves no dead code.
+- **The SimpleBroker premise holds.**
+  - With `db_path` omitted, `Queue.__init__` takes the configured default (`sbqueue.py:272-276`). `_default_target_from_config` then uses `Path.cwd()`, because the backend isn't SQLite, and goes through `target_for_directory` (`:170-178`). `_run` runs with `cwd=ROOT`, so this is the same route Weft's consumers use.
+  - The constructor only builds a `DBConnection` (`:289-295`), so it really is lazy.
+  - `peek_one` acquires a connection through `get_connection()`, and on an empty queue it returns `None` rather than raising (`:1073-1089`). So the forced read doesn't write anything and doesn't fail on a fresh schema.
+- **Both callers benefit.** `main()` and `isolated_postgres_server` (`tests/helpers/pytest_pg_runtime.py:55`) call the preflight right after readiness with an env from `_build_test_env`. Both now fail early and loudly on a bad endpoint, and xdist workers no longer race to initialize the schema on first use.
+- **The tests rule out the old code.**
+  - Unit readiness test: on old code, `command.index("-h")` raises, and the real host-socket probe would loop until `next(ports)` runs out. The fake clock still lets the deadline end the loop, so it can't hang.
+  - Docker test: it first shows that the old proof would have passed (host accept plus Unix `psql` returning 1), then requires a `RuntimeError` attributed to `Connection refused`. After release it uses the production default, then checks the real `simplebroker_pg_v1.meta` table. `simplebroker_pg_v1` is the right schema because `_build_test_env` pops `BROKER_BACKEND_SCHEMA`. `finally` releases the barrier and removes the owned container.
+  - Negative test: holding a bound socket that isn't listening reserves the port with no listener, so nothing else can grab it. On the old code it gets DIDNOTRAISE whether the preflight was lazy or bound to SQLite.
+  - Any always-failing preflight would also raise `CalledProcessError`, so that test alone could pass for the wrong reason. The positive meta-table test catches that case, so the pair together rules out both failure modes.
+- **Config precedence is unchanged and covered.** A repo-root `.broker.toml` or `BROKER_PROJECT_CONFIG_*` can still override the env target. In that case the unavailable-host oracle would fail loudly. No env scrubbing was added, which matches your stated decision.
+
+## Findings
+
+**F1 [P1] blocker: the barrier bind mount is probably unwritable by the container on Linux CI. Smallest fix: one line.**
+- The test mounts `tmp_path` as `/probe` (`tests/system/test_pytest_pg_script.py:859-860`).
+- pytest creates `tmp_path` with mode `0o700` (`.venv/.../_pytest/tmpdir.py:139,141`), owned by the runner user. The `test-postgres` job runs directly on `ubuntu-latest` with no `container:` (`.github/workflows/test.yml:183,226`).
+- The image's entrypoint drops to the `postgres` user (uid 999) before running init files. So `touch /probe/bootstrap-ready` fails with "Permission denied", and so does stat'ing `/probe/release`.
+- `hold.sh` is written as `0644`, so the entrypoint sources it under `set -Eeo pipefail`, and the failed `touch` stops the entrypoint. Even if it were executed instead, the barrier file never appears.
+- Result: about 30 s later the test raises `AssertionError("actual bootstrap barrier was not reached")` in the `remaining` slice.
+- Your local pass doesn't rule this out. Docker Desktop's file sharing on macOS doesn't enforce host uid/mode the way a native Linux bind mount does.
+- **Smallest fix:** add `tmp_path.chmod(0o777)` before `docker run`. The directory is test-owned and pytest still cleans it up. Files created by uid 999 can be deleted because the runner owns the directory.
+- **Alternative:** remove the `/probe` mount. Keep the barrier files in the container's `/tmp`, poll with `docker exec <name> test -f`, and release with `docker exec <name> touch`. This is the release method the earlier F2(d) suggested.
+
+**F2 [P2] Optional elegance: use `with` instead of try/finally in the embedded preflight.** `Queue` is a documented context manager (`sbqueue.py:221`). `with Queue('weft.pg.preflight', persistent=True, config=resolve_config(env=os.environ)) as queue: queue.peek_one()` cleans up the same way in two fewer lines.
+
+**F3 [P2] Optional wording: the spec could say which TCP is meant.** "Requires a successful TCP query" could be read as host TCP. "In-container loopback TCP query" matches what the code does, and it makes clear that the host endpoint is proven only by the following preflight. The current text isn't wrong.
+
+## Non-actionable observations
+
+- The witness that the host accepts TCP while the barrier is held (`:877`) depends on Docker's userland proxy, which is the default on GitHub runners. On a host with `userland-proxy: false` it would refuse, and the test would fail loudly instead of passing falsely. That is the right direction to fail.
+- If `docker run` fails after creating the container, the `finally` never runs, because `run` is outside the `try`. A named container could then be left behind. This is minor, and the pattern predates this change.
+- The new tests leave out the blank line after the docstring that older neighbours have. The recent evidence test does the same, so this is consistent with recent code.
+- The concerns outside scope are not made worse: the ~90 s negative path, the lack of timeouts on `docker exec`/`docker port`, and password echo through `docker run` argv and the DSN print. The embedded script contains no secret.
+```
+
+Verbatim ci-d3-implementation-closure (86.81s):
+
+```text
+**Verdict: no blocker.** F1 is fixed, and I found nothing new that would affect correctness on Linux. I only read the repository files. I ran nothing and edited nothing, and I couldn't read your external logs, so the pass, fail and mutant numbers are your verified results, not mine.
+
+## F1 on native Linux
+
+- **The barrier can now be written.** `probe.chmod(0o777)` at `tests/system/test_pytest_pg_script.py:842` sets the mode exactly; umask doesn't affect `chmod`.
+  - Inside the container, uid 999 can create `/probe/bootstrap-ready` and stat `/probe/release`.
+  - The host runner can see the file appear and can `touch` the release file.
+  - The runner owns the 0777 directory and there's no sticky bit, so pytest can delete the file created by uid 999 during cleanup.
+  - The parent `tmp_path` is still `0700`, but that doesn't matter. Docker resolves bind-mount sources as root, and the container only checks permissions from the mount point down. The same applies to `hold.sh`: it is `0644` and readable by `postgres`.
+- **The hold script works when sourced.** The script isn't executable, so the image's entrypoint sources it under `set -Eeo pipefail`.
+  - `touch` now succeeds.
+  - The `[ ! -f … ]` test in the `while` condition is exempt from `set -e`.
+  - The loop ends with status 0, so the entrypoint carries on and shuts down the temporary server.
+  - `postgres:18` is Debian-based, and its `sleep` accepts `0.05`.
+- **The Unix-socket query while held is portable.** The entrypoint creates `POSTGRES_DB` before it processes the init files, so `weft_test` exists during the hold. `docker exec` runs as root, `/var/run/postgresql` is world-writable, and the image trusts local connections. The query only depends on what happens inside the container, so it behaves the same on Docker Desktop and on native Linux.
+- **The rejection check is reliable.** The temporary server runs with `listen_addresses=''`, so nothing in the container listens on TCP 127.0.0.1:5432.
+  - The in-container `psql -h 127.0.0.1` therefore gets `Connection refused`, and `_wait_for_postgres` puts that stderr into the `RuntimeError` it raises (`bin/pytest-pg:234,237`).
+  - The loop always runs at least once, even if `docker exec` on a slow runner takes most of the 3 s.
+  - The port is checked to be non-None just before, so a "waiting for published port" message won't replace the error in practice.
+  - Removing the host-accept premise was the right call. On Linux, whether that check passes depends on docker-proxy or iptables configuration.
+- **Cleanup is complete.** `docker run` is now inside the `try`.
+  - If it fails, `finally` touches `release` in the existing probe dir, which is harmless.
+  - It then calls `_cleanup_container`, which uses `docker rm -f` with `check=False` and its output discarded (`bin/pytest-pg:115-124`). So a missing container is fine, and a half-created named container is removed. This closes the earlier non-actionable observation.
+- **After release, readiness reaches the final server.** Until the temporary server stops, `psql -h 127.0.0.1` keeps getting refused and readiness retries. The final server's default `pg_hba` has `host all all 127.0.0.1/32 trust` before the scram line the image appends, so the passwordless `docker exec psql -h 127.0.0.1` succeeds. Production readiness already relies on the same rule.
+
+## The rest of the final delta
+
+- **Production change.** `-h 127.0.0.1`, the deleted host-accept helper and `socket` import, and `peek_one()` through the configured default `Queue` with `cwd=ROOT` are the same as in my previous review. They are still correct and the smallest change that works. Not taking F2 is fine; the `try/finally` closes the same lifetime correctly.
+- **Negative test on Linux.** The bound socket that isn't listening makes the kernel send RST, which gives `Connection refused`. Because the port stays bound, the kernel can't give it to the client as its source port, so a self-connect is impossible.
+- **Unit test.** It still fails on the old code: either `command.index("-h")` raises `ValueError`, or `next(ports)` raises `StopIteration` once the real host probe has used up the port values.
+- **Spec (F3).** "In-container loopback TCP query" now matches what the code does.
+
+## Non-actionable observations
+
+- In the spec, the line with `` `bin/pytest-pg::_wait_for_postgres` `` is wider than the ~80-column wrap the paragraphs around it use. This is cosmetic, and the existing *Implementation mapping* line is already wide.
+- The barrier test assumes the test process and the Docker daemon share a filesystem, i.e. the runner isn't itself inside a container using a sibling daemon. That holds for the current `test-postgres` job.
+```
+
+Native author-independent final closure: PASS. Reviewer inspected restored TCP argument, dedicated directly mounted0777 probe, Docker allocation inside cleanup finally, and removed platform-dependent hostsocket prerequisite. Actual UnixSQL/barrier/rejection/schema-positive proof remains meaningful. No remaining actionable finding; reviewer ran no tests.
+
+Final full PostgreSQL suite: 5940 passed,29 skipped in363.02s (normal12 workers), ci-d3-full-pg.log. Both actual readiness regression and unavailable-host preflight control executed. Final local gates pass; exact-head CI after push remains required, including native Linux and Windows, with skipped extension checks not counted as passes.

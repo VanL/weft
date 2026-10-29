@@ -59,6 +59,14 @@ assertions require a named producer-closure boundary, meaning proof that the
 relevant producer can no longer emit the event being counted, before ordered
 history is asserted.
 
+PostgreSQL harness startup must distinguish the official image's temporary
+Unix-socket initialization server from its final TCP server. The canonical
+`bin/pytest-pg::_wait_for_postgres` requires a successful in-container loopback TCP query; its subsequent
+`_initialize_broker_schema` performs a non-destructive queue read through the
+consumer's host target before tests start. Constructing and closing a lazy Queue
+is not a schema or connectivity check. Repair and verification:
+[`2026-10-27-runtime-and-test-repair-plan.md`, CI-D3](../plans/2026-10-27-runtime-and-test-repair-plan.md).
+
 _Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated physical PostgreSQL proof fixtures through the canonical `bin/pytest-pg` lifecycle. `tests/helpers/reactor_driver.py::drive_until` owns
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
 contract tests.

@@ -11,7 +11,6 @@ import argparse
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -113,16 +112,6 @@ def _docker_port(container_name: str) -> str | None:
     return output.rsplit(":", 1)[1]
 
 
-def _host_port_accepts_connections(port: str) -> tuple[bool, str]:
-    """Return whether the published Postgres port accepts host TCP connections."""
-
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
-            return True, ""
-    except OSError as exc:
-        return False, str(exc)
-
-
 def _cleanup_container(container_name: str) -> None:
     """Remove the temporary Docker container if it still exists."""
 
@@ -205,7 +194,7 @@ def _retain_container_evidence(container_name: str, artifact: Path) -> None:
 
 
 def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
-    """Wait for the Postgres container to accept connections and return its host port."""
+    """Require final-server TCP SQL readiness; host preflight follows [TS-0]."""
 
     deadline = time.time() + timeout_seconds
     last_error = "container did not start"
@@ -217,20 +206,14 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
             time.sleep(1.0)
             continue
 
-        host_ready, host_error = _host_port_accepts_connections(port)
-        if not host_ready:
-            last_error = (
-                f"waiting for host connection to 127.0.0.1:{port}: {host_error}"
-            )
-            time.sleep(1.0)
-            continue
-
         result = subprocess.run(
             [
                 "docker",
                 "exec",
                 container_name,
                 "psql",
+                "-h",
+                "127.0.0.1",
                 "-U",
                 POSTGRES_USER,
                 "-d",
@@ -396,14 +379,15 @@ def _initialize_broker_schema(*, env: dict[str, str]) -> None:
         (
             "import os",
             "from simplebroker import Queue, resolve_config",
-            "target = os.environ['BROKER_BACKEND_TARGET']",
             "queue = Queue(",
             "    'weft.pg.preflight',",
-            "    db_path=target,",
             "    persistent=True,",
             "    config=resolve_config(env=os.environ),",
             ")",
-            "queue.close()",
+            "try:",
+            "    queue.peek_one()",
+            "finally:",
+            "    queue.close()",
         )
     )
     _run(
