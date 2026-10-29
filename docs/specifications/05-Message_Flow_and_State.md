@@ -1353,24 +1353,9 @@ the manager's broker-free child-launch worker lane. The manager reactor owns all
 broker effects: moving the request into a reserved queue, seeding the child
 inbox before worker submission, committing `task_spawned` and service-owner
 state after the worker returns, and deleting or applying reserved policy to the
-exact reserved spawn message. While the single launch-worker lane has an active request, the Manager
-continues task-local control and lifecycle processing but does not reserve
-another spawn request. PostgreSQL permits at most two attempted launch
-authorizations in a turn; SQLite permits one. An attempt closes its delivery
-pass's allowance before inbox seeding, including when seed, checkpoint or
-worker submission subsequently fails. A receipt applied at turn start still
-consumes that turn's ordinary allowance. Only a successful new worker submission
-in an ordinary delivery pass, followed by receipt settlement before that complete
-pass returns, can qualify one additional PostgreSQL delivery pass. That boundary
-must drain controls to observed emptiness, remain free of stop, draining and
-termination intent, and yield any remaining classification continuation. The
-additional pass uses the same source priority, startup, custody and fresh
-admission gates, with the existing child-maintenance gate before reservation.
-A failed worker result can qualify after successful submission and receipt settlement; all retry and custody gates still apply. The indexed frontier is reused without another classification page; later unclassified arrivals await normal classification, while known indexed work retains family ordering. An explicit public fallback submission without a following receipt drain cannot qualify.
-The Manager never waits for a receipt to fill a batch. STOP observed at the final
-pre-seed control fence prevents authorization; already-authorized work retains
-custody through seed, checkpoint, worker handoff and settlement. No post-seed STOP
-requeue/reseed path is introduced.
+exact reserved spawn message. While a launch worker is active, the manager must
+continue to answer task-local control messages such as `PING`, but it must not
+accept another spawn message in the same turn.
 
 Internal service observability has two publication phases. A successful manager
 launch first appears as a manager-authored `task_spawned` row with `child_tid`,
@@ -1411,9 +1396,7 @@ Current manager-dispatch rules:
   message from `weft.spawn.requests` owns that exact
   launch attempt
 - manager-owned internal spawn dispatch uses the same launch path and remains
-  strict-priority over ordinary work. When its attempted-fetch allowance is
-  exhausted, pending or unknown internal work defers ordinary reservation until
-  the next turn; positively observed empty permits the normal ordinary gates.
+  strict-priority over ordinary work
 - registry leadership is advisory for status, startup selection, and voluntary
   duplicate-manager convergence; stale or ambiguous registry proof must not
   block a manager that already reserved ordinary or internal spawn work

@@ -309,13 +309,9 @@ index is not a dated section and does not count toward the coalescing trigger.
   can reintroduce database access indirectly, even when the worker body itself
   has no queue calls.
 - A worker result committed at the start of a manager turn still counts as
-  launch work for that turn. Revised 2026-10-28: bounded serial batching may
-  reopen one PostgreSQL delivery pass only after a new submission in the prior
-  ordinary pass has settled and a bounded control drain proves empty. Close each
-  pass before seeding, including failed attempts; never wait for a receipt to
-  fill the batch. This preserves the control-order reason for the original rule:
-  a fast launch worker must not bypass pending STOP. Initial receipts do not
-  qualify the extra-pass exception.
+  launch work for that turn. Do not accept another spawn request before control
+  has had a chance to run; otherwise a fast child-launch worker can recreate a
+  same-turn STOP race.
 - Revised 2026-09-19: Manager-to-manager liveness probes are non-blocking
   reactor state. A stale-looking registry row with a keyed PING in flight stays
   unknown until a matching PONG or the next ordinary leadership evaluation; a

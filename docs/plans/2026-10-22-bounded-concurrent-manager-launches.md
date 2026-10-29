@@ -6,6 +6,10 @@ Superseded by: none
 
 Class: 5. Implementation with spec revision; hardening applies to reactor control order, launch custody, and cleanup. The October 27 revision replaces the concurrent-worker-first sequence with measured serial dispatch improvements. This document authorizes no deployment. Plan authoring does not implement or promote the proposed behavior.
 
+## Current execution decision (2026-10-29)
+
+B duplicate-sweep removal is retained. C1 and C2 are rejected after their complete measured comparisons; their proposed behavior below is historical experiment design, not the final runtime. Concurrent launch workers remain deferred. C2 candidate is recoverable at commit `94606277`; final runtime/constants/specifications restore `359d8d8f`. Useful real-broker test replacements remain. Final verification and CI gates are still open; see the execution log below for raw results and provenance limits.
+
 ## Goal
 
 Measure and reduce repeated Manager dispatch work while retaining the existing single launch-worker lane. First isolate duplicate child-sweep removal, then receipt-turn continuation and bounded serial dispatch batching. Consider concurrent launch workers only after those comparisons establish a remaining process-creation bottleneck worth their additional ownership and recovery machinery. A measured no-change or smaller-change result is a valid outcome.
@@ -70,7 +74,7 @@ Use the same fixed submitted workload, server capacity, resource configuration, 
 | A | Current single lane, receipt consumes turn, duplicate sweep | Reproducible baseline |
 | B | A plus dispatch-scoped duplicate-sweep removal only | Does one fewer sweep per dispatched request reduce work without delaying required settlement? |
 | C1 (rejected) | B plus initial-result-phase receipt continuation, still one new child launch per turn | Does eliminating the receipt-only turn reduce turns and latency? |
-| C2 (plan approved; implementation and measurement pending) | Retained B plus at most two serial delivery passes on PostgreSQL, one on SQLite | Are receipts ready soon enough to share maintenance within an outer turn? Is the extra loop worthwhile? |
+| C2 (rejected after measurement) | Retained B plus at most two serial delivery passes on PostgreSQL, one on SQLite | Are receipts ready soon enough to share maintenance within an outer turn? Is the extra loop worthwhile? |
 | D (deferred) | Concurrent launch workers | Not an implementation arm until the later gate and a fresh reviewed spec/design revision |
 
 The selected C2 experiment uses an internal PostgreSQL pass limit of two and SQLite limit of one, with the constant owned by `weft/_constants.py`. These are not user knobs or startup-window settings. Candidates four and six are not authorized by this revision. C1 was measured and rejected; its initial-receipt exception is not part of C2. C2 is removed unless the existing elapsed-time and control gates pass.
@@ -2796,3 +2800,92 @@ The complete B-before/C2/B-after comparison finished: 12 batches, 96 scenarios, 
 The strongest counterargument is the consistent PG PING improvement: candidate [0.145752708, 0.161187625, 0.153644292] seconds, each below every surrounding baseline sample. This does not replace the predeclared elapsed-time retention criterion. Batching was exercised: measured throughput traces had [16, 14, 14] extra spans and [8, 10, 10] extra authorizations; maximum simultaneous creators remained one. Receipt-only PG eligibility remained zero. The dependency-provenance qualification above still applies. This is not proof of equivalence or that batching cannot help.
 
 Decision: do not use the optional additional comparison to seek a favorable result. Reject C2 and restore B runtime/spec behavior, retaining independently useful real-broker test replacements and the startup-pressure fixture repair. Preserve the reviewed candidate in local Git before rollback so its implementation can be recovered. B duplicate-sweep removal remains retained for eliminating verified redundant work, without a speed claim. Concurrent launch workers remain deferred. Rollback tests, independent reviews, CI diagnostic repair and final CI gates remain outstanding.
+
+
+### Retained B test review and simplification (2026-10-29)
+
+Cross-family completed481.32s, no blocker. F1 accepted: remove maximum_creators and its accounting because the retained publication barriers make the counter non-discriminating; exact historical reservations and actual receipts remain the evidence. F2 accepted as-is: STOP state plus PG successor custody cover the case; no stronger SQLite claim. F3 accepted: remove C2 size/name leftovers. F4 deferred: ten lines of narrow forwarding wrappers do not justify a wider helper API. F5 accepted: attribute stalled-state clearing to the subsequent empty peek, not deletion itself. O2 accepted: import the shared process-cleanup helper directly from its owner in the PG system test. O1 late STOP receipt ordering is a pre-existing observation, not a confirmed new defect; no runtime change authorized by this review. O3 no defect, O4 optional custody expansion not added in this slice.
+
+Earlier native retained-delta review reported no findings but disclosed prior authorship of candidate tests; the cross-family pass supplies independent validation. Both are source reviews, not execution evidence. Full cross-family verdict follows; focused closure follows accepted simplifications.
+
+**Verdict: no blocker.** I read the files only; I ran no tests, no git and no mutations, and I didn't delegate. Write and ExitPlanMode weren't available in this session, so the review is here rather than in a plan file. I read the program theory, the review runbook, `AGENTS.md`, the code each test depends on, and the current state of all three files. In the regions under review, the files match the diff you gave.
+
+## Do the removed tests have real replacements?
+
+| Removed test | Replacement | Assessment |
+|---|---|---|
+| `…answers_ping_while_child_launch_is_active` (fake process, `elapsed < 3.0`) | `held[PING]` | **Stronger.** A real worker is held inside real process creation. If launch ran on the reactor thread, `process_once` would block for 30s and `hold_timeouts` would fire. It checks the exact PONG, the unreserved successor, and progress after release. |
+| `…stops_spawn_drain_after_child_launch_starts` (fake launch set only the per-turn flag) | `serial_dispatch` turn 1 | **Real.** The barrier publishes the launch result before `_drain_queue` returns. `BaseTask` applies results after the drain (`base.py:1488-1495`), so the public fallback (`manager.py:8419-8432`) sees an empty active-launch map. Only `_child_launch_started_this_turn` (set at `:1481` and `:1839`) stops a second launch in the same turn. `applied == submitted` proves that setup. The test fails only if both setters are removed. That is acceptable for a behaviour test. |
+| `…processes_internal_spawn_before_public_spawn` (fake launch, two launches in one turn) | `serial_dispatch` across turns | **Real.** The order comes from `QUEUE_PRIORITY_INTERNAL` (`manager.py:1170-1181`) and `_drain_priority_queues` (`multiqueue_watcher.py:1513`). The public rows are written first, so the order can't come from age. |
+| `…stop_command_does_not_launch_new_children_after_stop` | `held[STOP]` plus existing `test_manager.py:8318` and `:8766` | **Adequate together.** STOP while a child is live is covered at `:8318`. STOP in the middle of the handler with no new launch is covered at `:8766`. |
+
+On your main question: the publication barrier doesn't hide any product path. It only forces a legal ordering (a fast launch). Every process, queue, reservation and result is real.
+
+The control-drain rewrite (`test_manager.py:10306`) is an improvement. The fake queue injected into the cache is replaced by a fault at the SimpleBroker boundary, `Queue.delete` returning False. The new retry phase is a real test: it fails if the clear at `manager.py:5107` is removed. The `SimpleNamespace` clock replacement is the usual pattern in this repo.
+
+## Findings
+
+| ID | Sev | Location | Finding | Suggested disposition |
+|---|---|---|---|---|
+| F1 | P3 | `manager_dispatch.py:61-80`; `family:1503`, `:1639` | **`maximum_creators` can never fail in either test.** In `serial_dispatch`, the barrier waits for the first launch's result, which is published only after process creation returns, so two creations can't overlap. In `held`, the hold happens after `create_process` returns, after its `finally` has already decremented `_creators`, so a second creation during the hold would still read 1. The assertions that actually catch a second launch are `reserved == [ids[0]]` and the active-launch check. | **Accept: remove** the counter, `_creators` and `_lock`; `create_process` then only appends. This is leftover from C2. Don't move the hold inside the counted window, because "no concurrent launch workers" is an accepted risk. |
+| F2 | P3 | `family:1611-1637` | **The STOP-specific checks are weak.** Before the release, the active-launch gate (`manager.py:8412`) blocks dispatch for both PING and STOP. In the STOP turn, `_continue_shutdown_drain` finds `_child_processes` empty and finishes shutdown, so every later turn is `_process_stopping_reactor_turn` (`base.py:1498`), which never dispatches. The only check that tells STOP apart is `_draining or should_stop`. On SQLite, the startup window of 1 (`manager.py:1851-1856`) probably holds `ids[1]` back in that last turn even if STOP were ignored. On PostgreSQL the successor check does discriminate. | **Accept as-is.** The PostgreSQL run plus the state assertion cover it. Optionally say in the comment that this exercises the stopping-turn path. |
+| F3 | nit | `family:1496`, `:1472` | `count = 1` and the `batch-*` file names are left over from C2's batch size. | Accept: write `1` inline and rename. |
+| F4 | nit | `family:1571-1581` vs `manager_dispatch.py:99-103`, `:134-138` | The fetch and apply wrappers are copied verbatim between the helper and the held test. | Defer, owner's choice. Don't widen the helper's API just to remove this. |
+| F5 | nit | `test_manager.py:10348-10350` | The comment says the handler's deletion clears the stalled state. What actually clears it is the next empty peek (`manager.py:5105-5108`). | Accept: reword. |
+
+## Observations (not actionable this pass)
+
+- **O1, existing runtime behaviour.** STOP can finish draining while a launch result is still outstanding. `_continue_shutdown_drain` (`manager.py:8712`) checks only `_child_processes`, not `_active_child_launches`. The late result is then committed during the stopping turn with no draining check (`:1672`ff), so `task_spawned` can be logged after `manager_stop_drained`. The reservation itself is protected through `_scheduler_residents` (`:5412-5419`). `held[STOP]` runs this path but asserts nothing about it either way. This is a decision for the owner.
+- **O2.** The new helper module now has only one consumer. Separately, `tests/system/test_measured_admission_pg.py:20-22` still imports `_join_waiting_processes` through the alias in the family file. That works under the current mypy settings (`pyproject.toml:148-159`), but a later change should import it from `tests.helpers.manager_dispatch` directly.
+- **O3.** In `serial_dispatch`, turn 2 picks internal over public only because the first-turn service convergence marks the queues for re-probing (`manager.py:7983-7985`). Turn 1 drops the internal queue from the active set (`:5185`), and `drive_until` steps again with no wait in between (`reactor_driver.py:47`). In a real run loop, `wait_for_activity` re-probes on every turn (`multiqueue_watcher.py:1204-1206`). This isn't a defect; the test's cadence is harsher than production.
+- **O4, scope expansion.** `held[STOP]` could also assert that `ids[0]`'s reserved row is kept after STOP, which would cover the protected-custody path (MANAGER.11).
+
+I found no reversal of any theory or spec invariant, so no RECONSIDERATION REQUESTED. All the code and doc references above resolve. The final runs on this exact tree still need to happen.
+
+
+Full local SQLite suite on restored B plus retained tests and CI-D2:5987passed51skipped296.31s at normal12 workers (`retained-final-full-sqlite.log`). Following this run, review-directed test-only simplifications remove a vacuous counter, stale C2 names, and indirect helper import; focused SQLite rerun and full PG will verify that final test tree. No production change since this full SQLite result.
+
+
+### Retained-test final review closure (2026-10-29)
+
+Cross-family focused closure completed92.76s. Final author-independent fresh-eyes and cross-family verdicts below. Targeted final SQLite29passed23.63s, fullmypy480files/Ruff/format633files pass. FullPG remains in progress at this recording; no claim of completed CI.
+
+# Retained B tests: final independent fresh-eyes
+
+Verdict: no actionable finding. Scope: net359d8d8f changes in tests/core/test_manager.py, tests/core/test_manager_family_maintenance.py, tests/helpers/manager_dispatch.py and direct helper import in tests/system/test_measured_admission_pg.py. Read-only source review; no tests, edits, mutation or subprocess workloads. I authored CI-D1/CI-D2 diagnostic work and reviewed C2 earlier, but did not author this retained-test slice. This is an author-independent same-family fresh-eyes pass, not a cross-family claim.
+
+Accepted corrections verified: maximum_creators and its assertion/counters/lock are removed; create_process now retains actual processes only. Serial test name, serial-* witness paths and literal one-launch assertions match retained B semantics. Control retry comment attributes clearing to the post-deletion empty peek, not deletion itself. Measured-PG test imports join_waiting_processes directly from the shared helper, avoiding accidental re-export through the family test. No after_receipt callback or C2-only batching machinery remains.
+
+Correctness: the settled launch wrapper calls the actual launch, waits for actual publication, and lets the inherited result drain apply it. Historical reservations plus applied/submitted equality establish one-launch behavior after actual settlement, rather than trusting a mocked flag. Older public messages make internal-before-public order discriminating. Held receipt uses a real process and worker, sets an explicit hold, and records timeout failure outside swallowed worker exceptions. It proves exact PONG responsiveness and that the successor stays unreserved during the hold; PING subsequently progresses and STOP follows the stopping owner. Both tests release barriers before worker retirement/process joins, with patches remaining installed through cleanup. The retained stuck-control test substitutes only Queue.delete failure on an actual row, then advances the owner's local clock past its actual retry deadline and verifies row deletion/stalled-state clearing.
+
+Elegance and primitives: Event barriers, actual queues and exact timestamps express the causal ordering. Removing the creator counter eliminates a vacuous assertion without weakening actual reservation or progress evidence. Shared process cleanup is reused at its owning helper; retaining the two small fetch/apply wrappers avoids expanding that helper into a callback framework solely for deduplication. No arbitrary elapsed-time success threshold remains in the replaced liveness proof.
+
+Limits: this pass does not independently reproduce reported SQLite/PG runs or mutants. STOP's post-release checks exercise the stopping path, not every late-result custody invariant; existing separate STOP tests retain those broader contracts. The external review's pre-existing shutdown-order observation is not silently resolved by this test-only delta. No C2 performance benefit, concurrent-worker behavior or unrelated runtime correctness claim follows from this review. Final exact-tree test results remain the executing parent's gate.
+
+
+**Verdict: no blocker.** F1, F3, F5 and O2 are closed. This was a source-only review: I used Read, Grep and Glob and ran no tests, shell commands or delegation. Write and ExitPlanMode weren't available in this session, so the review is here. The three test files I reviewed match the diff you gave. I didn't open the runtime, constants or spec files to confirm they're unchanged since 359d; I relied on your statement, and none of the test changes refer to anything new in them.
+
+## Closure of the accepted findings
+
+| ID | Status | Evidence |
+|---|---|---|
+| **F1**: remove the vacuous `maximum_creators` counter | **Closed. No real check was lost.** | Nothing named `maximum_creators`, `_creators` or the old lock is left anywhere in `tests/`. `SettledLaunches.create_process` (`tests/helpers/manager_dispatch.py:63-69`) now just records each process and returns it. The checks that actually catch a second launch are all still there. In the serial test: `submitted == expected[:1]`, the matching `reserved` list, and the exact `peek_one` checks on both queues (`test_manager_family_maintenance.py:1500-1511`). In the held test: `reserved == [ids[0]]` and the successor still in source after the control turn (`:1603-1604`). |
+| Processes still recorded for cleanup | **Yes.** | Both paths record each process right after real creation and before any hold. The helper does this through `partial(evidence.create_process, real_create)` (`manager_dispatch.py:131-135`), and the held test calls `evidence.create_process` first (`family:1558`). Cleanup touches the release files and joins the workers before joining the processes (`manager_dispatch.py:142-143`, `family:1639-1640`), so the process list is complete when it is joined. |
+| **F3**: remove leftover C2 count and names | **Closed.** | The count of 1 is now written inline as `expected[:1]` (`family:1500-1501`). The ready and release files are named `serial-*` and `internal-*`, and no `batch-` names remain in the Manager tests. |
+| **F5**: comment wrongly said deletion clears the stall | **Closed.** | The comment (`test_manager.py:10348-10350`) now credits an empty-queue peek, not the deletion. In the third drain: the retry deadline has passed (`manager.py:4981-4985`), the handler deletes the row, and the peek at `:5144` returns `None`, so the row isn't marked again. Because `MANAGER_CONTROL_DRAIN_MAX_MESSAGES` is 32 (`_constants.py:774`), the loop runs again and the peek at the top of the loop clears the stall (`manager.py:5105-5108`). The assertions at `:10366-10367` would fail if that clear were removed. |
+| **O2**: import the cleanup helper directly | **Closed and correct.** | `tests/system/test_measured_admission_pg.py:24-26` now imports `join_waiting_processes` from `tests.helpers.manager_dispatch`, and the import order is correct. Nothing else imports `_join_waiting_processes` or `_dispatch_witness_body` through the family file. The family file's own aliases are still used at `:542`, `:966` onwards and `:1640`. |
+
+The other `test_manager.py` imports that the removed tests used (`cast`, `FakeLaunchProcess`, `WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE`) are still used elsewhere in the file, so no unused imports were left behind. No spec file mentions the removed test names; only historical plan text does.
+
+## Optional observations (non-blocking, owner's choice)
+
+1. **F5 comment wording (nit).** Strictly, the first empty peek after the delete is at `manager.py:5144`, and it doesn't clear anything; the clear comes from the empty peek at the top of the loop. "The drain loop's next empty-queue check" would be exact. The current wording is accurate enough for P2. Suggested disposition: decline.
+2. **Leftover import formatting (cosmetic).** `test_measured_admission_pg.py:20-22` still wraps the single `_publish_waiting_task` import in parentheses with a trailing comma, which is left over from the removed name. Ruff format keeps it as is, so it's harmless. Decline, or collapse it to one line.
+3. **Naming asymmetry (cosmetic).** In the serial test the public rows use `serial-{i}.ready` but the internal rows use `internal-{i}.ready`, and all four release files are `serial-*`. Also, `[int(tid) for tid in expected[:1]]` is the same as `internal_ids[:1]`. Decline unless you're editing the test anyway.
+
+I didn't reopen F4, F2, O1, O3 or O4. I found nothing that reverses a theory, spec, load, time or worker constraint, and the deferral of concurrent workers is untouched, so there's no RECONSIDERATION REQUESTED. The targeted final SQLite run and the full PostgreSQL run on this exact tree are still needed. This review says nothing about execution results.
+
+**Final: no blocker.**
+
+
+Final retained-tree PostgreSQL suite passed5938tests29skipped408.61s at normal12 workers/native300 with CI diagnostics enabled (`retained-final-full-pg.log`). Source manifest exactly matches the tested/reviewed files. Targeted final SQLite29passed23.63s follows the test-only review simplifications; preceding fullSQLite5987passed51skipped296.31s remains the full production-tree verification. No C2 runtime/spec delta remains. Optional closure nits are declined: current comment/import formatting and witness naming remain accurate and Ruff-clean. Final-head CI and dependent extensions remain outstanding; no merge or concurrent-worker implementation.

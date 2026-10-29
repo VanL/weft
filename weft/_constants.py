@@ -771,12 +771,6 @@ MANAGER_CHILD_INBOX_SEED_ATTEMPTS: Final[int] = 3
 MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS: Final[float] = 0.05
 """Linear retry base while seeding child inboxes before process launch."""
 
-MANAGER_POSTGRES_DISPATCH_MAX_PASSES: Final[int] = 2
-"""At most one extra ordinary pass after same-pass receipt settlement [MF-6]."""
-
-MANAGER_SQLITE_DISPATCH_MAX_PASSES: Final[int] = 1
-"""Retain SQLite's single ordinary delivery pass and serialized startup [MF-6]."""
-
 MANAGER_CONTROL_DRAIN_MAX_MESSAGES: Final[int] = 32
 """Maximum manager control messages handled before yielding a manager turn."""
 

@@ -58,26 +58,15 @@ class SettledLaunches:
     reserved: list[int] = field(default_factory=list)
     applied: list[str] = field(default_factory=list)
     publication_timeouts: list[str] = field(default_factory=list)
-    maximum_creators: int = 0
     processes: list[BaseProcess] = field(default_factory=list)
-    _creators: int = 0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def create_process(
         self, create: Callable[..., BaseProcess], *args: Any, **kwargs: Any
     ) -> BaseProcess:
-        """Observe actual concurrent creation and retain children for cleanup."""
-        with self._lock:
-            self._creators += 1
-            self.maximum_creators = max(self.maximum_creators, self._creators)
-        try:
-            process = create(*args, **kwargs)
-            with self._lock:
-                self.processes.append(process)
-            return process
-        finally:
-            with self._lock:
-                self._creators -= 1
+        """Retain each actual child for cleanup after its worker retires."""
+        process = create(*args, **kwargs)
+        self.processes.append(process)
+        return process
 
 
 @contextmanager
@@ -85,8 +74,6 @@ def settled_launches(
     manager: Manager,
     monkeypatch: pytest.MonkeyPatch,
     releases: list[Path],
-    *,
-    after_receipt: Callable[[str], None] | None = None,
 ) -> Iterator[SettledLaunches]:
     """Publish real receipts before returning to the inherited result drain."""
     evidence = SettledLaunches()
@@ -138,8 +125,6 @@ def settled_launches(
         tid = result.request.child_spec.tid
         assert tid is not None
         evidence.applied.append(tid)
-        if after_receipt is not None:
-            after_receipt(tid)
 
     with monkeypatch.context() as patch:
         patch.setattr(manager, "_fetch_next_message", fetch)

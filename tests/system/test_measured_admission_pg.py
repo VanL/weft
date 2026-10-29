@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterator
 from contextlib import ExitStack, closing, contextmanager
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,18 +18,18 @@ import weft.core.manager as manager_mod
 from simplebroker import BrokerSession, BrokerTarget, serialize_config
 from tests.core.test_manager import make_manager_spec
 from tests.core.test_manager_family_maintenance import (
-    _join_waiting_processes,
     _publish_waiting_task,
 )
 from tests.helpers.family_workload import FAMILY_EVENTS
-from tests.helpers.manager_dispatch import dispatch_witness_body, settled_launches
+from tests.helpers.manager_dispatch import (
+    join_waiting_processes as _join_waiting_processes,
+)
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import (
     COMPLETION_WAIT_REORDER_WINDOW_NS,
     WeftTestHarness,
 )
-from tests.tasks.sample_targets import wait_for_file
 from weft._constants import (
     ADMISSION_SERVICE_RESERVE_SLOTS,
     CONTROL_PING,
@@ -386,7 +385,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                     }
                 }
             )
-            request_ids = [int(source.write(body)) for _ in range(2)]
+            request_ids = [int(source.write(body)) for _ in range(3)]
             tids = [str(request_id) for request_id in request_ids]
             for tid in tids:
                 harness.register_tid(tid)
@@ -405,11 +404,6 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
             with _pressure(harness, None) as pressure:
                 pressure.send(startup_threshold)
                 assert pressure.poll(30.0) and pressure.recv() == startup_threshold
-                # A turn that receives the second launch may also dispatch a third.
-                # Make that request eligible only after real pressure is installed.
-                request_ids.append(int(source.write(body)))
-                tids.append(str(request_ids[-1]))
-                harness.register_tid(tids[-1])
                 observations: list[int] = []
                 read_usage = manager._read_postgres_connection_usage
 
@@ -808,198 +802,3 @@ def test_native_postgres_ceiling_denies_real_pressure_and_resumes(
             rows = _events(harness)
             assert len(rows) == 1
             assert rows[0]["admission_max_connections"] == 0
-
-
-def test_extra_dispatch_reads_fresh_pressure_before_reservation(
-    monkeypatch: pytest.MonkeyPatch,
-    isolated_postgres_server: None,
-    tmp_path: Path,
-) -> None:
-    """The same-turn successor observes real pressure before taking custody."""
-    with WeftTestHarness() as harness:
-        with harness.context.queue("batch-pressure-ids", persistent=True) as queue:
-            manager_tid = str(queue.generate_timestamp())
-        manager = Manager(
-            harness.context.broker_target,
-            make_manager_spec(manager_tid, idle_timeout=0.0),
-            config=load_config(
-                {
-                    "WEFT_ADMISSION_MAX_CONNECTIONS": 80,
-                    "WEFT_ADMISSION_RESERVE_FRACTION": 0.1,
-                    "WEFT_TASK_MONITOR_ENABLED": False,
-                    "WEFT_LIVENESS_MONITOR_ENABLED": False,
-                    "WEFT_HEARTBEAT_ENABLED": False,
-                    "WEFT_AUTOSTART_TASKS": False,
-                }
-            ),
-        )
-        releases = [tmp_path / f"pressure-{index}.release" for index in range(3)]
-        try:
-            manager._refresh_scheduler_evidence()
-            source = manager._queue(manager._queue_names["inbox"])
-            internal = manager._queue(manager._queue_names["internal_inbox"])
-            internal_ids: list[int] = []
-            ids = [
-                int(
-                    source.write(
-                        dispatch_witness_body(
-                            tmp_path / f"pressure-{index}.ready", releases[index]
-                        )
-                    )
-                )
-                for index in range(2)
-            ]
-            for request_id in ids:
-                harness.register_tid(str(request_id))
-            with _pressure(harness, None) as pressure:
-                owning_turn = False
-                tagged_gate = False
-                inside_tagged_gate = False
-                pressure_installed = False
-                ready_completed = False
-                before_pressure: list[int] = []
-                installed_pressure: list[int] = []
-                tagged_usage: list[int] = []
-                tail_usage: list[int] = []
-                in_tail = False
-                real_convergence = manager._run_managed_service_convergence
-                real_internal_drain = manager._drain_internal_spawn_requests
-                real_gate = manager._admission_allows_queue
-                real_usage = manager._read_postgres_connection_usage
-
-                def read_usage() -> Any:
-                    usage = real_usage()
-                    if inside_tagged_gate:
-                        tagged_usage.append(int(usage["total"]))
-                    return usage
-
-                def admission(queue_name: str) -> bool:
-                    nonlocal tagged_gate, inside_tagged_gate
-                    nonlocal pressure_installed, ready_completed
-                    if (
-                        owning_turn
-                        and queue_name == manager._queue_names["inbox"]
-                        and evidence.applied == [str(ids[0])]
-                    ):
-                        tagged_gate = True
-                        if not pressure_installed:
-                            # Install pressure independently of the decision's
-                            # fresh read, so a cached-read mutant sees it too.
-                            wait_for_file(str(tmp_path / "pressure-0.ready"))
-                            ready_completed = True
-                            before_pressure.append(int(real_usage()["total"]))
-                            amount = max(0, 74 - before_pressure[-1])
-                            pressure.send(amount)
-                            pressure_installed = (
-                                pressure.poll(30.0) and pressure.recv() == amount
-                            )
-                            installed_pressure.append(int(real_usage()["total"]))
-                            internal_ids.append(
-                                int(
-                                    internal.write(
-                                        dispatch_witness_body(
-                                            tmp_path / "pressure-internal.ready",
-                                            releases[2],
-                                        )
-                                    )
-                                )
-                            )
-                            harness.register_tid(str(internal_ids[0]))
-                        inside_tagged_gate = True
-                        try:
-                            return real_gate(queue_name)
-                        finally:
-                            inside_tagged_gate = False
-                    return real_gate(queue_name)
-
-                def convergence(*args: Any, **kwargs: Any) -> Any:
-                    nonlocal in_tail
-                    in_tail = (
-                        owning_turn and tagged_gate and not kwargs.get("force", False)
-                    )
-                    try:
-                        return real_convergence(*args, **kwargs)
-                    finally:
-                        in_tail = False
-
-                def internal_drain() -> int:
-                    if in_tail:
-                        # This read observes headroom; the actual drain still
-                        # reaches the original admission owner if the flag opens.
-                        tail_usage.append(int(real_usage()["total"]))
-                    return real_internal_drain()
-
-                with (
-                    settled_launches(manager, monkeypatch, releases) as evidence,
-                    monkeypatch.context() as patch,
-                ):
-                    patch.setattr(
-                        manager, "_run_managed_service_convergence", convergence
-                    )
-                    patch.setattr(
-                        manager, "_drain_internal_spawn_requests", internal_drain
-                    )
-                    patch.setattr(manager, "_admission_allows_queue", admission)
-                    patch.setattr(
-                        manager, "_read_postgres_connection_usage", read_usage
-                    )
-                    owning_turn = True
-                    try:
-                        manager.process_once()
-                    finally:
-                        owning_turn = False
-                    assert not evidence.publication_timeouts
-                    assert (
-                        evidence.applied[:1] == evidence.submitted[:1] == [str(ids[0])]
-                    )
-                    assert tagged_gate, (
-                        "no extra public admission before owning turn returned"
-                    )
-                    assert ready_completed, (
-                        "actual child readiness barrier did not complete"
-                    )
-                    assert len(before_pressure) == 1 and before_pressure[
-                        0
-                    ] < math.floor(72 * MANAGER_STARTUP_FAST_PATH_FRACTION)
-                    assert pressure_installed
-                    assert (
-                        len(installed_pressure) == 1
-                        and 72 <= installed_pressure[0] < 80
-                    )
-                    # Pressure is independently proved before this oracle: stale
-                    # admission must fail on actual forbidden custody, not a call count.
-                    assert evidence.reserved == [ids[0]]
-                    assert internal_ids and tail_usage, (
-                        "real tail internal drain did not run"
-                    )
-                    assert all(72 <= used < 80 for used in tail_usage)
-                    assert tagged_usage
-                    assert all(72 <= used < 80 for used in tagged_usage)
-                    assert evidence.applied == evidence.submitted == [str(ids[0])]
-                    assert source.peek_one(exact_timestamp=ids[1]) is not None
-                    assert (
-                        manager._queue(manager._queue_names["reserved"]).peek_one(
-                            exact_timestamp=ids[1]
-                        )
-                        is None
-                    )
-                    assert (
-                        internal.peek_one(exact_timestamp=internal_ids[0]) is not None
-                    )
-                    pressure.send("release")
-                    assert pressure.poll(30.0) and pressure.recv() == "released"
-                    drive_until(
-                        lambda: evidence.applied,
-                        lambda applied: (
-                            applied == [str(ids[0]), str(internal_ids[0]), str(ids[1])]
-                        ),
-                        step=manager.process_once,
-                        wait=manager.wait_for_activity,
-                        timeout=30.0,
-                    )
-                    assert not evidence.publication_timeouts
-                    assert evidence.reserved == [ids[0], internal_ids[0], ids[1]]
-                    assert evidence.maximum_creators == 1
-        finally:
-            manager.stop(join=False)
-            manager.cleanup()

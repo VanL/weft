@@ -10346,8 +10346,8 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
         assert manager._has_pending_messages() is False
         assert manager._control_allows_child_launch() is True
         # Let the same retained row retry after its actual owner deadline.
-        # Its successful handler deletion must clear stalled state before the
-        # newly observed post-handle empty boundary returns.
+        # After the handler deletes the row, the next empty-queue peek must
+        # clear stalled state before the control drain returns.
         retry_at = manager._stalled_control_retry_after_ns
         patch.setattr(Queue, "delete", real_delete)
         patch.setattr(
@@ -10361,11 +10361,10 @@ def test_manager_control_drain_yields_when_peek_message_does_not_advance(
                 sleep=time.sleep,
             ),
         )
-        empty = manager._drain_control_queue_first()
+        manager._drain_control_queue_first()
         assert ctrl_queue.peek_one(exact_timestamp=stamp) is None
         assert manager._stalled_control_message_id is None
         assert manager._stalled_control_retry_after_ns == 0
-        assert empty is True
 
 
 def test_manager_idle_shutdown(broker_env: BrokerEnv, unique_tid: str) -> None:

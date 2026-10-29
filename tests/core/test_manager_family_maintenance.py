@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import multiprocessing
 import multiprocessing.synchronize
-import signal
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -71,7 +70,7 @@ from weft.core.tasks.multiqueue_watcher import (
     QueueMode,
     QueueRuntimeConfig,
 )
-from weft.core.taskspec import ReservedPolicy, TaskSpec
+from weft.core.taskspec import TaskSpec
 
 pytestmark = pytest.mark.shared
 pytest_plugins = ["tests.helpers.pytest_pg_runtime"]
@@ -953,114 +952,6 @@ def test_consumed_primary_row_cannot_keep_a_cached_spawn_candidate(
     assert not manager._queue_has_pending(source)
 
 
-def test_manager_batches_settled_launches_with_internal_priority(
-    startup_pg_manager: tuple[Manager, WeftTestHarness],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Real receipts permit two PG attempts, one SQLite, preserving source priority."""
-    manager, harness = startup_pg_manager
-    internal = manager._queue(manager._queue_names["internal_inbox"])
-    public = manager._queue(manager._queue_names["inbox"])
-    releases = [tmp_path / f"batch-{index}.release" for index in range(4)]
-    # Both older public rows must follow both internal rows. The second
-    # internal row exposes loss of its active hint between settled passes;
-    # public P0 is also real eligible work for a forbidden third-pass mutant.
-    public_ids = [
-        int(
-            public.write(
-                _dispatch_witness_body(tmp_path / f"batch-{i}.ready", releases[i])
-            )
-        )
-        for i in range(2)
-    ]
-    internal_ids = [
-        int(
-            internal.write(
-                _dispatch_witness_body(
-                    tmp_path / f"internal-{i}.ready", releases[2 + i]
-                )
-            )
-        )
-        for i in range(2)
-    ]
-    expected = [str(tid) for tid in (*internal_ids, *public_ids)]
-    for tid in expected:
-        harness.register_tid(tid)
-    count = 2 if active_test_backend() == "postgres" else 1
-    with settled_launches(manager, monkeypatch, releases) as evidence:
-        manager.process_once()
-        assert not evidence.publication_timeouts
-        assert evidence.applied == evidence.submitted
-        assert evidence.submitted == expected[:count]
-        assert evidence.reserved == [int(tid) for tid in expected[:count]]
-        assert evidence.maximum_creators == 1
-        assert [
-            tid
-            for tid in internal_ids
-            if internal.peek_one(exact_timestamp=tid) is not None
-        ] == internal_ids[count:]
-        assert [
-            tid
-            for tid in public_ids
-            if public.peek_one(exact_timestamp=tid) is not None
-        ] == public_ids
-        drive_until(
-            lambda: evidence.submitted,
-            lambda submitted: submitted == expected,
-            step=manager.process_once,
-            wait=manager.wait_for_activity,
-            timeout=30.0,
-        )
-        assert not evidence.publication_timeouts
-        assert evidence.applied == expected
-        assert evidence.reserved == [*internal_ids, *public_ids]
-
-
-def test_pending_sigterm_prevents_extra_dispatch(
-    startup_pg_manager: tuple[Manager, WeftTestHarness],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Signal intent recorded after receipt must veto the extra PG pass."""
-    manager, _harness = startup_pg_manager
-    source = manager._queue(manager._queue_names["inbox"])
-    releases = [tmp_path / f"signal-{i}.release" for i in range(2)]
-    ids = [
-        int(
-            source.write(
-                _dispatch_witness_body(tmp_path / f"signal-{i}.ready", releases[i])
-            )
-        )
-        for i in range(2)
-    ]
-    boundary: list[tuple[bool, bool, bool, bool]] = []
-
-    def after_receipt(tid: str) -> None:
-        if tid == str(ids[0]):
-            manager.note_termination_signal(signal.SIGTERM)
-            boundary.append(
-                (
-                    manager._has_pending_termination_request(),
-                    manager.should_stop,
-                    manager._draining,
-                    bool(manager._active_child_launches),
-                )
-            )
-
-    with settled_launches(
-        manager, monkeypatch, releases, after_receipt=after_receipt
-    ) as evidence:
-        manager.process_once()
-        assert not evidence.publication_timeouts
-        assert boundary == [(True, False, False, False)]
-        assert not manager._family_classification_pending
-        assert evidence.applied == [str(ids[0])]
-        assert evidence.submitted == [str(ids[0])]
-        assert ids[1] not in evidence.reserved
-        assert source.peek_one(exact_timestamp=ids[1]) is not None
-
-
 @pytest.mark.parametrize("route", ["watcher", "explicit_public"])
 def test_dispatch_reuses_outer_child_cleanup(
     startup_pg_manager: tuple[Manager, WeftTestHarness],
@@ -1528,7 +1419,7 @@ def test_classification_continuation_keeps_first_dispatch(
         nonlocal first_boundary_seen
         phases.append(phase)
         try:
-            if phase == "queue_dispatch" and not first_boundary_seen:
+            if phase == "queue_dispatch":
                 first_boundary_seen = True
                 assert manager._family_classification_pending
                 assert manager._family_classify_after == ids[-2]
@@ -1549,10 +1440,7 @@ def test_classification_continuation_keeps_first_dispatch(
         with monkeypatch.context() as patch:
             patch.setattr(manager, "_timed_manager_call", timed)
             patch.setattr(manager, "_launch_child_task", launch)
-            with settled_launches(manager, monkeypatch, [release]) as evidence:
-                manager.process_once()
-                assert not evidence.publication_timeouts
-                assert evidence.applied == [str(ids[0])]
+            manager.process_once()
             assert first_boundary_seen
             assert authorizations == [str(ids[0])], (
                 "classification continuation blocked first dispatch"
@@ -1572,400 +1460,65 @@ def test_classification_continuation_keeps_first_dispatch(
         release.touch()
 
 
-@pytest.mark.parametrize("internal_state", ["pending", "empty", "unknown"])
-def test_internal_fetch_quota_preserves_priority(
-    manager: Manager,
+def test_manager_serial_dispatch_preserves_internal_priority(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    internal_state: str,
 ) -> None:
-    """An exhausted internal lane yields public only on actual known emptiness."""
+    """Real serial launches retain public custody until pending internal work drains."""
+    manager, harness = startup_pg_manager
     internal = manager._queue(manager._queue_names["internal_inbox"])
     public = manager._queue(manager._queue_names["inbox"])
-    malformed = [int(internal.write("{broken")) for _ in range(128)]
-    release = tmp_path / "quota.release"
-    internal_id = None
-    if internal_state == "pending":
-        internal_id = int(
-            internal.write(_dispatch_witness_body(tmp_path / "internal.ready", release))
-        )
-    public_id = int(
-        public.write(_dispatch_witness_body(tmp_path / "public.ready", release))
-    )
-    real_gate = manager._process_queue_message
-    real_pending = Queue.has_pending
-    real_priority = manager._drain_priority_queues
-    public_gate = False
-    failures: list[str] = []
-    priority_calls: list[bool] = []
-    internal_fetches: list[int] = []
-    real_fetch = manager._fetch_next_message
-
-    def fetch(config: QueueRuntimeConfig) -> tuple[str, int] | None:
-        message = real_fetch(config)
-        if message is not None and config.queue.name == internal.name:
-            internal_fetches.append(message[1])
-        return message
-
-    def gate(name: str, inactive: set[str]) -> bool:
-        nonlocal public_gate
-        public_gate = name == public.name
-        try:
-            return real_gate(name, inactive)
-        finally:
-            public_gate = False
-
-    def pending(queue: Queue) -> bool:
-        if (
-            internal_state == "unknown"
-            and public_gate
-            and queue.name == internal.name
-            and len(internal_fetches) == 128
-        ):
-            failures.append(queue.name)
-            raise BrokerError("named exhausted internal pending-read outage")
-        return real_pending(queue)
-
-    def priority() -> int:
-        priority_calls.append(True)
-        return real_priority()
-
-    with monkeypatch.context() as patch:
-        patch.setattr(manager, "_fetch_next_message", fetch)
-        patch.setattr(manager, "_process_queue_message", gate)
-        patch.setattr(manager, "_drain_priority_queues", priority)
-        patch.setattr(Queue, "has_pending", pending)
-        with settled_launches(manager, monkeypatch, [release]) as evidence:
-            manager.process_once()
-            assert priority_calls
-            assert internal_fetches == malformed
-            assert not evidence.publication_timeouts
-            if internal_state == "empty":
-                assert evidence.submitted == [str(public_id)]
-            else:
-                assert public_id not in evidence.reserved
-                assert evidence.submitted == []
-                assert public.peek_one(exact_timestamp=public_id) is not None
-            assert bool(failures) == (internal_state == "unknown")
-            # End the scoped outage, not the Manager's pending-state policy.
-            patch.setattr(Queue, "has_pending", real_pending)
-            if internal_id is not None:
-                drive_until(
-                    lambda: evidence.submitted,
-                    bool,
-                    step=manager.process_once,
-                    wait=manager.wait_for_activity,
-                    timeout=30.0,
-                )
-                assert evidence.submitted[0] == str(internal_id)
-            drive_until(
-                lambda: str(public_id) in evidence.submitted,
-                bool,
-                step=manager.process_once,
-                wait=manager.wait_for_activity,
-                timeout=30.0,
-            )
-
-
-def test_public_fetch_quota_bounds_real_requeue_refill(
-    broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """One real requeued poison row cannot consume an unbounded dispatch turn."""
-    target, queues = broker_env
-    tid = str(queues("requeue-quota-ids").generate_timestamp())
-    task = Manager(
-        target,
-        make_manager_spec(
-            tid, idle_timeout=0.0, reserved_policy_on_error=ReservedPolicy.REQUEUE
-        ),
-        config=load_config(
-            {
-                "WEFT_ADMISSION_MAX_CONNECTIONS": 0,
-                "WEFT_TASK_MONITOR_ENABLED": False,
-                "WEFT_LIVENESS_MONITOR_ENABLED": False,
-                "WEFT_HEARTBEAT_ENABLED": False,
-                "WEFT_AUTOSTART_TASKS": False,
-            }
-        ),
-    )
-    source = task._queue(task._queue_names["inbox"])
-    reserved = task._queue(task._queue_names["reserved"])
-    poison = int(source.write("{broken"))
-    release = tmp_path / "requeue.release"
-
-    phases: list[str] = []
-    fetch_phases: list[str] = []
-    real_timed = task._timed_manager_call
-    real_fetch = task._fetch_next_message
-
-    def timed[T](
-        phase: str, operation: Callable[[], T], *, child_tid: str | None = None
-    ) -> T:
-        phases.append(phase)
-        try:
-            return real_timed(phase, operation, child_tid=child_tid)
-        finally:
-            phases.pop()
-
-    def fetch(config: QueueRuntimeConfig) -> tuple[str, int] | None:
-        message = real_fetch(config)
-        if message is not None and message[1] == poison:
-            fetch_phases.append(
-                "public_dispatch" if "public_dispatch" in phases else "queue_dispatch"
-            )
-        return message
-
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(task, "_timed_manager_call", timed)
-            patch.setattr(task, "_fetch_next_message", fetch)
-            with settled_launches(task, monkeypatch, [release]) as evidence:
-                task.process_once()
-                assert len(fetch_phases) == 128
-                assert evidence.reserved == [poison] * 128
-                assert set(fetch_phases) == {"queue_dispatch", "public_dispatch"}
-                assert source.peek_one(exact_timestamp=poison) == "{broken"
-                assert reserved.peek_one(exact_timestamp=poison) is None
-                source.delete(message_id=poison)
-                successor = int(
-                    source.write(
-                        _dispatch_witness_body(tmp_path / "requeue.ready", release)
-                    )
-                )
-                drive_until(
-                    lambda: str(successor) in evidence.submitted,
-                    bool,
-                    step=task.process_once,
-                    wait=task.wait_for_activity,
-                    timeout=30.0,
-                )
-                assert not evidence.publication_timeouts
-    finally:
-        release.touch()
-        task.stop(join=False)
-        task.cleanup()
-
-
-@pytest.mark.parametrize(
-    "control", ["initial_pings", "boundary_pings", "boundary_stop"]
-)
-def test_serial_dispatch_observes_bounded_control_boundary(
-    startup_pg_manager: tuple[Manager, WeftTestHarness],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    control: str,
-) -> None:
-    """The extra pass drains controls without starving the ordinary first pass."""
-    manager, _harness = startup_pg_manager
-    source = manager._queue(manager._queue_names["internal_inbox"])
-    ctrl = manager._queue(manager._queue_names["ctrl_in"])
-    replies = manager._queue("dispatch-control-replies")
-    releases = [tmp_path / f"control-{i}.release" for i in range(2)]
-    ids = [
+    releases = [tmp_path / f"serial-{index}.release" for index in range(4)]
+    # Both older public rows must follow both internal rows across ordinary
+    # turns. Real receipt settlement must not open a second launch this turn.
+    public_ids = [
         int(
-            source.write(
-                _dispatch_witness_body(tmp_path / f"control-{i}.ready", releases[i])
+            public.write(
+                _dispatch_witness_body(tmp_path / f"serial-{i}.ready", releases[i])
             )
         )
         for i in range(2)
     ]
-    controls: list[int] = []
-
-    def publish() -> None:
-        if control == "boundary_stop":
-            controls.append(int(ctrl.write(encode_control_message(CONTROL_STOP))))
-        else:
-            controls.extend(
-                int(
-                    ctrl.write(
-                        encode_control_message(
-                            CONTROL_PING,
-                            request_id=f"batch-ping-{i}",
-                            reply_to=replies.name,
-                        )
-                    )
+    internal_ids = [
+        int(
+            internal.write(
+                _dispatch_witness_body(
+                    tmp_path / f"internal-{i}.ready", releases[2 + i]
                 )
-                for i in range(33)
             )
-
-    def after_receipt(tid: str) -> None:
-        if control != "initial_pings" and tid == str(ids[0]):
-            publish()
-
-    if control == "initial_pings":
-        publish()
-    with settled_launches(
-        manager, monkeypatch, releases, after_receipt=after_receipt
-    ) as evidence:
+        )
+        for i in range(2)
+    ]
+    expected = [str(tid) for tid in (*internal_ids, *public_ids)]
+    for tid in expected:
+        harness.register_tid(tid)
+    with settled_launches(manager, monkeypatch, releases) as evidence:
         manager.process_once()
         assert not evidence.publication_timeouts
-        assert evidence.applied and evidence.applied[0] == str(ids[0])
-        if control == "initial_pings":
-            assert all(
-                ctrl.peek_one(exact_timestamp=stamp) is None for stamp in controls
-            )
-            assert evidence.reserved.count(ids[0]) == 1
-        else:
-            assert ids[1] not in evidence.reserved
-            if control == "boundary_pings" and active_test_backend() == "postgres":
-                assert (
-                    sum(
-                        ctrl.peek_one(exact_timestamp=stamp) is None
-                        for stamp in controls
-                    )
-                    == 32
-                )
-                assert ctrl.peek_one(exact_timestamp=controls[-1]) is not None
-            if control == "boundary_stop" and active_test_backend() == "postgres":
-                assert manager._draining or manager.should_stop
-
-
-@pytest.mark.parametrize("fault", ["seed", "checkpoint", "start"])
-def test_failed_dispatch_attempt_consumes_the_pass_allowance(
-    manager: Manager,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fault: str,
-) -> None:
-    """A real failed first attempt must not reserve a successor in the same turn."""
-    source = manager._queue(manager._queue_names["inbox"])
-    releases = [tmp_path / f"failed-{i}.release" for i in range(2)]
-    ids = [
-        int(
-            source.write(
-                _dispatch_witness_body(tmp_path / f"failed-{i}.ready", releases[i])
-            )
+        assert evidence.applied == evidence.submitted
+        assert evidence.submitted == expected[:1]
+        assert evidence.reserved == [int(tid) for tid in expected[:1]]
+        assert [
+            tid
+            for tid in internal_ids
+            if internal.peek_one(exact_timestamp=tid) is not None
+        ] == internal_ids[1:]
+        assert [
+            tid
+            for tid in public_ids
+            if public.peek_one(exact_timestamp=tid) is not None
+        ] == public_ids
+        drive_until(
+            lambda: evidence.submitted,
+            lambda submitted: submitted == expected,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
         )
-        for i in range(2)
-    ]
-    real_write = Queue.write
-    with manager._get_connected_queue().get_connection() as broker:
-        broker_type = type(broker)
-    real_broker_write = broker_type.write
-    real_start = manager._start_service_worker
-    faults: list[str] = []
-    dispatch_passes: list[str] = []
-    real_timed = manager._timed_manager_call
-
-    def timed[T](
-        phase: str, operation: Callable[[], T], *, child_tid: str | None = None
-    ) -> T:
-        result = real_timed(phase, operation, child_tid=child_tid)
-        if phase == "queue_dispatch":
-            dispatch_passes.append(phase)
-        return result
-
-    def write(queue: Queue, *args: Any, **kwargs: Any) -> Any:
-        checkpoint_fault = (
-            fault == "checkpoint"
-            and queue.name == f"weft.state.tasks.{manager.tid}"
-            and str(ids[0]) in manager._active_child_launches
-        )
-        if checkpoint_fault:
-            faults.append(queue.name)
-            raise BrokerError("named dispatch persistence failure")
-        return real_write(queue, *args, **kwargs)
-
-    def broker_write(db: Any, queue: str, body: str, **kwargs: Any) -> Any:
-        if fault == "seed" and queue == f"T{ids[0]}.inbox":
-            faults.append(queue)
-            raise BrokerError("named child inbox write failure")
-        return real_broker_write(db, queue, body, **kwargs)
-
-    def start(*args: Any, **kwargs: Any) -> Any:
-        if fault == "start" and kwargs.get("request_id") == str(ids[0]):
-            faults.append("worker-start")
-            raise RuntimeError("named worker start failure")
-        return real_start(*args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(manager, "_timed_manager_call", timed)
-        patch.setattr(Queue, "write", write)
-        patch.setattr(broker_type, "write", broker_write)
-        patch.setattr(manager, "_start_service_worker", start)
-        with settled_launches(manager, monkeypatch, releases) as evidence:
-            manager.process_once()
-            assert faults
-            assert ids[0] in evidence.reserved
-            assert ids[1] not in evidence.reserved
-            assert evidence.submitted == []
-            assert source.peek_one(exact_timestamp=ids[1]) is not None
-            # PostgreSQL's real retry gate can protect custody even if a false
-            # submission witness opens another pass. Without a successful
-            # submission, that extra owner work is itself forbidden [MF-6].
-            assert dispatch_passes == ["queue_dispatch"]
-            patch.setattr(Queue, "write", real_write)
-            patch.setattr(broker_type, "write", real_broker_write)
-            patch.setattr(manager, "_start_service_worker", real_start)
-            drive_until(
-                lambda: str(ids[1]) in evidence.submitted,
-                bool,
-                step=manager.process_once,
-                wait=manager.wait_for_activity,
-                timeout=30.0,
-            )
-            assert not evidence.publication_timeouts
-
-
-@pytest.mark.parametrize("reason", ["sentinel", "terminal_retry"])
-def test_extra_dispatch_pass_rechecks_child_maintenance(
-    startup_pg_manager: tuple[Manager, WeftTestHarness],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    reason: str,
-) -> None:
-    """Cleanup reused across passes still yields to newly ready child maintenance."""
-    if active_test_backend() != "postgres":
-        pytest.skip("Only PostgreSQL opens an additional delivery pass")
-    manager, _harness = startup_pg_manager
-    source = manager._queue(manager._queue_names["inbox"])
-    release = tmp_path / "second-pass.release"
-    real_timed = manager._timed_manager_call
-    completed_passes: list[bool] = []
-    readiness: list[str] = []
-    with (
-        monkeypatch.context() as patch,
-        _staged_dispatch_maintenance(manager, patch, tmp_path, reason) as staged,
-    ):
-        _child, make_ready, assert_pending = staged
-        ids = [
-            int(
-                source.write(
-                    _dispatch_witness_body(tmp_path / f"pass-{i}.ready", release)
-                )
-            )
-            for i in range(2)
-        ]
-
-        def after_receipt(tid: str) -> None:
-            if tid == str(ids[0]):
-                make_ready()
-                assert_pending()
-                # Assert this marker outside the result handler as well: its
-                # exception boundary must not swallow a failed setup assertion.
-                readiness.append(tid)
-
-        def timed[T](
-            phase: str, operation: Callable[[], T], *, child_tid: str | None = None
-        ) -> T:
-            result = real_timed(phase, operation, child_tid=child_tid)
-            if phase == "queue_dispatch":
-                completed_passes.append(True)
-            return result
-
-        patch.setattr(manager, "_timed_manager_call", timed)
-        with settled_launches(
-            manager, monkeypatch, [release], after_receipt=after_receipt
-        ) as evidence:
-            manager.process_once()
-            assert not evidence.publication_timeouts
-            assert readiness == [str(ids[0])]
-            assert evidence.applied == [str(ids[0])]
-            assert len(completed_passes) == 2
-            assert ids[1] not in evidence.reserved
-            assert source.peek_one(exact_timestamp=ids[1]) is not None
+        assert not evidence.publication_timeouts
+        assert evidence.applied == expected
+        assert evidence.reserved == [*internal_ids, *public_ids]
 
 
 @pytest.mark.parametrize("control", [CONTROL_PING, CONTROL_STOP])
@@ -2081,7 +1634,6 @@ def test_manager_services_control_while_real_launch_receipt_is_held(
                 assert evidence.reserved == [ids[0]]
                 assert source.peek_one(exact_timestamp=ids[1]) is not None
             assert not hold_timeouts
-            assert evidence.maximum_creators == 1
         finally:
             release_receipt.set()
             retire_dispatch_workers(manager, releases)
