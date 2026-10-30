@@ -9,6 +9,7 @@ Spec references:
 
 from __future__ import annotations
 
+import faulthandler
 import itertools
 import json
 import logging
@@ -949,6 +950,72 @@ def test_manager_idle_probe_uses_newest_pending_timestamp(
     assert manager._read_broker_timestamp(force=True) == second
 
 
+def _retain_launch_witness(manager: Manager, *, deadline: float) -> dict[str, Any]:
+    """Temporary lock-avoiding snapshot before the unchanged spawn assertion."""
+    witness: dict[str, Any] = {
+        "pid": os.getpid(),
+        "time_ns": time.time_ns(),
+        "deadline_overrun_seconds": time.monotonic() - deadline,
+    }
+    try:
+        witness["startup_blocked"] = manager._startup_blocked
+        witness["draining"] = manager._draining
+        witness["active_launches"] = [
+            {
+                "tid": tid,
+                "source_queue": request.source_queue,
+                "reserved_queue": request.reserved_queue,
+                "message_timestamp": request.message_timestamp,
+                "started_ns": manager._child_launch_started_ns.get(tid),
+            }
+            for tid, request in itertools.islice(
+                manager._active_child_launches.items(), 16
+            )
+        ]
+        workers = []
+        for name, registration in itertools.islice(
+            manager._service_worker_registrations.items(), 16
+        ):
+            handle = registration.active_handle
+            workers.append(
+                {
+                    "name": name,
+                    "request_id": handle.request_id if handle is not None else None,
+                    "started": registration.threads_started,
+                    "completed": registration.threads_completed,
+                    "events_published": registration.events_published,
+                    "threads": [
+                        {
+                            "name": thread.name,
+                            "ident": thread.ident,
+                            "ident_hex": hex(thread.ident)
+                            if thread.ident is not None
+                            else None,
+                        }
+                        for thread in registration.threads[:32]
+                    ],
+                }
+            )
+        witness["workers"] = workers
+    except (AttributeError, RuntimeError, TypeError) as exc:
+        witness["snapshot_error"] = repr(exc)
+    directory = os.environ.get("WEFT_TEST_LAUNCH_WITNESS_DIR")
+    if not directory:
+        witness["write_error"] = "diagnostic directory unavailable"
+        return witness
+    try:
+        path = Path(directory) / f"launch-{os.getpid()}-{time.time_ns()}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", errors="backslashreplace") as stream:
+            stream.write(json.dumps(witness, indent=2) + "\n")
+            stream.flush()
+            faulthandler.dump_traceback(file=stream, all_threads=True)
+        witness["artifact"] = str(path)
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        witness["write_error"] = repr(exc)
+    return witness
+
+
 def wait_for_log_event(
     manager: Manager,
     log_queue: Queue,
@@ -971,6 +1038,7 @@ def wait_for_log_event(
             if predicate(event):
                 return event
         time.sleep(0.05)
+    launch_witness = _retain_launch_witness(manager, deadline=deadline)
     child_snapshot = {
         tid: {
             "pid": child.process.pid,
@@ -981,7 +1049,8 @@ def wait_for_log_event(
     }
     raise AssertionError(
         "Timed out waiting for matching task-log event; "
-        f"children={child_snapshot!r}; event_tail={event_tail!r}"
+        f"children={child_snapshot!r}; event_tail={event_tail!r}; "
+        f"launch_witness={launch_witness!r}"
     )
 
 
