@@ -1347,6 +1347,7 @@ def _build_manager_process_command(
             "import faulthandler,sys; "
             "faulthandler.dump_traceback_later(5,repeat=True,file=sys.stderr); "
             "import json,os,runpy,time; "
+            "os.environ['WEFT_STARTUP_WITNESS_CHILD_PID']=str(os.getpid()); "
             "sys.stderr.write(json.dumps({'startup_probe_pid':os.getpid(),'time_ns':time.time_ns()})+'\\n'); "
             "sys.stderr.flush(); "
             "runpy.run_module('weft.manager_process',run_name='__main__',alter_sys=True)"

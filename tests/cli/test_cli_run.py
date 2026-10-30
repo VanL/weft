@@ -620,6 +620,7 @@ def _run_parallel_manager_reuse_cycle(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
             status_observations=status_observations,
             status_payload=payload,
         )
+    _retain_startup_witness(harness)
     return payload
 
 

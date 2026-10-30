@@ -118,6 +118,29 @@ def _redirect_standard_streams_to_devnull() -> None:
             os.close(devnull_fd)
 
 
+def _startup_probe_phase(task_cls_path: str, phase: str) -> None:
+    """Temporary Manager-only markers in its already-owned stderr file."""
+    if task_cls_path != "weft.core.manager.Manager" or os.environ.get(
+        "WEFT_STARTUP_WITNESS_CHILD_PID"
+    ) != str(os.getpid()):
+        return
+    try:
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "startup_phase": phase,
+                    "pid": os.getpid(),
+                    "time_ns": time.time_ns(),
+                    "monotonic": time.monotonic(),
+                }
+            )
+            + "\n"
+        )
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def _task_process_entry(
     task_cls_path: str,
     db_path: BrokerTarget | str,
@@ -145,9 +168,13 @@ def _task_process_entry(
     reload_config(resolved_config)
     if runtime_identity is not None:
         install_runtime_identity(RuntimeIdentity.from_mapping(runtime_identity))
+    _startup_probe_phase(task_cls_path, "class_load_begin")
     task_cls = _load_task_class(task_cls_path)
+    _startup_probe_phase(task_cls_path, "class_load_end")
     spec = decode_taskspec_transport_payload(json.loads(spec_json))
+    _startup_probe_phase(task_cls_path, "constructor_begin")
     task = task_cls(db_path, spec, config=resolved_config)
+    _startup_probe_phase(task_cls_path, "constructor_end")
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
     stop_with_parent = _is_foreground_serve_task(task)
@@ -158,6 +185,7 @@ def _task_process_entry(
             watch_interval=PARENT_LOSS_WATCH_INTERVAL_SECONDS,
         )
 
+    _startup_probe_phase(task_cls_path, "run_entry")
     task.run_until_stopped(poll_interval=poll_interval)
 
     if hard_exit_on_return and os.name != "nt":

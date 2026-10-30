@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from simplebroker import BrokerTarget, Queue
+from tests.helpers.run_diagnostics import record_phase
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.typing import BrokerEnv, QueueFactory, TaskFactory
 from tests.helpers.weft_harness import WeftTestHarness
@@ -70,6 +71,8 @@ _progress_active_items: dict[str, float] = {}
 _progress_lock = threading.Lock()
 _progress_stop = threading.Event()
 _progress_thread: threading.Thread | None = None
+_diagnostic_config: pytest.Config | None = None
+_cli_diagnostic_lock = threading.Lock()
 _SHARED_MODULES = frozenset(
     {
         "tests/system/test_constants.py",
@@ -409,6 +412,34 @@ def task_factory(broker_env: BrokerEnv) -> Iterator[TaskFactory]:
                 logger.warning("Failed to stop test task")
 
 
+def _record_cli_phase(name: str, **details: object) -> None:
+    """Use the existing opt-in owner without replacing command outcomes."""
+    if _diagnostic_config is not None:
+        try:
+            with _cli_diagnostic_lock:
+                record_phase(_diagnostic_config, name, **details)
+        except (OSError, ValueError, RuntimeError, TypeError):
+            pass
+
+
+def _bounded_cli_output(value: str | bytes | None) -> dict[str, object]:
+    if value is None:
+        return {"length": 0, "prefix": "", "tail": ""}
+    size = len(value)
+    prefix = value[:8192]
+    tail = value[max(8192, size - 8192) :]
+    return {
+        "length": size,
+        "unit": "bytes" if isinstance(value, bytes) else "characters",
+        "prefix": prefix.decode("utf-8", errors="replace")
+        if isinstance(prefix, bytes)
+        else prefix,
+        "tail": tail.decode("utf-8", errors="replace")
+        if isinstance(tail, bytes)
+        else tail,
+    }
+
+
 def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
     *args: object,
     cwd: Path,
@@ -458,6 +489,8 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
     if prepare_root:
         prepare_cli_root(args, cwd=cwd, env=env_vars)
 
+    _record_cli_phase("run_cli:begin", command=cmd, cwd=str(cwd), timeout=timeout)
+    command_started = time.monotonic()
     try:
         completed = subprocess.run(
             cmd,
@@ -472,6 +505,15 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
+        _record_cli_phase(
+            "run_cli:timeout",
+            command=cmd,
+            cwd=str(cwd),
+            timeout=timeout,
+            subprocess_call_seconds=time.monotonic() - command_started,
+            stdout=_bounded_cli_output(exc.stdout),
+            stderr=_bounded_cli_output(exc.stderr),
+        )
         debug_lines = [
             "run_cli timeout diagnostics:",
             f"  command={' '.join(map(str, cmd))}",
@@ -498,6 +540,13 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
         exc.add_note(debug_text)
         raise
 
+    _record_cli_phase(
+        "run_cli:end",
+        command=cmd,
+        cwd=str(cwd),
+        returncode=completed.returncode,
+        subprocess_call_seconds=time.monotonic() - command_started,
+    )
     stdout = completed.stdout.strip()
     stderr = completed.stderr.strip()
 
@@ -631,7 +680,8 @@ def _write_progress_heartbeats(interval: float) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     """Start opt-in progress diagnostics for CI timeout investigation."""
 
-    del config
+    global _diagnostic_config
+    _diagnostic_config = config
     global _progress_thread
     interval = _progress_heartbeat_interval()
     if interval is None or _progress_thread is not None:
@@ -650,6 +700,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """Stop opt-in progress diagnostics."""
 
     del config
+    global _diagnostic_config
+    _diagnostic_config = None
     global _progress_thread
     if _progress_thread is None:
         return
