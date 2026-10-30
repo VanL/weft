@@ -1449,6 +1449,83 @@ def test_terminal_capture_collects_buffered_output_with_inherited_writer(
         _reap_test_process(process)
 
 
+def _inherited_writer_source(*, flood: bool) -> str:
+    """Build the actual held writer used by the inherited-pipe boundary tests."""
+    return (
+        "import errno,os,sys,time; from pathlib import Path\n"
+        "ready=Path(sys.argv[1]); release=Path(sys.argv[2]); closed=Path(sys.argv[3])\n"
+        + ("os.write(1,b'x'*4096); os.write(2,b'y'*4096)\n" if flood else "")
+        + "tmp=ready.with_suffix('.tmp'); tmp.write_text(str(os.getpid())); tmp.replace(ready)\n"
+        "while not release.exists():\n"
+        " try:\n"
+        + (
+            "  os.write(1,b'x'*4096); os.write(2,b'y'*4096)\n"
+            if flood
+            else "  time.sleep(.01)\n"
+        )
+        + " except OSError as exc:\n"
+        "  if not isinstance(exc,BrokenPipeError) and not (sys.platform=='win32' and exc.errno==errno.EINVAL): raise\n"
+        "  closed.touch(); time.sleep(.01)\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "error", "accepted"),
+    [
+        ("win32", errno.EINVAL, True),
+        ("linux", errno.EINVAL, False),
+        ("win32", errno.EACCES, False),
+        ("linux", errno.EPIPE, True),
+        ("win32", errno.EPIPE, True),
+    ],
+)
+def test_inherited_writer_handles_only_contextual_pipe_closure(
+    tmp_path: Path, platform: str, error: int, accepted: bool
+) -> None:
+    """The fixture preserves unexpected errors after real writes to both pipes."""
+    ready, release, closed = (
+        tmp_path / name for name in ("ready", "release", "closed")
+    )
+    wrapper = (
+        "import os,sys; from pathlib import Path\n"
+        "source,platform,code=sys.argv[1:4]; sys.argv=sys.argv[3:]\n"
+        "real_write=os.write; writes=0\n"
+        "def write(fd,data):\n"
+        " global writes\n"
+        " writes+=1\n"
+        " if writes<=2: return real_write(fd,data)\n"
+        " Path(sys.argv[2]).touch()\n"
+        " raise OSError(int(code),'injected pipe error')\n"
+        "os.write=write; sys.platform=platform\n"
+        "exec(source)\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            wrapper,
+            _inherited_writer_source(flood=True),
+            platform,
+            str(error),
+            str(ready),
+            str(release),
+            str(closed),
+        ],
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert ready.exists()
+    assert result.stdout == b"x" * 4096
+    assert result.stderr.startswith(b"y" * 4096)
+    assert result.returncode == (0 if accepted else 1), result.stderr.decode()
+    assert closed.exists() is accepted
+    if accepted:
+        assert result.stderr == b"y" * 4096
+    else:
+        assert f"[Errno {error}] injected pipe error".encode() in result.stderr
+
+
 @pytest.mark.parametrize(("returncode", "flood"), [(0, False), (7, False), (0, True)])
 def test_root_completion_bounds_inherited_pipe_drain(
     tmp_path: Path,
@@ -1459,24 +1536,13 @@ def test_root_completion_bounds_inherited_pipe_drain(
     """An inherited writer is not evidence of a running root [RM-5.2]."""
     ready = tmp_path / "descendant.pid"
     release = tmp_path / "release"
-    descendant_source = (
-        "import os,sys,time; from pathlib import Path\n"
-        "ready=Path(sys.argv[1]); release=Path(sys.argv[2])\n"
-        "tmp=ready.with_suffix('.tmp'); tmp.write_text(str(os.getpid())); tmp.replace(ready)\n"
-        "while not release.exists():\n"
-        " try:\n"
-        + (
-            "  os.write(1,b'x'*4096); os.write(2,b'y'*4096)\n"
-            if flood
-            else "  time.sleep(.01)\n"
-        )
-        + " except BrokenPipeError: time.sleep(.01)\n"
-    )
+    closed = tmp_path / "closed"
+    descendant_source = _inherited_writer_source(flood=flood)
     script = (
         "import subprocess,sys\n"
         "print('ROOT_OUT',flush=True); print('ROOT_ERR',file=sys.stderr,flush=True)\n"
-        "subprocess.Popen([sys.executable,'-u','-c',sys.argv[1],sys.argv[2],sys.argv[3]])\n"
-        "sys.exit(int(sys.argv[4]))\n"
+        "subprocess.Popen([sys.executable,'-u','-c',sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]])\n"
+        "sys.exit(int(sys.argv[5]))\n"
     )
     process = open_supervised_process(
         [
@@ -1487,6 +1553,7 @@ def test_root_completion_bounds_inherited_pipe_drain(
             descendant_source,
             str(ready),
             str(release),
+            str(closed),
             str(returncode),
         ],
         encoding="utf-8",
@@ -1518,6 +1585,8 @@ def test_root_completion_bounds_inherited_pipe_drain(
         assert outcome.returncode == returncode
         assert (outcome.stdout or "").startswith("ROOT_OUT\n")
         assert (outcome.stderr or "").startswith("ROOT_ERR\n")
+        if flood:
+            _wait_for_child_marker(closed)
         assert descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE
         assert "capture" in caplog.text and "EOF" in caplog.text
         _assert_owned_pipes_released(process)

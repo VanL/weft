@@ -1299,3 +1299,172 @@ As you said, this local review doesn't prove native Windows behaviour. The full 
 Disposition: PASS/no blockers. PostgreSQL evidence is now complete: owning module203passed34.03s; SQLite203passed8.76s, both all markers and normal12 workers. Focused GREEN was one test with12 workers, not12 tests. The actual owner-blocking mutation failed `_has_worker_activity() is True` withFalse in65.58s, before PING; it proves registered worker-lane participation, while GREEN directly proves PONG-before-release. Runtime restored byte-exact. Native independent review also passes. Fullmypy481, Ruff/format635, registry/docpath checks pass after the required nonsemantic string-parenthesis fix. Original3.95s startup delay remains unlocated; no runtime performance claim is made.
 
 Measurement provenance decision: retain manual run41109475299 on39a3c1c8 through all36jobs and native artifacts. This Consumer-test/plan-only correction leaves runtime, extensions, workflow and collector blobs unchanged; successful measurements from39a may be reused with that explicit source equivalence, never called same-head evidence. Require full normal CI on the corrected test head. Superseded known-failed normal run41109485264 may be cancelled after corrected push; retain its failure log and record cancellation, never a pass.
+
+
+### Native inherited-writer diagnostic (2026-10-30, evidence before repair)
+
+Manual39a Windows3.13 core failed `test_root_completion_bounds_inherited_pipe_drain[0-True]` at descendant liveness, after successful root status/output and capture-warning checks. All nine adapter execution cases passed, but the full job failed and skipped Windows measurements. Manual final31success/1failure/4skipped is not acceptance. The log contains no descendant exception or exit code, so the cause remains unproven. Primary CPython source v3.13.16 Python/fileutils.c `_Py_write_impl` delegates to CRT write and preserves errno; CPython issue35754/79935 and issue101881 explain Windows closed-reader writes may surface EINVAL rather than BrokenPipeError. This supports a hypothesis, not attribution of the historical failure.
+
+Before broadening fixture handling, run an extra native diagnostic from an isolated temporary branch based on58c2883f. Main runtime/tests/workflow remain unchanged. The temporary branch's existing test.yml dispatch path contains one Windows3.13 diagnostic job with read-only repository permissions and the same pinned tool actions/dependency installation. It is separate mechanism evidence, not a reduced replacement for official36-job validation and not performance acceptance. The small standalone probe reuses actual open_supervised_process and supervisor test helper, preserves root-to-flood-descendant topology and BrokenPipeError-only handling, and records first per-fd write exception plus successful byte counts atomically outside stdout/stderr. Five actual terminal-capture observations and five direct reader-close controls distinguish pipe closure from supervisor effects. Retain a real process HANDLE before closure (SYNCHRONIZE, limited query, owned-child termination right), observe wait state/exit code through that identity, and close it in finally after releasing/reaping the owned descendant. Unexpected exceptions remain failures and get independent sidecar evidence; no EINVAL suppression yet.
+
+Review exact probe/workflow before dispatch, retain diagnostic commit/run/artifacts and unchanged runtime blob identity. Native evidence must identify actual error/exit behavior before selecting a narrow fixture repair. Current official58c normal CI continues unchanged. If the diagnostic confirms the hypothesized errno, repair only that documented fixture boundary, retain real write/liveness premises and unexpected-error propagation, review and run officialCI again. Windows measurement remains pending until a complete successful native measurement dispatch; no skipped jobs count as passes.
+
+
+Native diagnostic draft review, verbatim (264.61 s):
+
+```text
+**Verdict: blocked. Don't dispatch yet.** There is one concrete blocker in what the probe records, plus some small ownership fixes. Everything else checks out. I read the runtime and helpers on this branch and ran nothing.
+
+## What checks out
+
+- **Topology matches.** The `ROOT` and `CHILD` argv slicing is right, and so is the ready-before-loop order. Running the supervisor once with `timeout=0.2` after `process.wait` matches `[0-True]` (`tests/core/test_subprocess_runner.py:1453-1508`). Without `sys.exit`, the root exits with returncode 0, which is correct.
+- **The Win32 calls are sound.** `SYNCHRONIZE`, `OpenProcess`, `WaitForSingleObject`, `GetExitCodeProcess`, `TerminateProcess` and `WAIT_TIMEOUT` all exist in `_winapi`; `multiprocessing.spawn` and the runtime at `subprocess_runner.py:1510` use the same ones. The access mask covers what each call needs, and `CloseHandle` sits in its own `finally`.
+- **The arms are separated properly.** The supervisor arm closes through `_close_output`/`_close_pipe` after cancel-and-collect (`subprocess_runner.py:1536-1552`). The reader-close arm calls `close_supervised_pipes` on the same `_OverlappedPipe` server ends. So the two arms really do separate "pipe-close mechanism" from "supervisor".
+- **Error and exit records stay outside the pipes**, using atomic `tmp.replace`. Unknown errors still `raise`. A missing marker or a forced cleanup fails the probe, and confirming the hypothesis doesn't. The probe reports and doesn't judge, which is right.
+- **The import path works.** `python tests/…py` relies on the hatchling editable `.pth` putting the root on `sys.path`. `tests/__init__.py` and `tests/core/__init__.py` exist, the same invocation already runs at `test.yml:82`, and the `runtime ==` assertion protects against importing from a mixed tree.
+- **Replacing `test.yml` on the temp branch is the right mechanism.** `workflow_dispatch` only resolves workflow files that exist on the default branch, but it runs the content at the dispatched ref. The temp version has no push/PR triggers, so the official runs are untouched.
+
+## Blocker: only the first error is recorded, and the exit wait depends on its type
+
+The child writes `error.json` only `if not error.exists()`. The probe then sets `wait_ms = 0` unless that first error is something other than `BrokenPipeError`.
+
+The likely native sequence is exactly the one this can't see:
+1. In both arms the pipe is full, so the descendant is blocked mid-`WriteFile`.
+2. The server end closes, and that in-flight write fails, possibly as `EPIPE` → `BrokenPipeError`.
+3. The original handler catches it and sleeps (`:1473`).
+4. The next write to the already-closed pipe fails with `ERROR_NO_DATA`, which the CRT turns into `EINVAL` (the bpo-35754 behavior). That error isn't caught, and the descendant dies.
+
+If that happens, the probe records `BrokenPipeError`, waits 0 ms, gets `STILL_ACTIVE` while the process is dying, and reports "survived". That is the opposite of what happened. The per-fd `try` makes it more likely, because fd 2 is attempted right after an fd 1 `BrokenPipeError`.
+
+**Narrow fix (no new framework):**
+- **Child:** keep `error.json` as the first-error marker. Just before `raise`, also write `fatal.json` atomically with the same record shape.
+- **Probe:** after the first-error marker appears, always do `WaitForSingleObject(handle, <fixed bound, e.g. 2000>)`, never a wait chosen by error type. Then record `GetExitCodeProcess` and the contents of `fatal.json` if it exists.
+- **Truthfulness check:** treat it as a `probe_error` unless the outcomes line up: `WAIT_OBJECT_0` with exit code 1 should come with `fatal.json` present, and `WAIT_TIMEOUT` with `STILL_ACTIVE` should come with it absent.
+
+A 2 s survival is strong evidence for BrokenPipe-only, because once the pipe is closed the 10 ms loop makes hundreds of failing writes in that time.
+
+## Non-blocking fixes
+
+1. **Close the owned parent ends in `finally`.** On any `probe_error` before the supervisor or reader-close step, nobody closes the parent ends. The descendant stays blocked writing into a full pipe, never sees `release`, and cleanup is always forced. `close_supervised_pipes(process.stdout, process.stderr, process.stdin)` is idempotent through `.closed`, so call it right after `release.touch()`. Since all observations are complete by then, this doesn't change what was observed.
+2. **Don't make descendant cleanup depend on reaping the root.** If `_reap_test_process` raises, the descendant is never waited on or terminated, and `observation.json` is skipped. Put the descendant wait/terminate in its own `try`/`finally`, and write the observation in the outermost `finally`.
+3. **Prove the process was alive when the handle was acquired.** Record `exit_at_open = GetExitCodeProcess(handle)` straight after `OpenProcess`, and expect `STILL_ACTIVE`. That's a cheap check against acquiring the handle after the descendant already exited.
+4. **Interpret `winerror: None` correctly.** `os.write` errors come from the CRT `errno`, so `winerror` will always be `None` here. Read that as "CRT errno only", not as a missing witness. Don't add a `WriteFile` arm, because that would change the mechanism under test.
+5. **Rename `stdout_bytes`/`stderr_bytes`.** They are `len()` of decoded text, so `*_chars` is accurate. It's the same number for ASCII payloads, but the label should be truthful.
+6. **Possible hang (accepted).** The supervisor arm has no thread/join bound like the original. A hang would run until the 15-minute job timeout. Observations from earlier cases are already written, and `always()` upload runs on cancellation. Normal CI already shows supervision returning, so this is acceptable as is.
+
+## Scope
+
+The scope you described holds: no runtime, test or official-workflow changes, no relaxed thresholds, 36 official jobs unchanged, and the fixture fix stays out of scope. Once the blocker fix and items 1–3 are in, I'd expect this to pass with no remaining blocker.
+```
+
+Dispositions: accept the blocker and all narrow evidence/ownership refinements. Record first error per fd plus every fatal unexpected exception, publish completion only after both fd errors or a fatal, and retain the original BrokenPipeError-only handling. After completion, wait on the retained kernel HANDLE for 2000 ms before release: WAIT_TIMEOUT plus STILL_ACTIVE and no fatal means only survival through this finite observation; WAIT_OBJECT_0 requires the actual nonzero exit and fatal sidecar. This is neither a product deadline nor a latency acceptance bar. Assert STILL_ACTIVE when acquiring the handle. Close parent pipes explicitly, run descendant cleanup independently of root cleanup, and write final observation in the outermost finally after rereading the sidecar. Label decoded lengths as characters. winerror=None is a legitimate CRT errno-only observation. Keep inline supervisor execution and the diagnostic job bound; no extra watchdog framework. Ruff and selected Windows mypy pass; native execution remains pending. Main58c normal run41112817269 is now complete with all36 jobs successful and zero skipped/nonpasses; this establishes intermittence only, not the inherited-writer cause.
+
+Parent fresh-eyes correction to that draft disposition: WaitForSingleObject and GetExitCodeProcess are sequential observations, not an atomic snapshot. A child can exit between them or publish a fatal before raising. Remove the joint consistency assertion and retain raw wait/exit values without treating valid transitions as probe failures. Avoid reading a sidecar concurrently with Windows replacement: read it only after release/cleanup. The final sidecar plus retained HANDLE final exit preserve the evidence. Invoke the probe with `python -m tests.windows_pipe_witness` so the selected checkout root resolves reused tests helpers. Selected Windows mypy and Ruff/format pass after these simplifications.
+
+Native diagnostic closure review, verbatim (137.54 s):
+
+```text
+**Verdict: PASS. Nothing blocks dispatch.**
+
+The corrected script handles every item from the prior review. I checked it against the helpers, the runtime close path and the official workflow at 58c2883f, reading them from the main checkout because the diagnostic worktree is outside my allowed path. I ran nothing.
+
+## Prior items, now closed
+
+- **Per-fd and fatal evidence:** `errors.setdefault(fd, …)` keeps the first error for each fd. `fatal` is recorded separately and always triggers a write. `error.json` is replaced atomically before `complete` is touched and before `raise`, so the probe never sees `complete` without the evidence behind it.
+- **Byte counts are snapshots:** each record copies the counts with `dict(writes)` at the moment of the error. A count of 0 is reported as 0, so the flood premise isn't overstated.
+- **Completion:** `complete` is touched only when there are errors on both fds or a fatal error.
+- **Fixed 2000 ms observation:** the probe always waits the same 2000 ms, whatever the error type, and records it as `observation_wait_ms`. It is not presented as a product deadline.
+- **Live at open:** `exit_at_open == STILL_ACTIVE` is asserted right after `OpenProcess`. The access mask covers `WaitForSingleObject`, `GetExitCodeProcess` and `TerminateProcess`.
+- **Consistency check:** "timed out, still active, no fatal" and "exited, nonzero code, fatal recorded" are the only accepted outcomes. The raw values are saved with `record.update` before the assert, so a mismatch keeps its evidence.
+- **Ownership:** after `release.touch()`, `close_supervised_pipes` closes the parent ends; it skips already-closed streams (`subprocess_runner.py:481-488`). Descendant cleanup runs in a `finally` that doesn't depend on `_reap_test_process` succeeding. `CloseHandle` sits in its own innermost `finally`. The observation is written in the outermost `finally`, after the final reread.
+- **Workflow:** the action pins and the install command match `test.yml:43-59` exactly. It has a read-only token, `workflow_dispatch` only, `always()` upload, and `if-no-files-found: error`.
+
+## Optional one-line hardening (not a blocker)
+
+On Windows, Python opens files without `FILE_SHARE_DELETE`. If the probe has `error.json` open when the child's `tmp.replace(error)` runs, the replace fails with `PermissionError`. That error is raised inside the child's `except` block, so the child dies without writing `fatal`.
+
+The only time this can overlap is the `write_error_at_completion` read, if a fatal error arrives after two first errors that were both `BrokenPipeError`. The failure is safe: the check reports a `probe_error` and doesn't produce a false witness. But that is the sequence we most want to catch. Deleting the `write_error_at_completion` line closes the window and loses nothing, because `write_error_before_release` and the per-record snapshots already hold that evidence. It's your call.
+
+## Points to keep in mind when reading the results (no script change)
+
+1. **The per-fd `try` differs slightly from the original.** In the original, a failure on fd 1 skips fd 2 for that iteration, so fd 2 is never written again once fd 1 keeps failing. A `fatal` on fd 2 whose `monotonic` time is after `errors["1"]` is a path only the probe can reach. It shows the pipe-close mechanism, not necessarily how the original descendant died.
+2. **`runtime_blob` is the identity to trust; `runtime_sha256` is not.** The repo has no `.gitattributes`, and Windows runners check files out with CRLF line endings. So `runtime_sha256` is the hash of the CRLF working file and won't match an LF hash taken locally.
+3. **`winerror: None` is expected.** `os.write` errors carry only the C runtime's `errno`. It doesn't mean a witness is missing.
+4. **One run proves the mechanism, not the CI failure.** As you said, it gates the repair. It doesn't explain the original 39a failure.
+
+The scope holds: runtime, tests and the official workflow are unchanged, nothing is relaxed, and the fixture reorder stays out of scope.
+```
+
+Disposition: PASS/no dispatch blocker. Parent independently identified the optional file-sharing issue and the non-atomic wait/exit assertion while this review ran; the final draft removes all live sidecar reads and the consistency assertion, preserving sequential raw observations and final post-cleanup evidence. Module invocation is now `python -m tests.windows_pipe_witness`. These simplify the evidence collector without changing runtime or original exception handling. Explicit diagnostic limitation: per-fd attempts can reach fd2 after fd1 failed, unlike the original shared try block. A later fd2 fatal proves closed-pipe mechanism, not that exact historical execution sequence. Trust the normalized git runtime blob for source equivalence; Windows working-file SHA256 may differ from LF due to checkout line endings. Native witness is not original-failure attribution.
+
+
+### Native inherited-writer repair after confirmed mechanism
+
+Diagnostic run41116680387 at6ebc4602880c9001e862563c983d2125fa554eea passed its single evidence job. Retained report contains ten first-error fatal OSError(EINVAL=22), winerror=None, each after successful writes to both inherited fds; all retained HANDLEs report exit1 before release, no probe errors/forced cleanup. Five actual-supervisor cases and five direct-reader-close controls agree. Four supervisor first errors were fd1; the fifth and all direct controls were fd2 after successful fd1. None depends on continuing after a prior benign error, so the probe's per-fd variation did not alter the path up to failure. Runtime blob57d75aaeb21f1671d368a5429a980cbd63fc79af matches main58c. This confirms the fixture's native closed-reader failure mechanism. The historical39a failure remains an inference because its own traceback was not captured.
+
+Class2 test-only repair under [RM-5.2]/[TS-0]: factor the existing descendant source builder into one local helper reused by its real integration test and focused source-execution controls. For flood mode, perform one normal4096-byte write to each inherited stream before publishing readiness, outside error suppression. Thereafter retain the original shared try/4KiB flood and tolerate BrokenPipeError on all platforms plus OSError(errno.EINVAL) only on Windows. Unexpected errors still raise. This is an owned test fixture with proven valid pipe writes and parent closure, not a production error policy. Quiet mode preserves behavior. No production, load, worker count, capture deadline or original5s bounds change.
+
+Focused controls execute the exact generated source in real child interpreters. A narrow os.write hook delegates the first two real writes, then injects a chosen error and publishes release so successful handling ends deterministically. Cover Windows EINVAL acceptance, POSIX EINVAL rejection, Windows access-denied rejection, and BrokenPipeError acceptance. Platform selection is a test input only to the child source; real native coverage remains the official Windows runs. Assert exact output from the two real writes, readiness, and exit/error evidence. A mutation removing the Windows EINVAL allowance must fail its acceptance control; broad allowance must fail unexpected-error controls. Run restored runner module, statics, independent fresh-eyes/cross-family review, then full normal36 and full manual36 with Linux/Windows measurements at the corrected head. Existing native diagnostic is the qualified failing reproduction of the old fixture; local controls must also fail before the allowance is implemented. No blind rerun or merge.
+
+Repair plan/test review, verbatim (110.65 s):
+
+```text
+**PASS, no blocker.** This was a read-only review: I ran nothing, edited nothing and delegated nothing. I checked `tests/core/test_subprocess_runner.py:1452-1599` and plan section `:1401-1407` against your seven contracts. Your requested steps are still pending: local RED, the broad-catch mutant, the restored module, statics, a fresh independent review, and the 36 normal plus 36 manual native jobs. I didn't write the plan file or call ExitPlanMode, because neither tool is available in this session.
+
+## What checks out
+
+- **Scope.** The diff changes only test code. The runtime, workload, worker count, capture deadline and the original 5 s bounds (`process.wait`, `owner.join`, `_wait_for_child_marker`) are unchanged. Quiet mode behaves the same: `closed` is passed in but never touched.
+- **Pre-readiness writes can't deadlock.** On Windows the parent pipes are created with `bufsize=SUBPROCESS_STREAM_TURN_READ_BYTES` (64 KiB) (`subprocess_runner.py:1101-1102`, `_constants.py:1931`). Linux and macOS pipes start at 64 KiB and 16 KiB. So `ROOT_OUT\n` plus 4096 bytes on each stream fits before anything reads.
+- **Argv wiring is correct.** In the control, `sys.argv[3:]` gives `[code, ready, release, closed]`, so the source's `argv[1..3]` and the hook's `argv[2]` (release) line up. In the integration test, root `argv[1..5]` maps to source, ready, release, closed, returncode. The descendant Popen passes argv 1–4 and exits with argv 5.
+- **The hook is deterministic.** Writes 1 and 2 are the real pre-readiness writes. Write 3 is the first in-loop fd1 write: it touches `release`, then raises. On acceptance, the loop sees `release` and exits 0. On rejection, the error propagates and the child exits 1. `OSError(32, …)` becomes `BrokenPipeError` on every platform, and `OSError(13, …)` becomes `PermissionError`, so each injected error has the class you intended.
+- **Shared `exec` globals are fine.** The source's `import os` rebinds the same module whose `write` was patched, and `global writes` resolves to the wrapper's globals.
+- **Discrimination is exact.**
+  - Against the current BrokenPipe-only source, only `win32/EINVAL` fails (exit 1 instead of 0). That is the correct RED.
+  - Catching every `OSError` fails both rejection controls.
+  - Accepting EINVAL on every platform fails `linux/EINVAL`.
+  - Accepting any error on Windows fails `win32/EACCES`.
+  - Removing the Windows allowance fails `win32/EINVAL`.
+- **Spoofing `sys.platform` is safe.** On 3.13, a traceback printed with `sys.platform='win32'` on POSIX goes through `_colorize.can_colorize`. That code catches the `ImportError` from `import nt`, and stderr isn't a TTY. The `[Errno N] injected pipe error` line shows up either way. The `linux` spoof on Windows doesn't affect `pathlib`, which picks its flavour from `os.name`.
+- **Ownership and liveness order is right.** Waiting for `closed` only after the supervisor returns proves the descendant saw the parent's closure and handled it. The liveness check comes after that, and `release.touch()` plus the bounded descendant wait/kill stay in `finally`.
+
+## Notes for the implementation step (none block)
+
+1. The handler must read `sys.platform` when it handles the error, not `os.name` or a value captured at import. Otherwise the controls can't select a platform. The source needs `import errno` (or must compare against 22).
+2. The generated source must not bind `write`, `writes`, `real_write`, `platform`, `source` or `code`, because `exec` shares the wrapper's globals.
+3. Nothing at runtime catches the two initial writes being moved inside the `try`. They succeed either way, so only reading the builder enforces "outside handler". That's acceptable, but reviewers should check it.
+4. Optional tightening: in accepted cases, assert `result.stderr == b"y" * 4096` instead of `startswith`, so a stray warning or partial traceback fails the test. Keep `startswith` for rejected cases.
+5. On attribution, the plan's wording is right: the native diagnostic confirms the closed-reader EINVAL mechanism, but the historical 39a failure is still an inference. Keep that qualifier in the closure text.
+```
+
+Disposition: PASS/no blocker. Qualified local RED was exactly win32/EINVAL exit1 versus0 after both real4KiB outputs and readiness; other3 arms passed. Native fresh-eyes found no blocker and requested Windows BrokenPipeError coverage, added as a fifth arm. Accept exact stderr equality for accepted controls. Initial writes remain outside the handler; generated source does not shadow wrapper globals. The reviewer Linux64KiB default claim is not a universal pipe-size guarantee; supported normal pipes here have capacity for the pre-readiness4KiB plus root marker, and actual integration runs remain required. The implementation imports errno and reads sys.platform at the handler boundary. No product error classification changes.
+
+Repair verification: initial GREEN75passed8native-Windows-skipped6.02s. Broad-catch mutation made both POSIX EINVAL and Windows access-denied controls fail at exit0 versus expected1;3other arms passed (1.00s). Restored byte-exact module75passed8skipped6.03s. Native fresh-eyes passed the causal readiness/closure/liveness and unexpected-error partition. Five local injected controls are classification evidence, not native Windows execution. Durable existing resource-ownership lesson now distinguishes CRT errno from product Win32 winerror.
+
+Final fixture implementation review, verbatim (74.21 s):
+
+```text
+**PASS, no blocker.** I only read files: no commands, tests, edits or delegation. The working tree matches your final diff exactly (`tests/core/test_subprocess_runner.py:1452-1599`, `docs/lessons.md:871-879`, plan `:1401-1441`). I can't confirm your run results (RED, mutant, 75 passed / 8 skipped, mypy, Ruff, the native review) from here. The one gate still open is the 36 normal plus 36 manual native jobs at the corrected head, which the plan records at `:1407`. I didn't write a plan file or call ExitPlanMode because neither tool is available in this session.
+
+## Verified against the code
+
+- **Scope.** The change is test and docs only. Runtime, workload, worker count, capture deadline and the original 5 s bounds (`process.wait`, `owner.join`, `_wait_for_child_marker` at `:1005-1009`) are all unchanged. In quiet mode, `closed` is passed in but never touched, and `time.sleep` can't realistically raise `OSError`.
+- **Builder.** The two initial writes sit outside the `try` (`:1457`), and readiness is published only after them. The shared `try` and the 4 KiB flood are unchanged. The handler reads `sys.platform` and `errno.EINVAL` when the error is handled (`:1467`), so the platform input takes effect. The source binds only `ready/release/closed/tmp/exc` and its imports, so it never clobbers the wrapper's `write/writes/real_write/source/platform/code`.
+- **Control wiring.** In the wrapper, `sys.argv[1:4]` gives source, platform and code. After that, `sys.argv[3:]` gives `[code, ready, release, closed]`, so the source's argv 1–3 and the hook's argv 2 (release) line up.
+  - Writes 1 and 2 are real.
+  - Write 3 touches `release` and then raises.
+  - `OSError(32)` becomes `BrokenPipeError` and `OSError(13)` becomes `PermissionError`.
+  - Accepted arms check exact stdout and stderr, `closed` present, and exit 0.
+  - Rejected arms check `closed` absent, exit 1, and the `[Errno N]` text.
+  - That partition is what makes the RED and the mutant results you reported possible.
+- **Integration ordering.** Readiness implies that 4 KiB of descendant output is already buffered before supervision starts. The `closed` marker is awaited only after the supervisor returns (`:1588-1589`), and liveness is checked after that. Cleanup in `finally` is unchanged.
+- **Lesson accuracy.** "Product `_winapi.WriteFile` classifies `winerror` 109/232" matches `subprocess_runner.py:1353-1355` (`ERROR_BROKEN_PIPE`, `ERROR_NO_DATA`). The lesson says the allowance belongs to the API layer that raised the error and must not go into the product error mask, which matches plan `:152/:166`. It adds a paragraph to an existing section rather than a new framework. The relative link `plans/2026-10-29-…` resolves from `docs/`. It keeps the qualifier that the historical failure is still an inference. Ruff has E501 disabled (`pyproject.toml:205`), so the long generated-source lines are fine.
+
+## Optional diagnostic tightening (none of these block)
+
+1. **Assertion order at `:1588-1592`.** If the supervisor stopped closing its read ends, the failure would show as a timeout ("child did not publish …/closed") instead of "runner left an owned pipe open". Moving `_assert_owned_pipes_released(process)` ahead of the `closed` wait would make the order owner released, then closure seen, then still alive, and the failure would point at the actual cause. The behaviour tested is identical either way.
+2. **Failure message at `:1518`.** `assert ready.exists()` has no message. If the generated source broke before readiness, the child's traceback would be lost. Adding `, result.stderr.decode(errors="replace")` there keeps it, and `errors="replace"` on `:1521` also guards against non-UTF-8 output on Windows.
+
+Neither changes correctness or scope.
+```
+
+Disposition: PASS/no blocker. Optional assertion-message/order refinements are deferred: current closure marker gives a bounded concrete causal failure, and the injected child message is fixed ASCII; no correctness finding remains. Native independent final review also passes. PostgreSQL owning module75passed8native-Windows-skipped6.10s; fullmypy481/Ruffformat635/docpaths pass. Diagnostic managed worktree archived recoverably after retained artifact and commit/run evidence; remote diagnostic branch remains reachable. Corrected-head normal and manual full CI are the remaining gates, including actual Windows measurements.

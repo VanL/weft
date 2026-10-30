@@ -867,3 +867,13 @@ Popen acquired at the handoff and check its cached return code before any oracle
 poll or wait. A kill-plus-pipe-EOF control exposed a false green when the test
 called poll: the observer supplied the missing ownership action. Independent
 cleanup may poll and wait after the assertion.
+
+Native pipe errors belong to the API layer that produced them. A Windows child
+using CRT-backed `os.write` can report `OSError(EINVAL)` after its pipe reader
+closes; product `_winapi.WriteFile` instead classifies `winerror` 109/232. A
+fixture that must survive reader closure may handle that CRT case only in its
+proven valid-pipe context, after real writes and with unexpected errors still
+fatal. Do not copy this allowance into the product error mask. The native
+[diagnostic run](https://github.com/VanL/weft/actions/runs/41116680387) and
+[reactor repair plan](plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md)
+record the witness; the historical CI failure still lacks its own traceback.
