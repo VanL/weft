@@ -10,12 +10,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        watchdog: ["on", "off"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.12'
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: '0.13.0'
@@ -23,15 +23,39 @@ jobs:
         run: uv pip install --system -e ".[dev,docker,django,macos-sandbox,microsandbox]"
       - name: Set original worker count
         run: python bin/pytest-worker-count --github-env
+      - name: Record diagnostic interval
+        shell: pwsh
+        run: '"WITNESS_START_UTC=$([DateTime]::UtcNow.ToString("o"))" >> $env:GITHUB_ENV'
       - name: Run unchanged full Windows CLI slice with startup witnesses
         env:
           WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: '120'
+          WEFT_STARTUP_WITNESS_WATCHDOG: ${{ matrix.watchdog }}
           WEFT_TEST_DIAGNOSTICS_DIR: ${{ runner.temp }}/weft-test-diagnostics
         run: pytest -v --tb=short -m "not slow" tests/cli --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
+      - name: Retain bounded Python crash events
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP "weft-test-diagnostics"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          $record = @{ start_utc = $env:WITNESS_START_UTC; max_events = 100; events = @() }
+          try {
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000,1001; StartTime = [DateTime]::Parse($env:WITNESS_START_UTC) } -MaxEvents 100 -ErrorAction Stop)
+            $record.sampled_events = $events.Count
+            $record.events = @($events | Where-Object { $_.Message -match '(?i)python' } | ForEach-Object {
+              $message = $_.Message
+              @{ time_created = $_.TimeCreated.ToUniversalTime().ToString('o'); id = $_.Id; provider = $_.ProviderName; message_length = $message.Length; message = $message.Substring(0, [Math]::Min(16384, $message.Length)) }
+            })
+          } catch {
+            $record.query_error = $_.Exception.Message
+          }
+          $record | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $destination 'python-crash-events.json')
       - name: Retain startup and worker evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: windows-startup-witness-${{ matrix.python-version }}
+          name: windows-startup-watchdog-${{ matrix.watchdog }}
           path: ${{ runner.temp }}/weft-test-diagnostics
           if-no-files-found: error

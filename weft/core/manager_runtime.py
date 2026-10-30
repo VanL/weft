@@ -1344,11 +1344,11 @@ def _build_manager_process_command(
         sys.executable,
         "-c",
         (
-            "import faulthandler,sys; "
-            "faulthandler.dump_traceback_later(5,repeat=True,file=sys.stderr); "
-            "import json,os,runpy,time; "
+            "import faulthandler,sys,os; "
+            "faulthandler.dump_traceback_later(5,repeat=True,file=sys.stderr) if os.environ.get('WEFT_STARTUP_WITNESS_WATCHDOG') == 'on' else None; "
+            "import json,runpy,time; "
             "os.environ['WEFT_STARTUP_WITNESS_CHILD_PID']=str(os.getpid()); "
-            "sys.stderr.write(json.dumps({'startup_probe_pid':os.getpid(),'time_ns':time.time_ns()})+'\\n'); "
+            "sys.stderr.write(json.dumps({'startup_probe_pid':os.getpid(),'time_ns':time.time_ns(),'watchdog':os.environ.get('WEFT_STARTUP_WITNESS_WATCHDOG')})+'\\n'); "
             "sys.stderr.flush(); "
             "runpy.run_module('weft.manager_process',run_name='__main__',alter_sys=True)"
         ),
