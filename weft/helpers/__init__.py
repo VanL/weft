@@ -36,8 +36,8 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
-    SUBPROCESS_POLL_INTERVAL_FLOOR,
     TASKSPEC_TID_SHORT_LENGTH,
+    VERIFIED_PROCESS_EXIT_POLL_INTERVAL,
     WEFT_SPAWN_REQUESTS_QUEUE,
     resolve_runtime_config,
 )
@@ -482,7 +482,7 @@ def _wait_for_verified_processes(
         remaining = deadline - time.monotonic()
         if not alive or remaining <= 0:
             break
-        time.sleep(min(SUBPROCESS_POLL_INTERVAL_FLOOR, remaining))
+        time.sleep(min(VERIFIED_PROCESS_EXIT_POLL_INTERVAL, remaining))
     return alive
 
 

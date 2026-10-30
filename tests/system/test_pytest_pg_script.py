@@ -5,8 +5,11 @@ from __future__ import annotations
 import builtins
 import importlib.machinery
 import importlib.util
+import os
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -540,57 +543,31 @@ def test_start_postgres_container_keeps_container_until_cleanup(
     assert "--rm" not in docker_run
 
 
-def test_wait_for_postgres_ignores_unpublished_entrypoint_bootstrap_server(
+def test_wait_for_postgres_requires_published_port_and_successful_tcp_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Readiness requires the published server and target database."""
-
-    pytest_pg = _load_pytest_pg_module()
-    commands: list[list[str]] = []
-    host_checks: list[str] = []
-    host_results = iter(
-        (
-            (False, "connection refused"),
-            (True, ""),
-        )
-    )
-
-    def fake_run(
-        cmd: list[str],
-        **_kwargs: Any,
-    ) -> subprocess.CompletedProcess[str]:
-        commands.append(cmd)
-        if "psql" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
-        raise AssertionError(f"unexpected readiness command: {cmd}")
-
-    def host_ready(port: str) -> tuple[bool, str]:
-        host_checks.append(port)
-        return next(host_results)
-
-    monkeypatch.setattr(pytest_pg, "_docker_port", lambda _name: "54321")
-    monkeypatch.setattr(pytest_pg, "_host_port_accepts_connections", host_ready)
-    monkeypatch.setattr(pytest_pg.subprocess, "run", fake_run)
-    monkeypatch.setattr(pytest_pg.time, "sleep", lambda _seconds: None)
-
-    port = pytest_pg._wait_for_postgres("weft-pg-test-example")
-
-    assert port == "54321"
-    assert host_checks == ["54321", "54321"]
-    assert commands == [
+    """Port discovery alone and a rejected SQL connection are not readiness."""
+    runtime = _load_pytest_pg_module()
+    ports = iter([None, "54321", "54321"])
+    results = iter(
         [
-            "docker",
-            "exec",
-            "weft-pg-test-example",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "weft_test",
-            "-tAc",
-            "SELECT 1",
-        ],
-    ]
+            subprocess.CompletedProcess([], 1, stdout="", stderr="starting up"),
+            subprocess.CompletedProcess([], 0, stdout="1\n", stderr=""),
+        ]
+    )
+    commands: list[list[str]] = []
+
+    def query(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert command[command.index("-h") + 1] == "127.0.0.1"
+        assert command[command.index("-d") + 1] == runtime.POSTGRES_DB
+        return next(results)
+
+    monkeypatch.setattr(runtime, "_docker_port", lambda _name: next(ports))
+    monkeypatch.setattr(runtime, "subprocess", SimpleNamespace(run=query))
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
+    assert runtime._wait_for_postgres("owned-server") == "54321"
+    assert len(commands) == 2
 
 
 def test_print_container_logs_includes_stdout_and_stderr(
@@ -726,3 +703,225 @@ def test_run_pytest_command_escalates_after_interrupt_timeout(
     ]
     assert "terminating process tree" in captured.err
     assert "killing process tree" in captured.err
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("fault", ["none", "timeout", "unwritable"])
+def test_isolated_pg_retains_evidence_before_cleanup(
+    tmp_path: Path, fails: bool, fault: str
+) -> None:
+    """Real pytest failure resumes the yield fixture without throwing into it."""
+    directory = tmp_path / "diagnostics"
+    if fault == "unwritable":
+        directory.write_text("occupied")
+    else:
+        directory.mkdir()
+    (tmp_path / "server-token").write_bytes(b"isolated-server-evidence\xff\n")
+    (tmp_path / "conftest.py").write_text(
+        """import os
+import subprocess
+import re
+from pathlib import Path
+from types import SimpleNamespace
+import pytest
+from tests.helpers import pytest_pg_runtime
+
+pytest_plugins = ['tests.helpers.pytest_pg_runtime']
+
+@pytest.fixture(autouse=True)
+def docker_boundary(monkeypatch):
+    real_loader = pytest_pg_runtime.load_pytest_pg_module
+    root = Path(__file__).parent
+    def load():
+        runtime = real_loader()
+        runtime._start_postgres_container = lambda: ('owned-probe', 'postgresql://localhost/probe')
+        runtime._initialize_broker_schema = lambda **kwargs: None
+        ticks = iter([0.0, 0.0, 10.0 if os.environ['PROBE_FAULT'] == 'timeout' else 3.0])
+        runtime.time = SimpleNamespace(monotonic=lambda: next(ticks), time_ns=lambda: 1)
+        def run(argv, **kwargs):
+            if argv[:3] == ['docker', 'rm', '-f']:
+                (root / 'server-token').unlink()
+                (root / 'removed').write_text('owned-probe')
+                return subprocess.CompletedProcess(argv, 0)
+            if argv[:2] == ['docker', 'inspect']:
+                assert argv[2] == '--format' and argv[-1] == 'owned-probe'
+                assert set(re.findall(r'\\.State\\.(\\w+)', argv[3])) == {
+                    'Status', 'ExitCode', 'OOMKilled', 'Error', 'StartedAt', 'FinishedAt',
+                }
+                assert '.Config' not in argv[3] and '.Env' not in argv[3]
+                assert kwargs['timeout'] == 10
+                if os.environ['PROBE_FAULT'] == 'timeout':
+                    raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+                os.write(kwargs['stdout'].fileno(), b'STATE running exit=0 oom=false\\n')
+                return subprocess.CompletedProcess(argv, 0)
+            if argv[:2] == ['docker', 'logs']:
+                assert argv == ['docker', 'logs', '--timestamps', '--tail', '2000', 'owned-probe']
+                assert kwargs['timeout'] == 7
+                token = root / 'server-token'
+                payload = token.read_bytes() if token.exists() else b'container gone\\n'
+                os.write(kwargs['stdout'].fileno(), payload)
+                return subprocess.CompletedProcess(argv, 0 if token.exists() else 1)
+            (root / 'unexpected').write_text(repr(argv))
+            raise AssertionError('unexpected command')
+        runtime.subprocess = SimpleNamespace(
+            run=run, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT,
+            TimeoutExpired=subprocess.TimeoutExpired, SubprocessError=subprocess.SubprocessError,
+        )
+        return runtime
+    monkeypatch.setattr(pytest_pg_runtime, 'load_pytest_pg_module', load)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_probe.py").write_text(
+        "def test_probe(isolated_postgres_server):\n"
+        + (
+            "    raise AssertionError('original isolated failure')\n"
+            if fails
+            else "    pass\n"
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env["PROBE_FAULT"] = fault
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = "1"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    env["WEFT_TEST_DIAGNOSTICS_DIR"] = str(directory)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_probe.py"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == int(fails), result.stdout + result.stderr
+    if fails:
+        assert "original isolated failure" in result.stdout
+    assert ("1 failed" if fails else "1 passed") in result.stdout
+    assert "ERROR" not in result.stdout + result.stderr
+    assert (tmp_path / "removed").read_text() == "owned-probe"
+    assert not (tmp_path / "server-token").exists()
+    assert not (tmp_path / "unexpected").exists()
+    artifact = directory / "postgres-owned-probe.log"
+    if fault == "unwritable":
+        return
+    assert artifact.exists(), "isolated server evidence lost before cleanup"
+    retained = artifact.read_bytes()
+    assert b"owned-probe" in retained
+    if fault == "timeout":
+        assert b"collection error=TimeoutExpired" in retained
+        assert b"skipped budget exhausted" in retained
+        assert b"isolated-server-evidence" not in retained
+    else:
+        assert b"isolated-server-evidence\xff" in retained
+        assert retained.index(b"command=") < retained.index(b"STATE running")
+        assert retained.index(b"STATE running") < retained.index(b"returncode=0")
+        assert retained.index(b"returncode=0") < retained.index(
+            b"isolated-server-evidence"
+        )
+
+
+@pytest.mark.skipif(
+    os.environ.get("BROKER_TEST_BACKEND") != "postgres", reason="requires bin/pytest-pg"
+)
+def test_postgres_readiness_rejects_bootstrap_then_initializes_schema(
+    tmp_path: Path,
+) -> None:
+    """The temporary Unix server cannot authorize host-side fixture startup."""
+    runtime = _load_pytest_pg_module()
+    name = f"weft-readiness-test-{uuid.uuid4().hex[:8]}"
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    # The official image runs init scripts as postgres, not the host runner UID.
+    probe.chmod(0o777)
+    script = tmp_path / "hold.sh"
+    script.write_text(
+        "#!/bin/sh\ntouch /probe/bootstrap-ready\n"
+        "while [ ! -f /probe/release ]; do sleep 0.05; done\n",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--env",
+                f"POSTGRES_PASSWORD={runtime.POSTGRES_PASSWORD}",
+                "--env",
+                f"POSTGRES_USER={runtime.POSTGRES_USER}",
+                "--env",
+                f"POSTGRES_DB={runtime.POSTGRES_DB}",
+                "--publish-all",
+                "--volume",
+                f"{probe}:/probe",
+                "--volume",
+                f"{script}:/docker-entrypoint-initdb.d/hold.sh:ro",
+                runtime.POSTGRES_IMAGE,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        deadline = time.monotonic() + 30.0
+        while not (probe / "bootstrap-ready").exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError("actual bootstrap barrier was not reached")
+            time.sleep(0.05)
+        port = runtime._docker_port(name)
+        assert port is not None
+        # Unix SQL proves the temporary server is ready while final TCP is held.
+        unix = subprocess.run(
+            [
+                "docker",
+                "exec",
+                name,
+                "psql",
+                "-U",
+                runtime.POSTGRES_USER,
+                "-d",
+                runtime.POSTGRES_DB,
+                "-tAc",
+                "SELECT 1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert unix.stdout.strip() == "1"
+        with pytest.raises(RuntimeError, match="Connection refused"):
+            runtime._wait_for_postgres(name, timeout_seconds=3.0)
+        (probe / "release").touch()
+        assert runtime._wait_for_postgres(name) == port
+        dsn = (
+            f"postgresql://{runtime.POSTGRES_USER}:{runtime.POSTGRES_PASSWORD}"
+            f"@127.0.0.1:{port}/{runtime.POSTGRES_DB}"
+        )
+        runtime._initialize_broker_schema(env=runtime._build_test_env(dsn=dsn))
+        meta = subprocess.run(
+            [
+                "docker",
+                "exec",
+                name,
+                "psql",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                runtime.POSTGRES_USER,
+                "-d",
+                runtime.POSTGRES_DB,
+                "-tAc",
+                "SELECT count(*) FROM simplebroker_pg_v1.meta",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert meta.stdout.strip() == "1"
+    finally:
+        (probe / "release").touch()
+        runtime._cleanup_container(name)

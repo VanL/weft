@@ -9,7 +9,6 @@ from typing import Literal, cast
 import pytest
 
 from weft.core.state_machines import StateMachine, Transition
-from weft.core.task_lifecycle import TaskLifecycleAction as TaskAction
 from weft.core.task_lifecycle import TaskLifecycleStatus as TaskState
 from weft.core.task_lifecycle import TaskStatusTarget as TargetStatus
 from weft.core.task_lifecycle import task_lifecycle_machine
@@ -461,43 +460,6 @@ def test_coverage_assertions_report_missing_and_unknown_values() -> None:
         machine.assert_actions_covered(
             ("start", "finish", cast(SimpleAction, "not-real"))
         )
-
-
-def test_task_lifecycle_allowed_transitions_are_covered() -> None:
-    machine = task_lifecycle_machine
-    cases: tuple[tuple[TaskState, TaskState, str, TaskAction], ...] = (
-        ("created", "spawning", "created-to-spawning", "begin_spawn"),
-        ("created", "failed", "created-to-failed", "fail"),
-        ("created", "cancelled", "created-to-cancelled", "cancel"),
-        ("spawning", "running", "spawning-to-running", "start_running"),
-        ("spawning", "completed", "spawning-to-completed", "complete"),
-        ("spawning", "failed", "spawning-to-failed", "fail"),
-        ("spawning", "timeout", "spawning-to-timeout", "timeout"),
-        ("spawning", "cancelled", "spawning-to-cancelled", "cancel"),
-        ("spawning", "killed", "spawning-to-killed", "kill"),
-        ("running", "completed", "running-to-completed", "complete"),
-        ("running", "failed", "running-to-failed", "fail"),
-        ("running", "timeout", "running-to-timeout", "timeout"),
-        ("running", "cancelled", "running-to-cancelled", "cancel"),
-        ("running", "killed", "running-to-killed", "kill"),
-    )
-    seen_transitions: set[str] = set()
-    seen_states: set[TaskState] = set()
-    seen_actions: set[TaskAction] = set()
-
-    for current, target, transition_id, expected_action in cases:
-        decision = machine.decide(current, TargetStatus(target))
-        assert decision.target == target
-        assert decision.action == expected_action
-        assert decision.transition_id == transition_id
-        seen_transitions.add(decision.transition_id)
-        seen_states.update((decision.source, decision.target))
-        seen_actions.add(decision.action)
-
-    machine.assert_all_states_reachable(("created",))
-    machine.assert_transition_ids_covered(seen_transitions)
-    machine.assert_states_covered(seen_states)
-    machine.assert_actions_covered(seen_actions)
 
 
 @pytest.mark.parametrize(

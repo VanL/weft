@@ -883,6 +883,8 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+
 - retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
 - retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md

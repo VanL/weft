@@ -23,6 +23,7 @@ import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from tests.helpers.typing import record_and_return
+from tests.tasks.sample_targets import wait_for_file
 from weft import helpers as helpers_module
 from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
 from weft.core.resource_monitor import ResourceMetrics
@@ -30,7 +31,10 @@ from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
 from weft.core.runners.host import HostTaskRunner
-from weft.core.runners.subprocess_runner import run_monitored_subprocess
+from weft.core.runners.subprocess_runner import (
+    open_supervised_process,
+    run_monitored_subprocess,
+)
 from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
@@ -1461,12 +1465,8 @@ def test_agent_session_routes_all_event_pairs_through_persistent_policy(
 def test_run_monitored_subprocess_uses_supplied_monitor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [sys.executable, "-c", "print('ok')"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
     )
 
     class FakeMonitor:
@@ -1535,7 +1535,7 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
 
 
 def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [
             sys.executable,
             "-c",
@@ -1547,10 +1547,6 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
                 "print('second', flush=True)"
             ),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
         encoding="utf-8",
         errors="replace",
     )
@@ -1612,7 +1608,7 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
 
 
 def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [
             sys.executable,
             "-c",
@@ -1624,10 +1620,6 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
                 "stdout=sys.stdout, stderr=sys.stderr)"
             ),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
         encoding="utf-8",
         errors="replace",
     )
@@ -1691,10 +1683,6 @@ def _write_descendant_scripts(tmp_path: Path) -> tuple[Path, Path]:
         """
 from __future__ import annotations
 
-from tests.helpers.typing import record_and_return
-
-from collections.abc import Iterator, Mapping
-
 import os
 import sys
 import time
@@ -1717,10 +1705,6 @@ if __name__ == "__main__":
     parent_script.write_text(
         """
 from __future__ import annotations
-
-from tests.helpers.typing import record_and_return
-
-from collections.abc import Iterator, Mapping
 
 import subprocess
 import sys
@@ -2578,18 +2562,29 @@ def test_command_session_terminate_kills_descendants(tmp_path: Path) -> None:
     )
 
     session = runner.start_session(on_activity=lambda: None)
-    child_pid = _wait_for_pidfile(pidfile)
+    child_identity: tuple[int, float] | None = None
     try:
+        try:
+            child_pid = _wait_for_pidfile(pidfile)
+        except AssertionError as error:
+            error.add_note(
+                f"Session returncode={session.returncode()!r}; "
+                f"stderr={''.join(session.poll_stderr())!r}"
+            )
+            raise
+        child_identity = (child_pid, psutil.Process(child_pid).create_time())
         session.terminate()
         assert _wait_for_pid_exit(child_pid)
     finally:
+        handle = session.handle
+        if handle is not None:
+            for pid, create_time in handle.scoped_host_processes():
+                helpers_module.terminate_verified_process_tree(
+                    pid, create_time, kill=True
+                )
+        if child_identity is not None:
+            helpers_module.terminate_verified_process_tree(*child_identity, kill=True)
         session.stop_monitor()
-        if not _wait_for_pid_exit(child_pid, timeout=0.1):
-            psutil = pytest.importorskip("psutil")
-            try:
-                psutil.Process(child_pid).kill()
-            except psutil.Error:
-                pass
 
 
 def test_task_runner_materializes_docker_container_profile_at_plugin_boundary(
@@ -2997,18 +2992,24 @@ def test_command_session_monitor_start_failure_clears_session_owner(
 
 
 def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
     calls: list[str] = []
     metrics = ResourceMetrics(memory_mb=12.5)
 
     class Monitor:
         def __init__(self) -> None:
             self.metrics_reads = 0
+            self.ready_observed = False
 
         def start(self, _pid: int) -> None:
             calls.append("start")
+            wait_for_file(str(ready), timeout=5.0)
+            self.ready_observed = True
 
         def check_limits(self) -> tuple[bool, str | None]:
             calls.append("check_limits")
@@ -3019,6 +3020,8 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
             self.metrics_reads += 1
             if self.metrics_reads == 1:
                 return metrics
+            if self.metrics_reads == 2:
+                release.touch()
             raise RuntimeError("sensitive metrics read failure")
 
         def snapshot(self) -> ResourceMetrics:
@@ -3032,15 +3035,21 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
     monkeypatch.setattr(host_module, "load_resource_monitor", lambda *_a, **_k: monitor)
     runner = _build_function_host_runner(
         timeout=5.0,
-        function_target="tests.tasks.sample_targets:simulate_work",
-        kwargs={"duration": 0.15},
+        function_target="tests.tasks.sample_targets:signal_ready_and_wait_for_release",
+        args=[str(ready), str(release)],
+        kwargs={"timeout": 60.0},
         monitor_class="tests.fake:Monitor",
         monitor_interval=0.01,
     )
 
-    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
-        outcome = runner.run(None)
+    try:
+        with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+            outcome = runner.run(None)
+    finally:
+        release.touch()
 
+    assert monitor.ready_observed, "monitored worker did not reach target entry"
+    assert monitor.metrics_reads >= 3
     assert outcome.status == "ok"
     assert outcome.value == "done"
     assert outcome.metrics is metrics
@@ -4857,3 +4866,58 @@ def test_agent_session_construction_failure_reports_monitor_cleanup_failure(
     assert context.queue.joined is True
     assert context.receiver.closed is True
     assert context.sender.closed is True
+
+
+def test_command_handle_acquisition_failure_reaps_process_and_closes_pipes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Host owns the spawned command before handle metadata can fail."""
+    created: list[subprocess.Popen[str]] = []
+    real_open = host_module.open_supervised_process
+
+    def opened(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        process = real_open(*args, **kwargs)
+        created.append(process)
+        return process
+
+    failure = RuntimeError("handle lookup failed")
+
+    def failed_handle(_pid: int | None) -> Any:
+        raise failure
+
+    monkeypatch.setattr(host_module, "open_supervised_process", opened)
+    monkeypatch.setattr(host_module, "_host_handle", failed_handle)
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-c", "import time; time.sleep(30)"],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="handle lookup failed") as raised:
+            runner.run({})
+        assert raised.value is failure
+        assert len(created) == 1
+        process = created[0]
+        assert process.returncode is not None
+        assert all(
+            pipe is None or pipe.closed
+            for pipe in (process.stdin, process.stdout, process.stderr)
+        )
+    finally:
+        for process in created:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()

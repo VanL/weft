@@ -837,3 +837,43 @@ Report actual access failures through existing error boundaries. Do not add
 permission probes, repairs, or a migration that widens previously restricted
 paths. Owner correction and implementation: [permission plan](plans/2026-10-15-operator-owned-permissions.md),
 [CTX.5](specifications/07-System_Invariants.md).
+
+## 2026-10-28: Bound capture without discarding accepted output
+
+A post-exit deadline applied to both pipe capture and callback delivery truncated
+already-captured output under real Consumer backpressure. Distinguish the phases:
+stop and join capture producers within their lifecycle bounds, then deliver the
+finite accepted backlog before successful logical completion. Physical pipe EOF
+and logical stream completion are separate facts. Verify the public result with
+a representative large payload and a slow consumer; a fast callback or small
+payload can miss the loss. See [RM-5.2](specifications/06-Resource_Management.md)
+and the [runtime repair plan](plans/2026-10-27-runtime-and-test-repair-plan.md).
+
+Consume a retry deadline at the owner when its retry is serviced, and re-arm it
+only after a new failure. Leaving the fired retry armed can mask a later grace
+deadline and create immediate-wake spinning. Fix the owner rather than filtering
+the stale deadline in a second projection policy; preserve future retries and
+custody until terminal proof commits ([MA-1.6a](specifications/03-Manager_Architecture.md)).
+
+Test resource ownership starts at acquisition, before readiness assertions. Its
+cleanup must remain effective when the method being tested is broken. Generated
+fixture scripts also need dependency review: unused test-helper imports can load
+the whole runtime before a tiny readiness handshake. Remove that work rather than
+loosening the guard. A same-head passing CI rerun establishes intermittence, not
+the cause of the original failure; preserve failure diagnostics and that limit.
+
+A process-reaping assertion must not perform the reap itself. Retain the actual
+Popen acquired at the handoff and check its cached return code before any oracle
+poll or wait. A kill-plus-pipe-EOF control exposed a false green when the test
+called poll: the observer supplied the missing ownership action. Independent
+cleanup may poll and wait after the assertion.
+
+Native pipe errors belong to the API layer that produced them. A Windows child
+using CRT-backed `os.write` can report `OSError(EINVAL)` after its pipe reader
+closes; product `_winapi.WriteFile` instead classifies `winerror` 109/232. A
+fixture that must survive reader closure may handle that CRT case only in its
+proven valid-pipe context, after real writes and with unexpected errors still
+fatal. Do not copy this allowance into the product error mask. The native
+[diagnostic run](https://github.com/VanL/weft/actions/runs/41116680387) and
+[reactor repair plan](plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md)
+record the witness; the historical CI failure still lacks its own traceback.

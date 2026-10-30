@@ -154,6 +154,14 @@ of SimpleBroker queues and OS processes:
    publish one immutable completion fact and wake the arbiter. If no input
    arrives and no timer is due, a quiet task runs zero turns.
 
+   The same reactor law governs worker-lane and subprocess supervision loops
+   that run inside a task's worker lane: an inner supervisor waiting on child
+   processes, pipes, or session channels must wait on OS readiness (readiness
+   demultiplexing on POSIX; overlapped completion waits on Windows) with the
+   next scheduled supervision deadline (execution
+   timeout or resource-monitor sample interval) as a protective ceiling—never
+   by polling non-blocking descriptors on a fixed timer floor.
+
 5. **Classical CS algorithms over existing primitives**:
    Weft solves scheduling, overload, and coordination problems by mapping them
    to well-understood computer science algorithms over its existing primitives:
@@ -202,6 +210,7 @@ of SimpleBroker queues and OS processes:
 | Pending family bucket | Consume-on-dispatch queue `weft.state.labels.<root_tid>.pending.<parent_tid>` indexing accepted child requests by parent; auto-disappears when emptied | The Manager process | `05-Message_Flow_and_State.md` [MF-5]; `2026-10-15-work-conserving-family-scheduling.md` |
 | Reactor and wake arbiter | Single wait point (`PollingStrategy`) per task over a closed set of queue, event, and deadline inputs | The task driver thread | [CC-2.2.1]; `07-System_Invariants.md` IMPL.8 to IMPL.11 |
 | Source adapter | Dedicated helper thread that owns one blocking OS or worker wait and wakes the reactor with one immutable result | The task that created it | [CC-2.2.1]; `2026-09-17-watcher-reactor-restoration-plan.md` |
+| Platform readiness adapter | Narrow OS-specific leaf inside a runner that waits on subprocess pipes or handles using the platform's native readiness primitive behind an opaque supervisor interface | The runner supervision loop | `06-Resource_Management.md` [RM-5.2] (promoted with `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`); `01-Core_Components.md` [CC-2.5], [CC-3.4] |
 | Control message | A request row on `T{target}.ctrl_in`; replies are pushed to the requester's own `T{requester}.ctrl_in` (`reply_to`) | The task reading `ctrl_in` | `05-Message_Flow_and_State.md` [MF-3]; `2026-09-18-event-routed-manager-pong-plan.md` |
 | Completion fact | One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out` | The completing task | [MF-3], [MF-5]; `07-System_Invariants.md` OBS.1 |
 | Runtime-state queue | `weft.state.*` ephemeral operational state (excluded from dumps, read via peek-latest; `weft.state.tasks.*` deleted only by `LivenessMonitor`) | The publishing task or service; `LivenessMonitor` for task-state deletion | `07-System_Invariants.md` OBS.6, LIVENESS.R3; `05-Message_Flow_and_State.md` [MF-5] |
@@ -245,6 +254,8 @@ engineering rule.
 |-----------|--------------------|----------|----------|
 | One reactor, one arbiter, a closed set of inputs | Every task waits at one `PollingStrategy` arbiter driven by backend hints/notifications, local `notify_activity()` events, OS sentinel adapters, and explicit deadlines—never defensive polling wait-caps. | Owner, 2026-09-17: "we are all event driven, with just a limited number of types of events" | [CC-2.2.1]; IMPL.8 to IMPL.11 |
 | A quiet task does nothing | When no event arrives and no deadline is due, a reactor sleeps without running turns. First wake after quiet is bounded by one SimpleBroker pass (~100 ms), followed by burst mode. | Owner, 2026-09-17 | [CC-2.2.1] |
+| Subprocess and stream supervision is readiness-driven, not timer-polled | When a runner supervises child stdio pipes alongside timeouts and resource limits, the platform readiness adapter drives wakeups; the supervision timeout is only the protective ceiling until the next deadline. Post-exit stream drain stops immediately when the kernel pipe reports EOF or empty rather than sleeping out a fixed drain window when an inherited grandchild descriptor remains open, and is otherwise bounded by the private drain budget while a descendant keeps writing. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5], [CC-3.4] |
+| Bounded per-turn stream work and backpressure over unbounded buffering | Active stream drainage reads a bounded chunk budget per turn so output floods cannot starve timeout, cancellation, or resource-limit checks, and slow downstream sinks apply OS pipe backpressure to the child rather than growing parent memory without bound. At process termination, remaining kernel pipe bytes are captured into memory before slow sink delivery. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5] |
 | Availability and death are different questions | A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death. Task-owned terminal proof wins over a Manager `wrapper_lost` record, and reservation/checkpoint custody survives until task-snapshot handoff or positive settlement. | Owner, 2026-09-08; `2026-09-17` discovery plan; `2026-10-14` family scheduling plan | [MA-1.6a], [MA-3], [MF-5], LIVENESS.R3–R7 |
 | Ask who owns this lifetime | A shared Manager, a detached child task (`stop_with_parent=False`), and a waiting client have independent lifetimes. Manager supersession changes who takes future work; it never kills or moves running children. | Owner, 2026-09-08 | [MA-1], [MA-3]; `14-Python_API_Surfaces.md` [PY-2] |
 
@@ -663,6 +674,40 @@ alternative. An agent must not propose the alternative again unless the
   `2026-10-14-task-monitor-read-separation-and-simplification-plan.md`;
   `2026-10-14-task-monitor-ingest-and-retirement-plan.md`;
   `2026-10-13-supervisor-terminal-projection.md`; [OBS.13], [SB-0.4a].
+
+### [ALT-WT-021] Non-blocking pipe polling loops in subprocess runners
+
+- Disposition: rejected
+- Candidate: Setting subprocess `stdout`/`stderr` descriptors non-blocking and
+  polling them in `10 ms` (100 Hz) helper threads so pipe `close()` and
+  post-exit grandchild pipe leaks do not hang `TextIOWrapper`.
+- Why plausible: Avoided blocking `TextIOWrapper.read()` deadlocks on pipe
+  close and worked across POSIX and Windows without platform-specific handle
+  APIs.
+- Reason: Wastes ~200–300 wakeups/sec and hundreds of context switches per
+  idle subprocess, couples output latency to a polling quantum, buffers child
+  output unboundedly in parent memory during slow callbacks, and violates the
+  single-arbiter readiness principle ([WT-2], [ALT-WT-002]).
+- Current consequence: Subprocess pipe supervision sits behind an opaque
+  platform readiness adapter: POSIX demultiplexes non-blocking descriptors on
+  the supervisor thread with no helper threads, child exit joins the selector
+  through a pidfd on Linux or a kqueue process filter on macOS and BSD (never a
+  thread parked in `Popen.wait()`, which holds the waitpid lock and blinds
+  `poll()`), and Windows waits
+  on overlapped pipe completion events together with the process handle, with
+  no helper threads and cancellation through the overlapped operation itself.
+  A synchronous-handle design (blocking reader threads torn down with
+  `PeekNamedPipe` and `CancelSynchronousIo`) was rejected in review: the peek
+  can block behind a reader and the cancel cannot reach a read not yet
+  submitted. Child exit is always its own input; pipe EOF is never a proxy
+  for it.
+- Reconsider when: Never. If an OS handle cannot join a readiness selector
+  directly, wrap it in a blocking source adapter ([ALT-WT-002]), never a
+  polling timer floor.
+- Evidence: Owner, 2026-10-29; commit `4c490043` (adapter introduction) and
+  commit `540707a3` (`_PipeAdapter` 100 Hz polling measured at ~890 context
+  switches and ~35 ms CPU per 3 s idle child on macOS);
+  `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`.
 
 ## Tensions and falsifiers [WT-7]
 

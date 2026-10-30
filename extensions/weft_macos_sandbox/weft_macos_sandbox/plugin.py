@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from typing import Any
 from simplebroker import BrokerTarget
 from weft._constants import MACOS_SANDBOX_BASE_ENV_PASSTHROUGH
 from weft.core.runners.subprocess_runner import (
+    open_supervised_process,
     prepare_command_invocation,
     run_monitored_subprocess,
 )
@@ -138,12 +138,9 @@ class MacOSSandboxRunner:
             args=self._args,
         )
         env_vars = self._build_child_env()
-        process = subprocess.Popen(
+        process = open_supervised_process(
             [self._sandbox_binary, "-f", self._profile, *command],
-            stdin=subprocess.PIPE if stdin_data is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            pipe_stdin=stdin_data is not None,
             encoding="utf-8",
             errors="replace",
             cwd=self._working_dir or None,
