@@ -25,6 +25,7 @@ from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
 from weft import commands
 from weft._constants import (
+    MANAGER_STARTUP_LOG_DIRNAME,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -335,6 +336,43 @@ def _parallel_manager_list_snapshot(root: Path) -> Any:
     }
 
 
+def _retain_startup_witness(harness: WeftTestHarness) -> dict[str, Any]:
+    """Temporary diagnostic: retain bounded startup evidence before root deletion."""
+    result: dict[str, Any] = {"files": []}
+    try:
+        paths = sorted(
+            (harness.context.logs_dir / MANAGER_STARTUP_LOG_DIRNAME).glob(
+                "manager-*.stderr.log"
+            )
+        )
+        result["file_count"] = len(paths)
+        for path in paths[:16]:
+            item: dict[str, Any] = {"path": str(path)}
+            try:
+                with path.open("rb") as stream:
+                    size = os.fstat(stream.fileno()).st_size
+                    item["size"] = size
+                    item["prefix"] = stream.read(32768).decode(
+                        "utf-8", errors="replace"
+                    )
+                    stream.seek(max(32768, size - 32768))
+                    item["tail"] = stream.read(32768).decode("utf-8", errors="replace")
+            except OSError as exc:
+                item["read_error"] = repr(exc)
+            result["files"].append(item)
+        directory = os.environ.get("WEFT_TEST_DIAGNOSTICS_DIR")
+        if directory:
+            destination = (
+                Path(directory) / f"startup-{harness.root.name}-{time.time_ns()}.json"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(result, indent=2), encoding="utf-8")
+            result["artifact"] = str(destination)
+    except OSError as exc:
+        result["collection_error"] = repr(exc)
+    return result
+
+
 def _raise_parallel_manager_reuse_failure(
     *,
     phase: str,
@@ -349,8 +387,10 @@ def _raise_parallel_manager_reuse_failure(
     status_payload: dict[str, object] | None = None,
     detail: str | None = None,
 ) -> Never:
+    startup_witness = _retain_startup_witness(harness)
     payload: dict[str, Any] = {
         "phase": phase,
+        "startup_witness": startup_witness,
         "root": str(root),
         "max_workers": max_workers,
         "submit_timeout": submit_timeout,

@@ -1342,8 +1342,15 @@ def _build_manager_process_command(
 
     return [
         sys.executable,
-        "-m",
-        "weft.manager_process",
+        "-c",
+        (
+            "import faulthandler,sys; "
+            "faulthandler.dump_traceback_later(5,repeat=True,file=sys.stderr); "
+            "import json,os,runpy,time; "
+            "sys.stderr.write(json.dumps({'startup_probe_pid':os.getpid(),'time_ns':time.time_ns()})+'\\n'); "
+            "sys.stderr.flush(); "
+            "runpy.run_module('weft.manager_process',run_name='__main__',alter_sys=True)"
+        ),
         invocation.task_cls_path,
         broker_target_b64,
         spec_b64,
@@ -1595,7 +1602,11 @@ def _format_manager_start_failure(
     launcher_events: list[dict[str, Any]],
     launcher_stderr: str,
 ) -> str:
-    parts = [message]
+    parts = [
+        message,
+        "Diagnostic launcher events: " + json.dumps(launcher_events),
+        "Diagnostic launcher stderr: " + launcher_stderr,
+    ]
     child_exit = next(
         (
             payload
