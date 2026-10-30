@@ -1152,3 +1152,114 @@ Final local SQLite all-marker validation: 6,017 passed, 58 skipped in 237.28 s w
 
 
 Final PostgreSQL all-marker validation completed: 5,969 passed, 35 skipped in 557.80 s, normal 12 workers, no load or timeout reductions (`reactor-final-pg.log`). The new eight collector acceptance cases run in both backend lanes. All local implementation/review gates are satisfied. Plan remains draft pending native Windows execution, Linux/Windows six-row measurements, and both exact-head CI runs. Concurrent launch workers remain deferred.
+
+
+### CI delivery-oracle correction (2026-10-30)
+
+Exact-head manual CI d4381877 failed Ubuntu3.12 and3.14 core in `test_stream_queue_drain_yields_with_continuing_production`: the first turn delivered one chunk, and the immediately following zero-time turn correctly delivered none. The test asserted a queued backlog without establishing one. A deterministic real-child probe holds the producer after its first64-byte write and reproduces the exact line1596 assertion against unchanged runtime (`reactor-delivery-premise-red.log`). This establishes the fixture defect; it does not justify runtime changes or retrying the failed run.
+
+Class2 test-only correction under [TS-0]/[RM-5.2]: retain the real continuous producer for bounded delivery-turn progress; separate the expired-deadline contract into the actual shared `_OutputStreamState` with two explicitly queued chunks. An already-expired monotonic deadline must deliver one and retain the other; removing deadline yield must fail by delivering both. Remove the slow15ms sink delay and scheduler-dependent backlog claim. No timeout/load/worker changes. Validate focused tests, the exact deadline-yield mutation, restored full module, statics, native fresh-eyes and cross-family narrow review, then push corrected tests and require fresh exact-head normal/manual CI. Earlier failed runs remain recorded and are not passes.
+
+
+Verbatim narrow cross-family delivery review:
+
+```text
+**Verdict: PASS. I found no blockers.**
+
+I only read code for this. I ran no commands or tests and made no edits. I checked the diff against `_OutputStreamState` at `weft/core/runners/subprocess_runner.py:544-636`, which d4381877 left unchanged.
+
+## Correctness
+
+**`test_stream_delivery_yields_at_expired_deadline_with_queued_work`** (`tests/core/test_subprocess_runner.py:1594`)
+- `accept(b"first")` and `accept(b"second")` each queue one separate chunk (`_decode`, lines 591-600). Neither one ends in `\r` or a partial UTF-8 sequence, so the newline decoder holds nothing back. The backlog actually exists before `deliver` runs, which fixes the old problem: that fixture assumed a backlog without proving it.
+- `deliver(16, 0.0)` takes and delivers `"first"`, then reaches the `time.monotonic() >= turn_deadline` check (line 635) and returns. So `delivered == ["first"]` and `pending_chunks == ["second"]` are both exact, with no timing involved.
+- `deliver(16, inf)` takes `"second"`, finds the queue empty and returns (line 622). Checking `in_flight_bytes == 0` also proves that `pending_sizes` stayed in step with `pending_chunks`.
+- This matches your mutation result: removing the deadline yield gives `['first','second'] != ['first']`.
+
+**`test_stream_queue_drain_yields_with_continuing_production`** (`:1567`)
+- With `wait_and_drain(None)`, `_turn_deadline` returns `math.inf` (line 676), so only `SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS` limits the turn. With 64-byte reads and a 64 KiB per-turn read budget, up to 1024 chunks can be ready in one turn, so the cap of 16 really is the limit being tested.
+- The new `process.poll() is None` check rules out the turn ending because the producer exited. The bound being tested is the chunk cap.
+- Removing `slow` and `threading.Event().wait(0.015)` removes the last sleep from this test. `threading` is still used elsewhere in the file, so no import goes unused.
+
+## Simplicity and deque use
+- `list(state.pending_chunks) == ["second"]` is the right comparison. A deque never equals a list, so the `list(...)` conversion is needed. No extra deque behaviour is assumed beyond what the runtime uses (`append` and `popleft`).
+- The pipe setup, the closed write end, `_OutputStreamState(pipe, …)`, the literal `16` and `float("inf")` all match the existing decoder tests at `:2355` and `:2374`. Nothing new is added to the test framework.
+
+## Optional improvements (none blocking)
+1. **Deadline value:** `0.0` counts as expired only because `time.monotonic()` is never negative. Python leaves the clock's starting point undefined, but in practice it is non-negative on CPython for Linux, macOS and Windows. Using `-math.inf` would make the test independent of the clock's origin. I'd call this cosmetic.
+2. **Extra assertion:** after the first `deliver`, checking `state.in_flight_bytes == len(b"second")` would pin the byte credit at the moment of the yield. The final `== 0` check already covers most of this.
+
+## Not actionable / limits
+- The continuous-producer test's `0 < len(delivered)` check depends on stdout becoming readable first. It was already there before this delta, so it's out of scope.
+- Native Windows is still a CI gate that I can't check from here. The new test uses only `os.pipe` and `_OutputStreamState`, which other decoder tests already use the same way.
+- The delta touches no runtime code, load, workers, deadlines, speed thresholds or TS0/RM5.2 rules, and nothing in it asks to change those rules.
+```
+
+Disposition: PASS/no blocker. Accept clock-origin improvement using negative infinity for an unconditionally expired deadline. Native review and parent correctly noted that the real producer can supply fewer than the cap, so it cannot alone guarantee a cap-removal mutant. The shared primitive test is now parameterized for chunk-cap (1,infinity) and deadline (16,negative-infinity), with the same explicit two-chunk premise. Cap-removal mutant fails exact first-plus-second vs first assertion; deadline-removal mutant independently fails that same intended assertion. Both mutations restored; full module passed70 with8 Windows skips in5.68s. Optional intermediate byte-credit assertion is unnecessary because existing decoder-credit tests and finalzero check already cover that contract. Native reviewer found no blocker. Final narrow closure covers the parameter addition.
+
+
+Verbatim final parameter-table closure (39.33 s):
+
+```text
+**Verdict: PASS. No blockers, no findings.** This was a read-only review: I ran no tests or commands, and native Windows still depends on CI, as you said.
+
+I checked the working-tree code against your diff (`tests/core/test_subprocess_runner.py:1567-1617`) and against `_OutputStreamState.deliver` (`weft/core/runners/subprocess_runner.py:619-636`).
+
+**Each case pins one boundary on its own:**
+- `deliver` loops `for _ in range(max_chunks)` and checks `time.monotonic() >= turn_deadline` after each delivery.
+- **`chunk-cap` (1, inf):** the deadline can never fire, so only the loop bound stops after "first". Removing the cap, or an off-by-one like `range(max_chunks + 1)`, delivers both chunks and fails `delivered == ["first"]`.
+- **`expired-deadline` (16, -inf):** the cap of 16 is well above the 2 queued chunks, so only the deadline check stops after "first". Removing that check delivers both and fails the same assertion.
+- If the deadline check were moved before delivery, the -inf case would deliver nothing. That also fails, so the test pins "deliver at least one, then yield".
+- -inf avoids depending on where the monotonic clock starts, as your point 5 says.
+
+**The setup is valid:**
+- `b"first"` and `b"second"` are plain ASCII with no trailing CR, so the decoder holds nothing back. Each `accept` queues exactly one chunk with credits 5 and 6.
+- After the second `deliver`, `in_flight_bytes == 0` is correct: credit is freed when a chunk is delivered (`:625`).
+- The test reads the real `pending_chunks` deque and `in_flight_bytes`. No new helpers, sleeps or abstractions.
+- The pipe/`fdopen` setup and `deliver(16, float("inf"))` copy the existing primitive tests at `:2366-2388` and `:2527-2532`.
+- The lambda's `append` returns `None`, which matches `_OutputCallback = Callable[[str, bool], None]` (`:70`).
+- The test uses only `fileno`, encoding and errors on the pipe, with no select or polling, so nothing in it depends on POSIX.
+
+**The live-producer test is narrowed correctly:**
+- The slow-sink and `wait_and_drain(0.0)` step is gone. That deadline proof now lives in the primitive test.
+- What remains is the `0 < len(delivered) <= cap` bound plus a check that the producer is still running. That fits your finding that a live producer alone can't prove the cap.
+- `threading` is still used elsewhere in the module, so removing the `threading.Event().wait` call leaves no unused import.
+
+**Scope:** the change is test-only. Runtime, load and deadline behaviour are untouched, and there's nothing that would justify reopening TS0/RM5.2.
+```
+
+Final disposition: PASS, no findings. Focused three cases pass1.03s on negative-infinity final source; full module70pass8skip before that clock-origin-only refinement. Full Ruff/format/mypy481 and suppression registry pass. Runtime files remain byte-identical to d4381877; only tests and this plan change. Failed d4381877 Linux core jobs are retained as evidence; corrected-head full CI and paired native measurements remain required.
+
+
+### Native Windows fault-hook correction (2026-10-30)
+
+Manual d4381877 Windows3.13 core job124236426446 failed all three closed-input error-partition cases with TypeError: fault hook `closed_pipe_write` rejected the actual `overlapped=True` keyword from Win32 WriteFile before injecting its intended OSError. This is a confirmed test-hook signature defect, not evidence against runtime error handling. Correct the hook to two positional arguments plus keyword-only overlapped=False, and require true on its Windows branch. Keep all three native error-code cases and existing process/pipe cleanup assertions; no runtime changes. Their retained native CI failures are the RED; local POSIX controls and statics supplement, but cannot replace, fresh native Windows CI. The JUnit execution guard correctly rejects these failing cases. Narrow independent review and corrected-head full normal/manual CI remain required.
+
+
+Verbatim Windows hook cross-family closure (44.58 s):
+
+```text
+**Verdict: PASS, no blocker.** I read the code only. I ran nothing, edited nothing and delegated nothing.
+
+1. **Does the hook match the real call sites?**
+   - On Windows, the runner calls `_winapi.WriteFile(self._stdin.descriptor, data, overlapped=True)` at `weft/core/runners/subprocess_runner.py:1324`. The new hook signature `(_handle, _data, *, overlapped=False)` accepts two positional arguments plus `overlapped` as a keyword, so it matches.
+   - On POSIX, the runner calls `os.write(self._stdin.descriptor, data)` with two positional arguments at `subprocess_runner.py:894`. `overlapped` falls back to its default `False`, and the Windows-only check doesn't run. This leaf is unaffected.
+   - This is the only `WriteFile` / `os.write` call in the runner. `_Forwarding` (`tests/core/test_subprocess_runner.py:157`) only replaces the runner module's own `os` / `_winapi` names. Everything else passes through to the real modules, so nothing else is intercepted.
+
+2. **Does it explain the native RED?** Yes. The old `*_args` hook had no `**kwargs`, so `overlapped=True` raised a `TypeError` before the hook could raise its injected error. A `TypeError` isn't caught by the `except OSError` at `:1327`, so it skipped `_write_failed` and all three Windows cases failed without the injected error ever being raised. That's a test-hook defect, not a production one.
+
+3. **Does the error split still reach production code?** Yes. Once the call binds, the injected `_winerror(code)` (`:204`, which sets `winerror` positionally) reaches `_write_failed` (`:1353`):
+   - 109 (broken pipe) and 232 (no data) close stdin. The child then sees EOF, so the expected `"done\n"` / `status == "ok"` holds.
+   - 5 (access denied) re-raises `exc` itself, which is what `caught.value is failure` asserts.
+   - `write_attempted` is set before the raise, so `assert write_attempted.is_set()` still proves the hook ran.
+
+4. **Does the new `assert overlapped` hold up?** Yes, it's a sound check. If it fails, an `AssertionError` escapes the `OSError` handler and the test fails loudly rather than passing falsely. It also matches the sibling hook `observed_write_file` (`:2053`), which already relies on `overlapped`.
+
+5. **Is anything outside the test touched?** No. Production `WriteFile(..., overlapped=True)`, the error split, cleanup, deadlines, load and fallback are all unchanged. No new helper or test was added.
+
+6. **Nit only:** the `_data: bytes` annotation is narrower than the sibling hooks' `bytes | memoryview` / `Any`. It has no effect at runtime because the hook ignores `_data`. No change needed.
+
+Separately: this review only shows that the hook signature now matches both call sites. Whether the three Windows cases pass still depends on the next native Windows 3.13 CI run, and local POSIX runs don't count as proof for Windows. I'm not claiming any result for the full-module run that's still in progress.
+```
+
+Disposition: PASS/no blocker. Keep bytes annotation: actual `_StdinStreamState.next_slice` returns bytes or None, and no broader buffer is passed at either intercepted call site. Native independent closure also found no blocker. Final local module70pass8Windows-skipped7.14s; fullmypy481, Windows-targetmypy1, Ruff/format635, registry and docpath checks pass. Retained Windows3.12/3.13 JUnit artifacts each contain all nine required executions: six pass and the three hook cases fail; those are not accepted as a passing native gate. Corrected-head native CI must prove all nine pass.

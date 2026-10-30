@@ -1574,12 +1574,9 @@ def test_stream_queue_drain_yields_with_continuing_production(
         pipe_stdin=False,
     )
     delivered: list[str] = []
-    slow = False
 
     def sink(chunk: str, _final: bool) -> None:
         delivered.append(chunk)
-        if slow:
-            threading.Event().wait(0.015)
 
     session = subprocess_runner._open_process_io(
         process, stdin_data=None, on_stdout_chunk=sink, on_stderr_chunk=None
@@ -1588,15 +1585,36 @@ def test_stream_queue_drain_yields_with_continuing_production(
         session.wait_and_drain(None)
         cap = subprocess_runner.SUBPROCESS_STREAM_DRAIN_MAX_CHUNKS
         assert 0 < len(delivered) <= cap, "one turn exceeded the delivery cap"
-        # A turn whose supervision deadline is already due yields after one
-        # slow delivery even though more chunks are queued.
-        slow = True
-        before = len(delivered)
-        session.wait_and_drain(0.0)
-        assert len(delivered) == before + 1
+        assert process.poll() is None, "producer exited before the bounded turn"
     finally:
         session.close()
         _reap_test_process(process)
+
+
+@pytest.mark.parametrize(
+    ("max_chunks", "deadline"),
+    [(1, float("inf")), (16, float("-inf"))],
+    ids=["chunk-cap", "expired-deadline"],
+)
+def test_stream_delivery_yields_with_queued_work(
+    max_chunks: int, deadline: float
+) -> None:
+    """Either delivery bound leaves queued output for the next turn [RM-5.2]."""
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    delivered: list[str] = []
+    with os.fdopen(read_fd, "r", encoding="utf-8") as pipe:
+        state = subprocess_runner._OutputStreamState(
+            pipe, lambda chunk, _final: delivered.append(chunk)
+        )
+        state.accept(b"first")
+        state.accept(b"second")
+        state.deliver(max_chunks, deadline)
+        assert delivered == ["first"]
+        assert list(state.pending_chunks) == ["second"]
+        state.deliver(16, float("inf"))
+        assert delivered == ["first", "second"]
+        assert state.in_flight_bytes == 0
 
 
 def test_large_input_preserves_text_encoding_and_stream_separation() -> None:
@@ -2106,7 +2124,11 @@ def test_closed_input_write_errors_partition_closed_pipe_from_faults(
             failure = BrokenPipeError(error_code, "input pipe write failed")
     write_attempted = threading.Event()
 
-    def closed_pipe_write(*_args: Any) -> Any:
+    def closed_pipe_write(
+        _handle: int, _data: bytes, *, overlapped: bool = False
+    ) -> Any:
+        if leaf == "win32":
+            assert overlapped, "Windows write fault must intercept overlapped I/O"
         write_attempted.set()
         raise failure
 
