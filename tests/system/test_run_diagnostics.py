@@ -232,11 +232,14 @@ def test_run_diagnostics_records_phases_without_replacing_failure(
     directory = tmp_path / "diagnostics"
     result = _run_test(
         tmp_path,
-        "from tests.helpers.run_diagnostics import record_phase\n"
+        "from tests.helpers.run_diagnostics import phase, record_phase\n"
         "def test_phase_failure(request):\n"
         "    record_phase(request.config, 'operation_begin', argv=['probe'])\n"
+        "    with phase(request.config, 'clean', argv=['ok']):\n"
+        "        pass\n"
         "    try:\n"
-        "        raise AssertionError('original phase failure')\n"
+        "        with phase(request.config, 'step', argv=['probe']):\n"
+        "            raise AssertionError('original phase failure')\n"
         "    except AssertionError as error:\n"
         "        record_phase(request.config, 'operation_end', error=type(error).__name__)\n"
         "        raise\n",
@@ -246,9 +249,20 @@ def test_run_diagnostics_records_phases_without_replacing_failure(
     assert result.returncode == 1, result.stdout + result.stderr
     assert "original phase failure" in result.stdout
     phases = [event for event in _events(directory) if event["event"] == "phase"]
-    assert [event["phase"] for event in phases] == ["operation_begin", "operation_end"]
+    assert [event["phase"] for event in phases] == [
+        "operation_begin",
+        "clean:start",
+        "clean:done",
+        "step:start",
+        "step:done",
+        "operation_end",
+    ]
     assert phases[0]["argv"] == ["probe"]
-    assert phases[1]["error"] == "AssertionError"
+    clean_done, step_done = phases[2], phases[4]
+    assert clean_done["argv"] == ["ok"] and clean_done["error"] is None
+    assert step_done["argv"] == ["probe"] and step_done["error"] == "AssertionError"
+    assert all(isinstance(event["elapsed"], float) for event in (clean_done, step_done))
+    assert phases[5]["error"] == "AssertionError"
     assert all(
         event["nodeid"] == "test_probe.py::test_phase_failure (call)"
         for event in phases

@@ -224,20 +224,24 @@ private startup, readiness, or teardown budget used inside the runtime.
 For one-shot command execution through the shared subprocess supervisor,
 delivering the work item's stdin is part of execution. The execution clock
 starts no later than input delivery, and input backpressure must not prevent
-cancellation, timeout, or resource-limit supervision. Closing input is owned
-by its I/O adapter; cancellation must not depend on another thread acquiring
-a buffered I/O lock held by a blocked operation.
+cancellation, timeout, or resource-limit supervision. Subprocess pipe I/O is
+owned by an opaque platform readiness adapter behind the supervisor reactor;
+while execution is active, the supervisor waits on platform pipe readiness
+bounded by the next scheduled supervision deadline rather than polling pipes
+on a fixed timer, and cancellation or teardown must not depend on another
+thread acquiring a buffered I/O lock held by a blocked operation.
 
 Root process completion and output-pipe EOF are separate observations. Once
-root completion is accepted, the supervisor uses the bounded private
-stream-drain budget to await output EOF and finish accepting output from
-inherited pipes. When both output adapters finish or that budget expires, it
-stops and joins its owned I/O adapters and closes their owned endpoints. This
-freezes a finite set of captured output. The supervisor delivers that captured
-output before forming its returned outcome; expiry must not discard output
-already captured in its local queues. The same capture, shutdown and delivery
-sequence follows the existing runtime stop/kill hooks for cancellation, timeout
-and resource-limit outcomes, preserving those outcomes.
+root completion is accepted, the supervisor performs a bounded post-exit
+capture pass over `stdout` and `stderr`: capture finishes immediately when
+both streams reach EOF or have no remaining buffered bytes in the kernel pipe,
+and is bounded by the private stream-drain budget when an inherited
+descendant continues writing. The session then closes its owned parent pipe endpoints, freezing a finite set of captured output, and delivers
+that captured output before forming its returned outcome; capture-budget
+expiry must not discard output already captured in memory. The same capture,
+endpoint-release, and delivery sequence follows the existing runtime
+stop/kill hooks for cancellation, timeout, and resource-limit outcomes,
+preserving those outcomes.
 
 The capture budget is not a total result-delivery or teardown timeout. Delivery
 duration depends on captured volume and sink throughput and may exceed the
@@ -246,13 +250,30 @@ Budget expiry neither converts a completed root into an execution timeout nor
 asserts physical EOF. Missing physical EOF remains a bounded diagnostic, with
 no new terminal state or outcome field.
 
+On Linux, subprocess supervision requires Linux 5.3 or newer, Python's
+`os.pidfd_open`, and permission to use that syscall. Missing support or security
+policy denial raises `RuntimeError` explaining the requirement, chained from the
+underlying error; there is no timer-polling fallback. A cached process returncode
+bypasses PID lookup for an already-reaped child. Live-child exit registration
+still precedes the supervisor's poll.
+
 While execution is active, output drainage performs finite work per stream
-before returning to other streams and supervision. After producer shutdown,
-delivery repeatedly drains the finite queues without idle waits. These rules
-do not preempt an arbitrarily blocking callback. A callback exception follows
-the existing execution-failure cleanup and exception-precedence contract; it
-does not guarantee delivery to the failed callback. Existing Consumer shutdown
-rules still govern a publisher that has stopped accepting worker events.
+before returning to other streams and supervision, and slow downstream sinks
+apply pipe backpressure rather than buffering child output without bound in
+parent memory. After capture is frozen, delivery drains the captured chunks
+without idle waits. The 64 KiB per-stream active in-flight accounting includes undecoded raw
+codec input and queued chunks' consumed bytes. Universal-newline decoding may
+also hold one CR character in fixed-size state. Consumed bytes that produce no
+text (for example `errors="ignore"`) release their capacity immediately.
+An incremental codec retaining 64 KiB without completing its sequence raises
+`UnicodeError` with a decoder-buffer-limit diagnostic, including during terminal
+capture. Valid stateful encodings whose single sequence exceeds this limit are
+rejected rather than buffering without bound or deadlocking on backpressure.
+Ordinary codec error-handler behavior and newline translation are unchanged.
+These rules do not preempt an arbitrarily blocking callback. A callback exception follows the existing execution-failure cleanup
+and exception-precedence contract; it does not guarantee delivery to the
+failed callback. Existing Consumer shutdown rules still govern a publisher
+that has stopped accepting worker events.
 
 Current behavior:
 
@@ -287,6 +308,11 @@ and payload, and the first accepted stop remains final.
 _Implementation mapping_: `weft/core/runners/host.py` owns the one-shot timeout
 observation boundary; `weft/core/tasks/sessions.py` owns the persistent-session
 boundary; both route observations through `weft/core/terminal_handoff.py`.
+`weft/core/runners/subprocess_runner.py` owns the shared subprocess supervisor
+(`run_monitored_subprocess`), its platform readiness adapter
+(`_open_process_io`: `_PosixSelectorProcessIO` and
+`_WindowsOverlappedProcessIO`), and supervised process construction
+(`open_supervised_process`).
 
 ## Error Handling
 
@@ -376,6 +402,7 @@ controls stay here only when they are already shipped and observable:
 ## Related Plans
 
 - [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+- [PR48 reactor and test hygiene repairs](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md) replaces timer-polled subprocess pipe supervision with the platform readiness adapter (`[RM-5.2]`).
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

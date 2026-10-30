@@ -59,13 +59,17 @@ assertions require a named producer-closure boundary, meaning proof that the
 relevant producer can no longer emit the event being counted, before ordered
 history is asserted.
 
-PostgreSQL harness startup must distinguish the official image's temporary
-Unix-socket initialization server from its final TCP server. The canonical
-`bin/pytest-pg::_wait_for_postgres` requires a successful in-container loopback TCP query; its subsequent
-`_initialize_broker_schema` performs a non-destructive queue read through the
-consumer's host target before tests start. Constructing and closing a lazy Queue
-is not a schema or connectivity check. Repair and verification:
-[`2026-10-27-runtime-and-test-repair-plan.md`, CI-D3](../plans/2026-10-27-runtime-and-test-repair-plan.md).
+PostgreSQL harness startup must distinguish the official `postgres:18` image's
+temporary Unix-socket initialization server from its final TCP server. The
+canonical `bin/pytest-pg::_wait_for_postgres` polls with a monotonic deadline
+(`POSTGRES_READY_POLL_INTERVAL_SECONDS = 0.2`) until `docker port` publishes
+the host port and an in-container loopback TCP query succeeds; its subsequent
+`_initialize_broker_schema` performs a non-destructive queue read
+(`queue.peek_one()`) through the consumer's host target before tests start.
+Constructing and closing a lazy Queue is not a schema or connectivity check.
+Repair and verification:
+[`2026-10-27-runtime-and-test-repair-plan.md`, CI-D3](../plans/2026-10-27-runtime-and-test-repair-plan.md)
+and [`2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md).
 
 _Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated physical PostgreSQL proof fixtures through the canonical `bin/pytest-pg` lifecycle. `tests/helpers/reactor_driver.py::drive_until` owns
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
@@ -74,6 +78,12 @@ contract tests.
 The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.
+
+`tests/subprocess_reactor_benchmark.py` has two distinct modes: paired
+measurements are opt-in, dev-only evidence outside the test contract; its
+`--verify-windows` mode is a permanent CI check that required Windows adapter
+cases executed and passed. Measurements run only through an explicit
+`workflow_dispatch` baseline argument, never by default on pull requests.
 
 ### Contention is a theory-possession stop condition
 
@@ -423,6 +433,8 @@ bug evidence.
   mixed into this canonical file.
 
 ## Related Plans
+
+- [PR48 reactor and test hygiene repairs](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md) records the `[TS-0]` PostgreSQL readiness poll cadence (monotonic deadline, `POSTGRES_READY_POLL_INTERVAL_SECONDS`) and removal of the redundant 96-second negative schema-preflight test.
 
 - [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 

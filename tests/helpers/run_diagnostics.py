@@ -15,6 +15,8 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -193,5 +195,23 @@ def record_phase(config: pytest.Config, phase: str, **details: object) -> None:
             "phase",
             phase=phase,
             nodeid=os.environ.get("PYTEST_CURRENT_TEST"),
+            **details,
+        )
+
+
+@contextmanager
+def phase(config: pytest.Config, name: str, **details: object) -> Iterator[None]:
+    """Record `{name}:start` and `{name}:done` with elapsed time and error type."""
+    record_phase(config, f"{name}:start", **details)
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        exc = sys.exception()
+        record_phase(
+            config,
+            f"{name}:done",
+            elapsed=round(time.monotonic() - started, 3),
+            error=None if exc is None else type(exc).__name__,
             **details,
         )

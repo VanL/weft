@@ -30,7 +30,10 @@ from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
 from weft.core.runners.host import HostTaskRunner
-from weft.core.runners.subprocess_runner import run_monitored_subprocess
+from weft.core.runners.subprocess_runner import (
+    open_supervised_process,
+    run_monitored_subprocess,
+)
 from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.agent_session_protocol import (
     make_booted_response,
@@ -1461,12 +1464,8 @@ def test_agent_session_routes_all_event_pairs_through_persistent_policy(
 def test_run_monitored_subprocess_uses_supplied_monitor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [sys.executable, "-c", "print('ok')"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
     )
 
     class FakeMonitor:
@@ -1535,7 +1534,7 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
 
 
 def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [
             sys.executable,
             "-c",
@@ -1547,10 +1546,6 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
                 "print('second', flush=True)"
             ),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
         encoding="utf-8",
         errors="replace",
     )
@@ -1612,7 +1607,7 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
 
 
 def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> None:
-    process = subprocess.Popen(
+    process = open_supervised_process(
         [
             sys.executable,
             "-c",
@@ -1624,10 +1619,6 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
                 "stdout=sys.stdout, stderr=sys.stderr)"
             ),
         ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
         encoding="utf-8",
         errors="replace",
     )
@@ -4860,3 +4851,58 @@ def test_agent_session_construction_failure_reports_monitor_cleanup_failure(
     assert context.queue.joined is True
     assert context.receiver.closed is True
     assert context.sender.closed is True
+
+
+def test_command_handle_acquisition_failure_reaps_process_and_closes_pipes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Host owns the spawned command before handle metadata can fail."""
+    created: list[subprocess.Popen[str]] = []
+    real_open = host_module.open_supervised_process
+
+    def opened(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        process = real_open(*args, **kwargs)
+        created.append(process)
+        return process
+
+    failure = RuntimeError("handle lookup failed")
+
+    def failed_handle(_pid: int | None) -> Any:
+        raise failure
+
+    monkeypatch.setattr(host_module, "open_supervised_process", opened)
+    monkeypatch.setattr(host_module, "_host_handle", failed_handle)
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-c", "import time; time.sleep(30)"],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="handle lookup failed") as raised:
+            runner.run({})
+        assert raised.value is failure
+        assert len(created) == 1
+        process = created[0]
+        assert process.returncode is not None
+        assert all(
+            pipe is None or pipe.closed
+            for pipe in (process.stdin, process.stdout, process.stderr)
+        )
+    finally:
+        for process in created:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()

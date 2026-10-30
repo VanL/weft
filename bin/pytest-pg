@@ -37,6 +37,15 @@ PYTEST_TERMINATE_GRACE_SECONDS: Final[float] = 2.0
 PYTEST_WAIT_POLL_SECONDS: Final[float] = 0.2
 """Bounded wait interval so repeated Ctrl-C can escalate promptly."""
 
+POSTGRES_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+"""Poll interval while waiting for the disposable PostgreSQL container.
+
+Docker has no synchronous readiness event for `docker port` host-port
+publication after `docker run -d`, and the official postgres:18 image
+restarts after running docker-entrypoint-initdb.d on a temporary
+Unix-socket-only server before opening loopback TCP connections.
+"""
+
 PYTEST_DIAGNOSTIC_ARGS: Final[tuple[str, ...]] = (
     "--durations=100",
     "--durations-min=0.5",
@@ -196,14 +205,14 @@ def _retain_container_evidence(container_name: str, artifact: Path) -> None:
 def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
     """Require final-server TCP SQL readiness; host preflight follows [TS-0]."""
 
-    deadline = time.time() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     last_error = "container did not start"
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         port = _docker_port(container_name)
         if port is None:
             last_error = "waiting for published port"
-            time.sleep(1.0)
+            time.sleep(POSTGRES_READY_POLL_INTERVAL_SECONDS)
             continue
 
         result = subprocess.run(
@@ -232,7 +241,7 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
             return port
 
         last_error = result.stderr.strip() or result.stdout.strip() or "psql failed"
-        time.sleep(1.0)
+        time.sleep(POSTGRES_READY_POLL_INTERVAL_SECONDS)
 
     raise RuntimeError(f"Postgres did not become ready: {last_error}")
 

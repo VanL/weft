@@ -1919,14 +1919,38 @@ or other-stream handling. Each raw chunk is at most SUBPROCESS_STREAM_READ_SIZE.
 """
 
 SUBPROCESS_STREAM_DRAIN_TIMEOUT: Final[float] = 0.25
-"""Output-capture grace after a subprocess terminal decision.
+"""Post-exit output-capture budget after a subprocess terminal decision.
 
-Bounds waiting for pipe EOF before stopping adapters. Delivery of the frozen
-captured backlog is separate and may take longer according to sink throughput.
+Capture ends as soon as both output pipes reach EOF or the kernel reports no
+buffered bytes, so this budget is spent only while an inherited descendant
+keeps writing to a pipe after the root's terminal decision. Delivery of the
+frozen captured backlog is separate and may take longer according to sink
+throughput (Spec: [RM-5.2]).
 """
 
-SUBPROCESS_POLL_INTERVAL_FLOOR: Final[float] = 0.01
-"""Minimum sleep interval for subprocess coordination loops."""
+SUBPROCESS_STREAM_TURN_READ_BYTES: Final[int] = 64 * 1024
+"""Per-stream fairness budget for one subprocess supervision turn.
+
+One kernel pipe buffer's worth of bytes: each reactor turn reads (and writes
+stdin) at most this many bytes per stream before supervision runs, and it is
+also the bound on undelivered in-flight output the supervisor holds per stream
+between the kernel pipe and the chunk callback. A stream at the bound is not
+read until callback delivery frees capacity, so a slow sink backpressures the
+child through the full kernel pipe instead of growing parent memory. This is a
+production fairness rule, not a fixture accommodation; tests that shrink
+SUBPROCESS_STREAM_READ_SIZE derive their expectations from it (Spec: [RM-5.2]).
+"""
+
+VERIFIED_PROCESS_EXIT_POLL_INTERVAL: Final[float] = 0.01
+"""Sleep between liveness checks while waiting for verified processes to exit.
+
+Used by ``weft.helpers._wait_for_verified_processes`` for arbitrary
+psutil-observed processes (descendants included) that the helper does not own:
+it must not call ``waitpid`` on them, because that would steal the reap from
+the owning ``Popen`` or multiprocessing handle, and no portable wakeup exists
+for the exit of a process the caller is not the parent of. The wait is bounded
+by the caller's ``timeout``.
+"""
 
 RUNNER_ENTRY_POINT_GROUP: Final[str] = "weft.runners"
 """Entry-point group name for external runner plugins."""

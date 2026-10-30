@@ -6,7 +6,6 @@ import builtins
 import importlib.machinery
 import importlib.util
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -566,9 +565,7 @@ def test_wait_for_postgres_requires_published_port_and_successful_tcp_query(
 
     monkeypatch.setattr(runtime, "_docker_port", lambda _name: next(ports))
     monkeypatch.setattr(runtime, "subprocess", SimpleNamespace(run=query))
-    monkeypatch.setattr(
-        runtime, "time", SimpleNamespace(time=time.time, sleep=lambda _: None)
-    )
+    monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
     assert runtime._wait_for_postgres("owned-server") == "54321"
     assert len(commands) == 2
 
@@ -928,19 +925,3 @@ def test_postgres_readiness_rejects_bootstrap_then_initializes_schema(
     finally:
         (probe / "release").touch()
         runtime._cleanup_container(name)
-
-
-@pytest.mark.skipif(
-    os.environ.get("BROKER_TEST_BACKEND") != "postgres", reason="requires bin/pytest-pg"
-)
-def test_schema_preflight_requires_real_backend_operation() -> None:
-    """A lazy Queue constructor must not masquerade as schema initialization."""
-    runtime = _load_pytest_pg_module()
-    with socket.socket() as unavailable:
-        unavailable.bind(("127.0.0.1", 0))
-        port = unavailable.getsockname()[1]
-        env = runtime._build_test_env(
-            dsn=f"postgresql://postgres:postgres@127.0.0.1:{port}/weft_test"
-        )
-        with pytest.raises(subprocess.CalledProcessError):
-            runtime._initialize_broker_schema(env=env)

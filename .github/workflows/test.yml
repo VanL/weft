@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      reactor_baseline:
+        description: 'Optional full baseline commit SHA for paired reactor measurements'
+        required: false
+        default: ''
+        type: string
 
 env:
   UV_VERSION: "0.13.0"
@@ -62,7 +68,7 @@ jobs:
         WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: ${{ matrix.os == 'windows-latest' && '120' || '' }}
         WEFT_TEST_DIAGNOSTICS_DIR: ${{ matrix.os == 'windows-latest' && matrix.test_slice == 'cli' && format('{0}/weft-test-diagnostics', runner.temp) || '' }}
       run: |
-        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }}
+        pytest -v --tb=short -m "not slow" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }} ${{ matrix.os == 'windows-latest' && matrix.test_slice == 'core-commands' && '--junitxml=pytest-results.xml' || '' }}
 
     - name: Run tests with coverage
       if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
@@ -70,6 +76,27 @@ jobs:
         COVERAGE_FILE: .coverage.${{ matrix.test_slice }}
       run: |
         pytest -v --tb=short -m "" ${{ matrix.pytest_targets }} --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" ${{ matrix.pytest_diagnostic_args }} --cov=weft --cov-report=term-missing
+
+    - name: Verify Windows reactor cases executed
+      if: ${{ always() && matrix.os == 'windows-latest' && matrix.test_slice == 'core-commands' }}
+      run: python tests/subprocess_reactor_benchmark.py --verify-windows pytest-results.xml
+
+    - name: Measure paired subprocess reactor costs
+      if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.reactor_baseline != '' && matrix.python-version == '3.13' && matrix.test_slice == 'core-commands' && matrix.os != 'macos-latest' }}
+      shell: bash
+      env:
+        REACTOR_BASELINE: ${{ inputs.reactor_baseline }}
+      run: python tests/subprocess_reactor_benchmark.py --baseline "$REACTOR_BASELINE" --output reactor-measurements
+
+    - name: Upload reactor measurements and Windows execution evidence
+      if: ${{ always() && matrix.test_slice == 'core-commands' && (matrix.os == 'windows-latest' || (matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' && github.event_name == 'workflow_dispatch' && inputs.reactor_baseline != '')) }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: reactor-evidence-${{ matrix.os }}-${{ matrix.python-version }}
+        path: |
+          reactor-measurements
+          pytest-results.xml
+        if-no-files-found: warn
 
     - name: Upload coverage data
       if: ${{ always() && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' }}
