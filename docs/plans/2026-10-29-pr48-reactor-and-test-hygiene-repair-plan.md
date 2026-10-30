@@ -673,7 +673,7 @@ Exact-head CI is a required gate, not a courtesy: all 27 OS/Python matrix jobs i
 
 ### Execution Record (2026-10-29)
 
-Status: Tasks 1–4 implemented in the working tree; nothing committed or pushed. This plan stays `draft` until its §9 gate passes: exact-head CI with the Windows adapter tests shown executed and passed in retained Windows JUnit evidence, and the Linux and Windows measurement rows recorded.
+Historical implementation-stage snapshot (superseded by later execution records): Tasks 1–4 were implemented in the working tree before commit/push. This plan stays `draft` until its §9 gate passes: exact-head CI with the Windows adapter tests shown executed and passed in retained Windows JUnit evidence, and the Linux and Windows measurement rows recorded.
 
 #### Measurements
 
@@ -687,8 +687,8 @@ macOS rows measured with a scratch script on the current tree before any runner 
 | 3 s idle child, pull `cancel_requested`: ctx switches | 761 | 83 |
 | Output-to-callback latency (median / max, 10 samples) | 34.60 / 58.23 ms | 0.22 / 0.46 ms |
 | Cancel latency, including terminate and reap (median / max, 5 samples) | 40.49 / 46.34 ms | 14.14 / 17.75 ms |
-| Linux rows (all six measurements) | pending exact-head CI | pending exact-head CI |
-| Windows rows (all six measurements) | pending exact-head CI | pending exact-head CI |
+| Linux rows (all six measurements) | recorded in native f4 table below | recorded; full CI gate remains open |
+| Windows rows (all six measurements) | recorded in native f4 table below | recorded; full CI gate remains open |
 
 #### Execution notes
 
@@ -1577,3 +1577,429 @@ I didn't check items 5-6 myself, so I'm taking your test-run, mutant and parent-
 ````
 
 Disposition: PASS/no blocker; native independent final review also closes the PID-content issue. Final SQLite and PostgreSQL owning modules each205passed7.22s, normal12. Fullmypy481/Ruffformat635/docpaths pass. Source diff is only this test plus plan; no production changes. Currentc9 normal Windows3.12/3.13 JUnit artifacts each verify all9 required adapter executions plus all5 fixture error controls and all3 inherited-pipe cases with no skips/errors. Other native gates continue. Corrected test head requires full normal and manual CI; historical7.58s delay remains unlocated.
+
+
+### Native Manager startup evidence (2026-10-30, no speculative runtime fix)
+
+Final-manualf4 run41120214739 Windows3.14 CLI job124285487290 failed parallel Manager reuse at submit_stderr. Four submissions were accepted with return0/TIDs but degraded registry readiness; snapshots contained Manager task_initialized events and no canonical registry entries. Launcher11 means parent ABORT, not spontaneous Manager exit; launcher1 may be cleanup-induced after the one-second communicate bound. No child stack or exception identifies the blocking operation. Existing startup stderr tails were absent from the error, and manual harness cleanup removed startup files. This does not establish a production cause or permit deadline/load relaxation.
+
+Extra diagnostic-only branch atf4: preserve main runtime/tests/workflow. Run the unchanged full Windows3.14 CLI slice, original worker-count helper (5 on this runner), markers,900s thread timeout,720s faulthandler setting and50min job bound. Wrap only detached Manager's interpreter command with stdlib faulthandler: print PID/time marker, schedule repeated5s stack dumps to existing owned stderr, then runpy.run_module('weft.manager_process',run_name='__main__',alter_sys=True) with unchanged argument tail. This preserves module metadata for spawn; no scheduler or timeout policy changes. Repeated dumps are diagnostic activity and may perturb timing; a pass establishes no cause. Runtime process lifetime and existing job deadline bound the probe; retained files are bounded separately.
+
+Before the parallel-reuse helper raises its original assertion and before manual harness cleanup, retain at most16 startup stderr files, each with first32KiB plus last32KiB, observed size and per-file read errors. Include full diagnostic launcher event list in the existing failure message. Copy the structured evidence under the existing WEFT_TEST_DIAGNOSTICS_DIR and use the same pinned always-upload action. Collection/read/write errors are facts in the payload and must not replace the original assertion. No environment dump. Review exact probe/workflow, static checks and source-level invocation/retention checks before dispatch; record diagnostic head/run/artifact. Do not infer the historical cause without matching native evidence. Both current official runs continue for useful core/measurement artifacts; failed/skipped workflows are not passes.
+
+Startup diagnostic review, verbatim (219.76 s):
+
+````text
+**Verdict: not PASS.** There is one blocker and one narrow evidence-loss finding. Everything else holds up when checked against the code on `main`/`f4`. I ran nothing; this is from reading the source only.
+
+## Blocker
+
+**B1. The probe looks in the wrong directory, so it can never capture a file.**
+- The diff globs `harness.context.logs_dir / "startup"`.
+- The real directory is `MANAGER_STARTUP_LOG_DIRNAME = "manager-startup"` (`weft/_constants.py:871`). Both the runtime (`weft/core/manager_runtime.py:1379`) and the harness (`tests/helpers/weft_harness.py:1116`) use it.
+- As written, the witness would always report `file_count: 0` with no files and no error. The run would look like "no stderr existed", which is a false negative.
+- Fix: add `MANAGER_STARTUP_LOG_DIRNAME` to the existing `weft._constants` import in `tests/cli/test_cli_run.py:27` and glob `logs_dir / MANAGER_STARTUP_LOG_DIRNAME`. The static checks and your source-level retention check could not have caught this, so a probe self-check that actually reads a real file is worth having.
+
+## Narrow finding
+
+**F1. The probe hides launcher stderr in the failure message.**
+- In `_format_manager_start_failure` (`manager_runtime.py:1619-1625`), launcher stderr only appears in the `elif` branch, i.e. when the startup stderr tail is empty.
+- In the failing run, that tail was empty, so launcher stderr would have shown.
+- With the probe, every Manager writes its PID/time marker first, so the tail is never empty and launcher stderr is never shown on the registry-readiness path (`_fail_manager_start`, `:2170`).
+- Since this function is already in the diff, append `launcher_stderr` unconditionally next to the new launcher-events line.
+
+## Minor, non-blocking
+
+- **Upload setting:** the workflow uses `if-no-files-found: error`, but the plan says "same pinned always-upload action", and the original uses `warn`. In practice it's harmless because `run_diagnostics.py` writes per-process files whenever the env var is set. Still, `warn` avoids a passing run failing on the upload step.
+- **Dump timing:** the 10s deadline starts after the `spawned` event, and the abort comes at about 10.5s plus up to 1s for `communicate`. The 5s timer starts before `weft` is imported, so expect only one or two dumps per aborted Manager. To read them, compare the marker's `time_ns` with the abort time. A single dump shows one point in time, not that the Manager was stuck.
+
+## Checked and OK
+
+- **`-c` wrapper:** the code compiles (`'\\n'` becomes a newline literal), and there are no double quotes, so Windows `list2cmdline` quoting is safe. With `-c`, `sys.argv` is `['-c', <5 args>]`. `alter_sys=True` rewrites `argv[0]` and `main()` reads `argv[1:]`, so it gets the 5-argument contract (`manager_process.py:49-50`).
+- **Spawn metadata:** during `run_module`, `sys.modules['__main__']` is a temporary module whose `__spec__.name` is `weft.manager_process`. multiprocessing therefore gets `init_main_from_name`, the same as with `-m`. `sys.exit(main())` keeps the exit code.
+- **Where the dumps go:** the Manager's stderr is the inherited file (`manager_detached_launcher.py:35-53`). The Manager calls `_task_process_entry` with `detach_stdio=False` (`launcher.py:141`), so fd 2 is never redirected to devnull and the dumps land in the owned file.
+- **File lifetime:** on Windows, open files can't be unlinked (the harness already handles this, `weft_harness.py:1622`). Files of aborted Managers survive the kill and stay until harness cleanup. The witness runs first, at the top of `_raise_parallel_manager_reuse_failure`, before the `finally: harness.cleanup()` at `test_cli_run.py:3029`. `root == harness.root` in all three callers, since the `workdir` fixture is `weft_harness.root`.
+- **Read bounds:** `seek(max(32768, size-32768))` gives no overlap and an empty tail for small files. `errors="replace"` cannot raise. `harness.context` is already cached by the time the helper runs, so in practice only `OSError` can occur.
+- **No contamination of the CLI slice:** no `tests/cli` test asserts on the Manager argv or the failure-message text. Those tests are in `tests/commands` and `tests/core`, which this run doesn't include. The `cmdline[0]` title check in `liveness/host.py` behaves the same, and the proctitle test is skipped on Windows. The foreground-serve path (`:2289`) doesn't use the wrapped command.
+- **Workflow:** overwriting `test.yml` itself keeps `workflow_dispatch --ref <branch>` working, because the file exists on the default branch. No other workflow triggers on a branch push. Don't open a PR from this branch: `pull_request` would run the diagnostic workflow.
+- **Workflow parity:** the slice, markers, timeouts, worker-count helper and 50-minute job bound match the original. The only differences are dropped caching and lint gating, which don't affect the test run.
+
+Once B1 and F1 are fixed (both one-liners) I have no other blockers. Nothing here supports a claim that the native run passes.
+````
+
+Dispositions: accept B1 and F1. Reuse MANAGER_STARTUP_LOG_DIRNAME (manager-startup), not a guessed directory; append launcher stderr independently of startup-tail presence. A real local WeftTestHarness self-check created105536 bytes with distinct32KiB prefix/tail in the actual startup directory plus an unreadable directory entry. Exact prefix/tail/size/read_error assertions passed, and copied artifact remained readable after harness root deletion. Prior static checks alone did not establish retention correctness. Keep if-no-files-found:error for this diagnostic-only evidence job: absence of any evidence must be visible, not accepted. File content and selected count are bounded; total discovery covers this isolated owned harness directory. Native fresh-eyes has no other blocker. Watchdog thread and stderr writes perturb scheduling; a missing dump is ambiguous and a passing diagnostic does not validate the historical startup.
+
+
+### Verified native reactor measurements at f4fb7789
+
+Manual run41120214739 produced successful Linux3.13 and Windows3.13 core measurement jobs before its separate Windows3.14 CLI failure. These are valid measured-job artifacts, not an all36 workflow pass. Baseline540707a370d32cf9475832099fabd52fa1dc7f0a and candidatef4fb77892efe76f9225ff4ad83040801b783cf04 match procedure.json and GITHUB_SHA. Both checkouts report no tracked dirt; each arm has12 imported Weft modules from its selected source root, with every normalized git blob matching the pinned revision. Before uses Popen(stdin=None), after uses open_supervised_process(pipe_stdin=False). Each contains3+3 raw idle samples,10 output samples and5 cancellation samples. Artifacts13008349432 (Linux) and13009057279 (Windows) are retained with procedure/before/after JSON. Parent independently verified source identities and all raw counts.
+
+| Measurement (Linux x86_64, CPython3.13.17) | Before | After |
+|---|---:|---:|
+|3s idle, no cancellation callback: parent CPU|34.966 ms|0.328 ms|
+|3s idle, no cancellation callback: context switches|724|1|
+|3s idle, pull cancellation: parent CPU|33.209 ms|3.784 ms|
+|3s idle, pull cancellation: context switches|834|61|
+|Output-to-callback observed median / max|38.930233 /39.284305 ms|0.143651 /0.154886 ms|
+|Cancellation through reap observed median / max|5.891750 /6.413786 ms|2.666598 /2.909921 ms|
+
+| Measurement (Windows Server2025, CPython3.13.16) | Before | After |
+|---|---:|---:|
+|3s idle, no cancellation callback: parent CPU|31.250 ms|0 ms counter delta (quantized)|
+|3s idle, no cancellation callback: context switches|at least68|2|
+|3s idle, pull cancellation: parent CPU|46.875 ms|0 ms counter delta (quantized)|
+|3s idle, pull cancellation: context switches|at least68|59|
+|Output-to-callback observed median / max|29.207500 /30.251700 ms|0.169900 /0.283600 ms|
+|Cancellation through reap observed median / max|18.728200 /20.663300 ms|10.458100 /43.680500 ms|
+
+Limitations are part of the result. The Windows observed cancellation maximum worsened from20.6633 to43.6805ms despite its lower median; no uniform cancellation improvement is claimed. Windows CPU counters advance in15.625ms ticks, so zero delta is not zero work. Windows joined-thread calibration observed only4 switches for100 sleeps; baseline context-switch counts omit exited helper threads and are lower bounds. After has no helper threads, so its process count covers the measured supervisor. Linux uses RUSAGE_SELF: calibration103 switches includes joined threads, while raw psutil saw only3. No cross-platform counter comparison is made. psutil7.2.2 is identical within both pairs. Collector SHA difference is newline-only: normalized sourceLF5446c175... on Linux becomes56f2b609... with WindowsCRLF, independently reproduced from pinned source.
+
+These are single before-then-after runner pairs with no speed threshold, randomization or latency-distribution claim. Output timestamps occur every0.1s and cancellation is requested at0.5s; either can phase-align with the old polling cadence. Reported maxima are sample maxima, never worst-case guarantees. Pull cancellation still has its existing50ms polling floor. Native measurements close the missing-row evidence gap, but the separate startup failure and full normal/manual CI acceptance remain open. Concurrent launch workers remain deferred.
+
+Startup diagnostic final closure, verbatim (38.97 s):
+
+````text
+**Verdict: PASS. No blockers.** I only read the source. I ran nothing, and none of this shows the native Windows run will pass.
+
+**B1 is fixed.** The witness now looks in `logs_dir / MANAGER_STARTUP_LOG_DIRNAME` for `manager-*.stderr.log`. That matches where the runtime writes the file: `startup_dir / f"manager-{tid}.stderr.log"` (`weft/core/manager_runtime.py:1379-1381`). `json`, `os`, `time` and `Path` are already imported in `tests/cli/test_cli_run.py`, and your self-check read a real file in that directory.
+
+**F1 is fixed.** Launcher events and launcher stderr are now always in the message. `json` is already imported in `manager_runtime.py:12`, and the events are parsed JSON dicts, so `json.dumps` won't fail on them.
+
+**The evidence survives on the failure path.** `_fail_manager_start` (`manager_runtime.py:1791-1813`) never calls `_cleanup_startup_stderr`. So the failing Manager's file is still there when the witness runs. That cleanup only runs on success and competing-acknowledgement paths. It ignores `OSError` (`:1416-1422`), so on Windows a file still held open by a Manager stays put. The 4000-character failure-message tail (`_tail_startup_stderr`, `:1404`) will now hold the marker and the last faulthandler dump. faulthandler writes ASCII only, so the strict UTF-8 `read_text` there won't fail.
+
+**Two small things, neither blocking:**
+- If the startup tail is empty, launcher stderr now shows up twice: once from the new line and once from the `elif` at `:1623-1625`. It's only cosmetic, and you don't need to touch it for a diagnostic-only branch.
+- The upload step still uses `if-no-files-found: error`. That's harmless because the env var is always set, so `run_diagnostics.py` always writes files. The prior review's minor note still applies.
+
+The earlier conditions still hold. Don't open a PR from this branch. The native evidence still decides whether a fix is needed, and a dump that isn't there doesn't prove the cause.
+````
+
+Disposition: PASS/no blocker; parent native review also passes after directory correction. Cosmetic duplicate launcher stderr is acceptable in this temporary evidence branch. Arm faulthandler immediately after importing faulthandler/sys, before json/runpy/metadata work, to reduce the wrapper blind spot; interpreter startup before the wrapper remains unobserved. Same5s diagnostic timer, argv semantics and original test deadlines. Ruff/selectedmypy pass and the actual retention self-check passes. No PR is opened from the diagnostic branch; no main runtime change.
+
+
+### Separate native child-launch timeout witness (2026-10-30, diagnostic only)
+
+Manual run 41120214739, Windows 3.14 core job 124285487372 failed `test_manager_spawns_child`: the existing eight-second task-log wait ended with `children={}; event_tail=[]`; teardown later reported a surviving managed child. This is an in-process Manager child-launch observation, distinct from standalone Manager registry startup. Neither the failure snapshot nor later cleanup locates the blocked operation. No product cause is claimed.
+
+An isolated branch at f4fb77892efe76f9225ff4ad83040801b783cf04 keeps all product files unchanged and runs the complete Windows 3.14 core/commands slice with the original five-worker helper, markers, timeouts, job bound, and pytest options. A test-only helper at the existing assertion boundary records at most sixteen active-launch and worker-registration records, at most thirty-two thread identities per registration, and stdlib all-thread stacks to a dedicated temporary `WEFT_TEST_LAUNCH_WITNESS_DIR` directory. The ordinary run-diagnostics plugin remains disabled as in the official core slice. It performs no broker query, queue-size lookup, explicit lock acquisition, process poll, or wait. Concurrent snapshot errors and file-write errors are evidence, not replacements for the original failure. The snapshot is not atomic; stack dumping/file writes happen only after the original timeout. The existing child snapshot/assertion remains intact.
+
+The temporary dispatch-only workflow uses read-only permissions and pinned existing actions, always retains the diagnostic directory and JUnit, and does not replace any official matrix gate. It contains no CLI command wrapper. A passing diagnostic establishes only intermittence; a stack shows one observed location, not proof of a deadlock. Interpreter/child stacks outside the worker are not captured by this helper. Source-only native and cross-family reviews precede dispatch. Local collector self-check confirmed sixteen-record caps, an actual faulthandler stack after the flushed JSON header, and an unwritable-path error returned without raising; selected Ruff and mypy passed.
+
+
+Official f4 runs completed with failures, not acceptance: normal 41120227615 has 31 successful jobs, one failed Windows 3.12 CLI job, and four skipped dependent extensions; manual 41120214739 has 29 successful jobs, three failed jobs (Windows 3.14 CLI/core and Windows 3.13 CLI), and four skipped extensions. The Windows 3.12 pipeline timeout made real progress (Manager/pipeline started, input edge and first stage completed); the retained inline Manager stack was in SimpleBroker `begin_immediate` during scheduler checkpoint publication, a single observation that does not prove a lock duration. Windows 3.13 CLI had three 120-second subprocess timeouts and an agent-result timeout. Two snapshots have only Manager initialization and no registry, another has spawning plus registry, and the agent snapshot includes work completion by diagnostic collection time. These paths remain separate hypotheses; no shared cause or product fix is inferred. The installed CI SimpleBroker version was 8.7.2 (simplebroker-pg 4.7.2), matching the local installed SimpleBroker version. Diagnostics and full logs are retained in scratch.
+
+
+Native child-launch probe review found no blocker: direct bounded owner reads avoid broker queries, joins and registration locks. Snapshot fields are sequential/non-atomic; output is synchronous filesystem/faulthandler work, so the helper is lock-avoiding rather than nonblocking. Worker stacks cannot expose child-process stacks or locate a past cause by themselves. The CLI startup witness run 41123724756 at c8ec83d811a60beb8c746ceb6699998cd6316d7a completed successfully with 293 passed/10 skipped in 350.61 seconds; the parallel-reuse case ran in 34.60 seconds. No startup-failure witness was emitted because the failure did not recur. This is intermittence evidence only, with observer effects retained, and does not establish the original cause.
+
+
+Core witness cross-family review (172.62 seconds), verbatim:
+
+````text
+**Not a PASS yet.** There is one blocking finding: the plan claims something about the run that the diff doesn't do. The other findings are cleanups that don't block. I didn't run anything; this is from reading the source and the diff.
+
+## Blocking
+
+**B1. Setting `WEFT_TEST_DIAGNOSTICS_DIR` changes the whole run, not just what happens after the deadline.**
+- **The claims.** The plan says the slice runs "unchanged" with the original options, and that "stack dumping/file writes happen only after the original timeout."
+- **What the variable does.** In the official Windows core-commands job this variable is empty; only the CLI slice sets it (`.github/workflows/test.yml:69`). `tests/conftest.py:29` always loads `tests.helpers.run_diagnostics`. When the variable is set, its `pytest_configure` (`tests/helpers/run_diagnostics.py:171`) registers a plugin in the controller and in every xdist worker. That plugin, for the entire run:
+  - opens and appends to a JSONL file at every test start and finish (`:123-127`);
+  - points each worker's terminal-writer `_file` at a line-buffered retained file (`:105-107`);
+  - calls `faulthandler.enable()` again, aimed at a per-worker stack file (`:117`).
+- **Also changed.** `WeftTestHarness._attach_failure_diagnostics` (`tests/helpers/weft_harness.py:197`) now writes into the same directory.
+- **Why it matters.** The failure is an intermittent Windows timing problem. Adding file I/O to every test in five workers (on a runner where Defender scans files) is an undeclared change to the conditions you're trying to reproduce. A pass, or a changed failure rate, can't be separated from this extra load.
+- **Fix, either way:**
+  - (a) Read a dedicated variable such as `WEFT_TEST_LAUNCH_WITNESS_DIR` in `_retain_launch_witness` and leave `WEFT_TEST_DIAGNOSTICS_DIR` unset, which keeps the official environment byte-for-byte. I recommend this.
+  - (b) Keep the variable, but state in the plan that the run-diagnostics plugin is active for the whole run, and drop the "only after the original timeout" claim.
+
+## Non-blocking
+
+1. **The `active_handle` check can race.** `registration.active_handle.request_id if registration.active_handle is not None else None` reads the field twice. If a worker clears it in between (`service.py:606`), you get an `AttributeError`. That error is caught, but it throws away the whole `workers` list plus `startup_blocked` and `draining`, which are assigned afterwards. Read `handle = registration.active_handle` once (a small per-registration function is the easiest way), and assign the plain scalar fields before the lists.
+
+2. **The "errors retained" claim only covers the listed exception types.** The snapshot catches `(AttributeError, RuntimeError)`. The write block catches `(OSError, ValueError, RuntimeError)`, and `json.dumps` sits inside it, so a `TypeError` from it would escape. Any other exception type replaces the original `AssertionError` and loses `child_snapshot`. The test still fails, so nothing is masked, but the message disappears. With the current dataclass field types this is unlikely. Adding `TypeError` to both tuples closes the gap without needing a broad-except entry in the Ruff suppression index.
+
+3. **Cheap fields that would help tell causes apart:**
+   - How far past the deadline the loop ended, or how long the last `process_once()` took. If the test thread was stuck inside `process_once()`, the after-the-fact stack dump won't show it. This number is the only signal that separates "reactor thread stalled" from "worker stalled."
+   - Per-launch `started_ns` from `manager._child_launch_started_ns`. It's a plain dict owned by the reactor and is already exposed at `manager.py:1251`, so the snapshot stays lock-free.
+
+4. **Thread IDs are hard to match.** The faulthandler dump labels threads as `Thread 0x…` in hex, while `thread.ident` is recorded in decimal. Recording `hex(ident)`, and optionally `native_id`, lets you match them directly.
+
+5. **Scope wording.** `wait_for_log_event` is shared by about 14 call sites in `tests/core/test_manager.py`, not only `test_manager_spawns_child`. A timeout at any of them now writes a witness file. File names are unique and no test expects this timeout to happen, so the behaviour is fine. The plan should just say it's a shared helper.
+
+## Checked, no issue
+- **Lock-free reads.** `_active_child_launches` and `_service_worker_registrations` are read without `_service_worker_lock`. The launch dict is changed only on the reactor thread, which here is the test thread. The registrations dict is changed only under the lock, and `threads` is swapped in as a whole tuple. Leaving out `qsize()` correctly avoids the queue's internal lock that `_service_worker_snapshot` takes (`service.py:511`).
+- **No blocking from the dump.** `faulthandler.dump_traceback(all_threads=True)` holds only the GIL on the default 3.14 build, so a worker stuck in `CreateProcess` or a pipe write can't block it. Flushing the JSON header first keeps the stack output in the right order.
+- **Fields exist.** Every field the helper reads exists with the types it expects (`manager.py:292-305`, `service.py:137-148`).
+- **Original assertion preserved.** `child_snapshot` and the original `AssertionError` remain, and the witness is only added to the message.
+- **Workflow:**
+  - Triggered only by dispatch, with `contents: read`, and actions pinned to the same SHAs as the official workflow.
+  - The pytest command is identical to the official one.
+  - The other workflows have no branch-push triggers.
+  - Reusing the `test.yml` filename keeps `--ref` dispatch working.
+  - With `if-no-files-found: error`, JUnit alone is enough to satisfy the upload when the test passes.
+  - Dropping the uv cache doesn't affect what gets tested.
+- **No cause claimed.** Nothing in the plan or diff claims a product cause, which matches the evidence.
+
+**Verdict:** fix B1, preferably with the dedicated variable. After that I have no remaining blockers, and items 1–3 are worth doing in the same edit.
+````
+
+Dispositions: B1 accepted, use a dedicated temporary variable so the run-wide diagnostics plugin stays disabled. F1 accepted, read active_handle once and scalar fields first. F2 accepted, retain TypeError alongside the specific snapshot/write errors. F3 accepted narrowly: include existing launch-start nanoseconds and deadline overrun without changing the loop. F4 accepted hex identifiers. F5 accepted: this is the shared wait_for_log_event helper and may capture any of its timeout callers. All record types remain existing owner primitives, no framework or product change. Corrected collector self-check and Ruff/selected mypy passed.
+
+
+Core witness final cross-family closure PASS (52.91 seconds), verbatim:
+
+````text
+**PASS. No blockers left.** As you asked, I only read source and ran no commands, tests, edits or delegation. The scope is still the earlier seven-part review.
+
+**B1 is closed.**
+- Only `_retain_launch_witness` reads `WEFT_TEST_LAUNCH_WITNESS_DIR`. Nothing else in the repo does.
+- `WEFT_TEST_DIAGNOSTICS_DIR` is not set in the diagnostic job. Two things depend on it, and both stay off for the whole run:
+  - the run-diagnostics plugin (`tests/helpers/run_diagnostics.py:172`);
+  - the harness failure-diagnostics write (`tests/helpers/weft_harness.py:197`).
+- Child processes inherit the new variable, but it has no effect on config. `weft/_constants.py:3018-3024` only picks up `WEFT_*` names that are declared in `WEFT_CONFIG_DEFAULTS`, and `TEST_LAUNCH_WITNESS_DIR` isn't one.
+- The heartbeat value (`120`), the pytest command line and the worker-count step all match the official Windows core-commands job. The only added work is the witness write, and it happens after the deadline expires.
+
+**F1–F5 are accepted as you describe them.** The diff matches:
+- **F1:** `handle = registration.active_handle` is read once. `startup_blocked` and `draining` are set before the lists are built.
+- **F2:** `TypeError` is added to both except clauses.
+- **F3:** `deadline_overrun_seconds` and the per-launch `started_ns` (`manager.py:644,1480`) are included.
+- **F4:** `ident_hex` is recorded alongside `ident`.
+- **F5:** the shared-helper scope (`wait_for_log_event` has many callers) is a plan-wording item, and you've said it's handled.
+
+**Re-checked against the current tree:**
+- `deadline` comes from `time.monotonic()` (`tests/core/test_manager.py:960`), so the overrun subtraction compares the same clock.
+- Every field the snapshot reads exists with the type it expects:
+  - `_ManagerChildLaunchRequest.{source_queue, reserved_queue, message_timestamp}` at `manager.py:301-303`;
+  - `_ServiceWorkerRegistration.{active_handle, threads, threads_started, threads_completed, events_published}` at `service.py:144-148`;
+  - `_service_worker_registrations` at `service.py:162`;
+  - `_startup_blocked` and `_draining` at `manager.py:609,666`.
+- `os`, `time`, `Path`, `Any` and `itertools` were already imported, and `faulthandler` is added.
+
+**How to read the results (not issues):**
+- **`deadline_overrun_seconds` is a lower bound.** It measures only the part of the last loop pass that ran past the deadline, and that pass includes the 0.05 s sleep. An overrun clearly above about 0.05 s points to a slow last `process_once()` or log drain. A small overrun rules nothing out.
+- **The stacks come from the test's own worker process only.** Snapshot and output are sequential and synchronous. The child process and the other xdist workers aren't captured.
+- **A passing run doesn't explain the original failure.** It isn't evidence of cause.
+````
+
+Accepted interpretation limits: deadline overrun covers the last loop pass including its existing sleep and is not a process_once duration; small overrun rules nothing out. Native review and corrected local collector checks are closed. Dispatch is diagnostic only.
+
+
+### Revised isolated CLI startup evidence proposal
+
+The first Windows3.14 full CLI diagnostic passed293/10 and captured no failure startup files. Do not repeat it unchanged. Its passing result only establishes intermittence with observer effects. Main f4 runtime remains untouched.
+
+Keep the same temporary branch, full Windows3.14CLI slice,5workers, all original test/job deadlines and options. Existing RunDiagnostics is already active in the official CLI slice. Retain pytest.Config in existing conftest configure/unconfigure lifecycle, and reuse record_phase at actual run_cli subprocess begin/return/timeout. Include command argv/cwd/timeout, monotonic elapsed, returncode; on timeout record bounded8KiB prefix+8KiB tail per stdout/stderr plus original lengths, bytes decoded with replacement. Record immediately before existing slower harness/queue dumps. Do not change failure or introduce retries. Setup/prepare_cli_root happens before begin and is thereby distinguished. The run_cli call from parallel worker threads uses the existing per-worker diagnostic owner, not a parallel file writer.
+
+Call existing bounded _retain_startup_witness after successful parallel reuse cycles before harness cleanup, in addition to current failure hook. This preserves successful constructor baselines. Existing helper captures at most16stderr files,32KiB prefix/tail perfile, file sizes/read errors. Add small explicit temporary Manager-only stderr phase markers at class-load begin/end, constructor begin/end, run entry using existing launcher boundary, plus current early faulthandler watchdog/runpy wrapper. Do not instrument every Consumer or add a tracing framework. Every marker PID/time_ns lets the file align with command records.
+
+Risk: synchronous JSON/file/stderr writes and watchdog thread perturb scheduling. Passing repeat still cannot diagnose original failures. Existing successful Manager stderr may be removed before collector on non-Windows; this probe is Windows-only and file-open lifetime will be verified. Partial TimeoutExpired.output/stderr only reflects Python-collected bytes and may not expose subprocess progress. The phase markers bound a location but do not establish why elapsed time was spent there.
+
+Before dispatch: independently review exact delta; local real subprocess success/timeout verifies original return/TimeoutExpired unchanged and phase records/byte bounds; real startup-file lifetime self-check; statics; inspect no main product changes. Record full final review/dispositions. Then one diagnostic dispatch, retain evidence and interpret exact installed dependency versions.
+
+Implementation self-check: actual run_cli --version returned0; actual0.001-second CLI call raised original TimeoutExpired with timeout unchanged; existing recorder retained exact begin/end/begin/timeout sequence. A56384-byte output value retained exact8192-byte prefix/tail and original length. Ruff/selected mypy passed3touchedfiles. Elapsed is subprocess-call duration including normal subprocess.run cleanup, not child-only execution.
+
+
+Separate core witness dispatched as commit23f48c6e0006d37c5c781276cf427aa9577176d6, run41125098427, job124301269547. Dedicated diagnostic branch only, no main runtime change.
+
+
+Revised CLI probe external review (188.13 seconds), verbatim:
+
+````text
+**Verdict: not a PASS.** There is one blocker, and one issue that should be fixed before dispatch. Everything else is correct.
+
+## Blocker: the Manager markers will break `tests/cli/test_cli_serve.py`
+
+`_startup_probe_phase` only checks `task_cls_path == "weft.core.manager.Manager"`. But the foreground `weft manager serve` command uses the same entry point inside the CLI process: `serve_manager_foreground` → `_run_manager_process_foreground` (`weft/core/manager_runtime.py:2283-2298`) → `run_manager_process` → `_task_process_entry` with `detach_stdio=False`. In that path, stderr is not a Manager-owned startup file. It is the CLI's own stderr pipe.
+
+`tests/cli/test_cli_serve.py` runs `_popen_cli("manager", "serve", ...)` and asserts `stderr == ""` at lines 387, 522, 612 and 700. Line 752 also needs `"STOP command received"` if stderr isn't empty. Those tests will now fail every time, inside the same Windows 3.14 full CLI slice. That breaks rule 2 ("preserve original results") and mixes guaranteed failures into the evidence. Your local checks (`--version`, the 0.001s timeout, ruff/mypy) never ran this path, so they couldn't catch it.
+
+**Fix:** keep the class check, and also gate on something that only the detached child has. The simplest option is an environment flag that your existing early faulthandler/runpy wrapper sets in its own process before `runpy`. I can't see that wrapper from the f4 baseline, so confirm it only wraps the detached `weft.manager_process` command. An `os.fstat(2)` "is a regular file" check is a weaker choice: pytest's in-process capture also uses temp files.
+
+## Should fix: four threads write the same event file at once
+
+`_run_parallel_manager_reuse_cycle` calls `run_cli` from a `ThreadPoolExecutor` with 4 tasks (`tests/cli/test_cli_run.py:404-405`). Each `_RunDiagnostics._record` opens its own `open("a")` handle on the same `events_path`, writes, and closes it. On Windows, the C runtime implements append mode as "seek to end, then write" on each handle separately, so writes from different handles aren't guaranteed to be atomic. The 4 `run_cli:begin` records start almost at the same moment by design, and the timeout records can be about 32 KiB or more. A lost or interleaved line would land exactly in the evidence you're collecting, so the claim "not a parallel file writer" isn't quite true inside one process.
+
+**Fix:** add a module-level `threading.Lock` in `_record_cli_phase` around `record_phase`. That covers every writer that can run at the same time: the main thread is blocked in `executor.map`, and the `test_start`/`test_finish` records happen outside the test body.
+
+## Checked and correct
+
+- **Prefix/tail slicing** (`value[max(8192, size - 8192):]`): no overlap, the tail is empty when size ≤ 8192, and the original length is kept. Decoding with replacement can't raise. `_bounded_cli_output` runs before the `try` in `_record_cli_phase`, but it can't fail for `None`, `str` or `bytes`.
+- **Timeout record placement:** it's written before the slower harness and queue dumps. The original `TimeoutExpired` is re-raised unchanged with the same notes, and recorder errors are swallowed at two levels. Failure safety holds.
+- **Windows output type:** on Windows, `exc.stdout`/`exc.stderr` come from the `communicate()` call after `kill()`, so in text mode they are `str`. Your 56,384-byte macOS self-check only exercised the `bytes` path. The `"unit": "characters"` field covers this, but run one pure call with a `str` input as a check.
+- **Elapsed time:** `subprocess_call_seconds` includes the kill and output collection after a timeout. The cleanup time can be estimated as `subprocess_call_seconds − timeout`. You already note this.
+- **Config lifecycle:** set in the conftest `pytest_configure` and cleared in `pytest_unconfigure`. Each xdist worker has its own config and its own per-worker owner. Correct.
+- **Launcher markers in the detached path:** `json`, `os`, `sys` and `time` are already imported. `manager_process.run_manager_process` passes `detach_stdio=False`, so fd 2 is the startup file opened in `manager_detached_launcher._launch_runtime`. Consumers are excluded by the class check. Marker placement is minimal and outside the class load and constructor. It's not a tracing framework.
+- **Windows file lifetime:** the Manager holds the inherited stderr handle, which Python opens without delete sharing. So `_cleanup_startup_stderr`'s `unlink` should fail with an `OSError` that gets swallowed, and the file should survive until the Manager exits. That's consistent with retaining it before harness cleanup, but it still needs the native verification you planned.
+- **Interpretation guardrails** (intermittence only, observer effects, no claim of a common cause) are stated correctly.
+
+## Before dispatch: things I couldn't see from f4
+
+`_retain_startup_witness` and the runpy wrapper aren't in the baseline tree. Confirm two things:
+1. It can't raise on the success path. If it did, a passing cycle would turn into a failure.
+2. Its behaviour when called several times for the same harness, once per reuse cycle: does it duplicate, overwrite, or get capped per test?
+
+There are no changes to main product code apart from the temporary marker hunk in `weft/core/launcher.py`, which is in scope for the isolated branch. Once the blocker and the lock are fixed, I'd expect this to pass.
+````
+
+Dispositions: accepted foreground-serve blocker; markers now require both Manager class and a current-PID flag set only by the detached runpy wrapper, excluding foreground CLI and inherited descendant flags. Accepted concurrent append finding: one temporary per-process lock serializes run_cli calls through the existing recorder; controller/test-boundary records remain outside those concurrent calls. Added string partial-output control, exact forty-record/four-thread recorder check, absent/wrong/current-PID marker partition and monotonic field checks. All passed; selected Ruff/mypy four files passed. Existing collector catches filesystem errors, uses only JSON-safe records, and writes unique per-call timestamped artifacts capped16files/64KiB each; successful cycle calls once before return. Snapshot remains diagnostic and synchronous.
+
+
+Revised CLI probe final cross-family closure PASS (76.04 seconds), verbatim:
+
+````text
+**Verdict: PASS. No blockers.** I only read the diff and the f4 tree. I ran nothing and changed nothing.
+
+## Prior blocker: fixed
+- `_startup_probe_phase` now needs two things: the Manager class path, and `WEFT_STARTUP_WITNESS_CHILD_PID` equal to the current `os.getpid()`. Only the `-c` wrapper in `_build_manager_process_command` sets that variable, and it does so in its own process before `runpy`.
+- **Foreground `weft manager serve`** runs the Manager inside the CLI process (`manager_runtime.py:2289`, `from weft.manager_process import run_manager_process`). Pytest never sets the variable, so `tests/cli/test_cli_serve.py`'s `stderr == ""` assertions are safe.
+- **Children of a detached Manager** inherit the variable, but it holds the Manager's PID, not theirs. So consumers and nested processes are also excluded. The PID check covers the inheritance path that the class check alone missed.
+- **Same process:** the wrapper and `_task_process_entry` see the same PID, because `runpy.run_module` runs in-process.
+
+## Prior should-fix: fixed
+- `_cli_diagnostic_lock` wraps every `record_phase` call from `run_cli`.
+- I checked the other writers to the same `events_path` in a worker:
+  - `test_start`, `test_finish`, `session_*` and `worker_down` all run on the hook thread outside the test body.
+  - The heartbeat thread writes to `sys.__stderr__`, not the events file (`conftest.py:611-628`).
+  - `test_cli_run_installed_entrypoint.py` calls `record_phase` directly, but it's a separate test, and xdist runs one test at a time per worker.
+- So the lock covers every writer that can run at the same time.
+
+## Questions from the last round, now answered
+1. **Can the success path fail?** No.
+   - `_retain_startup_witness` catches `OSError` around everything, and catches it again for each file read.
+   - Decoding uses `errors="replace"`.
+   - The JSON fields are all `str` or `int`.
+   - `harness.context` was already built during the cycle (`weft_harness.py:214-217`).
+   - The return value on the success path is thrown away.
+2. **Repeated calls:** each call writes a unique artifact named with `time_ns`. Each call reads at most 16 files and at most 2×32 KiB from each. Artifacts pile up per cycle, with no cap per test, which is fine for one diagnostic run.
+
+## Other checks
+- `_build_manager_process_command` returns the same number of arguments as before (`-c <code>` replaces `-m <module>`). Positional indices 5, 6 and 7 still line up with `tests/commands/test_run.py:793-800`, and that test isn't in the CLI slice anyway.
+- Nothing in the harness checks the content of the startup stderr files. `weft_harness.py:1112-1132` only parses TIDs from file names, and `:1622-1636` only classifies locked-file cleanup errors. The extra marker lines can't change harness behaviour.
+- Placing `command_started` after `run_cli:begin` means the recording time is left out of `subprocess_call_seconds`. Correct.
+
+## Notes, not blockers
+- On the failure path, the full witness (up to about 1 MiB) is embedded in the failure payload as well as written to the artifact. This bloats the failure text but doesn't change the outcome.
+- Whether the healthy file survives on native Windows is still unverified, as you noted. The interpretation guardrails from the last round still apply.
+````
+
+Native final closure also found no blocker: current-PID/class marker ownership, non-recursive recorder lock, monotonic stamps and original outcomes preserved. Optional failure-payload size remains bounded by existing16file/64KiB collector cap and is accepted for this isolated run. Native healthy-file survival remains an observation gate.
+
+
+### Bounded failing-version CLI comparison
+
+The reviewed d1a3440e instrumentation is already running on Windows3.14 (41126045971). A separate dispatch reuses that exact instrumentation on Windows3.12 and3.13 only, tied respectively to the observed pipeline timeout and four CLI failures. The temporary workflow adds a two-version matrix with fail-fast false and unique version-qualified artifact names. Full CLI targets, five-worker helper, all deadlines/options, dependencies and instrumentation remain unchanged. This is a bounded version-comparison diagnostic, not an official rerun or an attempt to replace failed acceptance with a passing probe. Current3.14 run remains frozen at its earlier commit and is untouched. Source review of the small workflow delta precedes dispatch.
+
+
+Version-comparison workflow review PASS (38.36 seconds), verbatim:
+
+````text
+**PASS. I found no blocker.**
+
+I compared the diff against the official `.github/workflows/test.yml` (as it is in this checkout) and against the test helpers.
+
+**Matrix substitution**
+- The versions `["3.12", "3.13"]` are quoted strings. That avoids the YAML number problem where `3.10` would turn into `3.1`. This is the same form the official matrix uses at `.github/workflows/test.yml:29`.
+- `${{ matrix.python-version }}` is only used in two places: the `setup-python` input and the artifact name. Nothing else depends on the version.
+- `fail-fast: false` matches the official strategy (`test.yml:26`). A timeout on 3.12 won't cancel the 3.13 job.
+- Each matrix job gets its own runner, so the two `${{ runner.temp }}/weft-test-diagnostics` directories can't collide.
+
+**Artifacts and compatibility**
+- The names `windows-startup-witness-3.12` and `windows-startup-witness-3.13` are unique within the run, which upload-artifact needs. Dots are allowed in artifact names.
+- Artifacts are scoped to a run. The 3.14 run 41126045971 (`windows-startup-witness`, earlier commit) can't collide with or be overwritten by this dispatch.
+- `requires-python = ">=3.12"` (`pyproject.toml:10`) covers both versions.
+- The official workflow already installs the same extras string on Windows with 3.12 and 3.13 (`test.yml:59`), so installation is a known-good path.
+- Nothing in the diagnostics code checks the Python version. `WEFT_TEST_DIAGNOSTICS_DIR` is read with no version checks (`tests/helpers/run_diagnostics.py:172`, `tests/helpers/weft_harness.py:197`). So `if-no-files-found: error` should behave the same on 3.12 and 3.13 as on 3.14.
+
+**Preserved scope**
+- The pytest command matches the official Windows CLI slice exactly:
+  - target: `tests/cli`
+  - `-m "not slow"`
+  - `addopts` override with `-n logical --dist load`
+  - the full diagnostic arguments (`test.yml:34`, `:71`)
+- These are also unchanged:
+  - `bin/pytest-worker-count --github-env`
+  - the heartbeat of `120`
+  - `timeout-minutes: 50`
+  - the pinned action SHAs
+  - uv `0.13.0`
+- The only changes are the matrix, `fail-fast: false`, and the artifact name. There's no new code, no measurements, and no trigger change: it's still `workflow_dispatch` only, with `contents: read`.
+
+**Not part of this diff (no action needed)**
+- The diagnostic workflow's `setup-uv` has no `enable-cache` or `cache-dependency-glob`, unlike the official one. This was already in the reviewed d1a3440e baseline, and caching doesn't affect test behaviour.
+- `if-no-files-found: error` differs from the official `warn`. It was also in the reviewed baseline, and it's stricter, which suits a diagnostic.
+
+As you stated, this run is for comparison only. A passing 3.12 or 3.13 run doesn't replace the 36 official gates, and it doesn't show what causes the failures.
+````
+
+Native parent review independently verified only the two-version matrix/setup-python substitution/fail-fast setting/artifact names changed. No remaining finding; acceptance and cause limits retained.
+
+
+Revised native startup diagnostics dispatched: run41126045971 at d1a3440e7ff3e295e21252c86c4d237d7f249fc3 (windows-startup-witness job124304731060); run41126681628 at dbe3c5c72ab132f70e2cbacd49a4ca4c004f57f7 (windows-startup-witness (3.13) job124306908594, windows-startup-witness (3.12) job124306909018); all remain diagnostic-only, with original full CLI slices and deadlines.
+
+
+Core diagnostic41125098427 at23f48c6e completed successfully:3436passed67skipped795.47s. JUnit explicitly contains successful test_manager_spawns_child (12.968s total test-case time, not the eight-second call boundary). No launch-timeout witness file was emitted. This establishes intermittence only; no original child-launch cause was located. Raw JUnit/log retained; temporary managed core diagnostic worktree archived recoverably, remote diagnostic commit/branch retained.
+
+
+Revised Windows3.14 diagnostic41126045971 completed successfully:293passed10skipped395.11s. Seven retained startup artifacts contain eleven Manager stderr files, each with all five phase markers; constructor intervals0.1263889–0.3417666s (monotonic). The inline-Manager cycle has no detached startup file, as expected. Recorder retained377begin/end pairs and no timeout; maximum observed subprocess-call duration11.6373691s. Six PytestAssertRewriteWarnings arise from importing the existing plugin before pytest rewrite registration in this temporary conftest; no assertions/results changed. Native healthy startup-file lifetime is now verified. These healthy observations do not locate the original startup/other CLI failures. Raw artifacts/logs and per-file phase summary retained in scratch.
+
+
+Parent independently parsed all three f4 manual Windows JUnit artifacts: each of seventeen named I/O cases appears exactly once and passes without skip/error/failure (nine required adapter cases, five contextual CRT error-partition controls, three inherited-pipe integration arms). This closes native execution evidence for that slice; it does not clear the separate Manager/CLI failures.
+
+
+Version comparison41126681628 completed: Windows3.13 passed293/10skipped395.41s; Windows3.12 failed3/290passed10skipped459.32s. The three312 failures are both parallel-Manager reuse cases and the installed-console live-Manager premise, not the historical pipeline timeout. All378 run_cli calls have begin/end records; no subprocess timeout occurred. In failed reuse roots, Manager constructors completed and entered the reactor, the competing higher-TID Manager yielded, and the winner spawned a Consumer before disappearing without a retained terminal event. Its captured stderr ends mid-first-five-second asynchronous watchdog stack. This is evidence of a later phase and a possible diagnostic observer effect, not proof of the original cause or a specific native crash. No retained native exit code/crash event resolves termination versus dump failure. Full logs, startup files, parsed failure JSON and version summary are retained. No main behavior repair or official rerun follows from this ambiguous result.
+
+
+### Observer discriminator after instrumented312 failure
+
+The next diagnostic is a single two-arm Windows3.12 experiment, watchdog ON versus OFF, with identical full CLI tests, five workers, original deadlines/options, command/constructor phase retention and dependencies. Only the detached wrapper's asynchronous five-second repeating stack timer differs. Both arms retain the same imports, current-PID marker gating and runpy metadata. This tests a possible observer-induced disappearance, not a recurrence claim about the original failures.
+
+A post-test always-run PowerShell step queries Application events1000/1001 since the recorded test interval, examines at most100events, retains Python-related messages capped16384characters each, and records query errors/absence. The step has its own two-minute collection bound; it does not change test/job timeouts or outcomes. Artifacts are arm-qualified. WER/Application events may be absent or delayed; absence does not establish normal exit. No native process exit handle is retained in this experiment. OpenProcess with QUERY_LIMITED_INFORMATION|SYNCHRONIZE can preserve an exit code without changing process lifetime or lifecycle ownership; it would require a timely additional observer hook here. That extra instrumentation is deferred for this bounded experiment, and the missing exit-code evidence remains explicit. A pass is not an official gate replacement.
+
+Before dispatch, the actual wrapper AST compiled; executing it against narrow stdlib call-boundary observers confirmed ON schedules once, OFF never schedules, both preserve exact runpy module/run_name/alter_sys metadata and emit arm identity. Ruff/selected mypy passed. PowerShell collection requires native verification; independent short plan/probe review precedes dispatch.
+
+
+Primary-source support for observer-risk hypothesis: CPython issue [116008](https://github.com/python/cpython/issues/116008) reports asynchronous faulthandler crashes while walking live threaded stacks; [131580](https://github.com/python/cpython/issues/131580) includes a watchdog-thread traceback through `_Py_DumpTracebackThreads`/`dump_frame`. Parent inspected exact3.12.10 faulthandler/traceback sources and confirmed traversal without the GIL. The upstream reproductions are Linux/ARM or signal-driven examples, not this Windows process; shared implementation supports a mechanism hypothesis, not proof of this run or a safe-version upgrade boundary. The ON/OFF and crash-event discriminator remains necessary.
+
+
+Watchdog discriminator review PASS (74.82 seconds), verbatim:
+
+````text
+**Verdict: PASS, no blockers.** This review was read-only: I ran nothing and didn't edit any files. The diff's base (`fab82c2b`) is the temporary branch, which isn't checked out here. So I reviewed the diff as written, plus the current test harness and launcher code it relies on.
+
+**What I confirmed**
+- **Only the timer differs between arms.** The ON and OFF arms keep the same imports, the same marker set before `runpy` (`WEFT_STARTUP_WITNESS_CHILD_PID`) and the same `runpy.run_module(..., run_name='__main__', alter_sys=True)` call. The timer runs only when the value is exactly `'on'`. Moving `os` into the first import line doesn't change what loads.
+- **The wrapper string will survive Windows argv quoting.** It uses only single quotes inside and no double quotes, the same as the wrapper that already ran.
+- **The variable reaches the manager.** The detached launcher (`weft/manager_detached_launcher.py`) and `manager_runtime.py` never pass an explicit `env=`, so the manager inherits the environment. The main CLI harness copies the environment too (`tests/conftest.py:423`).
+- **The PowerShell is sound.**
+  - The nested `"o"` inside `$()` is valid, and `>> $env:GITHUB_ENV` is the documented pattern.
+  - `Parse` sits inside the `try`, so an empty start time ends up as `query_error` rather than crashing the step.
+  - Events with no message fail the `-match` and are skipped before `.Substring` runs.
+  - `@()` keeps one result as an array, `-Depth 6` is enough, and pwsh 7 writes UTF-8 without a BOM.
+  - With no end time, crashes from leftover child processes after pytest are still captured.
+- **Artifacts are labelled per arm,** and `if-no-files-found: error` is safe because the events JSON is always written.
+
+**Non-blocking findings**
+1. **The collection step can change the job's result.** GitHub runs pwsh steps with `$ErrorActionPreference='stop'`. If `New-Item` or `Set-Content` throws, or the step hits its 2-minute timeout, the job fails even when the tests passed. That contradicts the plan's statement that outcomes are unchanged. Fix: add `continue-on-error: true` to that step. It's a one-line change and keeps the claim strictly true.
+2. **"No events" is recorded as a query error.** When nothing matches, `Get-WinEvent -ErrorAction Stop` throws "No events were found that match the specified selection criteria," which lands in `query_error` with no `sampled_events`. That will probably be the most common result. Either match that message, or say in the plan that this text means "nothing found," not "collection failed."
+3. **Some launches never see the variable, even in the ON arm.** `tests/cli/test_env_file_bootstrap.py:18` (`_clean_subprocess_env`) removes every `WEFT_*` variable. A few other tests also pass a hand-built `env=` to helpers. Those child processes run as OFF in both arms. The `watchdog` field in the marker shows this, so the analysis should take each launch's arm from that marker rather than from the artifact name, and read `null` as OFF. No code change needed; just state it in the plan's analysis rules.
+4. **Possible empty `${{ matrix.python-version }}` reference.** Lines 1–9 of the base workflow aren't in the diff. If the job `name:` or anything above line 10 uses that variable, it will now render empty. This is cosmetic only, but worth a quick look.
+5. **Nit:** `(?i)` is redundant because PowerShell's `-match` already ignores case. It's harmless.
+
+The two scope limits you already state still hold: absence of an event doesn't prove the process exited normally, and there's still no native exit-code capture. Native PowerShell verification is still pending, as your plan says. Findings 1 and 2 are what I'd most want that run to exercise.
+````
+
+Dispositions: F1 accepted, collection step uses continue-on-error so its failure cannot replace the test outcome; collection failure remains an evidence gap and will be reported. F2 interpret the explicit no-matching-events query_error as no events found, not proof of normal exit. F3 accepted: use each process marker watchdog field; null means timer OFF even in nominal ON arm because intentional clean environments remove WEFT variables. F4 verified no remaining matrix.python-version reference. F5 harmless PowerShell case flag retained. Native parent review no blocker; its extra limit is retained: the100event cap precedes Python filtering and may omit relevant events. No safe-exit inference from absence.
+
+
+Clarification: a retained Windows process HANDLE itself does not change process lifetime or lifecycle ownership. The decision to defer it concerns the extra timely acquisition/observation hook in this diagnostic, not an inherent handle limitation. Historical review wording about ownership is read with this correction.
+
+
+Observer discriminator dispatched at75c8cff8f017a21e187c98827fd19aef832432f8 as run41128466407: OFF job124312962366, ON job124312962600. Both use Windows3.12 fullCLI, unchanged five-worker and deadline settings. No main code change.
+
+
+Windows handle clarification is supported by Microsoft [Terminating a Process](https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-process) and [GetExitCodeProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess): a held process handle preserves the terminated process object and permits immediate exit-status retrieval. Acquisition must occur while the intended process identity is still available. This primitive remains available if later evidence warrants a narrow observer.
+
+### Owner-directed stop for structured root-cause analysis (2026-10-30)
+
+Observer comparison 41128466407 finished: OFF passed 293 cases with 10 skips; ON failed one Manager-reuse case, passed 292, and skipped 10. Both event exports sampled two events with no Python matches. The failed winner completed construction and its first five-second dump ended mid-frame. This supports an observer-risk hypothesis, not a native-crash diagnosis or an explanation of the original failures.
+
+After the owner raised concern about instability and corrective churn, further runtime/test-premise changes and acceptance reruns stopped. The active investigation is now [PR #48 Windows Root-Cause Analysis](./2026-10-30-pr48-windows-root-cause-analysis.md). It records seven original failures, six falsifiable hypotheses, historical environment confounds, controlled comparisons and explicit stop rules. Prior proposals to add diagnostics and close on a green run do not authorize proceeding around this gate. The original failures and this repair plan remain open until causal evidence and justified corrections satisfy the governing gates. Concurrent launch workers remain deferred.
