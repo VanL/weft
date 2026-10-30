@@ -1263,3 +1263,39 @@ Separately: this review only shows that the hook signature now matches both call
 ```
 
 Disposition: PASS/no blocker. Keep bytes annotation: actual `_StdinStreamState.next_slice` returns bytes or None, and no broader buffer is passed at either intercepted call site. Native independent closure also found no blocker. Final local module70pass8Windows-skipped7.14s; fullmypy481, Windows-targetmypy1, Ruff/format635, registry and docpath checks pass. Retained Windows3.12/3.13 JUnit artifacts each contain all nine required executions: six pass and the three hook cases fail; those are not accepted as a passing native gate. Corrected-head native CI must prove all nine pass.
+
+
+### Active-command PING proof correction (2026-10-30)
+
+Corrected-head39a3c1c8 normal PR Windows3.13 remaining job124248231382 failed `test_consumer_reactor_responds_to_ping_while_command_work_is_active` before sending PING: the first process_once took3.9528651s versus a1.5s bound derived from a2s child sleep. Manual same-platform remaining passed; that establishes intermittence only. The exact source of3.95s remains unknown. The turn includes strategy startup, queue reads, work-state publication, worker submission and result drain, so this elapsed assertion does not isolate command blocking or PING latency. The unchanged test is present in4370bb0f. Re-read program theory single-arbiter reactor and [CC-2.2]/[CC-2.5]: blocking target work belongs in a broker-free worker lane while the owner processes controls; no1.5s startup contract exists. No contention/load explanation is asserted, and no workers/timeouts are reduced.
+
+Class2 oracle correction: reuse `tests.tasks.sample_targets.signal_ready_and_wait_for_release` in a real command, establish actual child entry, then require the original routed PONG/status fields and empty outbox while the child remains unreleased. Release only after that proof and keep the original5s completion guard and exact result. Finally always release and invoke task cleanup so early assertion failures cannot strand the worker. This replaces the unsupported sleep-ratio proxy with a causal progress assertion; production is unchanged. A negative control runs the actual work synchronously on the owner, which must fail the active-worker/PONG-before-release proof. Validate focused test, qualified negative control, restored owning module, SQLite/PostgreSQL original-load checks, native fresh-eyes and narrow cross-family review before pushing. Both current runs continue while collecting useful native artifacts; no blind rerun.
+
+
+Verbatim held-command PING cross-family review (91.57 s):
+
+```text
+**Verdict: PASS. No blockers.**
+
+I read the delta at `tests/tasks/test_task_execution.py:3644-3710`, the helper code it relies on and the new plan section at `docs/plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md:1268-1272`. I ran nothing.
+
+**Correctness**
+- **Ordering:** The test proves each step in turn. The child really starts (`ready.exists`), the work sits in the worker lane, release hasn't happened and the outbox is empty. A routed PONG then comes back with `task_status == "running"` while the child is still held. That is the [CC-2.2]/[CC-2.5] contract (blocking work runs in the worker lane, the owner handles controls), checked as an order of events with no wall-clock ratio.
+- **Helper reuse:** `signal_ready_and_wait_for_release` (`tests/tasks/sample_targets.py:98`) is used as-is. A real command child is kept and no new framework is added.
+- **Timeouts:** The 5s readiness wait is only a failure bound. `_drive_consumer_until` (`:3601`) steps `process_once` with a 0.02s `wait_slice`, so polling for the file is bounded and still drives the reactor. The original 5s completion guard and the exact `"reactor-done"` result are kept.
+- **Cleanup:** The `finally` calling `release.touch()` (safe to repeat) and then `task.cleanup()` means an early assertion can't leave the child stuck until its own 60s timeout. `task.cleanup()` matches the 36 other uses in the module.
+- **Negative control:** Your mutant result fits the code. With inline execution, the first `process_once` blocks until the child's own 60s timeout, then fails at `_has_worker_activity() is True`. So it catches the owner blocking directly, before the 5s bound comes into play.
+
+**Non-blocking notes, most important first**
+1. **The child's import doesn't depend on its working directory.** The harness switches into a temp root (`tests/helpers/weft_harness.py:149`) and `working_dir` is None. So `from tests.tasks.sample_targets import …` works because of the editable install (CI runs `uv pip install --system -e` at `.github/workflows/test.yml:59`). The same pattern is already used at `tests/tasks/test_task_stop_sqlite_only.py:56`. If the import ever broke, the test would fail loudly at the readiness bound with diagnostics, not pass falsely. No change needed.
+2. **The plan promises more checks than your evidence covers.** `…repair-plan.md:1272` lists "SQLite/PostgreSQL original-load checks" and "narrow cross-family review" as steps before pushing. Your evidence covers the focused 12-pass run, the mutant and the restored full module. If the PostgreSQL original-load run hasn't been recorded, either record it or narrow the plan's wording so it doesn't claim more than was done.
+3. **`next(...)` can raise a bare `StopIteration`.** If PONG is missing, the error is unhelpful. This was there before and is unchanged in scope; leave it.
+
+**The plan section is sound.** It keeps the 3.95s delay explicitly unexplained, claims no contention cause or runtime fix, notes that no 1.5s startup contract exists, and treats the bad oracle as a separate problem from the delay's cause. That matches what you described.
+
+As you said, this local review doesn't prove native Windows behaviour. The full normal CI run on the corrected head is still required.
+```
+
+Disposition: PASS/no blockers. PostgreSQL evidence is now complete: owning module203passed34.03s; SQLite203passed8.76s, both all markers and normal12 workers. Focused GREEN was one test with12 workers, not12 tests. The actual owner-blocking mutation failed `_has_worker_activity() is True` withFalse in65.58s, before PING; it proves registered worker-lane participation, while GREEN directly proves PONG-before-release. Runtime restored byte-exact. Native independent review also passes. Fullmypy481, Ruff/format635, registry/docpath checks pass after the required nonsemantic string-parenthesis fix. Original3.95s startup delay remains unlocated; no runtime performance claim is made.
+
+Measurement provenance decision: retain manual run41109475299 on39a3c1c8 through all36jobs and native artifacts. This Consumer-test/plan-only correction leaves runtime, extensions, workflow and collector blobs unchanged; successful measurements from39a may be reused with that explicit source equivalence, never called same-head evidence. Require full normal CI on the corrected test head. Superseded known-failed normal run41109485264 may be cancelled after corrected push; retain its failure log and record cancellation, never a pass.
