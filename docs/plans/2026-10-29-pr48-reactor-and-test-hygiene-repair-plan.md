@@ -1468,3 +1468,112 @@ Neither changes correctness or scope.
 ```
 
 Disposition: PASS/no blocker. Optional assertion-message/order refinements are deferred: current closure marker gives a bounded concrete causal failure, and the injected child message is fixed ASCII; no correctness finding remains. Native independent final review also passes. PostgreSQL owning module75passed8native-Windows-skipped6.10s; fullmypy481/Ruffformat635/docpaths pass. Diagnostic managed worktree archived recoverably after retained artifact and commit/run evidence; remote diagnostic branch remains reachable. Corrected-head normal and manual full CI are the remaining gates, including actual Windows measurements.
+
+
+### Function monitor-policy oracle correction (2026-10-30)
+
+Manualc9 run41117698595 macOS3.13 remaining job124276417077 failed the existing `test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome`: expected ok, actual timeout, total call7.58s. The unchanged test dates tobb6e477 and invokes a real spawned function simulate_work(duration0.15) with5s timeout and repeated monitor faults. This is the function terminal-handoff path, not the changed command reactor. Logs prove monitor polling occurred but contain no child-entry/result timestamps; the exact elapsed cause is unknown and no production failure is established. No contention explanation or blanket rerun is asserted.
+
+Class2 test repair under [RM-5.1]/[CC-3.5]/[TS-0]: use the existing signal_ready_and_wait_for_release function target. The test Monitor.start waits for its actual entry with existing wait_for_file(timeout5) before the unchanged5s terminal-handoff budget starts. This explicitly narrows the test to monitor policy rather than incidental interpreter/bootstrap duration; dedicated timeout tests retain timeout semantics. Hold the target until the second last_metrics poll raises, publishing release immediately before that injected exception. The first poll returns the exact cached metrics object, subsequent polls/final collection fail, and stop fails as before. Preserve all outcome/value/cache/log ordering/no-sensitive-exception assertions, require readiness and at least two metrics reads, and always release in finally. A readiness failure is separately bounded, never treated as success; no production deadline, worker count, CI timeout or target workload benchmark is changed.
+
+Review before implementation. Verify the corrected test with real spawn and a targeted negative control removing the metrics-failure catch: it must propagate the injected exception rather than return success. Keep cached-object identity and expected final-log assertions. Run restored owning module on SQLite/PostgreSQL at normal12 and statics, independent fresh-eyes and cross-family implementation review. Continue both existing full CI runs for native artifacts; any successful measurements may be retained with explicit unchanged runtime/workflow/collector provenance, but a failed workflow is never called an all36 pass. Corrected test head still needs full official validation. Historical7.58s cause remains unknown.
+
+Monitor-policy plan review, verbatim (68.82 s):
+
+```text
+**PASS. I found no blocker.** I only read code; I didn't run anything or edit any files.
+
+**1. Premise matches the code.** In `HostTaskRunner._run_one_shot_terminal_handoff` (`weft/core/runners/host.py:569`), `_start_optional_monitor` → `monitor.start(pid)` runs at `host.py:591`. The timeout clock only starts after that, at `host.py:593` (`start_time = time.monotonic()`). So a test whose `Monitor.start` blocks on `wait_for_file(ready, timeout=5)` really does keep interpreter/bootstrap time out of the unchanged 5s budget. `signal_ready_and_wait_for_release` (`tests/tasks/sample_targets.py:98`) and `wait_for_file` (`sample_targets.py:86`) already exist, so nothing new is needed.
+
+**2. Readiness can't pass silently, as long as the test is built the way the plan says.** If `wait_for_file` raises inside `start`, production swallows it at `host.py:415-421`. It logs "Failed to start host resource monitor", calls `stop`, and sets the monitor to `None`. With no monitor there's no polling, the target never gets released, and the run ends with a timeout or error after about 5s. The test therefore needs a `ready` flag that `Monitor.start` sets only after `wait_for_file` returns, and must assert it on its own. Asserting `"start" in calls` is not enough, because `calls` gets "start" before the wait. Assert `ready` first, so a bootstrap failure shows up as a readiness failure and not as a misleading outcome or log mismatch. The plan covers this.
+
+**3. The held target gives the right ordering.**
+- In-loop polling requires `process.is_alive()` (`host.py:675`). Holding the target guarantees poll 1 (returns the cached `metrics`) and poll 2 (publishes release, then raises) both happen while the worker is alive.
+- Poll 2 can't turn into the final collection: the loop can only exit with `ok` after the release, and the release is only written in poll 2.
+- After the release: more in-loop failures, then the final `last_metrics` fails (`host.py:848-851`). The cached object is kept, so `snapshot` is never called. Then `stop` fails (`host.py:864-868`).
+- So `outcome.metrics is metrics`, `messages[-2:] == [final, stop]`, `calls[-1] == "stop"` and the no-`exc_info`/no-"sensitive" assertions all still hold as written.
+
+**4. The negative control is meaningful.** If you remove the in-loop catch at `host.py:682-685`, poll 2's `RuntimeError` escapes the loop. The `finally` still logs the failed stop, and `run()` skips `_require_worker_reaped` because `completed` is False. The exception reaches pytest instead of returning `ok`. Removing the final-collection catch (`host.py:848-851`) also propagates under the new design, so it's a valid second mutant.
+
+**5. Scope and primitives are fine.** It's a class-2 change to a test fixture only. Using a file sentinel and the existing polling helper fits how this module already does things, with no new framework. The plan states openly that the test moves from bootstrap-plus-policy to policy only. It doesn't infer a historical cause or a production fix. It also has a useful diagnostic side effect: if a timeout happens again after readiness is proven, that shows the cause is after child entry.
+
+**Optional tightenings (not blockers):**
+- Say which catch the negative control removes: the in-loop one at `host.py:682-685`, which is the one the held target exists to exercise. Optionally run the final-collection catch as a second mutant.
+- The ready file holds the child's `os.getpid()`. Asserting it equals the `pid` passed to `Monitor.start` proves readiness came from the monitored worker.
+- Pass an explicit `timeout` to the target's release wait, longer than the 5s handoff budget, instead of relying on the default 60s. A held target would then fail through the handoff timeout and not the target's own `TimeoutError`. The current default already does this; it would just be explicit.
+- Asserting `metrics_reads >= 3` (two in-loop reads plus the final one) is a bit stronger than `>= 2`, though the "Failed to collect host resource metrics" log assertion already proves an in-loop failure.
+```
+
+Disposition: PASS/no blocker; native independent scope review also passes. Accept explicit ready_observed flag set only after readiness and PID identity match, assert it before outcome, require>=3 metrics reads, and make the existing60s held-target failure bound explicit. The negative control removes the in-loop last_metrics catch only. Monitor.start readiness errors are swallowed by production, not propagated; explicit post-run assertions prevent silent success. Existing function timeout test covers a held function, not a separately proven bootstrap-duration boundary. This policy isolation neither diagnoses the historical delay nor claims to close bootstrap timing coverage.
+
+Monitor-policy implementation review, verbatim (63.90 s):
+
+````text
+**Verdict: no blocker to the design, but one concrete finding I'd fix before calling it final.** I only read code (`tests/tasks/test_runner.py:2994-3069`, `tests/tasks/sample_targets.py:86-104`, `weft/core/runners/host.py:402-423,569-868`). I didn't run, edit or delegate anything.
+
+## Finding (low severity, should fix): the PID check can misread the file, and a failure there gets swallowed
+
+`tests/tasks/test_runner.py:3011-3012`:
+```python
+wait_for_file(str(ready), timeout=5.0)
+assert int(ready.read_text()) == _pid
+```
+- `signal_ready_and_wait_for_release` writes the file with `Path.write_text` (`sample_targets.py:103`). That call creates and truncates the file first, then writes the PID. `wait_for_file` only checks `exists()`. So under CI scheduling pressure, `read_text()` can catch the file after it was created but before the PID was written, and get `""`. `int("")` then raises `ValueError`.
+- That exception happens inside `monitor.start`, which production wraps in a broad `except` (`host.py:413-421`). It logs, calls stop, and turns the monitor off. The target is then never released, the run hits the 5s handoff timeout, and the test fails with `"monitored worker did not reach target entry"`. That message is wrong: the worker did reach entry.
+- A real PID mismatch fails the same way, so the PID assertion can never fail with its own message. This is the kind of silent-swallow problem item 4 was meant to rule out.
+
+**Fix (3 lines, no new primitive):** in `start`, only record. Do the PID comparison after `run()`, when the child has already written the PID and returned:
+```python
+def start(self, pid: int) -> None:
+    calls.append("start")
+    wait_for_file(str(ready), timeout=5.0)
+    self.started_pid = pid
+    self.ready_observed = True
+...
+assert monitor.ready_observed, "monitored worker did not reach target entry"
+assert int(ready.read_text()) == monitor.started_pid
+```
+This closes the race and gives readiness failures and PID mismatches separate messages. It also lets you drop the `_pid` underscore, since the parameter is now used.
+
+## Everything else checks out
+- **Clock seam:** `start` blocks before `start_time` is set (`host.py:591-593`), so bootstrap time stays outside the unchanged 5s budget. The 5s readiness cap is separate and explicit.
+- **Ordering:** read 1 returns the cached `metrics` while the target is held. Read 2 touches `release` and raises inside the loop (`host.py:682-685`), which hits the in-loop catch. Exit is only possible after release, and the final read always happens (`host.py:847-851`). So `metrics_reads >= 3` is guaranteed and not timing-dependent. `snapshot` is never reached because `last_metrics` is not None. The `finally` stop failure is logged last, so `messages[-2:]` and `calls[-1] == "stop"` hold.
+- **Outcome:** `wait_for_file` returns `"done"`. `outcome.metrics is metrics` is preserved through `outcome.metrics or last_metrics` (`host.py:860`).
+- **Assertion order:** readiness is asserted before outcome and logs, so a bootstrap stall shows up as a readiness failure, not as a misleading outcome mismatch.
+- **Cleanup:** `finally: release.touch()` means a raising `run()` can't leave the target waiting out its 60s. `kwargs={"timeout": 60.0}` is redundant with the default, but it documents that the target timeout is longer than the handoff budget, as the earlier review suggested.
+- **Negative control:** removing the in-loop catch lets read 2's `RuntimeError` escape. That matches the mutant result you reported.
+- **Scope and primitives:** the change reuses `wait_for_file` and `signal_ready_and_wait_for_release`, adds no framework and touches no production code. It also doesn't claim a historical cause. Item 2's narrowing is stated honestly.
+
+Not reviewed: CI status (items 5-6). I'm taking your reported results as given, and I haven't independently checked the PG module or the manual CI runs.
+````
+
+Disposition: accept the PID-content race, also independently found by native reviewer. Remove the optional PID-content comparison entirely: the isolated path has one writer inside target entry, so existence proves entry without claiming complete PID publication. Keep ready_observed and the original one5s wait; no new predicate loop/shared publisher changes. This is narrower than the reviewer optional post-run PID comparison and sufficient for monitor policy. Corrected owning module205passed7.22s. Earlier restoredPG module205passed7.21s; final correctedPG verification follows. Negative control removing the in-loop metrics catch raised the exact injected RuntimeError in1.22s; Host restored byte-exact.
+
+Monitor-policy final closure, verbatim (32.17 s):
+
+````text
+**Verdict: PASS, no blocker.** The prior finding is closed, and I didn't find any new issue. I only read `tests/tasks/test_runner.py:2994-3070`, `tests/tasks/sample_targets.py:86-104` and `weft/core/runners/host.py:402-423,584-594`. I didn't run, edit or delegate anything.
+
+## Prior finding: closed
+- **No PID read is left.** `start` only waits for the ready file to exist, then sets `ready_observed` (`test_runner.py:3009-3012`). Nothing reads the file, so a half-written file can no longer raise inside `monitor.start`.
+- **"The file exists" is enough on its own.** The ready path is under a unique `tmp_path`, and the only thing that writes it is the first line of `signal_ready_and_wait_for_release` (`sample_targets.py:103`). Once `write_text` has created the file, the target function has started running. That is the only fact this monitor-policy test needs; it never needed the PID's value.
+- **A readiness failure now fails with the right message.** If the 5s `wait_for_file` times out, `_start_optional_monitor` catches the `TimeoutError` (`host.py:413-421`) and disables the monitor. Then:
+  - nothing touches `release`, so `run()` hits its 5s timeout;
+  - `finally` releases the target;
+  - `assert monitor.ready_observed` is the first assertion (`:3051`), so the test reports "monitored worker did not reach target entry". That message is now accurate.
+- **`_pid` is fine as written.** The parameter is unused again, so the underscore is correct.
+
+## Everything you asked to keep is still there
+- **5s setup wait** in `start`, and the **5s handoff timeout** in `timeout=5.0`. `start` returns before `start_time` is set (`host.py:591-593`), so the two budgets stay separate.
+- **The second metrics read releases the held target** (`:3023-3025`). That read raises inside the loop and is caught there. The final read (`host.py:849`) always runs after that, so `metrics_reads >= 3` is guaranteed and doesn't depend on timing.
+- **These assertions are unchanged:** cache identity (`outcome.metrics is metrics`), log order (`messages[-2:]`), `calls[-1] == "stop"`, no `exc_info`, and the redaction check.
+- **`finally: release.touch()` is still there**, so the target can't sit out its 60s wait if `run()` raises.
+- **Your negative control still applies.** Removing the in-loop catch lets the second read's `RuntimeError` escape, which matches the mutant result you reported.
+
+## Scope
+The diff is limited to this one test. It reuses `wait_for_file` and `signal_ready_and_wait_for_release` with no new predicate, publisher or framework. Production code and the shared helpers are untouched, and nothing claims a historical CI cause.
+
+I didn't check items 5-6 myself, so I'm taking your test-run, mutant and parent-agreement results as you reported them.
+````
+
+Disposition: PASS/no blocker; native independent final review also closes the PID-content issue. Final SQLite and PostgreSQL owning modules each205passed7.22s, normal12. Fullmypy481/Ruffformat635/docpaths pass. Source diff is only this test plus plan; no production changes. Currentc9 normal Windows3.12/3.13 JUnit artifacts each verify all9 required adapter executions plus all5 fixture error controls and all3 inherited-pipe cases with no skips/errors. Other native gates continue. Corrected test head requires full normal and manual CI; historical7.58s delay remains unlocated.

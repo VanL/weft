@@ -23,6 +23,7 @@ import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
 from tests.helpers.typing import record_and_return
+from tests.tasks.sample_targets import wait_for_file
 from weft import helpers as helpers_module
 from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
 from weft.core.resource_monitor import ResourceMetrics
@@ -2991,18 +2992,24 @@ def test_command_session_monitor_start_failure_clears_session_owner(
 
 
 def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
+    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
     calls: list[str] = []
     metrics = ResourceMetrics(memory_mb=12.5)
 
     class Monitor:
         def __init__(self) -> None:
             self.metrics_reads = 0
+            self.ready_observed = False
 
         def start(self, _pid: int) -> None:
             calls.append("start")
+            wait_for_file(str(ready), timeout=5.0)
+            self.ready_observed = True
 
         def check_limits(self) -> tuple[bool, str | None]:
             calls.append("check_limits")
@@ -3013,6 +3020,8 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
             self.metrics_reads += 1
             if self.metrics_reads == 1:
                 return metrics
+            if self.metrics_reads == 2:
+                release.touch()
             raise RuntimeError("sensitive metrics read failure")
 
         def snapshot(self) -> ResourceMetrics:
@@ -3026,15 +3035,21 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
     monkeypatch.setattr(host_module, "load_resource_monitor", lambda *_a, **_k: monitor)
     runner = _build_function_host_runner(
         timeout=5.0,
-        function_target="tests.tasks.sample_targets:simulate_work",
-        kwargs={"duration": 0.15},
+        function_target="tests.tasks.sample_targets:signal_ready_and_wait_for_release",
+        args=[str(ready), str(release)],
+        kwargs={"timeout": 60.0},
         monitor_class="tests.fake:Monitor",
         monitor_interval=0.01,
     )
 
-    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
-        outcome = runner.run(None)
+    try:
+        with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
+            outcome = runner.run(None)
+    finally:
+        release.touch()
 
+    assert monitor.ready_observed, "monitored worker did not reach target entry"
+    assert monitor.metrics_reads >= 3
     assert outcome.status == "ok"
     assert outcome.value == "done"
     assert outcome.metrics is metrics
