@@ -95,10 +95,20 @@ jobs:
           -RedirectStandardError (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stderr.log') `
           -RedirectStandardOutput (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stdout.log')
         # Readiness means a probe has sampled, not merely that a header exists.
+        # The writer keeps the file open for append, so the reader must share
+        # read and write access or Windows reports a sharing violation.
+        function Test-VolumeSample([string] $path) {
+          if (-not (Test-Path $path)) { return $false }
+          try {
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try { $text = (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+          } catch [System.IO.IOException] { return $false }
+          return $text.Contains('"event": "volume"')
+        }
         $ready = (Get-Date).AddSeconds(30)
         $probing = $false
         while ((Get-Date) -lt $ready) {
-          if ((Test-Path $samples) -and (Select-String -Path $samples -Pattern '"event": "volume"' -Quiet)) { $probing = $true; break }
+          if (Test-VolumeSample $samples) { $probing = $true; break }
           if ($canary.HasExited) { break }
           Start-Sleep -Milliseconds 250
         }
