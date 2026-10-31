@@ -503,3 +503,79 @@ no new defect within scope. Windows execution not rerun by the reviewer;
 that is what the dispatch provides. Verbatim review retained at
 `/tmp/weft-implementation-20261027/rca-canary-review-v4.md`. Dispatch of
 `codex/windows-env-canary` (commit 9bf4181b) follows this record.
+
+### Canary dispatch 1 (run 41220352646, commit 9bf4181b, 2026-10-31 16:34–16:43 UTC)
+
+All twelve jobs passed; no slowdown episode occurred (per-minute medians
+0.7–1.9x, maximum ratio 4.3x in one minute of the 3.12 `c` r2 job, no run of
+two minutes above 3x). This dispatch is therefore inconclusive for the
+mechanism, as preregistered. It also exposed an observer defect: the canary
+was started in its own step, and the Actions runner terminates a step's
+process tree when the step ends, so every job's observer died two or three
+samples after launch (`alive_at_stop` false in all twelve lifetime records;
+one sample file empty because the header's PowerShell queries took about
+8 s). The branch now starts the canary, runs the byte-identical pytest
+command, and stops the canary inside one step whose exit code is pytest's,
+and emits a cheap start record before any probe runs with the slow metadata
+gathered on a thread (commit 18116e8b, reviewed before dispatch 2).
+
+What the short samples still establish about the hosted image (metadata
+records from three jobs): `Get-MpComputerStatus` reports
+`RealTimeProtectionEnabled`, `BehaviorMonitorEnabled`, and
+`OnAccessProtectionEnabled` all false, so E2 (antimalware real-time
+scanning) is excluded on this image; the VMs were `Standard_D4ads_v6` and
+`Standard_D4ads_v7` in `eastus`, `centralus`, and `southcentralus`; the
+C: volume is physical disk `Virtual_Disk NVME Premium` (a remote Azure
+managed disk, 150 GiB) and the D: volume is `Microsoft NVMe Direct Disk v2`
+(host-local NVMe, 220 GiB); in the few overlapping samples, fsync of 4 KiB
+cost 8.4–10.2 ms p50 on C: and 0.5–6.3 ms on D:. These are consistent with
+E1's premise that the two volumes have different storage paths; they do not
+show a stall. Analysis output retained at
+`/tmp/weft-implementation-20261027/rca-env-canary-run-41220352646.txt`.
+
+### Canary review round 5 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Scoped to the single-step restructure and fast start after dispatch 1.
+Verdict blocker on F1–F3; dispositions:
+
+| Finding | Disposition and operative correction |
+| --- | --- |
+| F1 [P2] with `$PSNativeCommandUseErrorActionPreference` true, a pytest failure would abort the step before its exit code was captured or the stop file written | Accept. The step sets that preference false immediately before the unchanged pytest command and captures `$LASTEXITCODE` on the next line (null guarded to 1). |
+| F2 [P2] a cleanup cmdlet failure under `ErrorActionPreference = 'Stop'` could replace pytest's exit code or skip the stop request | Accept. Lifetime record, stop file, wait, kill, and line count run inside `try`/`catch` that records the error as a warning; the step always ends with `exit $pytestExit`. |
+| F3 [P2] the start record did not prove sampling; `SystemSampler()` ran synchronously before any probe thread (about 2 s in the smoke) | Accept. The sampler is built on the system thread; volume and spawn threads start first (first volume sample 7 ms after start in the smoke); the workflow's readiness wait requires an `"event": "volume"` record, and the step fails if none appears within 30 s or the observer exits. |
+
+Verbatim review retained at `/tmp/weft-implementation-20261027/rca-canary-review-v5.md`.
+
+### Canary review rounds 6 and 7 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Round 6 verified the round-5 fixes F1 and F2 and found one new P2 in F3's
+readiness check: `Select-String -Path` opens the sample file with
+`FileShare.Read`, which conflicts with the observer's open append handle on
+Windows and would fail the step before pytest. Accepted: the check reads the
+file through a `FileStream` opened with `FileShare.ReadWrite`, treats
+`IOException` as not ready, and tests for an `"event": "volume"` line
+(commit 6bea9168). Round 7 verified that fix statically (function syntax
+under the Actions pwsh `run` block, quoting, partial-line reads, handle
+disposal) with no new defect: PASS. Verbatim reviews retained at
+`/tmp/weft-implementation-20261027/rca-canary-review-v6.md` and `-v7.md`.
+Dispatch 2 follows at commit 6bea9168.
+
+### Canary dispatch 2 (run 41221900076, commit 6bea9168, 2026-10-31 16:54–17:02 UTC)
+
+All twelve jobs passed and the observer covered every test phase (lifetime
+`alive_at_stop` true, 324–415 samples per probe, stop on the stop file, no
+blocked threads, pytest exit 0 recorded in every lifetime file). No
+slowdown episode occurred (per-minute medians 0.8–1.3x, no minute above 3x),
+so the mechanism remains unobserved and this dispatch is inconclusive, as
+preregistered. Full-run baselines on `Standard_D4ads_v5/v6` and
+`Standard_D4ds_v6` VMs across `eastus`, `centralus`, `westus`, and
+`WestUS3`: during the test phase, system CPU 87–94% busy; 4 KiB fsync on
+the C: remote managed disk 30–50 ms p50 and 180–256 ms p95, against 0.5 ms
+p50 and 20–60 ms p95 on the D: host-local NVMe; `python -I -c pass` 44–128
+ms p50 with maxima near 500 ms; antimalware CPU zero; `RealTimeProtectionEnabled`
+false in every job. Steady-state test-phase wall time showed no consistent
+C-versus-D difference (dispatch 1: per-version C-temp means 404/350/344 s
+against D-temp 405/264/348 s, with same-arm VM-to-VM spread of 249–439 s),
+which is expected when no stall occurs. Analysis output retained at
+`/tmp/weft-implementation-20261027/rca-env-canary-run-41221900076.txt`.
+Dispatch 3 follows; it is the last of the preregistered follow-ups.
