@@ -282,3 +282,224 @@ Resolving F1 clears the block. I recommend settling F2–F7 and F9 before dispat
 7. **F10:** if the current `windows-latest` image doesn't put the workspace on D:, the instruction can't be followed. Add: verify the workspace volume; if it differs, record a deviation or stop.
 8. **Gates:** `bin/check-doc-paths` only scans `docs/agent-context`, `docs/specifications`, `skills`, `AGENTS.md` and `docs/coalescing.md` (`bin/check-doc-paths:40-41`). So it doesn't check this plan's paths, and passing it isn't evidence about them; the plan's manual path check covers that. The gates recorded as passing ran before this revision, so rerun them on the revised plan and `docs/plans/README.md`.
 ````
+
+## Stall-profile finding and revised first discriminator (2026-10-31)
+
+Owner: top-level investigator (this session). Boundary: evidence re-read of the
+retained f4 diagnostics; no runtime, test-tree, workflow, or deadline change on
+the PR branch. Verification: the profile script and its output are retained
+with digests below and can be rerun from the artifact directories. Required
+action: dispatch the environment canary below after review; keep every original
+failure open until the mechanism is read from canary evidence.
+
+### What the retained per-test timelines show
+
+The official Windows CLI slice already writes one `test_start`/`test_finish`
+record per test and worker into `WEFT_TEST_DIAGNOSTICS_DIR` (artifact
+`diagnostics-windows-<py>-cli`). Dividing each test's duration in a run by the
+median duration of the same node across the three healthy 58c2883f jobs
+(run 41112817269) gives a per-minute slowdown profile. Script:
+`/tmp/weft-implementation-20261027/rca-stall-profile.py` (SHA256
+`f4bed1ff7c60707520bada8326cf7c76a1d4022b3f10143b750484ceb6206fea`); output:
+`/tmp/weft-implementation-20261027/rca-stall-profile-2026-10-31.txt` (SHA256
+`a9e4ad26a99e15898ba91b6aa8064194437c214c978e47ec5f6cc48ebf1edebe`).
+
+| Run / job | Outcome | Episode (finish minutes with median ≥ 3x) | Median slowdown in episode | Max ratio in run | Ratios > 3x whose finish minute is outside the episode |
+| --- | --- | --- | --- | --- | --- |
+| 41120214739 / Windows 3.14 CLI | 1 failed (parallel reuse) | 20:13–20:16 | 23.6–37.0x | 46.2x | one: the failed node `test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse` (started 20:12:01, finished 20:17:13, 312 s, 7.9x), which spans the whole episode |
+| 41120214739 / Windows 3.13 CLI | 4 failed (three 120 s CLI timeouts, one 60 s result wait) | 20:25–20:28 | 6.0–17.1x | 24.7x | three finishing at 20:29: `test_cli_run_agent_spec_no_wait_and_result` (started 20:26:16, 164 s, 10.6x, the failed result-wait node), `test_cli_run_spec_bundle_declared_path_arg_normalizes_to_absolute_path` (started 20:28:14, 6.1x), `test_cli_run_function_with_kwargs` (started 20:28:15, 4.1x) |
+| 41120227615 / Windows 3.12 CLI | 1 failed (pipeline 120 s timeout) | 20:25–20:26 | 10.2–16.4x | 21.1x | six: three onset-minute finishers that started 20:24:17–20:24:20 and finished inside 20:24 at 3.8–10.6x (`test_queue_write_resolves_explicit_alias_operand`, `test_cli_init_help_describes_positional_directory`, `test_queue_list_json_stats_includes_totals`); the failed `test_pipeline_run_sequential`, which started 20:24:13 and finished 20:27:13 (180 s, 8.0x) and so spans the whole episode; and two that started inside the episode and finished at 20:27, `test_task_tid_reverse` (started 20:25:46, 6.0x) and `test_queue_delete_rejects_all_with_message_and_preserves_queues` (started 20:26:05, 6.2x) |
+| 41112817269 / Windows 3.12, 3.13, 3.14 CLI (58c) | all passed | none | 0.90–1.16x | 2.9x | 0 of 729 |
+| 41126045971 / 3.14 and 41126681628 / 3.12, 3.13 (instrumented witnesses) | 3.12 failed three cases with no slowdown episode (the watchdog observer effect already recorded in the repair plan); 3.13 and 3.14 passed | none | 0.68–1.33x | 3.0x | 0 of 729 |
+
+Population and rules: the script divides each test's duration by the median
+duration of the same node across the three 58c jobs and keeps only nodes
+whose baseline median is at least 1 s, which leaves 243 ratios per job and
+729 per three-job group; ratios are binned by the minute the test finished.
+An episode is a run of finish minutes whose median ratio is at least 3x; the
+median rule marks the body of a stall, not its edges. Every ratio above 3x
+outside an episode's minutes belongs to a test that overlapped it in one of
+three ways: it started before the median crossed 3x and finished inside the
+onset minute (the 3.12 job's three 20:24 finishers show the onset within
+20:24, where the minute's median was 1.3x and its p90 6.5x); it started
+inside the episode and finished after it; or it started before the episode
+and finished after it, spanning the whole stall (the failed 3.14
+parallel-reuse node and the failed 3.12 pipeline node). No ratio above 3x
+occurs away from an episode in any run.
+
+Inside each episode every worker's test slowed, including tests that run no
+Weft subprocess beyond `weft status` against an empty project (42–68 s for
+1.4–1.8 s `tests/cli/test_status.py` nodes and 93–131 s for 6–7 s nodes in
+the 3.14 job) and, on the Windows 3.14 core-commands job 124285487372 (same
+run, separate VM, heartbeats show the episode at about 20:17–20:21), the
+`manager_setup`
+fixture, which only constructs a `Manager` against a fresh SQLite database
+in-process (31.4 s and 43.9 s setups; 32.2 s teardown). SimpleBroker runs WAL
+with `SYNC_MODE=FULL`, so that fixture is almost entirely fsync-bound storage
+I/O on the pytest temp root under `C:\Users\runneradmin\AppData\Local\Temp`.
+Through the 3.13 episode the controller's heartbeat thread fired at
+119.971 s, 120.006 s, and 120.004 s intervals (log lines 20:23:59.898,
+20:25:59.898, 20:27:59.905, 20:29:59.910), so CPU scheduling inside the
+controller process stayed intact while every storage-touching process
+crawled. Four separate VMs (three CLI jobs across two workflow runs plus the
+3.14 core job) stalled within 20:13–20:28 UTC on 2026-10-30.
+
+The retained queue timestamps for the failed `json:dumps` node make the
+stall legible end to end: test start 20:24:43.9; spawn request written
+20:25:18.8 (34 s for `python -m weft run` to start and submit); Manager
+`task_initialized` 20:25:46.5; registry row 20:25:50.7; Manager
+`task_spawning` 20:25:54.7; nothing further before the 120 s timeout.
+
+### Same failure family on main and before the reactor
+
+Windows 3.14 CLI job 119618901109 on main commit af0bb649 (2026-10-22)
+failed `test_cli_run_continuous_overrides_nonpersistent_spec` with the same
+`manager readiness is degraded … return code 11` text that the frozen 3.14
+parallel-reuse signature carries; jobs 119641591206 and 119618901126 (main)
+and 122987338721 (branch commit 8261a4b0, before d4381877) failed on
+readiness and event waits of the same family. These matches are by failure
+text and boundary, not by the preregistered node-and-retained-state rules,
+and no stall profile exists for those runs (the CLI diagnostics directory
+was not retained then). They show that the reactor change is not necessary
+for the readiness-degraded signature and make it unlikely to be necessary
+for the others; they do not match every frozen signature. The paired
+baseline/candidate CLI comparison in step 2 is deferred rather than run
+first: the mechanism question is prior, the comparison cannot observe the
+mechanism, and it would cost six full CLI runs. It remains the control to
+run if a product hypothesis survives the canary evidence.
+
+### Hypothesis disposition
+
+Storage latency on the volume holding the test temp roots is now the leading
+hypothesis. The rows below say what the current evidence supports and what it
+leaves open; none is a categorical exclusion.
+
+| ID | Current standing | Basis and what remains open |
+| --- | --- | --- |
+| H1 broker lock | Not the leading explanation | The sampled `begin_immediate` frame is one writer waiting behind another; under a storage stall that is the expected shape, because commits are fsync-bound and busy-timeout waits chain. The retained evidence does not identify the lock holder or show its commit stalled in storage; the canary's fsync probe is the measurement that would support or refute that. |
+| H2 missed wake | Not supported so far | Every stalled worker resumed when the episode ended, which is consistent with no lost wake, but recovery alone does not exclude one. A reproduced episode with no corresponding canary latency would reopen H2. |
+| H3 election vs readiness | Not supported so far | Launcher return 11 is the CLI's ABORT at the 10 s registry-readiness deadline while `last_child_pid_live` was true; three other submissions in the same failure show launcher return 1. Which phase (interpreter start, imports, construction, registry write) consumed the 10 s is not identified by the retained snapshot; the healthy witness run measured 0.13–0.34 s constructors, so a 20–40x slowdown of any of them fits the deadline. |
+| H4 pipe/process ownership | Not necessary for the readiness-degraded signature | Same failure family on main and pre-reactor commits; no accumulation across the run (ratios return to about 1.0x after each episode). Not excluded as a contributor to other signatures. |
+| H5 Windows startup cost | Generalized to E1–E4 below | The stall is not startup-specific: in-process SQLite fixtures and trivial CLI calls stall by similar factors. |
+| H6 false oracle | Not supported so far | Every oracle reported absence within its budget; the budgets assume the VM cannot stall storage for minutes, and that environmental premise is what the measurements contradict. |
+
+Open mechanism hypotheses for the environment stall (the discriminator
+below splits them):
+
+| ID | Hypothesis | Prediction during an episode |
+| --- | --- | --- |
+| E1 | The C: volume (Azure OS disk) suffers storage-latency events; D: (host-local temp disk) does not | C: fsync canary p50 ≥ 1 s while D: canary stays < 50 ms; jobs whose test temp root is on D: keep test slowdown < 3x even while their own C: canary spikes |
+| E2 | Antimalware real-time scanning serializes file and process creation | `MsMpEng`/`NisSrv` CPU ≥ 50% of one core during the episode; create-close-delete canary slow on both volumes |
+| E3 | Host-level storage or hypervisor degradation | Both volume canaries slow; antimalware CPU low; spawn canary slow only through its own file I/O |
+| E4 | Process-creation path alone | Both volume canaries normal while `python -I -c pass` spawn latency ≥ 1 s |
+
+### Environment canary (diagnostic only)
+
+Branch `codex/windows-env-canary` (worktree outside the main checkout) keeps
+the product, the test tree, and the pytest command byte-identical to the
+official Windows CLI slice and adds one external observer process,
+`tests/windows_env_canary.py`, started before pytest and stopped after it by
+a stop file (never by the lifetime of the step that launched it; the stop
+step records whether the observer was still alive when pytest finished).
+Each probe runs on its own thread with its own one-second schedule, so a
+blocked operation on one volume cannot delay or mask the others: one thread
+per probed volume records fsync-write latency of a 4 KiB file and
+create-close-delete latency on that volume (C: under `%TEMP%`, D: under
+`RUNNER_TEMP`); one thread records the wall time of `python -I -c pass`
+every two seconds; one thread records system CPU, available memory, process
+count, psutil per-physical-disk counter deltas, and CPU time of antimalware
+processes (recorded as denied if protected). A one-time header records
+`Get-MpComputerStatus`, `Get-MpPreference`, volumes and physical disks, the
+temp environment, and the Azure instance-metadata `vmSize` if reachable.
+Every record carries its own schedule overrun, and the stop record names any
+thread still blocked at shutdown, so a probe that could not observe an
+interval leaves a visible gap rather than a misleading fast sample. The
+observer adds about one small fsync and one file create/delete per second
+per volume and one interpreter spawn every two seconds.
+
+Matrix: Python 3.12, 3.13, 3.14 × test temp volume {`c` = unchanged
+`%TEMP%`, `d` = `RUNNER_TEMP\weft-test-temp` via `TEMP`/`TMP` for the pytest
+step only} × repeat 2 = 12 jobs per dispatch, `fail-fast: false`, original
+worker count, deadlines, and job ceiling. The `d` arm is a discriminator for
+E1, not an acceptance run.
+
+Preregistered interpretation: an episode is two or more consecutive finish
+minutes with median test slowdown ≥ 3x against the 58c baseline. During an
+episode, overlapping volume samples are read as in the E-table: E1 requires
+C: fsync p50 ≥ 1 s while D: samples taken in the same minutes stay < 50 ms;
+E3 requires both volumes slow in the same minutes; a volume thread with no
+samples in an episode minute counts as blocked for that minute, not as
+healthy. A `d`-arm job that shows a C:-volume episode without a test-slowdown
+episode confirms C:-volume dependence. If no job records an episode, the
+dispatch is inconclusive, the canary data stands as baseline, and at most
+two further dispatches follow. A passing job never closes an original
+failure. A job whose stop record shows the observer did not span pytest
+contributes no mechanism evidence.
+
+### What a justified correction could look like
+
+If E1 is confirmed: set `TEMP`/`TMP` to a `RUNNER_TEMP` subdirectory for the
+Windows test steps in the official workflow. That changes where the
+harness, pytest, and SQLite files live on the runner; it changes no product
+code, no test premise, no worker count, and no deadline, and it corrects an
+environment assumption rather than relieving load. If E2: antimalware
+exclusions for the temp roots, same scope. If E3 or E4: no in-repo
+correction exists; report, and keep the gate honest by retaining canary
+evidence with failures. In every case the original failures stay open until
+the correction is verified under the original load with the official 36-job
+matrix.
+
+Review before dispatch: cross-family review of this section, the canary
+script, and the temporary workflow, with the Scoped Change Review Prompt.
+
+### Canary review round 1 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Dispositions, applied in the operative text above and on the diagnostic
+branch before any dispatch:
+
+| Finding | Disposition and operative correction |
+| --- | --- |
+| F1 [P1] observer tracked the launching PowerShell step's PID and would have stopped when that step exited | Accept. The observer's lifetime is bounded only by the stop file and `--max-seconds`; the stop step records `canary-lifetime.json` with whether the observer was still alive when pytest finished, and a job whose observer did not span pytest contributes no mechanism evidence. |
+| F2 [P2] serial probes cannot separate volume-local latency from shared degradation, and a blocked probe hides later intervals | Accept. One thread per probed volume, one for spawn, one for system counters, each on its own schedule with recorded overruns; the stop record names threads still blocked; interpretation rules read overlapping samples and treat a missing volume sample in an episode minute as blocked, not healthy. |
+| F3 [P2] the section promoted plausible explanations to established causes (lock holder, phase consumed, "history answers every signature") | Accept. Hypothesis table rewritten as current standing with what remains open; the three launcher return-1 cases are recorded beside the return-11 case; the history section states the match is by failure text and boundary, not the preregistered rules, and the paired comparison is deferred rather than withdrawn. |
+| F4 [P2] evidence table claimed no ratio above 3x outside episodes, used 909 instead of 729, and listed the 3.12 episode from 20:24 | Accept. Table corrected to the ≥ 3x-median episode rule with the spanning tests named, population stated (243 ratios per job, baseline median ≥ 1 s), 3.12 episode 20:25–20:26 with the 20:24 p90 noted. |
+
+Verbatim review retained at `/tmp/weft-implementation-20261027/rca-canary-review-v1.md`.
+
+### Canary review round 2 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Verdict FAIL on three new P2 findings; F1 and F3 verified. Dispositions:
+
+| Finding | Disposition and operative correction |
+| --- | --- |
+| R2-1 [P2] the shared record sink held one lock across write and flush, so blocked output could stall every probe and the stop record | Accept. Probes now queue records in memory and a dedicated writer thread appends them; each record keeps its measurement timestamp and gains `write_delay_ms` at append time, so output blockage is visible and distinct from probe blockage; the stop record counts records the writer could not append and, when the writer is still blocked, the shutdown facts go to a side file (`env-canary.stop.json`, exit code 2). Verified locally by forcing the writer to block: probes kept sampling, exit 2, side file written within the budget. |
+| R2-2 [P2] four sequential 5 s joins consumed the workflow's whole 20 s grace | Accept. One shared 5 s join deadline for all probe threads plus a 3 s writer drain, about 8 s total, leaving margin before the workflow's 20 s force-kill. |
+| R2-3 [P2] the evidence table's explanation said outliers occur only after episodes while the 3.12 row listed 20:24 finishers, and the spanning tests were not named | Accept. The table now names every above-3x test outside episode minutes with start and finish times; the explanation distinguishes onset-minute finishers (the 3.12 job's four 20:24 finishers, median 1.3x but p90 6.5x) from tests that started inside an episode and finished after it, and states that no above-3x ratio occurs away from an episode. |
+
+Verbatim review retained at `/tmp/weft-implementation-20261027/rca-canary-review-v2.md`.
+
+### Canary review round 3 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Verdict FAIL: R2-2 verified; R2-1's writer handoff had four new defects and
+R2-3's 3.12 row still contradicted its explanation. Dispositions:
+
+| Finding | Disposition and operative correction |
+| --- | --- |
+| R3-1 [P2] a failed stop-record append could still return success | Accept. `Sink.emit` returns a per-record completion event set only after a confirmed append; shutdown returns 0 only when the stop record's event is set and no record remains unwritten. |
+| R3-2 [P2] the delay field was stamped before write and flush, so it measured queue wait, not append time | Accept. The field is renamed `queue_wait_ms`, and each record also carries `previous_append_ms` (the writer's write-plus-flush time for the record before it); the shutdown facts carry `last_append_ms`. A blocked append therefore appears in the next record or in the shutdown facts. |
+| R3-3 [P2] the side-file fallback mutated a record the writer still owned | Accept. `emit` copies every record; the side file is built from a separate copy; no caller dictionary is shared with the writer. |
+| R3-4 [P3] `records_unwritten` counted the shutdown sentinel | Accept. Counts come from `queued`, `written`, and `write_errors` counters, not from queue size. |
+| R3-5 (R2-2 note) the synchronous side-file write was unbounded | Accept. The side file is written on a thread with a 2 s join; total shutdown is bounded at about 10 s against the workflow's 20 s force-kill, and a side file that could not be written exits 3. |
+| R3-6 (R2-3) the 3.12 row listed the pipeline node among the 20:24 finishers, and the explanation lacked the whole-episode spanning category | Accept. The row separates the three onset finishers from the pipeline node (started 20:24:13, finished 20:27:13) and the two late finishers; the explanation names all three overlap categories. |
+
+Verbatim review retained at `/tmp/weft-implementation-20261027/rca-canary-review-v3.md`.
+
+### Canary review round 4 (cross-family, codex read-only sandbox, 2026-10-31)
+
+Verdict PASS: R3-1 through R3-6 verified with in-memory I/O doubles (a
+forced 120 ms flush produced `previous_append_ms` 122.8 ms; fully blocked
+probes, writer, and side file returned exit 3 in 10.0 s on default budgets),
+no new defect within scope. Windows execution not rerun by the reviewer;
+that is what the dispatch provides. Verbatim review retained at
+`/tmp/weft-implementation-20261027/rca-canary-review-v4.md`. Dispatch of
+`codex/windows-env-canary` (commit 9bf4181b) follows this record.
