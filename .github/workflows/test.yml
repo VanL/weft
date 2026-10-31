@@ -90,30 +90,47 @@ jobs:
           '--spawn-interval', '2.0',
           '--max-seconds', '3300'
         )
+        $samples = Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.jsonl'
         $canary = Start-Process -FilePath python -ArgumentList $arguments -PassThru -WindowStyle Hidden `
           -RedirectStandardError (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stderr.log') `
           -RedirectStandardOutput (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stdout.log')
-        $samples = Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.jsonl'
+        # Readiness means a probe has sampled, not merely that a header exists.
         $ready = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $ready -and -not ((Test-Path $samples) -and (Get-Item $samples).Length -gt 0)) { Start-Sleep -Milliseconds 250 }
+        $probing = $false
+        while ((Get-Date) -lt $ready) {
+          if ((Test-Path $samples) -and (Select-String -Path $samples -Pattern '"event": "volume"' -Quiet)) { $probing = $true; break }
+          if ($canary.HasExited) { break }
+          Start-Sleep -Milliseconds 250
+        }
         if ($canary.HasExited) { throw "canary exited early with code $($canary.ExitCode)" }
-        "canary pid $($canary.Id) running; first record present: $((Test-Path $samples) -and (Get-Item $samples).Length -gt 0)"
+        if (-not $probing) { throw "canary produced no volume sample within 30 s" }
+        "canary pid $($canary.Id) probing"
 
+        # A native nonzero exit must never abort this script: the pytest exit
+        # code is captured immediately and is the step's exit code below.
+        $PSNativeCommandUseErrorActionPreference = $false
         pytest -v --tb=short -m "not slow" tests/cli --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
         $pytestExit = $LASTEXITCODE
+        if ($null -eq $pytestExit) { $pytestExit = 1 }
 
-        $aliveAtStop = -not $canary.HasExited
-        @{ canary_pid = $canary.Id; alive_at_stop = $aliveAtStop; pytest_exit = $pytestExit; stop_requested_utc = [DateTime]::UtcNow.ToString('o') } |
-          ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'canary-lifetime.json')
-        if (-not $aliveAtStop) { Write-Warning "canary was not alive when pytest finished; its samples do not span the run" }
-        New-Item -ItemType File -Force -Path $env:WEFT_CANARY_STOP | Out-Null
-        if (-not $canary.WaitForExit(20000)) {
-          Stop-Process -Id $canary.Id -Force
-          "canary killed after stop-file timeout"
-        } else {
-          "canary exited on stop file with code $($canary.ExitCode)"
+        # Observer cleanup is diagnostic-only: its failures are recorded, never
+        # allowed to replace pytest's exit code.
+        try {
+          $aliveAtStop = -not $canary.HasExited
+          @{ canary_pid = $canary.Id; alive_at_stop = $aliveAtStop; pytest_exit = $pytestExit; stop_requested_utc = [DateTime]::UtcNow.ToString('o') } |
+            ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'canary-lifetime.json')
+          if (-not $aliveAtStop) { Write-Warning "canary was not alive when pytest finished; its samples do not span the run" }
+          New-Item -ItemType File -Force -Path $env:WEFT_CANARY_STOP | Out-Null
+          if (-not $canary.WaitForExit(20000)) {
+            Stop-Process -Id $canary.Id -Force
+            "canary killed after stop-file timeout"
+          } else {
+            "canary exited on stop file with code $($canary.ExitCode)"
+          }
+          Get-Content $samples | Measure-Object -Line
+        } catch {
+          Write-Warning "observer cleanup error: $_"
         }
-        Get-Content $samples | Measure-Object -Line
         exit $pytestExit
 
     - name: Retain canary samples and test diagnostics

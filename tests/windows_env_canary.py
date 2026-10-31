@@ -383,6 +383,11 @@ def spawn_measure() -> dict[str, Any]:
     return {"spawn": spawn_latency()}
 
 
+def system_probe(interval: float, stop: threading.Event, sink: Sink) -> None:
+    """Build the system sampler on its own thread so no probe waits for its setup."""
+    run_scheduled("system", interval, stop, sink, SystemSampler().measure)
+
+
 class SystemSampler:
     """CPU, memory, process count, disk counter deltas, antimalware CPU deltas."""
 
@@ -475,8 +480,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     threads.append(
         threading.Thread(
-            target=run_scheduled,
-            args=("system", args.interval, stop, sink, SystemSampler().measure),
+            target=system_probe,
+            args=(args.interval, stop, sink),
             name="canary-system",
             daemon=True,
         )
