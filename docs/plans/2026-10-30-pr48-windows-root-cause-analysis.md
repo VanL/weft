@@ -439,7 +439,23 @@ contributes no mechanism evidence.
 ### What a justified correction could look like
 
 If E1 is confirmed: set `TEMP`/`TMP` to a `RUNNER_TEMP` subdirectory for the
-Windows test steps in the official workflow. That changes where the
+Windows test steps in the official workflow. The exact candidate, for the
+owner's decision and not applied by this investigation, is two lines in the
+`Run tests with pytest` step's `env` block of `.github/workflows/test.yml`
+(the PostgreSQL, Linux, and macOS jobs are untouched because their matrix
+condition is false):
+
+```yaml
+        TEMP: ${{ matrix.os == 'windows-latest' && format('{0}/weft-test-temp', runner.temp) || '' }}
+        TMP: ${{ matrix.os == 'windows-latest' && format('{0}/weft-test-temp', runner.temp) || '' }}
+```
+
+with a preceding `mkdir` of that directory on Windows. An empty `TEMP`
+would be wrong on Linux and macOS, so the production form must leave the
+variables unset there (a conditional step that appends to `GITHUB_ENV`
+only on Windows is the cleaner shape); the canary's `d` arm already proved
+the inheritance path through pytest, the harness, the CLI, the detached
+Manager, and child processes on Windows. That changes where the
 harness, pytest, and SQLite files live on the runner; it changes no product
 code, no test premise, no worker count, and no deadline, and it corrects an
 environment assumption rather than relieving load. If E2: antimalware
@@ -579,3 +595,66 @@ against D-temp 405/264/348 s, with same-arm VM-to-VM spread of 249–439 s),
 which is expected when no stall occurs. Analysis output retained at
 `/tmp/weft-implementation-20261027/rca-env-canary-run-41221900076.txt`.
 Dispatch 3 follows; it is the last of the preregistered follow-ups.
+
+### Canary dispatch 3 (run 41222689158, commit 6bea9168, 2026-10-31 17:04–17:13 UTC)
+
+All twelve jobs passed with full observer coverage; no slowdown episode
+(no minute above 3x; slowest minute 2.1x in the 3.14 `c` r1 job). This was
+the last preregistered follow-up dispatch, so the stall mechanism remains
+unobserved directly after 36 canary jobs on 2026-10-31. The run adds a
+gradient that the earlier dispatches lacked: in the six `c`-arm jobs (test
+temp on the remote C: disk) the C: fsync p95 reached 183–1753 ms in at
+least one minute, with the two highest (1057 and 1753 ms) on the two 3.14
+`c` jobs, while in the six `d`-arm jobs (test temp on D:) the C: probe,
+now carrying only the canary's own load, stayed at 128–376 ms p95 and the
+D: probe at 73–185 ms p95 under the suite's load. The suite's own commits
+therefore drive the remote disk into second-scale tails on their own;
+whether an external storage event turns that into a minutes-long episode is
+the part still unobserved. Analysis output retained at
+`/tmp/weft-implementation-20261027/rca-env-canary-run-41222689158.txt`.
+
+Within-run rank correlations between per-minute test slowdown and the C:
+or D: fsync p95 are mixed across the 24 covered jobs (both signs, five to
+eight minutes per job) and support no claim on their own; the single
+standout is the 3.14 `c` r1 minute at 2.1x, which coincided with that run's
+highest C: p95 (1753 ms) while the D: probe read 34 ms. These normal-run
+gradients are context for E1, not confirmation of it.
+
+### Official run on the plan head (run 41222682358, commit b39f7963, 2026-10-31 17:03–17:27 UTC)
+
+31 of 36 jobs succeeded; the four dependent extension jobs were skipped
+because Windows 3.12 core-commands (job 124600479054) failed: xdist worker
+`gw0` crashed while running
+`tests/commands/test_event_observation_connections.py::test_realtime_early_exit_closes_owned_connections[cancel-after-snapshot]`
+(JUnit records the case at 24.9 s against 6–7 s for its sibling variants;
+3436 other cases passed). This is a different failure family from the stall
+episodes and is recorded as a separate open signature:
+
+- The job log contains no Python fatal-exception text, no faulthandler dump,
+  and no pytest-timeout dump, and no heartbeat shows a long-running test; the
+  worker simply disappeared. A Python-level crash would have printed a
+  `Windows fatal exception` block, so the remaining mechanisms are an
+  external `TerminateProcess` or a Windows fail-fast termination (for
+  example heap corruption, exit code `0xC0000374`), which bypasses the
+  unhandled-exception filter faulthandler relies on.
+- The test spawns no process: it seeds a task observation (no PID fields)
+  and drives `iter_task_realtime_events` in-process with a cancel event,
+  patching the broker class's `latest_pending_timestamp` to raise after the
+  first snapshot. `WeftTestHarness` skips its own PID and its ancestors when
+  terminating registered PIDs, so the harness self-kill path has no trigger
+  here.
+- Prior silent worker crashes in this repository's Windows jobs: main job
+  119629382792 (2026-10-22, `test_result_activity_waits.py::test_realtime_releases_stream_iterator_before_yielding_frame`,
+  the same in-process realtime-observer family) and branch job 123101422111
+  (commit a385f3e8, 2026-10-28, `test_cli_run_installed_entrypoint.py`). No
+  silent crash appears in the four most recent branch runs before this one.
+
+Discriminator for this signature, not yet dispatched: run the Windows
+core-commands slice unchanged with `WEFT_TEST_DIAGNOSTICS_DIR` set (the
+existing plugin writes one faulthandler file per worker, so a native fatal
+error leaves a dump while an external or fail-fast termination leaves an
+empty file) and with the Application-event-log collector from diagnostic
+commit 75c8cff8 (event 1000 records the faulting module and exception code
+for a fail-fast termination). Both are existing machinery; neither changes
+the test command, workers, or deadlines. This signature is outside the
+stall investigation's hypotheses and must be kept open on its own.
