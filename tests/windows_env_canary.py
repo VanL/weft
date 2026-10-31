@@ -195,8 +195,9 @@ def _imds() -> Any:
         return {"error": repr(exc)}
 
 
-def header(probe_dirs: dict[str, Path]) -> dict[str, Any]:
-    record: dict[str, Any] = {
+def start_record(probe_dirs: dict[str, Path]) -> dict[str, Any]:
+    """Cheap facts, emitted before any probe starts so sampling begins at once."""
+    return {
         "event": "start",
         "time_ns": time.time_ns(),
         "monotonic": time.monotonic(),
@@ -218,6 +219,15 @@ def header(probe_dirs: dict[str, Path]) -> dict[str, Any]:
                 "GITHUB_JOB",
             )
         },
+    }
+
+
+def metadata_record() -> dict[str, Any]:
+    """Slow environment facts (PowerShell queries, instance metadata); gathered on a thread."""
+    record: dict[str, Any] = {
+        "event": "metadata",
+        "time_ns": time.time_ns(),
+        "monotonic": time.monotonic(),
     }
     try:
         record["partitions"] = [
@@ -250,6 +260,7 @@ def header(probe_dirs: dict[str, Path]) -> dict[str, Any]:
             " | ConvertTo-Json"
         )
     record["imds"] = _imds()
+    record["collection_seconds"] = round(time.monotonic() - record["monotonic"], 3)
     return record
 
 
@@ -436,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     sink.start()
     stop_file = Path(args.stop_file)
     stop = threading.Event()
-    sink.emit(header(probe_dirs))
+    sink.emit(start_record(probe_dirs))
 
     threads = [
         threading.Thread(
@@ -472,6 +483,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     for thread in threads:
         thread.start()
+    threading.Thread(
+        target=lambda: sink.emit(metadata_record()),
+        name="canary-metadata",
+        daemon=True,
+    ).start()
 
     started = time.monotonic()
     reason = "max_seconds"

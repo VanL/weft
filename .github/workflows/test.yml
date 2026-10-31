@@ -3,9 +3,10 @@ name: Windows environment canary (diagnostic only)
 # Temporary diagnostic workflow on branch codex/windows-env-canary. It runs
 # the official Windows CLI slice byte-for-byte (same install, worker count,
 # pytest command, heartbeat, diagnostics directory, and 50-minute ceiling)
-# beside one external observer process, tests/windows_env_canary.py, whose
-# lifetime is bounded by a stop file (not by its launching step), and
-# optionally moves the test temp root to the D: volume. It replaces no
+# beside one external observer process, tests/windows_env_canary.py, which
+# shares the pytest step (the runner kills a step's process tree at step
+# end) and stops on a stop file, and optionally moves the test temp root to
+# the D: volume. It replaces no
 # official gate and claims no acceptance. Plan:
 # docs/plans/2026-10-30-pr48-windows-root-cause-analysis.md
 on:
@@ -67,8 +68,17 @@ jobs:
         "C probe: $(Join-Path $env:TEMP 'weft-canary')"
         "D probe: $(Join-Path $env:RUNNER_TEMP 'weft-canary')"
 
-    - name: Start environment canary
+    - name: Run unchanged Windows CLI slice beside the environment canary
+      # One step on purpose: the Actions runner terminates a step's process
+      # tree when the step ends, so the observer must share the pytest step.
+      # The pytest command below is byte-identical to the official Windows
+      # CLI job; its exit code is the step's exit code.
       shell: pwsh
+      env:
+        WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: '120'
+        WEFT_TEST_DIAGNOSTICS_DIR: ${{ env.WEFT_CANARY_DIAGNOSTICS }}
+        TEMP: ${{ env.WEFT_CANARY_TEST_TEMP }}
+        TMP: ${{ env.WEFT_CANARY_TEST_TEMP }}
       run: |
         $arguments = @(
           'tests/windows_env_canary.py',
@@ -83,40 +93,28 @@ jobs:
         $canary = Start-Process -FilePath python -ArgumentList $arguments -PassThru -WindowStyle Hidden `
           -RedirectStandardError (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stderr.log') `
           -RedirectStandardOutput (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.stdout.log')
-        "WEFT_CANARY_PID=$($canary.Id)" >> $env:GITHUB_ENV
-        Start-Sleep -Seconds 5
+        $samples = Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.jsonl'
+        $ready = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $ready -and -not ((Test-Path $samples) -and (Get-Item $samples).Length -gt 0)) { Start-Sleep -Milliseconds 250 }
         if ($canary.HasExited) { throw "canary exited early with code $($canary.ExitCode)" }
-        "canary pid $($canary.Id) running"
+        "canary pid $($canary.Id) running; first record present: $((Test-Path $samples) -and (Get-Item $samples).Length -gt 0)"
 
-    - name: Run unchanged Windows CLI slice
-      env:
-        WEFT_TEST_PROGRESS_HEARTBEAT_SECONDS: '120'
-        WEFT_TEST_DIAGNOSTICS_DIR: ${{ env.WEFT_CANARY_DIAGNOSTICS }}
-        TEMP: ${{ env.WEFT_CANARY_TEST_TEMP }}
-        TMP: ${{ env.WEFT_CANARY_TEST_TEMP }}
-      run: |
         pytest -v --tb=short -m "not slow" tests/cli --override-ini="addopts=-ra -q --strict-markers -n logical --dist load" --durations=100 --durations-min=0.5 -o faulthandler_timeout=720 --timeout=900 --timeout-method=thread --full-trace
+        $pytestExit = $LASTEXITCODE
 
-    - name: Stop environment canary
-      if: always()
-      shell: pwsh
-      run: |
-        $aliveAtStop = [bool](Get-Process -Id $env:WEFT_CANARY_PID -ErrorAction SilentlyContinue)
-        @{ canary_pid = [int]$env:WEFT_CANARY_PID; alive_at_stop = $aliveAtStop; stop_requested_utc = [DateTime]::UtcNow.ToString('o') } |
+        $aliveAtStop = -not $canary.HasExited
+        @{ canary_pid = $canary.Id; alive_at_stop = $aliveAtStop; pytest_exit = $pytestExit; stop_requested_utc = [DateTime]::UtcNow.ToString('o') } |
           ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'canary-lifetime.json')
-        if (-not $aliveAtStop) { Write-Warning "canary was not alive when the test step finished; its samples do not span the run" }
+        if (-not $aliveAtStop) { Write-Warning "canary was not alive when pytest finished; its samples do not span the run" }
         New-Item -ItemType File -Force -Path $env:WEFT_CANARY_STOP | Out-Null
-        $deadline = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $deadline -and (Get-Process -Id $env:WEFT_CANARY_PID -ErrorAction SilentlyContinue)) {
-          Start-Sleep -Milliseconds 250
-        }
-        if (Get-Process -Id $env:WEFT_CANARY_PID -ErrorAction SilentlyContinue) {
-          Stop-Process -Id $env:WEFT_CANARY_PID -Force
+        if (-not $canary.WaitForExit(20000)) {
+          Stop-Process -Id $canary.Id -Force
           "canary killed after stop-file timeout"
         } else {
-          "canary exited on stop file"
+          "canary exited on stop file with code $($canary.ExitCode)"
         }
-        Get-Content (Join-Path $env:WEFT_CANARY_DIAGNOSTICS 'env-canary.jsonl') | Measure-Object -Line
+        Get-Content $samples | Measure-Object -Line
+        exit $pytestExit
 
     - name: Retain canary samples and test diagnostics
       if: always()
