@@ -721,3 +721,7 @@ pitfall does not apply), `GITHUB_ENV` reaches later shell and action steps,
 no later step sets `TMPDIR`, `TEMP`, `TMP`, or `--basetemp`, the diagnostics
 directory is a sibling, the `if:` cannot empty Linux or macOS temp variables,
 and deleting the step restores the previous workflow text exactly.
+
+### Standing at merge (2026-10-31)
+
+Official run [41264534068](https://github.com/VanL/weft/actions/runs/41264534068) on `3ce155fc`, the first head with the D: temp root, passed 36 of 36; PR #48 merges on it by owner directive. Per the preregistered interpretation above this is consistent with E1 and is not a confirmation (rule d). This plan stays `draft` as the active investigation record because two items remain open on their own evidence: the stall trigger was never reproduced on demand, and the silent-worker-crash signature has not had its discriminator dispatched. Every later Windows failure on `main` is read through the rules above before it is named. The repair plan this investigation served is closed on its own gate.

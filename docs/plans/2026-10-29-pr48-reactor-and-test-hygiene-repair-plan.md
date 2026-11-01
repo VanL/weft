@@ -1,6 +1,6 @@
 # PR #48 Subprocess Reactor and Test Hygiene Repairs
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2]; docs/specifications/01-Core_Components.md [CC-2.5], [CC-3.2], [CC-3.4]; docs/specifications/08-Testing_Strategy.md [TS-0], [TS-1], [TS-3.1]
 Superseded by: none
 
@@ -2019,3 +2019,32 @@ After the owner raised concern about instability and corrective churn, further r
 **Cross-family review (Codex, read-only, high effort, one scoped round on the completed diff).** Verdict FAIL with one should-fix and one note, both accepted. Should-fix: the first rewrite kept the child alive with a fixed 0.5 s sleep, which the reviewer showed still depends on scheduling (a 0.7 s delay before supervisor entry produced `late_checks == 0`); replaced by the release-file handshake described above. Note: the spec sentence read as a general enforcement guarantee while `host.py` and `sessions.py` keep their own precedence handling; scoped to the one-shot command supervisor. The reviewer confirmed the production change: `break` reaches output capture, return-code classification, final metrics, and monitor shutdown; `process_returncode` reuse is safe; the same-thread `wait()` releases the Popen wait lock before the re-poll; an independent OOM exit remains a nonzero error, not an accepted limit stop. No second review round was run (owner rule: one scoped round); the two corrections are verified by the RED/GREEN runs below.
 
 **Verification.** RED: the final test fails with only the product change stashed, `assert 'limit' == 'ok'` (the CI symptom). GREEN: passes 3/3 locally after the fix. `tests/core/test_subprocess_runner.py tests/tasks/test_runner.py tests/tasks/test_consumer_terminal_events.py`: 290 passed, 8 skipped (Windows overlapped leaf). `ruff check`, `ruff format --check`, and `mypy` on the two changed files: clean. Exact-head 36-job CI on the commit is the acceptance gate; the macOS witness cannot be forced in CI, so the deterministic test is the regression guard.
+
+### Native macOS reactor measurement at 3ce155fc (2026-10-31, owner host)
+
+The closure gate in §9 requires the Task 1 measurement table for Linux, macOS, and Windows. The official workflow's measurement step excludes `macos-latest`, so the macOS row was produced on the owner's machine with the same script and procedure as the CI rows: `tests/subprocess_reactor_benchmark.py --baseline 540707a370d32cf9475832099fabd52fa1dc7f0a --output <dir>` from the clean `3ce155fc` checkout, baseline arm from a `git archive` of the pinned revision, candidate arm from the checkout. `procedure.json` records `candidate_dirty_status == ""`; both arms report `dirty_imports: false` with every one of the 12 imported Weft modules matching its expected git blob; before uses `Popen(stdin=None)`, after uses `open_supervised_process(pipe_stdin=False)`; psutil 7.2.2 and CPython 3.14.9 are identical across arms; joined-thread calibration passed on both arms (109 switches for 100 sleeps), so context-switch coverage is `complete`. The run was taken on an otherwise idle machine after the local suite finished; artifacts are retained at `/tmp/weft-implementation-20261027/reactor-measure-macos-3ce155fc/{procedure,before,after}.json`.
+
+| Measurement (macOS 27.0.1 arm64, CPython 3.14.9) | Before | After |
+|---|---:|---:|
+| 3 s idle, no cancellation callback: parent CPU | 34.830 ms | 0.691 ms |
+| 3 s idle, no cancellation callback: context switches | 953 | 3 |
+| 3 s idle, pull cancellation: parent CPU | 36.540 ms | 5.514 ms |
+| 3 s idle, pull cancellation: context switches | 919 | 93 |
+| Output-to-callback observed median / max | 37.313104 / 59.121959 ms | 0.196354 / 0.386375 ms |
+| Cancellation through reap observed median / max | 24.934209 / 75.553000 ms | 17.831625 / 21.389208 ms |
+
+Same limitations as the Linux and Windows rows: a single before-then-after pair on one host, no speed threshold, no randomization, no latency-distribution claim; output timestamps every 0.1 s and cancellation at 0.5 s can phase-align with the old polling cadence; pull cancellation keeps its 50 ms polling floor, so observed cancellation latency depends on where the 0.5 s request lands within that poll period. This is a developer-host sample, not a hosted-runner sample, and is recorded as such.
+
+### Closure (2026-10-31)
+
+Owner directive in session: merge on a green exact-head run, bump every first-party package by one patch level, and run `bin/release.py all`.
+
+**Exact-head gate.** Official run [41264534068](https://github.com/VanL/weft/actions/runs/41264534068) on `3ce155fc` (the PR head): 36 of 36 jobs succeeded, including all 27 OS/Python matrix jobs, the three PostgreSQL slices, lint, coverage, and the four dependent extension jobs. The `Verify Windows reactor cases executed` step passed in each Windows core-commands job, so the nine required Windows adapter cases ran exactly once and passed on 3.12, 3.13, and 3.14 (retained `reactor-evidence-windows-latest-*` artifacts). No job was skipped, cancelled, or relabelled.
+
+**Local final gates (§9), run on `3ce155fc` after `. ./.envrc`:** `ruff check .` and `ruff format --check .` clean (636 files); `bin/ruff_suppression_index.py --check` exit 0; the CI mypy command clean on 481 files; `pytest -m "not slow"` 6023 passed, 47 skipped (12 workers, 192 s); `bin/pytest-pg --all` 5976 passed, 35 skipped (330 s); `tests/specs` and `tests/architecture` structural suites pass; `bin/check-doc-paths`, `bin/check-dom15-fixtures`, and `bin/coalesce-check` report no violation; `git diff --check` clean.
+
+**Measurement table.** Linux and Windows rows at `f4fb7789` (above); macOS row at `3ce155fc` on the owner host (above). The supervisor change between `f4fb7789` and `3ce155fc` is the late-limit re-poll, which touches no measured path.
+
+**Deviation log at closure.** (1) The late-limit race slice ran its cross-family review on the completed diff rather than before implementation (recorded in that slice). (2) The macOS measurement row is a developer-host sample because the official workflow excludes `macos-latest` from the measurement step; the row is labelled as such. (3) The Windows stall investigation and the silent-worker-crash signature are owned by `2026-10-30-pr48-windows-root-cause-analysis.md`, which stays open; this plan's gate is the green exact-head run, which it has.
+
+Plan status flipped to `completed` with the matching index row in `docs/plans/README.md` in the same change.
