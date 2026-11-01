@@ -265,6 +265,18 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                 )
                 next_monitor_at = time.monotonic() + interval
                 if not ok:
+                    # The process may exit between the liveness poll above
+                    # and the monitor's own sample. A violation reported
+                    # against a process that has already exited is not a
+                    # confirmed limit: there is nothing to kill, and the
+                    # exit code decides the outcome [RM-5.2].
+                    process_returncode = process.poll()
+                    if process_returncode is not None:
+                        logger.debug(
+                            "Ignoring resource violation reported after exit",
+                            extra={"violation": violation},
+                        )
+                        break
                     cleanup_phase = "limit cleanup"
                     _kill_process_runtime(process, kill_runtime=kill_runtime)
                     stdout, stderr = io_session.finish_after_exit()

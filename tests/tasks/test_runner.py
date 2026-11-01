@@ -1607,14 +1607,22 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
     assert stderr_chunks[-1] == ("", True)
 
 
-def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> None:
+def test_run_monitored_subprocess_ignores_late_limit_after_process_exit(
+    tmp_path: Path,
+) -> None:
+    # The child exits only after the monitor releases it, so the first limit
+    # check is guaranteed to find it alive and the exit is guaranteed to land
+    # before the violation is reported, whatever the scheduler does.
+    release = tmp_path / "release"
     process = open_supervised_process(
         [
             sys.executable,
             "-c",
             (
-                "import subprocess, sys; "
+                "import os, subprocess, sys, time; "
                 "print('ok', flush=True); "
+                f"release = {str(release)!r}; "
+                "[time.sleep(0.01) for _ in iter(lambda: os.path.exists(release), True)]; "
                 "subprocess.Popen("
                 "[sys.executable, '-c', 'import time; time.sleep(0.3)'], "
                 "stdout=sys.stdout, stderr=sys.stderr)"
@@ -1633,8 +1641,13 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
             del pid
 
         def check_limits(self) -> tuple[bool, str | None]:
-            if process.poll() is None:
-                return True, None
+            # Force the race the supervisor must tolerate: the supervisor saw
+            # the process alive, then the process exits before the monitor
+            # reports. The grandchild keeps stdout open so the supervisor is
+            # still draining when the violation arrives.
+            assert process.poll() is None
+            release.write_text("", encoding="utf-8")
+            process.wait()
             self.late_checks += 1
             return False, "late limit after process exit"
 
@@ -1673,7 +1686,8 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit() -> Non
 
     assert outcome.status == "ok"
     assert outcome.value == "ok"
-    assert monitor.late_checks == 0
+    assert outcome.returncode == 0
+    assert monitor.late_checks == 1
     assert monitor.stopped is True
 
 

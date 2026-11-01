@@ -199,7 +199,12 @@ Enforcement mechanics and security boundary:
 - On violation, the runner escalates through `terminate_process_tree` /
   `kill_process_tree` (`weft/helpers/__init__.py`), which walk the process
   tree via `psutil.Process(...).children(recursive=True)` starting from the
-  worker PID.
+  worker PID. In the shared one-shot command subprocess supervisor
+  (`run_monitored_subprocess`), a violation reported after the supervised
+  process has already exited is not a confirmed limit: the supervisor re-polls
+  the process before escalating, kills nothing, and the exit code decides the
+  outcome. The function-runner and persistent-session paths keep their own
+  precedence rules in [CC-2.5].
 - **Enforcement boundary**: both metric collection (`_process_tree` in
   `weft/core/resource_monitor.py`) and the kill path walk the *psutil-visible
   child tree* rooted at the worker PID. A task that detaches from that tree —
