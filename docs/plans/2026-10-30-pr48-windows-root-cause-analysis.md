@@ -1,6 +1,6 @@
 # PR #48 Windows Root-Cause Analysis
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/08-Testing_Strategy.md [TS-0], [TS-4]; docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-3.2]; docs/specifications/06-Resource_Management.md [RM-5.2]
 Superseded by: none
 
@@ -724,4 +724,107 @@ and deleting the step restores the previous workflow text exactly.
 
 ### Standing at merge (2026-10-31)
 
-Official run [41264534068](https://github.com/VanL/weft/actions/runs/41264534068) on `3ce155fc`, the first head with the D: temp root, passed 36 of 36; PR #48 merges on it by owner directive. Per the preregistered interpretation above this is consistent with E1 and is not a confirmation (rule d). This plan stays `draft` as the active investigation record because two items remain open on their own evidence: the stall trigger was never reproduced on demand, and the silent-worker-crash signature has not had its discriminator dispatched. Every later Windows failure on `main` is read through the rules above before it is named. The repair plan this investigation served is closed on its own gate.
+Official run [41264534068](https://github.com/VanL/weft/actions/runs/41264534068) on `3ce155fc`, the first head with the D: temp root, passed 36 of 36; PR #48 merges on it by owner directive. Per the preregistered interpretation above this is consistent with E1 and is not a confirmation (rule d). At merge this plan stayed `draft` as the active investigation record because two items remained open on their own evidence (the owner's acceptance record of 2026-11-01 below closes the plan and carries both items as named reevaluation triggers): the stall trigger was never reproduced on demand, and the silent-worker-crash signature has not had its discriminator dispatched. Every later Windows failure on `main` is read through the rules above before it is named. The repair plan this investigation served is closed on its own gate.
+
+### Accepted hypothesis, action, and reevaluation triggers (2026-11-01)
+
+Owner: Van. Boundary: this record and the index row; no runtime, test,
+workflow, or deadline change. Verification: the facts below are read from
+the retained diagnostics, the canary data, and the official runs named.
+Required action: none now; the triggers below say when work resumes.
+
+On 2026-11-01 the owner decided that E1, storage-latency episodes on the
+Windows runner's C: volume, is a strong enough hypothesis to act on, and
+that the investigation closes on the action already taken rather than on a
+confirmation that may never arrive. This section records what is
+happening, why the correction was made, and what must cause reevaluation.
+
+**What is happening.** GitHub's `windows-latest` runners hold the default
+`%TEMP%` on C:, an Azure managed OS disk, and `RUNNER_TEMP` on D:, a
+host-local disk. In each of the three profiled original failing runs (the
+3.12, 3.13, and 3.14 CLI jobs of 2026-10-30; the instrumented 3.12 witness
+that failed with no episode is recorded above as an observer effect, not a
+stall), the whole VM entered a two-to-four-minute episode in which the
+median slowdown across all workers was 6x to 37x and single tests reached
+46x (nodes with a baseline median of at least 1 s), including tests that
+run no Weft process beyond `weft status` and a fixture that only constructs
+a Manager against a fresh SQLite database in-process, while through the
+3.13 episode the controller's heartbeat thread kept intervals of 119.971 s
+to 120.006 s. The slowed
+operations share one property: they are fsync-bound storage I/O to the
+pytest temp root, because SimpleBroker runs SQLite with `SYNC_MODE=FULL`.
+Four VMs stalled within the same fifteen minutes on 2026-10-30. Since
+commit `3ce155fc` the official Windows test steps export `TEMP` and `TMP`
+to `RUNNER_TEMP\weft-test-temp`, so the harness, pytest, SQLite, the CLI,
+the detached Manager, and child processes all write to D:.
+
+| Official run (D: temp root) | Head | Windows jobs | Result |
+| --- | --- | --- | --- |
+| [41264534068](https://github.com/VanL/weft/actions/runs/41264534068) | `3ce155fc` (PR #48 head) | 9 | 9 passed |
+| [41270736759](https://github.com/VanL/weft/actions/runs/41270736759) | `13706bac` (main; the run's one failure was the Linux serve-drain race, fixed in `4f65a81c`) | 9 | 9 passed |
+| [41272654140](https://github.com/VanL/weft/actions/runs/41272654140) | `4f65a81c` (main, release 0.9.119 head) | 9 | 9 passed |
+
+**Why we did it.** The correction was chosen over any product, test, or
+budget change for these reasons, each of which is evidence already
+recorded above:
+
+1. The slowdown is whole-VM and fsync-shaped, not path-specific: tests
+   with no reactor, no spawn, and no CLI involvement stalled by the same
+   factors as the failing ones, so the environment hypothesis ranks above
+   every product hypothesis. The disposition table above leaves product
+   contributions to other signatures open rather than excluded; none of
+   them accounts for a whole-VM slowdown.
+2. The same readiness-degraded failure family appears on `main` on
+   2026-10-22 and on a pre-reactor branch commit, so PR #48's reactor
+   change was not necessary to produce it.
+3. The canary measured D: fsync at 0.5 ms p50 in 12 jobs and proved the
+   inheritance path for a D: temp root end to end; the correction moves
+   where the fsyncs land and changes nothing about how many or how strong
+   they are. `SYNC_MODE=FULL` is a deliberate maximum-safety setting that
+   Weft keeps everywhere, by owner direction.
+4. The change is one Windows-only workflow step, reversible by deletion,
+   with no change to sync mode, timeouts, readiness budgets, worker count,
+   the pytest command, product code, or any test premise. Padding a
+   deadline or lowering load would have relieved the symptom while
+   leaving the premise, that the VM cannot stall storage for minutes,
+   uncorrected [WT-7], [ALT-WT-017].
+
+**What this does not establish.** The stall trigger was never reproduced
+on demand: no canary dispatch caught an episode, so no sample shows C:
+slow while D: stays fast in the same minutes. E1 is therefore supported by
+the failure-run profiles and the measured latency gradient, not by direct
+observation of the mechanism, and the three green runs above are
+consistent with it without confirming it (rule d). E3, host-level storage
+or hypervisor degradation, whose preregistered prediction is that both
+volumes slow, is not excluded by direct observation, because no episode
+occurred while the canary was running. A variant in which degradation
+reaches only the managed disk would act on the tests exactly as E1 does
+and is caught by the first trigger below. The silent-worker-crash signature (jobs 119629382792 and
+123101422111) was never part of the stall hypotheses; its discriminator,
+the existing per-worker faulthandler files plus the Application-event-log
+collector from diagnostic commit `75c8cff8`, has not been dispatched.
+
+**Reevaluation triggers.** Any one of the following reopens this
+investigation; each row names its own action. When the trigger is a
+failing run, the first step is to stall-profile it with the retained
+method above before naming anything (rules a and b). The canary is
+redispatched from `codex/windows-env-canary` rebased onto `main` only
+where a row says so; the worker-crash row keeps its own path (rule c).
+
+| Trigger | What it means | Required action |
+| --- | --- | --- |
+| A Windows job on `main` fails with a budget-exceedance signature and its retained timelines show a whole-VM episode (median ratio ≥ 3x over ≥ 2 consecutive finish minutes) with the temp root on D: | E1 is falsified as the sufficient cause of that episode | Return to E3/E4; redispatch the canary; do not change budgets |
+| A Windows job on `main` fails with a budget-exceedance signature and no episode | Not a stall; the environment premise is not in question | Classify on its own evidence as a product or test question; [WT-7] forbids padding the deadline |
+| The runner image changes so that `RUNNER_TEMP` is no longer on a local disk, D: is absent, or the exporting step stops applying (the step's `if:` or `GITHUB_ENV` semantics change) | The correction may silently stop doing anything | Re-measure the volume gradient with the canary before relying on the step |
+| A proposal to relax `SYNC_MODE` for Windows CI | Conflicts with the owner's decision that Weft keeps `SYNC_MODE=FULL` everywhere | Refuse on this record |
+| A proposal to raise a Windows deadline or lower the Windows worker count cites CI stalls as its reason | Accommodates contention without a located cause [WT-7], [ALT-WT-017] | Refuse until the cause is located; re-enter the investigation here instead |
+| A pytest worker on Windows dies silently again | The independent signature has recurred | Dispatch its discriminator unchanged (diagnostics directory plus event-log collector); keep it outside the stall hypotheses |
+| A stall episode is reproduced on demand, in CI or elsewhere | The mechanism can finally be observed | Run the canary against it; convert this record to confirmed or refuted only if overlapping volume samples with valid observer coverage (the preregistered interpretation above) decide it, otherwise it stays "supported" |
+
+**Closure.** Status flips to `completed`: the planned slice landed, the
+workflow step describes current tooling, and the open items are carried
+as named triggers rather than as blockers. The index row in
+`docs/plans/README.md` flips in the same change. The canary branch
+`codex/windows-env-canary` and the retained diagnostics under
+`/tmp/weft-implementation-20261027/` on the owner's host remain the
+starting material for any reopening.
