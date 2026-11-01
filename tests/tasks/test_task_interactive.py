@@ -411,8 +411,9 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
 
     ``drive_until`` waits in short slices, so it cannot distinguish an event
     wake from polling. This drives ``run_until_stopped()`` with no poll
-    interval and a ten-second sampling timer, so the only thing that can wake
-    the reactor for quiet child output is the session's ``on_activity``.
+    interval and a ten-second sampling timer. The producer is released only
+    after the legitimate startup hint has drained and its follow-up turn has
+    finished; observation must end before the sampling deadline.
 
     Verifies:
     - with the real callback the output row appears promptly
@@ -441,30 +442,40 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
         enable_process_title=False,
     )
     task = Consumer(db_path, spec)
-    original_wait = task._wait_for_activity_body
+    original_wait = task._strategy.wait_for_activity
+    sampling_deadline: float | None = None
     reactor_waiting = threading.Event()
 
-    def wait_after_child_ready(timeout: float | None) -> None:
-        child_deadline = time.monotonic() + 5.0
-        while time.monotonic() < child_deadline and not child_ready.exists():
-            time.sleep(0.01)
-        assert child_ready.exists()
-        reactor_waiting.set()
+    def wait_after_startup_hint(timeout: float | None = None) -> None:
+        nonlocal sampling_deadline
+        if not reactor_waiting.is_set() and not task._strategy._local_activity_pending:
+            child_deadline = time.monotonic() + 5.0
+            while time.monotonic() < child_deadline and not child_ready.exists():
+                time.sleep(0.01)
+            assert child_ready.exists()
+            # A hint-free wait after the session exists follows the dispatch
+            # turn, whose local hint always returns for a follow-up turn.
+            # Keep readiness on this owner thread and forward the real wait.
+            remaining = task.next_wait_timeout()
+            sampling_deadline = (
+                None if remaining is None else time.monotonic() + remaining
+            )
+            reactor_waiting.set()
         original_wait(timeout)
 
-    monkeypatch.setattr(task, "_wait_for_activity_body", wait_after_child_ready)
-    if not notify:
-        original_start_session = TaskRunner.start_session
+    monkeypatch.setattr(task._strategy, "wait_for_activity", wait_after_startup_hint)
+    captured = threading.Event()
+    original_start_session = TaskRunner.start_session
 
-        def start_muted(
-            runner: TaskRunner,
-            *,
-            on_activity: Callable[[], None],
-        ) -> Any:
-            del on_activity
-            return original_start_session(runner, on_activity=lambda: None)
+    def start_observed(runner: TaskRunner, *, on_activity: Callable[[], None]) -> Any:
+        def observe_activity() -> None:
+            captured.set()  # Host reader enqueues the chunk before this callback.
+            if notify:
+                on_activity()
 
-        monkeypatch.setattr(TaskRunner, "start_session", start_muted)
+        return original_start_session(runner, on_activity=observe_activity)
+
+    monkeypatch.setattr(TaskRunner, "start_session", start_observed)
 
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
@@ -478,16 +489,25 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
 
     def observe_output() -> None:
         try:
-            reactor_waiting.wait()
+            assert reactor_waiting.wait(10.0), (
+                "reactor did not reach observation boundary"
+            )
             assert not driver_finished.is_set(), "driver exited before quiet wait"
             release_child.write_text("release", encoding="utf-8")
 
-            # Output is released only after the reactor starts its quiet wait.
-            # Retain the notification deadline, independent of session startup.
-            deadline = time.monotonic() + (5.0 if notify else 0.5)
+            # Observe the actual reader publication, including in the muted
+            # control. A slow producer must not make an absence assertion pass.
+            release_at = time.monotonic()
+            assert captured.wait(5.0), "child output was not captured"
+            assert task._interactive_session is not None
+            assert task._interactive_session.is_alive()
+            deadline = release_at + 5.0 if notify else time.monotonic() + 0.5
             while time.monotonic() < deadline and not delivered():
                 time.sleep(0.01)
             assert not driver_finished.is_set(), "driver exited during observation"
+            assert sampling_deadline is None or time.monotonic() < sampling_deadline, (
+                "resource-sampling deadline contaminated the notification observation"
+            )
             assert delivered() is notify
         finally:
             # The main test thread owns the driver; do not join it from here.

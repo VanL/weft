@@ -44,6 +44,9 @@ from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.outcome import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
+    cleanup_after_execution_failure,
+    close_supervised_pipes,
+    open_supervised_process,
     prepare_command_invocation,
     run_monitored_subprocess,
 )
@@ -933,12 +936,9 @@ class HostTaskRunner:
             creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
 
         try:
-            process = subprocess.Popen(
+            process = open_supervised_process(
                 command,
-                stdin=subprocess.PIPE if stdin_data is not None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                pipe_stdin=stdin_data is not None,
                 encoding="utf-8",
                 errors="replace",
                 cwd=cwd_value,
@@ -964,9 +964,16 @@ class HostTaskRunner:
                 ),
             )
 
-        runtime_handle = _host_handle(process.pid)
-        if runtime_handle is None:
-            raise RuntimeError("Command process did not expose a PID")
+        try:
+            runtime_handle = _host_handle(process.pid)
+            if runtime_handle is None:
+                raise RuntimeError("Command process did not expose a PID")
+        except BaseException:
+            cleanup_after_execution_failure(
+                process, stop_runtime=process.terminate, kill_runtime=process.kill
+            )
+            close_supervised_pipes(process.stdin, process.stdout, process.stderr)
+            raise
 
         def _stop_runtime() -> None:
             terminate_process_tree(process.pid or -1, timeout=0.2)

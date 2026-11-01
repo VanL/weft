@@ -12,6 +12,7 @@ These indexes are hints; exact broker reservation remains launch authority.
 from __future__ import annotations
 
 import heapq
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -68,6 +69,7 @@ def _pop(head: _Head) -> _Head | None:
 class _PendingIndex:
     newest: _Head | None = None
     count: int = 0
+    physical_count: int = 0
     parent: _PendingIndex | None = None
 
     def owner(self) -> _PendingIndex:
@@ -83,23 +85,93 @@ class _PendingIndex:
     def add(self, request_id: int) -> None:
         self.newest = _meld(self.newest, _Head(-request_id))
         self.count += 1
+        self.physical_count += 1
 
     def merge(self, other: _PendingIndex) -> None:
         self.newest = _meld(self.newest, other.newest)
         self.count += other.count
+        self.physical_count += other.physical_count
         other.newest = None
+        other.count = 0
+        other.physical_count = 0
         other.parent = self
 
-    def remove(self, request_id: int) -> None:
+    def _owns(
+        self,
+        request_id: int,
+        pending: Mapping[int, PendingRequest],
+        indexes: Mapping[int, _PendingIndex],
+    ) -> bool:
+        """Reject stale IDs re-added under a later recovered ancestor."""
+        if request_id not in pending:
+            return False
+        index = indexes.get(request_id)
+        return index is not None and index.owner() is self
+
+    def _compact(
+        self,
+        pending: Mapping[int, PendingRequest],
+        indexes: Mapping[int, _PendingIndex],
+    ) -> None:
+        """Reclaim only this bucket's history, preserving cheap contraction.
+
+        Traversal and bottom-up pairwise meld cost O(H), plus owner-handle
+        resolution (which compresses paths but need not be constant per ID).
+        The H > 2L trigger charges rebuilding to discarded history; one call
+        can still take linear time in the live bucket. Spec: [MA-1.8].
+        """
+        nodes = [self.newest] if self.newest is not None else []
+        heads: list[_Head | None] = []
+        seen: set[int] = set()
+        while nodes:
+            node = nodes.pop()
+            if node.left is not None:
+                nodes.append(node.left)
+            if node.right is not None:
+                nodes.append(node.right)
+            request_id = -node.key
+            if request_id not in seen and self._owns(request_id, pending, indexes):
+                seen.add(request_id)
+                node.left = node.right = None
+                node.rank = 1
+                heads.append(node)
+
+        self.physical_count = len(heads)
+        while len(heads) > 1:
+            heads = [
+                _meld(
+                    heads[index], heads[index + 1] if index + 1 < len(heads) else None
+                )
+                for index in range(0, len(heads), 2)
+            ]
+        self.newest = heads[0] if heads else None
+
+    def remove(
+        self,
+        request_id: int,
+        pending: Mapping[int, PendingRequest],
+        indexes: Mapping[int, _PendingIndex],
+    ) -> None:
         self.count -= 1
         if self.count == 0:
             self.newest = None
+            self.physical_count = 0
         elif self.newest is not None and self.newest.key == -request_id:
             self.newest = _pop(self.newest)
+            self.physical_count -= 1
+        if self.physical_count > 2 * self.count:
+            self._compact(pending, indexes)
 
-    def candidate(self, pending: dict[int, PendingRequest]) -> PendingRequest | None:
-        while self.newest is not None and -self.newest.key not in pending:
+    def candidate(
+        self,
+        pending: Mapping[int, PendingRequest],
+        indexes: Mapping[int, _PendingIndex],
+    ) -> PendingRequest | None:
+        while self.newest is not None and not self._owns(
+            -self.newest.key, pending, indexes
+        ):
             self.newest = _pop(self.newest)
+            self.physical_count -= 1
         return pending.get(-self.newest.key) if self.newest else None
 
 
@@ -209,12 +281,12 @@ class FamilyScheduler:
             self._offer_root(request.root_tid)
 
     def remove_pending(self, request_id: int) -> PendingRequest | None:
-        """Forget an exact reserved/absent request; lazy heads discard its ID."""
+        """Forget exact reserved/absent work and bound bucket-local history [MA-1.8]."""
         request = self._pending.pop(request_id, None)
         if request is not None:
             self._family_counts[request.root_tid] -= 1
             index = self._request_indexes.pop(request_id).owner()
-            index.remove(request_id)
+            index.remove(request_id, self._pending, self._request_indexes)
             if not index.count:
                 parent = self._parent(request.root_tid, request.ancestry_tids)
                 if self._parents.get(parent) is index:
@@ -257,7 +329,11 @@ class FamilyScheduler:
             index = (self._turn + offset) % count
             tip = self._stacks[index][-1]
             bucket = self._parents.get(tip)
-            candidate = bucket.candidate(self._pending) if bucket else None
+            candidate = (
+                bucket.candidate(self._pending, self._request_indexes)
+                if bucket
+                else None
+            )
             if candidate is not None:
                 self._turn = (index + 1) % count
                 return candidate

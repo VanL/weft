@@ -1391,6 +1391,10 @@ doc:
 
 ## Related Plans
 
+- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+
+- [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
+
 - [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs bounded startup feedback under [MA-1.8].
 
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].

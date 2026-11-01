@@ -18,10 +18,12 @@ import weft.core.manager as manager_mod
 from simplebroker import BrokerSession, BrokerTarget, serialize_config
 from tests.core.test_manager import make_manager_spec
 from tests.core.test_manager_family_maintenance import (
-    _join_waiting_processes,
     _publish_waiting_task,
 )
 from tests.helpers.family_workload import FAMILY_EVENTS
+from tests.helpers.manager_dispatch import (
+    join_waiting_processes as _join_waiting_processes,
+)
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import (

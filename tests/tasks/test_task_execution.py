@@ -3644,18 +3644,24 @@ def _consumer_worker_stacks(task: Consumer) -> list[str]:
 def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     broker_env: BrokerEnv,
     unique_tid: str,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    command_duration = 2.0
+    ready = tmp_path / "command-ready"
+    release = tmp_path / "command-release"
     spec = make_command_taskspec(
         unique_tid,
         sys.executable,
         args=[
-            PROCESS_SCRIPT,
-            "--duration",
-            str(command_duration),
-            "--result",
-            "reactor-done",
+            "-c",
+            (
+                "import sys; from tests.tasks.sample_targets import "
+                "signal_ready_and_wait_for_release; "
+                "signal_ready_and_wait_for_release(sys.argv[1], sys.argv[2]); "
+                "print('reactor-done')"
+            ),
+            str(ready),
+            str(release),
         ],
     )
     task = Consumer(db_path, spec)
@@ -3667,39 +3673,43 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
     outbox = make_queue(spec.io.outputs["outbox"])
     inbox.write(json.dumps({"args": []}))
 
-    started_at = time.monotonic()
-    task.process_once()
-    elapsed = time.monotonic() - started_at
+    try:
+        task.process_once()
+        _drive_consumer_until(task, ready.exists, timeout=5.0)
+        assert task.taskspec.state.status == "running"
+        assert task._has_worker_activity() is True
+        assert not release.exists()
+        assert outbox.read_one() is None
 
-    assert elapsed < command_duration * 0.75
-    assert task.taskspec.state.status == "running"
-    assert task._has_worker_activity() is True
-    assert outbox.read_one() is None
-
-    ctrl_in.write(
-        encode_control_message(
-            CONTROL_PING,
-            request_id="during",
-            reply_to=reply_to,
+        ctrl_in.write(
+            encode_control_message(
+                CONTROL_PING,
+                request_id="during",
+                reply_to=reply_to,
+            )
         )
-    )
-    task.process_once()
+        task.process_once()
 
-    responses = [json.loads(msg) for msg in drain_queue(replies)]
-    pong = next(response for response in responses if response["command"] == "PING")
-    assert pong["request_id"] == "during"
-    assert pong["message"] == "PONG"
-    assert pong["task_status"] == "running"
-    assert "reply_to" not in pong
-    assert drain_queue(ctrl_out) == []
+        responses = [json.loads(msg) for msg in drain_queue(replies)]
+        pong = next(response for response in responses if response["command"] == "PING")
+        assert pong["request_id"] == "during"
+        assert pong["message"] == "PONG"
+        assert pong["task_status"] == "running"
+        assert "reply_to" not in pong
+        assert drain_queue(ctrl_out) == []
+        assert not release.exists()
+        assert outbox.read_one() is None
 
-    _drive_consumer_until(
-        task,
-        lambda: task.taskspec.state.status == "completed",
-        timeout=5.0,
-    )
-
-    assert outbox.read_one() == "reactor-done"
+        release.touch()
+        _drive_consumer_until(
+            task,
+            lambda: task.taskspec.state.status == "completed",
+            timeout=5.0,
+        )
+        assert outbox.read_one() == "reactor-done"
+    finally:
+        release.touch()
+        task.cleanup()
 
 
 def test_consumer_reactor_stop_cancels_active_command_on_main_thread(

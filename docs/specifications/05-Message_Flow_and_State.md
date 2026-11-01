@@ -285,7 +285,16 @@ ambiguous commit; readers do not turn duplicate observations into duplicate outp
 settlement.
 
 Completion is published after the task has finalized the output belonging to that
-boundary. Interactive STOP/KILL, external termination signals, and parent loss record
+boundary. For successful one-shot live command streams, the Consumer publishes
+any missing logical stdout/stderr final frames after the runner has delivered
+its captured output and before publishing work completion. A logical final does
+not assert physical pipe EOF; a descendant may retain an inherited pipe after
+root completion. Already-published finals are not duplicated. When both logical
+finals are missing, the stderr final precedes the stdout final, which closes the
+result for readers that consume through stdout final. The existing stdout result
+transform and physical-EOF ordering remain unchanged.
+
+Interactive STOP/KILL, external termination signals, and parent loss record
 the terminal state on the owner thread, unwind the session, and publish completion after
 its final stdout/stderr frames. Queued control is acknowledged after this unwind. It does not publish local completion while the session can
 still produce final output. The payload for one publication attempt series is serialized
@@ -342,6 +351,7 @@ _Implementation mapping_: canonical wire encoding and parsing live in
 `weft/core/control_messages.py::parse_control_request`; task policy lives in
 `weft/core/tasks/base.py::BaseTask._handle_control_message`,
 `weft/core/tasks/base.py::BaseTask._handle_control_command`,
+`weft/core/tasks/consumer.py::Consumer._run_task_for_reactor` (successful live-stream finalization),
 `weft/core/tasks/consumer.py::Consumer._poll_active_control_once`, and
 `weft/core/tasks/consumer.py::Consumer._finalize_deferred_active_control`;
 pipeline broadcast and policy live in
@@ -2083,6 +2093,8 @@ A coordinated upgrade quiesces old producers and runtimes before migration. The 
 _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigration`, `weft/commands/_spawn_submission.py::prepare_legacy_child_migration`, `weft/commands/_spawn_submission.py::LegacyChildMigrationManager`, `tests/commands/test_family_migration.py`.
 
 ## Related Plans
+
+- [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
 - [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs bounded startup feedback under [MA-1.8].
 

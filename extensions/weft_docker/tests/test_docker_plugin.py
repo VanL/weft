@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import io
 import os
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -48,6 +50,7 @@ def test_cleanup_process_contains_operational_kill_failure(
     failure: BaseException,
 ) -> None:
     class Process:
+        stdout = io.StringIO()
         wait_called = False
 
         def poll(self) -> int | None:
@@ -65,6 +68,7 @@ def test_cleanup_process_contains_operational_kill_failure(
     plugin._cleanup_process(process)
 
     assert process.wait_called is False
+    assert process.stdout.closed
 
 
 @pytest.mark.parametrize(
@@ -78,6 +82,7 @@ def test_cleanup_process_contains_operational_wait_failure(
     failure: BaseException,
 ) -> None:
     class Process:
+        stdout = io.StringIO()
         killed = False
 
         def poll(self) -> int | None:
@@ -94,11 +99,14 @@ def test_cleanup_process_contains_operational_wait_failure(
     plugin._cleanup_process(process)
 
     assert process.killed is True
+    assert process.stdout.closed
 
 
 @pytest.mark.parametrize("phase", ["kill", "wait"])
 def test_cleanup_process_propagates_unexpected_defect(phase: str) -> None:
     class Process:
+        stdout = io.StringIO()
+
         def poll(self) -> int | None:
             return None
 
@@ -112,8 +120,10 @@ def test_cleanup_process_propagates_unexpected_defect(phase: str) -> None:
                 raise RuntimeError("unexpected cleanup defect")
             return 0
 
+    process = Process()
     with pytest.raises(RuntimeError, match="unexpected cleanup defect"):
-        plugin._cleanup_process(Process())
+        plugin._cleanup_process(process)
+    assert process.stdout.closed
 
 
 @pytest.mark.parametrize(
@@ -1026,8 +1036,8 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
 
     class FakeProcess:
         pid = 4321
-        stdout = object()
-        stderr = object()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
 
         def poll(self) -> int | None:
             return None
@@ -1079,7 +1089,7 @@ def test_command_runner_waits_for_container_to_leave_created_before_runtime_hand
         )
 
     monkeypatch.setattr(
-        plugin.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+        plugin, "open_supervised_process", lambda *args, **kwargs: FakeProcess()
     )
     monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
     monkeypatch.setattr(
@@ -1455,55 +1465,49 @@ def test_docker_container_liveness_propagates_unexpected_reload_defect() -> None
         plugin._docker_container_liveness(FakeContainer())
 
 
+def _reap_command_fixture(process: subprocess.Popen[str]) -> None:
+    """Release real fixture resources even when the owner under test is broken."""
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=5)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+@pytest.mark.parametrize("phase", ["client", "startup", "exited"])
 def test_command_runner_cleans_up_container_when_runtime_start_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    phase: str,
 ) -> None:
-    class FakeProcess:
-        pid = 4321
-        stdout = object()
-        stderr = object()
+    created: list[subprocess.Popen[str]] = []
+    real_open = plugin.open_supervised_process
 
-        def __init__(self) -> None:
-            self.killed = False
-            self.wait_timeout: float | None = None
+    def opened(*_args: Any, **_kwargs: Any) -> subprocess.Popen[str]:
+        process = real_open(
+            [
+                sys.executable,
+                "-c",
+                "pass" if phase == "exited" else "import time; time.sleep(30)",
+            ],
+            pipe_stdin=True,
+        )
+        created.append(process)
+        if phase == "exited":
+            process.wait(timeout=5)
+        return process
 
-        def poll(self) -> int | None:
-            return 137 if self.killed else None
-
-        def kill(self) -> None:
-            self.killed = True
-
-        def wait(self, timeout: float | None = None) -> int:
-            self.wait_timeout = timeout
-            return 137
-
-    class FakeContainer:
-        id = "container-789"
-
-        def __init__(self) -> None:
-            self.attrs: dict[str, Any] = {
-                "Name": "/weft-test",
-                "Config": {"Image": "busybox:latest"},
-                "State": {"Status": "created"},
-            }
-
-        def reload(self) -> None:
-            return None
-
-    fake_process = FakeProcess()
-    fake_container = FakeContainer()
-    assert fake_container.attrs is not FakeContainer().attrs
     fake_client = object()
     removed: list[tuple[object, str]] = []
 
     @contextmanager
     def fake_docker_client() -> Iterator[object]:
+        if phase == "client":
+            raise RuntimeError("startup failed")
         yield fake_client
 
-    monkeypatch.setattr(
-        plugin.subprocess, "Popen", lambda *args, **kwargs: fake_process
-    )
+    monkeypatch.setattr(plugin, "open_supervised_process", opened)
     monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
     monkeypatch.setattr(
         plugin.DockerCommandRunner,
@@ -1515,7 +1519,7 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
     monkeypatch.setattr(
         plugin,
         "_wait_for_container",
-        lambda client, runtime_id, process: fake_container,
+        lambda client, runtime_id, process: object(),
     )
     monkeypatch.setattr(
         plugin,
@@ -1541,12 +1545,25 @@ def test_command_runner_cleans_up_container_when_runtime_start_fails(
         options=plugin._parse_command_options({"image": "busybox:latest"}),
     )
 
-    with pytest.raises(RuntimeError, match="startup failed"):
-        runner.run_with_hooks({})
-
-    assert fake_process.killed is True
-    assert fake_process.wait_timeout == 1.0
-    assert removed == [(fake_client, "weft-cleanup-test")]
+    try:
+        with pytest.raises(RuntimeError, match="startup failed"):
+            runner.run_with_hooks({})
+        if phase == "client":
+            assert created == [], "client acquisition failure must not spawn a command"
+        else:
+            assert len(created) == 1
+            process = created[0]
+            assert process.returncode is not None
+            assert all(
+                pipe is not None and pipe.closed
+                for pipe in (process.stdin, process.stdout, process.stderr)
+            )
+        assert removed == (
+            [] if phase == "client" else [(fake_client, "weft-cleanup-test")]
+        )
+    finally:
+        for process in created:
+            _reap_command_fixture(process)
 
 
 def test_factory_restores_replaced_liveness_registry(

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -56,5 +57,11 @@ def isolated_postgres_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     except BaseException:
         runtime._print_container_logs(name)
         raise
+    else:
+        directory = os.environ.get("WEFT_TEST_DIAGNOSTICS_DIR")
+        if directory:
+            runtime._retain_container_evidence(
+                name, Path(directory).expanduser() / f"postgres-{name}.log"
+            )
     finally:
         runtime._cleanup_container(name)

@@ -15,8 +15,12 @@ from tests.fixtures.provider_cli_fixture import (
 )
 from tests.taskspec.fixtures import create_valid_provider_cli_agent_taskspec
 from weft._constants import PROVIDER_CLI_OPENCODE_RUN_PROBE_TIMEOUT_SECONDS
+from weft.core.agents.backends import provider_cli as provider_cli_backend
 from weft.core.agents.provider_cli import probes
-from weft.core.agents.provider_cli.registry import list_provider_cli_providers
+from weft.core.agents.provider_cli.registry import (
+    ProviderCLIProvider,
+    list_provider_cli_providers,
+)
 from weft.core.agents.validation import (
     agent_runtime_name_from_taskspec,
     validate_taskspec_agent_runtime,
@@ -282,7 +286,29 @@ def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_execut
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".weft").mkdir()
-    wrapper = write_provider_cli_wrapper(tmp_path, "codex")
+    wrapper = write_provider_cli_wrapper(tmp_path / "configured", "codex")
+    default_wrapper = write_provider_cli_wrapper(tmp_path / "default", "codex")
+    monkeypatch.setenv("PATH", str(default_wrapper.parent))
+    resolved_executables: list[Path] = []
+    resolve_executable = provider_cli_backend.resolve_provider_cli_executable
+
+    def observe_resolution(
+        provider: ProviderCLIProvider,
+        *,
+        configured_executable: str | None = None,
+        spec_context: str | None = None,
+    ) -> str:
+        resolved = resolve_executable(
+            provider,
+            configured_executable=configured_executable,
+            spec_context=spec_context,
+        )
+        resolved_executables.append(Path(resolved).resolve())
+        return resolved
+
+    monkeypatch.setattr(
+        provider_cli_backend, "resolve_provider_cli_executable", observe_resolution
+    )
     (tmp_path / ".weft" / "agents.json").write_text(
         json.dumps(
             {
@@ -307,6 +333,9 @@ def test_validate_agent_runtime_preflight_uses_project_agent_settings_for_execut
     payload["spec"]["agent"]["runtime_config"].pop("executable", None)
 
     validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)
+
+    # The default is also executable, so merely accepting preflight is insufficient.
+    assert set(resolved_executables) == {wrapper.resolve()}
 
 
 def test_validate_agent_runtime_rejects_bounded_opencode(tmp_path: Path) -> None:

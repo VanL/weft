@@ -12,7 +12,6 @@ from tests.taskspec import fixtures
 from weft.core.task_lifecycle import (
     TaskLifecycleAction,
     TaskLifecycleStatus,
-    TaskStatusTarget,
     task_lifecycle_machine,
     task_lifecycle_statuses,
     terminal_task_lifecycle_statuses,
@@ -36,10 +35,15 @@ def test_mark_running_promotes_from_created() -> None:
     assert taskspec.state.started_at is not None
 
 
-def test_invalid_transition_raises() -> None:
+@pytest.mark.parametrize("target", ("completed", "timeout", "killed"))
+def test_invalid_transition_raises(target: TaskLifecycleStatus) -> None:
     taskspec = fixtures.create_minimal_taskspec()
-    with pytest.raises(ValueError):
-        taskspec.set_status("completed")
+    before = taskspec.state.model_dump()
+
+    with pytest.raises(ValueError, match="Invalid transition"):
+        taskspec.set_status(target)
+
+    assert taskspec.state.model_dump() == before
 
 
 def test_terminal_state_is_immutable() -> None:
@@ -51,29 +55,32 @@ def test_terminal_state_is_immutable() -> None:
 
 
 def test_lifecycle_machine_covers_allowed_state_transitions() -> None:
-    cases: tuple[tuple[TaskLifecycleStatus, TaskLifecycleStatus, str], ...] = (
-        ("created", "spawning", "created-to-spawning"),
-        ("created", "failed", "created-to-failed"),
-        ("created", "cancelled", "created-to-cancelled"),
-        ("spawning", "running", "spawning-to-running"),
-        ("spawning", "completed", "spawning-to-completed"),
-        ("spawning", "failed", "spawning-to-failed"),
-        ("spawning", "timeout", "spawning-to-timeout"),
-        ("spawning", "cancelled", "spawning-to-cancelled"),
-        ("spawning", "killed", "spawning-to-killed"),
-        ("running", "completed", "running-to-completed"),
-        ("running", "failed", "running-to-failed"),
-        ("running", "timeout", "running-to-timeout"),
-        ("running", "cancelled", "running-to-cancelled"),
-        ("running", "killed", "running-to-killed"),
+    cases: tuple[
+        tuple[TaskLifecycleStatus, TaskLifecycleStatus, str, TaskLifecycleAction], ...
+    ] = (
+        ("created", "spawning", "created-to-spawning", "begin_spawn"),
+        ("created", "failed", "created-to-failed", "fail"),
+        ("created", "cancelled", "created-to-cancelled", "cancel"),
+        ("spawning", "running", "spawning-to-running", "start_running"),
+        ("spawning", "completed", "spawning-to-completed", "complete"),
+        ("spawning", "failed", "spawning-to-failed", "fail"),
+        ("spawning", "timeout", "spawning-to-timeout", "timeout"),
+        ("spawning", "cancelled", "spawning-to-cancelled", "cancel"),
+        ("spawning", "killed", "spawning-to-killed", "kill"),
+        ("running", "completed", "running-to-completed", "complete"),
+        ("running", "failed", "running-to-failed", "fail"),
+        ("running", "timeout", "running-to-timeout", "timeout"),
+        ("running", "cancelled", "running-to-cancelled", "cancel"),
+        ("running", "killed", "running-to-killed", "kill"),
     )
     seen_transitions: set[str] = set()
     seen_states: set[TaskLifecycleStatus] = set()
     seen_actions: set[TaskLifecycleAction] = set()
 
-    for current, target, transition_id in cases:
+    for current, target, transition_id, expected_action in cases:
         decision = validate_task_status_transition(current, target)
         assert decision.target == target
+        assert decision.action == expected_action
         assert decision.transition_id == transition_id
         seen_transitions.add(decision.transition_id)
         seen_states.update((decision.source, decision.target))
@@ -109,7 +116,7 @@ def test_lifecycle_machine_pair_matrix_matches_transition_table() -> None:
                 assert decision.target == target
             else:
                 with pytest.raises(ValueError, match="No transition matched"):
-                    task_lifecycle_machine.decide(current, TaskStatusTarget(target))
+                    validate_task_status_transition(current, target)
 
     assert terminal_task_lifecycle_statuses == {
         status for status, targets in allowed.items() if not targets
@@ -125,15 +132,30 @@ def test_direct_created_to_running_still_fails() -> None:
 
 def test_nonterminal_same_status_update_stays_allowed() -> None:
     taskspec = fixtures.create_minimal_taskspec()
-    taskspec.set_status("created")
-    assert taskspec.state.status == "created"
+    statuses: tuple[TaskLifecycleStatus, ...] = ("created", "spawning", "running")
 
-    taskspec.mark_started()
-    started_at = taskspec.state.started_at
-    taskspec.set_status("spawning")
+    for status in statuses:
+        if status != "created":
+            taskspec.set_status(status)
+        before = taskspec.state.model_dump()
+        taskspec.set_status(status)
 
-    assert taskspec.state.status == "spawning"
-    assert taskspec.state.started_at == started_at
+        assert taskspec.state.model_dump() == before
+
+
+@pytest.mark.parametrize(
+    "status", ("completed", "failed", "timeout", "cancelled", "killed")
+)
+def test_terminal_same_status_update_is_rejected(status: TaskLifecycleStatus) -> None:
+    taskspec = fixtures.create_minimal_taskspec()
+    taskspec.mark_running()
+    taskspec.set_status(status)
+    before = taskspec.state.model_dump()
+
+    with pytest.raises(ValueError, match="Cannot transition from terminal state"):
+        taskspec.set_status(status)
+
+    assert taskspec.state.model_dump() == before
 
 
 def test_unknown_current_status_fails_explicitly() -> None:

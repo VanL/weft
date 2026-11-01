@@ -197,6 +197,7 @@ _RUNTIME_OBJECT_ALLOWLIST = {
         "_PATH_WRITER_REGISTRY_LOCK",
     },
     "weft/core/runners/host.py": {"_HOST_PLUGIN"},
+    "weft/core/runners/subprocess_runner.py": {"_CHILD_EXIT"},
     "weft/core/serve_log.py": {"_LOG_QUEUE", "_LOG_QUEUE_LOCK", "_LOG_WRITER_FD"},
     "weft/manager_detached_launcher.py": {"_NO_SIGNAL"},
 }

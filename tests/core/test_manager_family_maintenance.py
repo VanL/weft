@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import multiprocessing
 import multiprocessing.synchronize
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,18 +25,35 @@ import weft.core.tasks.base as base_mod
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_manager import make_manager_spec
+from tests.helpers.manager_dispatch import (
+    SettledLaunches,
+    retire_dispatch_workers,
+    settled_launches,
+)
+from tests.helpers.manager_dispatch import (
+    dispatch_witness_body as _dispatch_witness_body,
+)
+from tests.helpers.manager_dispatch import (
+    join_waiting_processes as _join_waiting_processes,
+)
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.typing import BrokerEnv
 from tests.helpers.weft_harness import WeftTestHarness
+from tests.tasks.sample_targets import signal_ready_and_wait_for_release, wait_for_file
 from weft._constants import (
+    CONTROL_PING,
+    CONTROL_STOP,
     MANAGER_ADMISSION_RECHECK_SECONDS,
+    MANAGER_FAMILY_CLASSIFY_PAGE_SIZE,
     MANAGER_STARTUP_FAST_PATH_WINDOW,
     WEFT_FAMILY_PENDING_PREFIX,
     load_config,
 )
+from weft.core.control_messages import encode_control_message
 from weft.core.family_scheduling import FamilyScheduler
 from weft.core.manager import (
+    ManagedChild,
     Manager,
     _ManagerChildLaunchRequest,
     _ManagerChildLaunchResult,
@@ -45,6 +65,11 @@ from weft.core.runtime_identity import (
     submission_lineage,
 )
 from weft.core.tasks.consumer import Consumer
+from weft.core.tasks.multiqueue_watcher import (
+    QueueMessageContext,
+    QueueMode,
+    QueueRuntimeConfig,
+)
 from weft.core.taskspec import TaskSpec
 
 pytestmark = pytest.mark.shared
@@ -295,18 +320,6 @@ def _publish_waiting_task(
             task.run()
     finally:
         task.cleanup()
-
-
-def _join_waiting_processes(processes: list[BaseProcess]) -> None:
-    """Close this fixture's real process producers before broker teardown."""
-    for process in processes:
-        process.join(timeout=30.0)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=10.0)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=10.0)
 
 
 def _release_waiting_tasks(
@@ -937,3 +950,691 @@ def test_consumed_primary_row_cannot_keep_a_cached_spawn_candidate(
     )
     assert manager._peek_family_candidate() is None
     assert not manager._queue_has_pending(source)
+
+
+@pytest.mark.parametrize("route", ["watcher", "explicit_public"])
+def test_dispatch_reuses_outer_child_cleanup(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """Both real delivery routes reuse the completed turn sweep [MA-3]."""
+    manager, _harness = startup_pg_manager
+    source = manager._queue(manager._queue_names["inbox"])
+    ready, release = tmp_path / "child.ready", tmp_path / "child.release"
+    body = _dispatch_witness_body(ready, release)
+    request_ids: list[int] = []
+    phases: list[str] = []
+    cleanup_sites: list[tuple[str, ...]] = []
+    launch_sites: list[tuple[str, ...]] = []
+    convergence_sites: list[tuple[str, ...]] = []
+    real_timed = manager._timed_manager_call
+    real_cleanup = manager._cleanup_children
+    real_launch = manager._launch_child_task
+
+    def publish() -> None:
+        request_ids.append(int(source.write(body)))
+        manager._classify_family_requests()
+        manager._mark_queue_active(source.name)
+
+    def cleanup(**kwargs: Any) -> bool:
+        cleanup_sites.append(tuple(phases))
+        return real_cleanup(**kwargs)
+
+    def launch(spec: TaskSpec, message: Any | None, **kwargs: Any) -> bool:
+        assert any("child_cleanup" in site for site in cleanup_sites)
+        accepted = real_launch(spec, message, **kwargs)
+        if accepted:
+            launch_sites.append(tuple(phases))
+        return accepted
+
+    def timed[T](
+        phase: str, operation: Callable[[], T], *, child_tid: str | None = None
+    ) -> T:
+        phases.append(phase)
+        try:
+            if phase == "service_convergence":
+                convergence_sites.append(tuple(phases))
+            result = real_timed(phase, operation, child_tid=child_tid)
+        finally:
+            phases.pop()
+        if phase == "queue_dispatch" and route == "explicit_public" and not request_ids:
+            # The actual inherited pass was empty. Arrival at this boundary
+            # exercises the existing public fallback without replacing it.
+            publish()
+        return result
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager, "_cleanup_children", cleanup)
+            patch.setattr(manager, "_launch_child_task", launch)
+            patch.setattr(manager, "_timed_manager_call", timed)
+            if route == "watcher":
+                request_ids.append(int(source.write(body)))
+            manager.process_once()
+            assert len(request_ids) == 1
+            assert len(launch_sites) == 1
+            expected_phase = (
+                "queue_dispatch" if route == "watcher" else "public_dispatch"
+            )
+            assert expected_phase in launch_sites[0]
+            assert source.peek_one(exact_timestamp=request_ids[0]) is None
+            assert not [
+                site
+                for site in cleanup_sites
+                if "queue_dispatch" in site or "public_dispatch" in site
+            ], "ordinary delivery repeated the completed child cleanup"
+            assert convergence_sites, "normal post-delivery convergence was bypassed"
+            drive_until(
+                ready.exists,
+                bool,
+                step=manager.process_once,
+                wait=manager.wait_for_activity,
+                timeout=30.0,
+            )
+            assert int(ready.read_text()) > 0
+            release.touch()
+            outbox = manager._queue(f"T{request_ids[0]}.outbox")
+            assert (
+                drive_until(
+                    outbox.peek_one,
+                    lambda value: value is not None,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
+                == "done"
+            )
+    finally:
+        release.touch()
+
+
+@pytest.mark.parametrize("route", ["watcher", "explicit_public"])
+def test_dispatch_cleanup_scope_clears_after_exception(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """An escaping delivery failure cannot suppress later standalone cleanup."""
+
+    class DispatchScopeError(BaseException):
+        """Escape ordinary handler-error routing after actual reservation."""
+
+    manager, _harness = startup_pg_manager
+    source = manager._queue(manager._queue_names["inbox"])
+    reserved = manager._queue(manager._queue_names["reserved"])
+    ready, release = tmp_path / "never.ready", tmp_path / "never.release"
+    body = _dispatch_witness_body(ready, release)
+    request_ids: list[int] = []
+    cleanup_calls = 0
+    real_cleanup = manager._cleanup_children
+    real_timed = manager._timed_manager_call
+    real_build = manager._build_child_spec
+
+    def cleanup(**kwargs: Any) -> bool:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return real_cleanup(**kwargs)
+
+    def standalone() -> None:
+        stamp = int(source.write("{"))
+        assert source.move_one(
+            reserved.name, exact_timestamp=stamp, with_timestamps=True
+        ) == ("{", stamp)
+        before = cleanup_calls
+        manager._handle_work_message(
+            "{",
+            stamp,
+            QueueMessageContext(
+                source.name,
+                source,
+                QueueMode.RESERVE,
+                stamp,
+                reserved.name,
+            ),
+        )
+        assert cleanup_calls == before + 1, "standalone handler cleanup was suppressed"
+
+    def build(payload: dict[str, Any], timestamp: int) -> TaskSpec | None:
+        spec = real_build(payload, timestamp)
+        assert spec is not None
+        # Classification also validates through this owner. Fail only after
+        # actual delivery has moved the exact request into reserved custody.
+        if reserved.peek_one(exact_timestamp=timestamp) == body:
+            assert source.peek_one(exact_timestamp=timestamp) is None
+            raise DispatchScopeError("named failure after reservation, before seeding")
+        return spec
+
+    def timed[T](
+        phase: str, operation: Callable[[], T], *, child_tid: str | None = None
+    ) -> T:
+        result = real_timed(phase, operation, child_tid=child_tid)
+        if phase == "queue_dispatch" and route == "explicit_public" and not request_ids:
+            request_ids.append(int(source.write(body)))
+            manager._classify_family_requests()
+            manager._mark_queue_active(source.name)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager, "_cleanup_children", cleanup)
+        standalone()
+        patch.setattr(manager, "_build_child_spec", build)
+        patch.setattr(manager, "_timed_manager_call", timed)
+        if route == "watcher":
+            request_ids.append(int(source.write(body)))
+        with pytest.raises(DispatchScopeError, match="named failure after reservation"):
+            manager.process_once()
+        assert len(request_ids) == 1
+        stamp = request_ids[0]
+        assert source.peek_one(exact_timestamp=stamp) is None
+        assert reserved.peek_one(exact_timestamp=stamp) == body
+        assert manager._queue(f"T{stamp}.inbox").peek_one() is None
+        assert not ready.exists()
+        assert str(stamp) not in manager._active_child_launches
+        assert str(stamp) not in manager._child_processes
+        standalone()
+
+
+@contextmanager
+def _staged_dispatch_maintenance(
+    manager: Manager,
+    patch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reason: str,
+) -> Iterator[tuple[ManagedChild, Callable[[], None], Callable[[], None]]]:
+    """Own one real old process, exact custody, clock, and publication fault.
+
+    Yield the child, a boundary action making maintenance ready, and an
+    assertion that the delivery gate has not consumed that readiness.
+    This stages the cleanup owner, not the old child's original launch.
+    """
+    reserved = manager._queue(manager._queue_names["reserved"])
+    ready, release = tmp_path / "old.ready", tmp_path / "old.release"
+    old_id = int(reserved.write(_dispatch_witness_body(ready, release)))
+    ctrl_out = manager._queue(f"T{old_id}.ctrl_out")
+    process = multiprocessing.get_context("spawn").Process(
+        target=signal_ready_and_wait_for_release,
+        args=(str(ready), str(release)),
+    )
+    child = ManagedChild(
+        process,
+        None,
+        ctrl_out_queue=ctrl_out.name,
+        reserved_queue=reserved.name,
+        message_timestamp=old_id,
+        launched_ns=time.time_ns(),
+    )
+    real_time_ns = time.time_ns
+    offset_ns = 0
+    clock = SimpleNamespace(
+        time=time.time,
+        time_ns=lambda: real_time_ns() + offset_ns,
+        monotonic=time.monotonic,
+        perf_counter=time.perf_counter,
+        sleep=time.sleep,
+    )
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    real_write = broker_type.write
+    outage = False
+    write_failures = 0
+
+    def write(db: Any, queue: str, body: str, **kwargs: Any) -> int:
+        nonlocal write_failures
+        if outage and queue == ctrl_out.name:
+            write_failures += 1
+            raise RuntimeError("named old-child terminal publication outage")
+        return int(real_write(db, queue, body, **kwargs))
+
+    def make_ready() -> None:
+        nonlocal offset_ns, outage
+        if reason == "sentinel":
+            process.kill()
+            process.join(timeout=10.0)
+            assert not process.is_alive()
+            assert process.exitcode is not None and process.exitcode != 0
+            assert manager._child_sentinel_adapter.wait(10.0)
+            assert all(
+                timeout > 0
+                for timeout in manager._manager_child_timeouts(now_ns=clock.time_ns())
+            ), "sentinel case unexpectedly has a due child deadline"
+        else:
+            assert child.terminal_retry_after_ns > clock.time_ns()
+            assert not manager._child_sentinel_adapter.wait(0)
+            outage = False
+            offset_ns += max(0, child.terminal_retry_after_ns - clock.time_ns()) + 1
+            assert min(manager._manager_child_timeouts(now_ns=clock.time_ns())) == 0
+
+    def assert_pending() -> None:
+        if reason == "sentinel":
+            assert manager._child_sentinel_adapter.wait(0), "gate consumed the hint"
+        else:
+            assert min(manager._manager_child_timeouts(now_ns=clock.time_ns())) == 0, (
+                "gate consumed the due cleanup obligation"
+            )
+
+    patch.setattr(manager_mod, "time", clock)
+    patch.setattr(broker_type, "write", write)
+    try:
+        process.start()
+        manager._child_processes[str(old_id)] = child
+        manager._register_child_sentinel(str(old_id), child)
+        wait_for_file(str(ready), timeout=30.0)
+        if reason == "terminal_retry":
+            process.kill()
+            process.join(timeout=10.0)
+            assert not process.is_alive()
+            assert process.exitcode is not None and process.exitcode != 0
+            outage = True
+            assert manager._cleanup_children() is False
+            assert write_failures > 0
+            assert child.terminal_retry_after_ns > clock.time_ns()
+            assert reserved.peek_one(exact_timestamp=old_id) is not None
+            assert ctrl_out.peek_one() is None
+            assert manager._child_sentinel_adapter.wait(10.0)
+            assert manager._drain_child_sentinel_events() == 1
+            assert not manager._child_sentinel_adapter.wait(0)
+        yield child, make_ready, assert_pending
+    finally:
+        outage = False
+        release.touch()
+        if process.pid is not None:
+            if process.is_alive():
+                process.kill()
+            process.join(timeout=10.0)
+            assert not process.is_alive()
+        offset_ns += max(0, child.terminal_retry_after_ns - clock.time_ns()) + 1
+        try:
+            manager.stop(join=False)
+            manager.cleanup()
+        finally:
+            process.close()
+
+
+@pytest.mark.parametrize("reason", ["sentinel", "terminal_retry"])
+def test_spawn_delivery_yields_for_ready_child_maintenance(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    """Real exit/retry readiness precedes reservation and new launch [MA-3].
+
+    The old child's raw process and retained broker custody are staged at the
+    cleanup owner, as in S2. Its original launch protocol is not under test.
+    The second request follows the full real Manager launch and result path.
+    """
+    manager, _harness = startup_pg_manager
+    source = manager._queue(manager._queue_names["inbox"])
+    reserved = manager._queue(manager._queue_names["reserved"])
+    ready, release = tmp_path / "new.ready", tmp_path / "new.release"
+    real_timed = manager._timed_manager_call
+    real_message = manager._process_queue_message
+    real_launch = manager._launch_child_task
+    phases: list[str] = []
+    yields: list[str] = []
+    launches: list[str] = []
+    injected = False
+
+    with (
+        monkeypatch.context() as patch,
+        _staged_dispatch_maintenance(manager, patch, tmp_path, reason) as staged,
+    ):
+        child, make_ready, assert_pending = staged
+        old_id = child.message_timestamp
+        assert old_id is not None and child.ctrl_out_queue is not None
+        old_tid = str(old_id)
+        ctrl_out = manager._queue(child.ctrl_out_queue)
+        new_id = int(source.write(_dispatch_witness_body(ready, release)))
+
+        def timed[T](
+            phase: str,
+            operation: Callable[[], T],
+            *,
+            child_tid: str | None = None,
+        ) -> T:
+            nonlocal injected
+            phases.append(phase)
+            try:
+                if not injected and phase == "child_cleanup":
+                    assert (
+                        child.process.is_alive()
+                        or child.terminal_retry_after_ns > manager_mod.time.time_ns()
+                    )
+                if not injected and phase == "queue_dispatch":
+                    candidate = manager._peek_family_candidate()
+                    assert candidate is not None and candidate.request_id == new_id
+                    assert not manager._has_active_child_launches()
+                    assert not manager._child_launch_started_this_turn
+                    assert reserved.peek_one(exact_timestamp=old_id) is not None
+                    make_ready()
+                    injected = True
+                return real_timed(phase, operation, child_tid=child_tid)
+            finally:
+                phases.pop()
+
+        def message(queue_name: str, inactive: set[str]) -> bool:
+            capture = (
+                injected
+                and queue_name == source.name
+                and old_tid in manager._child_processes
+                and ("queue_dispatch" in phases or "public_dispatch" in phases)
+            )
+            result = real_message(queue_name, inactive)
+            if capture:
+                assert result is False, (
+                    "ready child maintenance did not yield before fetch"
+                )
+                assert source.peek_one(exact_timestamp=new_id) is not None
+                assert reserved.peek_one(exact_timestamp=new_id) is None
+                assert manager._queue(f"T{new_id}.inbox").peek_one() is None
+                assert queue_name not in inactive, (
+                    "maintenance yield inactivated its source"
+                )
+                assert_pending()
+                yields.append(phases[-1])
+            return result
+
+        def launch(spec: TaskSpec, inbox_message: Any | None, **kwargs: Any) -> bool:
+            assert old_tid not in manager._child_processes
+            assert reserved.peek_one(exact_timestamp=old_id) is None
+            assert json.loads(str(ctrl_out.peek_one()))["source"] == "manager"
+            accepted = real_launch(spec, inbox_message, **kwargs)
+            if accepted:
+                launches.append(str(spec.tid))
+            return accepted
+
+        patch.setattr(manager, "_timed_manager_call", timed)
+        patch.setattr(manager, "_process_queue_message", message)
+        patch.setattr(manager, "_launch_child_task", launch)
+        try:
+            manager.process_once()
+            assert injected and yields
+            # Preserved service convergence may settle the old child here.
+            # Gate assertions ran before that later lifecycle phase.
+            drive_until(
+                ready.exists,
+                bool,
+                step=manager.process_once,
+                wait=manager.wait_for_activity,
+                timeout=30.0,
+            )
+            assert launches == [str(new_id)]
+            assert int(ready.read_text()) > 0
+            release.touch()
+            outbox = manager._queue(f"T{new_id}.outbox")
+            assert (
+                drive_until(
+                    outbox.peek_one,
+                    lambda value: value is not None,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
+                == "done"
+            )
+            assert old_tid not in manager._child_processes
+            assert reserved.peek_one(exact_timestamp=old_id) is None
+            assert json.loads(str(ctrl_out.peek_one()))["source"] == "manager"
+        finally:
+            release.touch()
+
+
+def test_classification_continuation_keeps_first_dispatch(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A serviced full classification page cannot veto known first work [MA-3]."""
+    manager, _harness = startup_pg_manager
+    source = manager._queue(manager._queue_names["inbox"])
+    ready, release = tmp_path / "first.ready", tmp_path / "first.release"
+    ids = [int(source.write(_dispatch_witness_body(ready, release)))]
+    small = json.loads(request_body())
+    small["spec"]["keyword_args"] = {"size": 8}
+    ids.extend(
+        int(source.write(json.dumps(small)))
+        for _ in range(MANAGER_FAMILY_CLASSIFY_PAGE_SIZE)
+    )
+    real_timed = manager._timed_manager_call
+    real_launch = manager._launch_child_task
+    first_boundary_seen = False
+    authorizations: list[str] = []
+    phases: list[str] = []
+    ordering: list[str] = []
+
+    def launch(spec: TaskSpec, message: Any | None, **kwargs: Any) -> bool:
+        assert manager._family_classification_pending
+        accepted = real_launch(spec, message, **kwargs)
+        if accepted:
+            authorizations.append(str(spec.tid))
+            ordering.append("authorized")
+        return accepted
+
+    def timed[T](
+        phase: str, operation: Callable[[], T], *, child_tid: str | None = None
+    ) -> T:
+        nonlocal first_boundary_seen
+        phases.append(phase)
+        try:
+            if phase == "queue_dispatch":
+                first_boundary_seen = True
+                assert manager._family_classification_pending
+                assert manager._family_classify_after == ids[-2]
+                candidate = manager._peek_family_candidate()
+                assert candidate is not None and candidate.request_id == ids[0]
+                assert 0.0 in manager._admission_retry_timeouts(now_ns=time.time_ns())
+                assert manager.next_wait_timeout() == 0.0
+                assert not manager._child_sentinel_adapter.wait(0)
+                assert not manager._manager_child_timeouts(now_ns=time.time_ns())
+                assert manager._last_managed_service_convergence_ns <= 0
+            elif phase == "service_convergence":
+                ordering.append("convergence")
+            return real_timed(phase, operation, child_tid=child_tid)
+        finally:
+            phases.pop()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager, "_timed_manager_call", timed)
+            patch.setattr(manager, "_launch_child_task", launch)
+            manager.process_once()
+            assert first_boundary_seen
+            assert authorizations == [str(ids[0])], (
+                "classification continuation blocked first dispatch"
+            )
+            assert ordering.index("authorized") < ordering.index("convergence")
+            assert manager._family_classification_pending
+            assert 0.0 in manager._admission_retry_timeouts(now_ns=time.time_ns())
+            assert manager.next_wait_timeout() == 0.0
+            assert source.peek_one(exact_timestamp=ids[0]) is None
+            assert source.peek_one(exact_timestamp=ids[-1]) is not None
+            assert manager._family_scheduler.pending(ids[-1]) is None
+            # The actual worker can enter its seeded child without another
+            # Manager turn. Do not dispatch the other page of test requests.
+            wait_for_file(str(ready), timeout=30.0)
+            assert int(ready.read_text()) > 0
+    finally:
+        release.touch()
+
+
+def test_manager_serial_dispatch_preserves_internal_priority(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Real serial launches retain public custody until pending internal work drains."""
+    manager, harness = startup_pg_manager
+    internal = manager._queue(manager._queue_names["internal_inbox"])
+    public = manager._queue(manager._queue_names["inbox"])
+    releases = [tmp_path / f"serial-{index}.release" for index in range(4)]
+    # Both older public rows must follow both internal rows across ordinary
+    # turns. Real receipt settlement must not open a second launch this turn.
+    public_ids = [
+        int(
+            public.write(
+                _dispatch_witness_body(tmp_path / f"serial-{i}.ready", releases[i])
+            )
+        )
+        for i in range(2)
+    ]
+    internal_ids = [
+        int(
+            internal.write(
+                _dispatch_witness_body(
+                    tmp_path / f"internal-{i}.ready", releases[2 + i]
+                )
+            )
+        )
+        for i in range(2)
+    ]
+    expected = [str(tid) for tid in (*internal_ids, *public_ids)]
+    for tid in expected:
+        harness.register_tid(tid)
+    with settled_launches(manager, monkeypatch, releases) as evidence:
+        manager.process_once()
+        assert not evidence.publication_timeouts
+        assert evidence.applied == evidence.submitted
+        assert evidence.submitted == expected[:1]
+        assert evidence.reserved == [int(tid) for tid in expected[:1]]
+        assert [
+            tid
+            for tid in internal_ids
+            if internal.peek_one(exact_timestamp=tid) is not None
+        ] == internal_ids[1:]
+        assert [
+            tid
+            for tid in public_ids
+            if public.peek_one(exact_timestamp=tid) is not None
+        ] == public_ids
+        drive_until(
+            lambda: evidence.submitted,
+            lambda submitted: submitted == expected,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+        assert not evidence.publication_timeouts
+        assert evidence.applied == expected
+        assert evidence.reserved == [*internal_ids, *public_ids]
+
+
+@pytest.mark.parametrize("control", [CONTROL_PING, CONTROL_STOP])
+def test_manager_services_control_while_real_launch_receipt_is_held(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    control: str,
+) -> None:
+    """Held real launch leaves control live and the exact successor unreserved."""
+    manager, harness = startup_pg_manager
+    source = manager._queue(manager._queue_names["inbox"])
+    ctrl = manager._queue(manager._queue_names["ctrl_in"])
+    replies = manager._queue(f"T{int(manager.tid) + 1}.ctrl_in")
+    releases = [tmp_path / f"held-{index}.release" for index in range(2)]
+    ids = [
+        int(
+            source.write(
+                _dispatch_witness_body(
+                    tmp_path / f"held-{index}.ready", releases[index]
+                )
+            )
+        )
+        for index in range(2)
+    ]
+    for tid in ids:
+        harness.register_tid(str(tid))
+    evidence = SettledLaunches()
+    first_created = threading.Event()
+    release_receipt = threading.Event()
+    hold_timeouts: list[str] = []
+    real_create = manager_mod.launch_task_process
+    real_fetch = manager._fetch_next_message
+    real_apply = manager._handle_child_launch_result
+
+    def create(*args: Any, **kwargs: Any) -> BaseProcess:
+        process = evidence.create_process(real_create, *args, **kwargs)
+        assert process.pid is not None
+        harness.register_pid(process.pid)
+        if len(evidence.processes) == 1:
+            first_created.set()
+            # Holding the actual process result keeps the real worker active.
+            # Any timeout is asserted outside broker/worker error conversion.
+            if not release_receipt.wait(timeout=30.0):
+                hold_timeouts.append("first real launch receipt hold timed out")
+        return process
+
+    def fetch(config: QueueRuntimeConfig) -> tuple[str, int] | None:
+        message = real_fetch(config)
+        if message is not None and config.mode is QueueMode.RESERVE:
+            evidence.reserved.append(message[1])
+        return message
+
+    def apply(result: _ManagerChildLaunchResult) -> None:
+        real_apply(result)
+        tid = result.request.child_spec.tid
+        assert tid is not None
+        evidence.applied.append(tid)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager_mod, "launch_task_process", create)
+        patch.setattr(manager, "_fetch_next_message", fetch)
+        patch.setattr(manager, "_handle_child_launch_result", apply)
+        try:
+            manager.process_once()
+            assert first_created.wait(timeout=30.0)
+            assert not hold_timeouts
+            assert not release_receipt.is_set()
+            assert evidence.applied == []
+            assert str(ids[0]) in manager._active_child_launches
+            assert evidence.reserved == [ids[0]]
+            ctrl.write(
+                encode_control_message(
+                    control,
+                    request_id="held-launch-control",
+                    reply_to=replies.name if control == CONTROL_PING else None,
+                )
+            )
+            manager.process_once()
+            assert not hold_timeouts
+            assert evidence.applied == []
+            assert evidence.reserved == [ids[0]]
+            assert source.peek_one(exact_timestamp=ids[1]) is not None
+            if control == CONTROL_PING:
+                response = json.loads(str(replies.read_one()))
+                assert response["command"] == CONTROL_PING
+                assert response["request_id"] == "held-launch-control"
+                assert response["message"] == "PONG"
+                assert response["task_status"] == "running"
+            else:
+                assert manager._draining or manager.should_stop
+            release_receipt.set()
+            drive_until(
+                lambda: evidence.applied,
+                lambda applied: str(ids[0]) in applied,
+                step=manager.process_once,
+                wait=manager.wait_for_activity,
+                timeout=30.0,
+            )
+            if control == CONTROL_PING:
+                drive_until(
+                    lambda: evidence.applied,
+                    lambda applied: applied == [str(tid) for tid in ids],
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
+                assert evidence.reserved == ids
+            else:
+                # The real late receipt has now reached the shutdown owner.
+                # Further ordinary turns must not take the retained successor.
+                manager.process_once()
+                assert evidence.reserved == [ids[0]]
+                assert source.peek_one(exact_timestamp=ids[1]) is not None
+            assert not hold_timeouts
+        finally:
+            release_receipt.set()
+            retire_dispatch_workers(manager, releases)
+            _join_waiting_processes(evidence.processes)

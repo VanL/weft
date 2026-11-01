@@ -11,7 +11,6 @@ import argparse
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -26,6 +25,9 @@ POSTGRES_IMAGE = os.environ.get("SIMPLEBROKER_PG_TEST_IMAGE", "postgres:18")
 POSTGRES_DB = os.environ.get("SIMPLEBROKER_PG_TEST_DB", "weft_test")
 POSTGRES_USER = os.environ.get("SIMPLEBROKER_PG_TEST_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("SIMPLEBROKER_PG_TEST_PASSWORD", "postgres")
+POSTGRES_DIAGNOSTIC_WAIT_SECONDS: Final[float] = 10.0
+"""Shared Docker wait budget for retained evidence; excludes file I/O and cleanup."""
+
 PYTEST_INTERRUPT_GRACE_SECONDS: Final[float] = 8.0
 """Wait after forwarding Ctrl-C before escalating pytest shutdown."""
 
@@ -34,6 +36,15 @@ PYTEST_TERMINATE_GRACE_SECONDS: Final[float] = 2.0
 
 PYTEST_WAIT_POLL_SECONDS: Final[float] = 0.2
 """Bounded wait interval so repeated Ctrl-C can escalate promptly."""
+
+POSTGRES_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+"""Poll interval while waiting for the disposable PostgreSQL container.
+
+Docker has no synchronous readiness event for `docker port` host-port
+publication after `docker run -d`, and the official postgres:18 image
+restarts after running docker-entrypoint-initdb.d on a temporary
+Unix-socket-only server before opening loopback TCP connections.
+"""
 
 PYTEST_DIAGNOSTIC_ARGS: Final[tuple[str, ...]] = (
     "--durations=100",
@@ -110,16 +121,6 @@ def _docker_port(container_name: str) -> str | None:
     return output.rsplit(":", 1)[1]
 
 
-def _host_port_accepts_connections(port: str) -> tuple[bool, str]:
-    """Return whether the published Postgres port accepts host TCP connections."""
-
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
-            return True, ""
-    except OSError as exc:
-        return False, str(exc)
-
-
 def _cleanup_container(container_name: str) -> None:
     """Remove the temporary Docker container if it still exists."""
 
@@ -158,25 +159,60 @@ def _print_container_logs(container_name: str) -> None:
         )
 
 
-def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
-    """Wait for the Postgres container to accept connections and return its host port."""
+def _retain_container_evidence(container_name: str, artifact: Path) -> None:
+    """Retain bounded pre-removal State and logs without replacing failures [TS-0]."""
+    state_format = (
+        "Status={{json .State.Status}} ExitCode={{json .State.ExitCode}} "
+        "OOMKilled={{json .State.OOMKilled}} Error={{json .State.Error}} "
+        "StartedAt={{json .State.StartedAt}} FinishedAt={{json .State.FinishedAt}}"
+    )
+    commands = (
+        ["docker", "inspect", "--format", state_format, container_name],
+        ["docker", "logs", "--timestamps", "--tail", "2000", container_name],
+    )
+    try:
+        with artifact.open("ab") as stream:
+            stream.write(
+                f"container={container_name} time_ns={time.time_ns()} "
+                f"test={os.environ.get('PYTEST_CURRENT_TEST', '')}\n".encode(
+                    "utf-8", errors="backslashreplace"
+                )
+            )
+            deadline = time.monotonic() + POSTGRES_DIAGNOSTIC_WAIT_SECONDS
+            for command in commands:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stream.write(f"skipped budget exhausted: {command!r}\n".encode())
+                    break
+                stream.write(f"command={command!r}\n".encode())
+                stream.flush()
+                try:
+                    result = subprocess.run(
+                        command,
+                        cwd=ROOT,
+                        check=False,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        timeout=remaining,
+                    )
+                    stream.write(f"\nreturncode={result.returncode}\n".encode())
+                except (OSError, subprocess.SubprocessError) as exc:
+                    stream.write(f"\ncollection error={type(exc).__name__}\n".encode())
+    except (OSError, ValueError):
+        pass  # Optional evidence must not replace the test outcome or cleanup.
 
-    deadline = time.time() + timeout_seconds
+
+def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) -> str:
+    """Require final-server TCP SQL readiness; host preflight follows [TS-0]."""
+
+    deadline = time.monotonic() + timeout_seconds
     last_error = "container did not start"
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         port = _docker_port(container_name)
         if port is None:
             last_error = "waiting for published port"
-            time.sleep(1.0)
-            continue
-
-        host_ready, host_error = _host_port_accepts_connections(port)
-        if not host_ready:
-            last_error = (
-                f"waiting for host connection to 127.0.0.1:{port}: {host_error}"
-            )
-            time.sleep(1.0)
+            time.sleep(POSTGRES_READY_POLL_INTERVAL_SECONDS)
             continue
 
         result = subprocess.run(
@@ -185,6 +221,8 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
                 "exec",
                 container_name,
                 "psql",
+                "-h",
+                "127.0.0.1",
                 "-U",
                 POSTGRES_USER,
                 "-d",
@@ -203,7 +241,7 @@ def _wait_for_postgres(container_name: str, *, timeout_seconds: float = 60.0) ->
             return port
 
         last_error = result.stderr.strip() or result.stdout.strip() or "psql failed"
-        time.sleep(1.0)
+        time.sleep(POSTGRES_READY_POLL_INTERVAL_SECONDS)
 
     raise RuntimeError(f"Postgres did not become ready: {last_error}")
 
@@ -350,14 +388,15 @@ def _initialize_broker_schema(*, env: dict[str, str]) -> None:
         (
             "import os",
             "from simplebroker import Queue, resolve_config",
-            "target = os.environ['BROKER_BACKEND_TARGET']",
             "queue = Queue(",
             "    'weft.pg.preflight',",
-            "    db_path=target,",
             "    persistent=True,",
             "    config=resolve_config(env=os.environ),",
             ")",
-            "queue.close()",
+            "try:",
+            "    queue.peek_one()",
+            "finally:",
+            "    queue.close()",
         )
     )
     _run(

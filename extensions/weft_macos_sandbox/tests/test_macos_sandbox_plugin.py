@@ -123,7 +123,7 @@ def test_macos_sandbox_runner_publishes_runner_authority_handle(
         )
 
     monkeypatch.setattr(
-        plugin.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+        plugin, "open_supervised_process", lambda *args, **kwargs: FakeProcess()
     )
     monkeypatch.setattr(plugin, "process_create_time", lambda pid: 123.456)
     monkeypatch.setattr(
@@ -336,7 +336,7 @@ def test_sandbox_child_env_is_allowlisted_not_inherited(
         captured["env"] = kwargs["env"]
         return FakeProcess()
 
-    monkeypatch.setattr(plugin.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(plugin, "open_supervised_process", fake_popen)
     monkeypatch.setattr(plugin, "process_create_time", lambda pid: 123.456)
     monkeypatch.setattr(
         plugin, "run_monitored_subprocess", fake_run_monitored_subprocess

@@ -635,7 +635,7 @@ def test_deadline_from_timeout_clamps_at_zero(
     timeout: float | None,
     expected: float | None,
 ) -> None:
-    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(task_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0))
 
     assert task_cmd._deadline_from_timeout(timeout) == expected
 
@@ -655,7 +655,7 @@ def test_deadline_helpers_share_exact_expiry_boundary(
     remaining: float | None,
     expired: bool,
 ) -> None:
-    monkeypatch.setattr(task_cmd.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(task_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0))
 
     assert task_cmd._remaining_timeout(deadline) == remaining
     assert task_cmd._deadline_expired(deadline) is expired
@@ -1561,7 +1561,6 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
         created_monitors.append(monitor)
         return monitor
 
-    monkeypatch.setattr(task_cmd.time, "monotonic", clock)
     monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 1.0)
     monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
     monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
@@ -1571,7 +1570,9 @@ def test_await_control_surface_public_grace_outlives_expired_kill_ack(
     monkeypatch.setattr(task_cmd, "_task_status", lambda *_args, **_kwargs: None)
 
     try:
-        entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.5)
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(task_cmd, "time", SimpleNamespace(monotonic=clock))
+            entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.5)
     finally:
         ctrl_out.close()
 

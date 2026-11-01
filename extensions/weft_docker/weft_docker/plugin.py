@@ -26,6 +26,8 @@ from weft.core.agents.provider_cli.container_runtime import (
     resolve_provider_container_runtime,
 )
 from weft.core.runners.subprocess_runner import (
+    close_supervised_pipes,
+    open_supervised_process,
     prepare_command_invocation,
     run_monitored_subprocess,
 )
@@ -228,18 +230,15 @@ class DockerCommandRunner:
             executable=executable,
             image=image,
         )
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE if stdin_data is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=os.environ.copy(),
-        )
-
         with _docker_client() as client:
+            process = open_supervised_process(
+                command,
+                pipe_stdin=stdin_data is not None,
+                encoding="utf-8",
+                errors="replace",
+                env=os.environ.copy(),
+            )
+
             try:
                 container = _wait_for_container(
                     client,
@@ -307,8 +306,10 @@ class DockerCommandRunner:
                 outcome.runtime_handle = updated_handle
                 return outcome
             finally:
-                _cleanup_process(process)
-                _remove_container(client, container_name)
+                try:
+                    _cleanup_process(process)
+                finally:
+                    _remove_container(client, container_name)
 
     def start_session(
         self, *, on_activity: Callable[[], None]
@@ -1262,16 +1263,23 @@ class _CleanupProcess(Protocol):
 
 
 def _cleanup_process(process: _CleanupProcess) -> None:
-    if process.poll() is not None:
-        return
     try:
-        process.kill()
-    except OSError:  # pragma: no cover - best-effort cleanup
-        return
-    try:
-        process.wait(timeout=1.0)
-    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - cleanup
-        return
+        if process.poll() is not None:
+            return
+        try:
+            process.kill()
+        except OSError:  # pragma: no cover - best-effort cleanup
+            return
+        try:
+            process.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - cleanup
+            return
+    finally:
+        close_supervised_pipes(
+            getattr(process, "stdin", None),
+            getattr(process, "stdout", None),
+            getattr(process, "stderr", None),
+        )
 
 
 @contextmanager
