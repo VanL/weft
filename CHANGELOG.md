@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.119] - 2026-10-31
+
+### Fixed
+
+- Commands no longer block timeout or cancellation while writing stdin, wait
+  indefinitely on output pipes inherited by a grandchild, or leak a child
+  after resource-monitor acquisition fails. The shared Host and Docker
+  subprocess supervisor owns cancellable pipe I/O and acquisition rollback,
+  bounds post-exit capture to 250 ms, and then delivers every byte already
+  captured. Decoder-held raw bytes count toward capacity, and an unfinished
+  encoded sequence reaching 64 KiB fails explicitly instead of growing memory.
+- A resource violation reported after the supervised process has already
+  exited is no longer classified as a limit; the supervisor re-polls before
+  escalating and the exit code decides the outcome.
+- Pending-family heaps reclaim stale nodes while preserving leftist meld and
+  current ownership. Manager retires a serviced publication-retry deadline and
+  reuses the outer child sweep during dispatch, removing redundant handler
+  sweeps per workload, with a readiness gate that yields to required
+  maintenance before reservation.
+- Consumer finalizes successful logical streams independently of physical EOF.
+- PostgreSQL test readiness requires an in-container TCP query against the
+  final server instead of accepting the temporary bootstrap server, and schema
+  preflight uses the configured Queue target with a non-destructive read.
+
+### Changed
+
+- Subprocess supervision is readiness-driven: POSIX waits on selectors with
+  pidfd or kqueue child-exit sources, and Windows owns overlapped pipes and
+  waits on completion and process handles. The 100 Hz polling helper threads
+  are gone. Linux requires kernel 5.3 or later with usable pidfd support;
+  denied or unavailable capability produces a clear error naming the cause,
+  with no polling fallback.
+- Measured dispatch admission is complete: receipt-turn continuation and
+  bounded serial batching were measured and rejected; the runtime keeps one
+  launch lane and baseline dispatch behavior.
+- Windows CI jobs place the test temp root on the runner-local disk, so
+  SimpleBroker's per-commit fsync lands on local NVMe instead of the remote
+  managed disk. Sync mode, timeouts, and worker counts are unchanged.
+- Bump coordinated extension releases: `weft-docker` 0.9.94, `weft-django`
+  0.9.54, `weft-macos-sandbox` 0.6.23, and `weft-microsandbox` 0.5.24.
+
 ## [0.9.118] - 2026-10-21
 
 ### Fixed
