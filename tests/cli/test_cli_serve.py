@@ -321,6 +321,13 @@ def _stop_process(
     return stdout, stderr
 
 
+def _is_multiprocessing_resource_tracker(child: psutil.Process) -> bool:
+    try:
+        return any("multiprocessing.resource_tracker" in arg for arg in child.cmdline())
+    except psutil.Error:
+        return False
+
+
 def _operational_log_events(output: str) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for line in output.splitlines():
@@ -741,8 +748,15 @@ def test_serve_sigterm_drains_children_cleanly(
         )
         assert started_tid == tid
 
+        # The drain contract covers task processes: the Consumer and any
+        # worker it registered. The spawn context's resource tracker is also a
+        # descendant, but CPython exits it on pipe EOF, which arrives only
+        # after the manager and every spawned child have closed the inherited
+        # write end, so it is never ordered before the manager's own exit.
         child_pids = [
-            child.pid for child in psutil.Process(process.pid).children(recursive=True)
+            child.pid
+            for child in psutil.Process(process.pid).children(recursive=True)
+            if not _is_multiprocessing_resource_tracker(child)
         ]
         assert child_pids
         process.terminate()

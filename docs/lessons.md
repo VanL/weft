@@ -877,3 +877,25 @@ fatal. Do not copy this allowance into the product error mask. The native
 [diagnostic run](https://github.com/VanL/weft/actions/runs/41116680387) and
 [reactor repair plan](plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md)
 record the witness; the historical CI failure still lacks its own traceback.
+
+## 2026-10-31: Assert on what the contract orders, not on what happens to be alive
+
+Two CI failures on the same day came from tests asserting an instantaneous
+process-state fact right after an asynchronous teardown. `run_monitored_subprocess`'s
+late-limit test asserted a monitor is never consulted after child exit, which no
+poll-then-check design can promise; the real gap underneath (a violation reported
+against an already-exited process classified as `limit`) was fixed in the
+supervisor and the test now forces the ordering with a handshake. The serve
+SIGTERM drain test asserted, right after the manager's `serve` process had
+exited and the task's terminal state was visible, that every descendant captured
+before SIGTERM was dead; but `children(recursive=True)` also returns CPython's
+`multiprocessing.resource_tracker`, which exits only after reading EOF on a pipe
+the manager and every spawned child hold, so its exit is not guaranteed before
+the manager's exit is observable. Rule: name the processes the contract
+actually orders (the Consumer and its registered workers) and assert on those;
+exclude interpreter infrastructure that the owner cannot join; and when a test
+claims an ordering, make the fixture force it rather than assert it never
+happens. A "never after" claim over a poll-then-check guard is a race, not a
+contract. See [RM-5.2](specifications/06-Resource_Management.md),
+[MA-3](specifications/03-Manager_Architecture.md), and
+`tests/cli/test_cli_serve.py::test_serve_sigterm_drains_children_cleanly`.
