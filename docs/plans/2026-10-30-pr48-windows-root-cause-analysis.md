@@ -658,3 +658,66 @@ commit 75c8cff8 (event 1000 records the faulting module and exception code
 for a fail-fast termination). Both are existing machinery; neither changes
 the test command, workers, or deadlines. This signature is outside the
 stall investigation's hypotheses and must be kept open on its own.
+
+### Owner decision and applied environment correction (2026-10-31)
+
+The owner reviewed the stall-profile finding, the hypothesis disposition, and
+the canary baselines and directed: "Move to D: now." The owner also fixed one
+premise for all later work: SimpleBroker's `SYNC_MODE=FULL` (an fsync per
+commit) is a deliberate maximum-safety setting that Weft keeps; users of
+SimpleBroker may relax it, Weft does not, in CI or anywhere else. The
+correction therefore changes where the fsyncs land, never how many or how
+strong.
+
+**Applied** (official `.github/workflows/test.yml`, `test` job, in the same
+commit as this record): one new step after `Set pytest worker count`,
+conditioned on `matrix.os == 'windows-latest'`, running under `pwsh`. It
+creates `RUNNER_TEMP\weft-test-temp` and appends `TEMP` and `TMP` pointing at
+it to `GITHUB_ENV`, so every later step in the Windows jobs (pytest, the
+reactor verification, the CLI installation check) inherits the runner-local
+temp root. Linux and macOS jobs skip the step and keep their defaults; the
+PostgreSQL and extension jobs are untouched. This is the "conditional step
+that appends to `GITHUB_ENV` only on Windows" shape named above as cleaner
+than per-step `env` expressions. The canary's `d` arm already exercised the
+same directory and the inheritance path in 12 jobs (`TEMP`/`TMP` =
+`RUNNER_TEMP\weft-test-temp` through pytest, the harness, the CLI, the
+detached Manager, and child processes), all passing, with D: fsync at 0.5 ms
+p50; it set the variables per step through `env:`, so exporting them through
+`GITHUB_ENV` to every later step is the one part of this shape the canary did
+not run, and the first official Windows jobs on this commit are its test.
+
+**Not changed:** sync mode, any timeout or readiness budget, the worker
+count, the pytest command, any product code, any test premise.
+
+**Classification:** class 2. Observable CI behavior changes, but it conforms
+to intended behavior evidenced by the owner's directive in this session and
+the measured latency gradient recorded above; reversible by deleting one
+step; the official gate's 36-job matrix is unchanged. The repository rule
+against agent-initiated CI edits is satisfied by the explicit owner
+instruction.
+
+**Preregistered interpretation from here.** Every later Windows failure on
+this branch is stall-profiled with the method above before it is named.
+(a) A Windows job that fails with a budget-exceedance signature *and* a
+whole-VM episode (median ratio ≥ 3x over ≥ 2 consecutive minutes) with the
+temp root on D: falsifies E1 as the sufficient cause of that episode and
+returns the investigation to E3/E4 with the canary redispatched. (b) A
+Windows failure with no episode is not a stall and is classified on its own
+evidence. (c) The silent-worker-crash signature is independent of this
+correction and is expected neither to improve nor to worsen; it keeps its own
+discriminator. (d) Absence of stall failures is consistent with E1 but is
+not proof: the stall trigger was never reproduced on demand, so the
+correction rests on the measured gradient and the failure-run profiles. No
+run count converts (d) into a confirmation; the record stays "supported, not
+confirmed" unless (a) or a reproduced episode decides it.
+
+**Review:** one scoped cross-family round (Codex, read-only, high effort) on
+the YAML step and this record before commit. Verdict PASS, no blocker or
+should-fix. One note, accepted and applied above: the record had called the
+canary's `d` arm "this exact mechanism" although the canary assigned the
+variables per step rather than through `GITHUB_ENV`. The reviewer confirmed
+`shell: pwsh` selects PowerShell 7 (UTF-8 redirection, so the 5.1 UTF-16
+pitfall does not apply), `GITHUB_ENV` reaches later shell and action steps,
+no later step sets `TMPDIR`, `TEMP`, `TMP`, or `--basetemp`, the diagnostics
+directory is a sibling, the `if:` cannot empty Linux or macOS temp variables,
+and deleting the step restores the previous workflow text exactly.

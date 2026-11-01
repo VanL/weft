@@ -62,6 +62,24 @@ jobs:
       run: |
         python bin/pytest-worker-count --github-env
 
+    - name: Move the Windows test temp root to the runner-local disk
+      # The hosted Windows image's default temp root (C:\Users\...\Temp) is a
+      # remote Azure managed disk; RUNNER_TEMP is on the VM-local NVMe (D:).
+      # SimpleBroker commits with SYNC_MODE=FULL, so every test commit fsyncs
+      # through whichever volume holds the temp root. Measured on 2026-10-31:
+      # C: 30-50 ms p50 / up to 1.75 s p95 per fsync under suite load, with
+      # whole-VM stall episodes of 3-5 min; D: 0.5 ms p50. This changes where
+      # the fsyncs land, not the sync mode, any timeout, or the worker count.
+      # Plan: docs/plans/2026-10-30-pr48-windows-root-cause-analysis.md
+      if: ${{ matrix.os == 'windows-latest' }}
+      shell: pwsh
+      run: |
+        $testTemp = Join-Path $env:RUNNER_TEMP 'weft-test-temp'
+        New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
+        "TEMP=$testTemp" >> $env:GITHUB_ENV
+        "TMP=$testTemp" >> $env:GITHUB_ENV
+        "test temp root: $testTemp"
+
     - name: Run tests with pytest
       if: ${{ matrix.os != 'ubuntu-latest' || matrix.python-version != '3.13' }}
       env:
