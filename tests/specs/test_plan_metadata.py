@@ -13,6 +13,7 @@ ALLOWED_STATUSES = frozenset(
     {
         "completed",
         "draft",
+        "promoted",
     }
 )
 
@@ -58,7 +59,7 @@ def test_plan_readme_exists_and_defines_status_taxonomy() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
 
     assert "## Status Taxonomy" in readme_text
-    assert "## Index" in readme_text
+    assert "## Status Index" in readme_text
 
 
 def test_every_plan_has_normalized_metadata() -> None:

@@ -160,7 +160,9 @@ smell.
   Superseded by: none
   ```
 
-- `Status` must be either `draft` or `completed`.
+- `Status` must be one of `draft`, `promoted`, or `completed`. `promoted`
+  marks an active plan whose labelled Replacement blocks have been applied
+  to their target files; it lasts until the plan closes as `completed`.
 - `Superseded by` must be `none` or a valid relative Markdown link to an
   existing plan file.
 - Every plan file in `docs/plans/` must have a matching row in
@@ -374,7 +376,13 @@ Rules:
   memory overclaim, and the reviewer should check rule-vs-code, not just
   rule-vs-intent
 - do not treat plan-only text as a second governing contract after
-  promotion — once promoted, `docs/specifications/` is canonical
+  promotion — once promoted, `docs/specifications/` is canonical; in active
+  plans that have promoted their delta (recorded a non-pending `Promotion
+  Baseline Identifier` or `promoted` status; lifecycle status read from
+  `docs/plans/README.md`), any `Replacement (`<path>`):` (or heading-scoped
+  `Replacement:`) fenced block is checked by `bin/check-doc-paths` for text
+  containment in the target file so the plan's fenced delta and the promoted
+  target file do not drift apart during review dispositions
 
 ### 4d. Spec-Changing Work — Slice Order
 
@@ -782,9 +790,9 @@ upstream lifecycle and describes intent, not weft's recorded tokens —
 the next bullet states the statuses this repo actually allows and gates.
 
 - **The status vocabulary is closed, and the index is gated.** This
-  repo's valid statuses are exactly `completed` and `draft`, declared
-  in the `## Status Taxonomy` section of `docs/plans/README.md` and
-  enforced by `tests/specs/test_plan_metadata.py`: every plan carries a
+  repo's valid statuses are exactly `completed`, `draft`, and `promoted`,
+  declared in the `## Status Taxonomy` section of `docs/plans/README.md`
+  and enforced by `tests/specs/test_plan_metadata.py`: every plan carries a
   normalized three-key metadata block (`Status`, `Source specs`,
   `Superseded by`, in that order) directly under its title, every plan
   file is indexed, and the index row's status must match the file's.

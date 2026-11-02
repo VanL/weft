@@ -193,10 +193,14 @@ scope decision.
 > unnecessary work over adding it. Verdict line: `no blocker` or
 > `blocker: F<ids>`, naming only findings within the unit under review.
 
-Round-2 variant (after dispositions — never before):
+Round-2 variant (only when Round 1 returned `BLOCKED` / `blocker: F<ids>` or
+when scope/invariants/authority changed after review — never to re-check
+non-blocking edits after `PASS` or `no blocker`; the author verifies non-blocking
+edits locally and runs `bin/check-doc-paths` to confirm promoted `Replacement:`
+fenced blocks still match their target files):
 
-> Round-2 verification, scoped ONLY to these accepted findings and their
-> fixes: [IDs, one line each]. Verify each fix; report any NEW defect the
+> Round-2 verification, scoped ONLY to these accepted blocking findings and
+> their fixes: [IDs, one line each]. Verify each fix; report any NEW defect the
 > fixes introduced. Do not revisit declined or out-of-scope findings —
 > they are closed by their disposition rows. Verdict: PASS / FAIL.
 

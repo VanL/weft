@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 52 plan files in this directory.
+There are currently 53 plan files in this directory.
 
 ## Curation Policy
 
@@ -18,11 +18,16 @@ There are currently 52 plan files in this directory.
 - `draft`: the plan is an active implementation slice or meta-plan that has
   not landed yet, or a retained historical draft whose `Superseded by` column
   points to the successor plan.
+- `promoted`: the plan is an active slice whose labelled Replacement blocks
+  have been applied to their target files; while the plan is `promoted`,
+  `bin/check-doc-paths` checks every labelled Replacement block for text
+  containment in its target. The plan moves to `completed` when it closes.
 
-## Index
+## Status Index
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-02-program-theory-reconciliation-plan.md`](./2026-11-02-program-theory-reconciliation-plan.md) | Program Theory Reconciliation: Hub Propagation, Four-Way Balance, and Adoption | `completed` | none |
 | [`2026-10-30-pr48-windows-root-cause-analysis.md`](./2026-10-30-pr48-windows-root-cause-analysis.md) | PR #48 Windows Root-Cause Analysis | `completed` | none |
 | [`2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`](./2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md) | PR #48 Subprocess Reactor and Test Hygiene Repairs | `completed` | none |
 | [`2026-10-27-runtime-and-test-repair-plan.md`](./2026-10-27-runtime-and-test-repair-plan.md) | Runtime Ownership and Test Evidence Repairs | `completed` | none |

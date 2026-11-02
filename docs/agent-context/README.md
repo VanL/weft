@@ -22,9 +22,11 @@ Start with the conceptual account, then process. This list, root
 sequence element-for-element.
 
 1. `../program-theory.md` — the conceptual account of Weft ("weftness"),
-   including rejected alternatives; frames placement and refusal, and does not
-   override winning contracts. Extend local depth with **module theory** on
-   entry, not by bulking this file.
+   including rejected alternatives; frames interpretation, placement, and the
+   direction in which plans move specs and code (`[WT-0]`; do **not** silently
+   break active contracts mid-edit, and do **not** treat an existing spec or
+   plan as final when it pulls away from the theory). Extend local depth with
+   **module theory** on entry, not by bulking this file.
 2. This file — `README.md` (the hub overview you are reading).
 3. `decision-hierarchy.md`
 4. `principles.md`

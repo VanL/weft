@@ -13,12 +13,22 @@ not docs/specs; no docs/README.md), the claim pattern covers the
 bin/ tools and tests/specs/ gates weft's guidance cites by path, and
 the hub-only --scaffold mode is dropped.
 
+The plan Replacement-sync check is ported from agent-theory @ e6ac579
+via docs/plans/2026-11-02-program-theory-reconciliation-plan.md (task
+6a, fork 3 option (a)). Weft-local adaptations: the `## Status Index`
+section of docs/plans/README.md is read in weft's row shape (a link to
+the plan file, a title, a backticked status, a superseded-by cell), and
+the check fires for a `promoted` plan; `draft`, `completed`, and
+`superseded` plans are skipped.
+
 Modes:
   check-doc-paths [--root DIR]   scan a tree (default: this repo)
   check-doc-paths --self-test    firing tests for the claim scan, fenced
-                                 block stripping, and DECLARED_FUTURE_ARTIFACTS
+                                 block stripping, DECLARED_FUTURE_ARTIFACTS,
+                                 and the plan Replacement-sync check
 
-Exit 0 when every claim resolves; exit 1 listing the danglers.
+Exit 0 when every claim resolves and every promoted plan's Replacement
+blocks are contained in their targets; exit 1 listing the failures.
 """
 
 from __future__ import annotations
@@ -42,6 +52,27 @@ SCAN_FILES = ["AGENTS.md", "docs/coalescing.md"]
 
 # A claim is a single-line backticked token that looks like a repo path.
 CLAIM_RE = re.compile(r"`((?:docs|skills|bin|tests)/[A-Za-z0-9_./-]+)`")
+
+# Plan Replacement-block sync checks for active promoted plans.
+PLAN_STATUS_RE = re.compile(r"^Status:\s*([A-Za-z-]+)(.*)$", re.IGNORECASE)
+# Weft index rows: | [`<plan>.md`](./<plan>.md) | <title> | `<status>`[ qualifier] |
+# <superseded by> |. The hub's bare `| <plan>.md | <status> |` shape is not read.
+INDEX_ROW_RE = re.compile(
+    r"^\|\s*\[`?([0-9]{4}-[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]+\.md)`?\]\(\./\1\)\s*"
+    r"\|[^|]*\|\s*`?([A-Za-z-]+)`?([^|]*)\|[^|]*\|\s*$"
+)
+PROMOTION_BASELINE_RE = re.compile(
+    r"^(?:[-*]\s*)?(?:\*\*Promotion [Bb]aseline(?: [Ii]dentifier)?:\*\*|Promotion [Bb]aseline(?: [Ii]dentifier)?:)\s*(.+)$"
+)
+UNPROMOTED_VALUE_RE = re.compile(
+    r"^`?(?:pending|none|tbd|n/a|not yet promoted)\b", re.IGNORECASE
+)
+PROMOTED_NOTE_RE = re.compile(
+    r"\b(?:promoted|spec-promotion slice applied)\b", re.IGNORECASE
+)
+HEADING_PATH_RE = re.compile(r"^#{1,6}\s+.*`([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)`")
+REPLACEMENT_LABEL_RE = re.compile(r"^Replacement(?:\s*\(`([A-Za-z0-9_./-]+)`\))?:\s*$")
+SKIPPED_PLAN_STATUSES = {"draft", "completed", "superseded"}
 
 # Suffixes/patterns that are templates or globs, not claims.
 NON_CLAIM = re.compile(r"[*{}<>]|YYYY|<[a-z]|\.\.\.")
@@ -149,6 +180,189 @@ def _scan_claims(root: Path, declared_future: set[str]) -> tuple[list[str], set[
     return failures, claimed_allowlisted
 
 
+def _load_plan_index_statuses(
+    plans_dir: Path,
+) -> dict[str, tuple[str, str]] | None:
+    """Return {plan_filename: (status_word, rest_of_cell)} from ## Status Index in docs/plans/README.md, or None if README.md is absent."""
+    readme = plans_dir / "README.md"
+    if not readme.is_file():
+        return None
+    statuses: dict[str, tuple[str, str]] = {}
+    in_status_index = False
+    for line in readme.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_status_index = stripped == "## Status Index"
+            continue
+        if not in_status_index:
+            continue
+        m = INDEX_ROW_RE.match(stripped)
+        if m:
+            statuses[m.group(1)] = (m.group(2).lower(), m.group(3))
+    return statuses
+
+
+def _is_plan_promoted(
+    lines: list[str],
+    status_word: str | None,
+    status_tail: str,
+) -> bool:
+    """Return True when an active plan has promoted its spec delta (§4b/§4d)."""
+    if status_word == "promoted" or PROMOTED_NOTE_RE.search(status_tail):
+        return True
+    for _, line in _prose_lines("\n".join(lines)):
+        m_prom = PROMOTION_BASELINE_RE.match(line.strip())
+        if m_prom:
+            val = m_prom.group(1).strip()
+            if val and not UNPROMOTED_VALUE_RE.match(val):
+                return True
+    return False
+
+
+def _plan_status(
+    root: Path,
+    plan: Path,
+    raw_text: str,
+    index_statuses: dict[str, tuple[str, str]] | None,
+    failures: list[str],
+) -> tuple[str | None, str] | None:
+    """Return (status_word, status_tail) for a plan, or None to skip it."""
+    if index_statuses is not None:
+        if plan.name in index_statuses:
+            return index_statuses[plan.name]
+        if any(REPLACEMENT_LABEL_RE.match(line) for _, line in _prose_lines(raw_text)):
+            failures.append(
+                f"{plan.relative_to(root)}:1: plan with Replacement block is missing from `docs/plans/README.md` `## Status Index`"
+            )
+        return None
+    for line in raw_text.splitlines()[:25]:
+        m_status = PLAN_STATUS_RE.match(line)
+        if m_status:
+            return m_status.group(1).lower(), m_status.group(2)
+    return None, ""
+
+
+def _replacement_block_failure(
+    root: Path,
+    plan: Path,
+    rep_line: int,
+    target_rel: str | None,
+    block_lines: list[str],
+) -> str | None:
+    """Return a failure line when a closed Replacement block is not in its target."""
+    if not target_rel:
+        return (
+            f"{plan.relative_to(root)}:{rep_line}: "
+            "Replacement block has no backticked target path"
+        )
+    target_path = (root / target_rel).resolve()
+    if not target_path.is_relative_to(root.resolve()) or not target_path.is_file():
+        return (
+            f"{plan.relative_to(root)}:{rep_line}: "
+            f"Replacement target `{target_rel}` does not exist"
+        )
+    snippet = "\n".join(block_lines)
+    target_text = target_path.read_text(errors="replace")
+    if not snippet or snippet not in target_text:
+        return (
+            f"{plan.relative_to(root)}:{rep_line}: "
+            f"Replacement block for `{target_rel}` does not match target file"
+        )
+    return None
+
+
+def _scan_prose_label_line(
+    root: Path,
+    plan: Path,
+    lineno: int,
+    line: str,
+    pending: tuple[int, str | None] | None,
+    heading_target: str | None,
+    failures: list[str],
+) -> tuple[tuple[int, str | None] | None, str | None]:
+    """Track heading targets and Replacement labels on one prose line."""
+    if pending is not None and line.strip():
+        failures.append(
+            f"{plan.relative_to(root)}:{pending[0]}: "
+            "Replacement label must be followed immediately by a fenced code block"
+        )
+        pending = None
+    m_heading = HEADING_PATH_RE.match(line)
+    if m_heading:
+        return pending, m_heading.group(1)
+    m_rep = REPLACEMENT_LABEL_RE.match(line)
+    if m_rep:
+        pending = (lineno, m_rep.group(1) or heading_target)
+    return pending, heading_target
+
+
+def _plan_replacement_block_failures(
+    root: Path, plan: Path, lines: list[str]
+) -> list[str]:
+    """Check every Replacement: fenced block in one promoted plan."""
+    failures: list[str] = []
+    fence: tuple[str, int] | None = None
+    heading_target: str | None = None
+    pending: tuple[int, str | None] | None = None
+    active_block: tuple[int, str | None, list[str]] | None = None
+
+    for lineno, line in enumerate(lines, start=1):
+        marker = _fence_marker(line)
+        if fence is None and marker is not None:
+            fence = (marker[0], marker[1])
+            if pending is not None:
+                active_block = (pending[0], pending[1], [])
+                pending = None
+            continue
+        if fence is not None:
+            if _closes_fence(marker, fence):
+                fence = None
+                if active_block is not None:
+                    failure = _replacement_block_failure(root, plan, *active_block)
+                    active_block = None
+                    if failure is not None:
+                        failures.append(failure)
+            elif active_block is not None:
+                active_block[2].append(line)
+            continue
+
+        pending, heading_target = _scan_prose_label_line(
+            root, plan, lineno, line, pending, heading_target, failures
+        )
+
+    unfinished = pending if pending is not None else active_block
+    if unfinished is not None:
+        failures.append(
+            f"{plan.relative_to(root)}:{unfinished[0]}: "
+            "Replacement label has no closed fenced code block"
+        )
+    return failures
+
+
+def _plan_replacement_sync_failures(root: Path) -> list[str]:
+    """Verify every Replacement: fenced block in an active promoted plan appears in its target file."""
+    plans_dir = root / "docs" / "plans"
+    if not plans_dir.is_dir():
+        return []
+    index_statuses = _load_plan_index_statuses(plans_dir)
+    failures: list[str] = []
+    for plan in sorted(plans_dir.glob("*.md")):
+        if plan.name == "README.md":
+            continue
+        raw_text = plan.read_text(errors="replace")
+        status = _plan_status(root, plan, raw_text, index_statuses, failures)
+        if status is None:
+            continue
+        status_word, status_tail = status
+        if status_word in SKIPPED_PLAN_STATUSES:
+            continue
+        lines = raw_text.splitlines()
+        if not _is_plan_promoted(lines, status_word, status_tail):
+            continue
+        failures.extend(_plan_replacement_block_failures(root, plan, lines))
+    return failures
+
+
 def check_tree(
     root: Path,
     *,
@@ -166,8 +380,9 @@ def check_tree(
         "remove the unused suppression entry"
         for unused in sorted(active_declared - claimed_allowlisted)
     )
+    failures.extend(_plan_replacement_sync_failures(root))
     if failures:
-        print(f"check-doc-paths: {len(failures)} dangling path claim(s):")
+        print(f"check-doc-paths: {len(failures)} failure(s):")
         for fail in failures:
             print(f"  {fail}")
         return 1
@@ -189,6 +404,18 @@ def _build_probe_tree(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}")
     return root
+
+
+PROBE_PLAN = "2026-11-02-sample-plan.md"
+PROBE_INDEX_HEADER = (
+    "# Plans\n\n## Status Index\n\n"
+    "| File | Title | Status | Superseded by |\n| --- | --- | --- | --- |\n"
+)
+
+
+def _probe_row(status_cell: str, plan: str = PROBE_PLAN) -> str:
+    """Return one weft-shaped `## Status Index` row for a self-test probe."""
+    return f"| [`{plan}`](./{plan}) | Sample plan | {status_cell} | none |\n"
 
 
 def self_test() -> int:
@@ -281,11 +508,163 @@ def self_test() -> int:
                 (root / symlink[0]).symlink_to(symlink[1])
             if quiet_check(root, declared) != expected:
                 failures.append(name)
+
+    spec_rel = "docs/specifications/01-sample.md"
+    weft_block = f"Replacement (`{spec_rel}`):\n```markdown\n"
+    plan_probes: list[tuple[str, str, str | None, str, int]] = [
+        (
+            "active promoted plan Replacement block matching target file was wrongly flagged",
+            "Status: active\nPromotion Baseline Identifier: `296a7cd` + worktree\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nexact spec line\n```\n",
+            None,
+            "header\nexact spec line\nfooter\n",
+            0,
+        ),
+        (
+            "active promoted plan Replacement block diverging from target file passed",
+            "Status: active\nPromotion Baseline Identifier: `296a7cd` + worktree\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nstale plan text\n```\n",
+            None,
+            "header\nupdated spec text\nfooter\n",
+            1,
+        ),
+        (
+            "active promoted plan heading-scoped Replacement block diverging from target file passed",
+            "Status: active — promoted\n\n### Delta 1 — `docs/specifications/01-sample.md`\n\nReplacement:\n```markdown\nstale text\n```\n",
+            None,
+            "header\nupdated text\n",
+            1,
+        ),
+        (
+            "active unpromoted plan Replacement block was wrongly flagged before promotion",
+            "Status: active\nPromotion Baseline Identifier: pending\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nunpromoted text\n```\n",
+            _probe_row("`active`"),
+            "baseline text\n",
+            0,
+        ),
+        (
+            "draft plan unpromoted Replacement block was wrongly flagged",
+            "Status: draft\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nunpromoted text\n```\n",
+            _probe_row("`draft`"),
+            "baseline text\n",
+            0,
+        ),
+        (
+            "completed index row overrode stale active header and skipped historical Replacement block",
+            "Status: active — promoted\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nolder historical text\n```\n",
+            _probe_row("`completed` — landed"),
+            "later evolved text\n",
+            0,
+        ),
+        (
+            "active promoted index row overrode stale draft header and caught diverging Replacement block",
+            "Status: draft\nPromotion Baseline Identifier: `296a7cd`\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nstale text\n```\n",
+            _probe_row("`active` — promoted"),
+            "updated text\n",
+            1,
+        ),
+        (
+            "unindexed plan with Replacement block when README exists failed instead of falling back to Status header",
+            "Status: completed\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nexact text\n```\n",
+            "",
+            "exact text\n",
+            1,
+        ),
+        (
+            "row outside Status Index section was ignored and did not mark active promoted plan completed",
+            "Status: active — promoted\n\nReplacement (`docs/specifications/01-sample.md`):\n```markdown\nstale text\n```\n",
+            "RAW:# Plans\n\n## Example\n\n"
+            + _probe_row("`completed`")
+            + "\n"
+            + PROBE_INDEX_HEADER
+            + _probe_row("`active` — promoted"),
+            "updated text\n",
+            1,
+        ),
+        (
+            "active promoted plan Replacement label without fenced block passed",
+            "Status: active — promoted\n\nReplacement (`docs/specifications/01-sample.md`):\nnot a fence\n",
+            None,
+            "not a fence\n",
+            1,
+        ),
+        (
+            "promoted weft row with a matching Replacement block was wrongly flagged",
+            "Status: promoted\n\nPromotion baseline identifier: pending\n\n"
+            + weft_block
+            + "exact spec line\n```\n",
+            _probe_row("`promoted`"),
+            "header\nexact spec line\nfooter\n",
+            0,
+        ),
+        (
+            "promoted weft row with a diverging Replacement block passed",
+            "Status: promoted\n\nPromotion baseline identifier: pending\n\n"
+            + weft_block
+            + "stale plan text\n```\n",
+            _probe_row("`promoted`"),
+            "header\nupdated spec text\nfooter\n",
+            1,
+        ),
+        (
+            "draft weft row with a diverging Replacement block was wrongly flagged",
+            "Status: draft\n\n" + weft_block + "stale plan text\n```\n",
+            _probe_row("`draft`"),
+            "header\nupdated spec text\nfooter\n",
+            0,
+        ),
+        (
+            "completed weft row with a diverging Replacement block was wrongly flagged",
+            "Status: completed\n\n" + weft_block + "older historical text\n```\n",
+            _probe_row("`completed`"),
+            "later evolved text\n",
+            0,
+        ),
+        (
+            "plan with a Replacement block absent from a weft Status Index passed",
+            "Status: promoted\n\n" + weft_block + "exact spec line\n```\n",
+            _probe_row("`promoted`", "2026-11-01-other-plan.md"),
+            "exact spec line\n",
+            1,
+        ),
+        (
+            "hub bare-shape row was read as indexing the plan in a weft README",
+            "Status: promoted\n\n" + weft_block + "exact spec line\n```\n",
+            f"| {PROBE_PLAN} | promoted |\n",
+            "exact spec line\n",
+            1,
+        ),
+        (
+            "row under the old ## Index heading was read as the Status Index",
+            "Status: promoted\n\n" + weft_block + "exact spec line\n```\n",
+            "RAW:# Plans\n\n## Index\n\n"
+            + "| File | Title | Status | Superseded by |\n| --- | --- | --- | --- |\n"
+            + _probe_row("`promoted`"),
+            "exact spec line\n",
+            1,
+        ),
+    ]
+    for name, plan_text, index_row, spec_text, expected in plan_probes:
+        with tempfile.TemporaryDirectory() as td:
+            root = _build_probe_tree(td, spec_text=spec_text)
+            plans_dir = root / "docs" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            if index_row is not None:
+                readme_content = (
+                    index_row[4:]
+                    if index_row.startswith("RAW:")
+                    else PROBE_INDEX_HEADER + index_row
+                )
+                (plans_dir / "README.md").write_text(readme_content)
+            (plans_dir / PROBE_PLAN).write_text(plan_text)
+            if quiet_check(root, set()) != expected:
+                failures.append(name)
+
     if failures:
         for f in failures:
             print(f"check-doc-paths self-test FAIL: {f}")
         return 1
-    print("check-doc-paths self-test: all claim, fence, and allowlist probes pass")
+    print(
+        "check-doc-paths self-test: all claim, fence, allowlist, and plan-replacement sync probes pass"
+    )
     return 0
 
 

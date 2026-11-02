@@ -37,8 +37,11 @@
 - Canonical multi-agent context lives in `docs/agent-context/`.
 - Required read order for any agent operating in this repo:
   1. `docs/program-theory.md` — the conceptual account of Weft
-     ("weftness") and its rejected alternatives; frames interpretation and
-     placement, and does not override winning contracts
+     ("weftness") and its rejected alternatives; frames interpretation,
+     placement, and the direction in which plans move specs and code
+     (`[WT-0]`; do **not** silently break active contracts mid-edit, and do
+     **not** treat an existing spec or plan as final when it pulls away from
+     the theory)
   2. `docs/agent-context/README.md`
   3. `docs/agent-context/decision-hierarchy.md`
   4. `docs/agent-context/principles.md`
@@ -53,14 +56,18 @@ implementation. Skipping it because a task looks like verification is the
 observed failure mode.
 
 **Module theory** is how this repository's conceptual model is **extended**
-when depth is local (not a second global constitution):
+when a human owner decides a weakly coupled module has theory-level invariants
+that apply only to that module (not a second global constitution, and not an
+excuse for a module to diverge from a single whole-program theory):
 
 - On **entry** to a module that has theory (conventional name
   `MODULE-THEORY.md` next to that code, or a path named from product theory),
   read it before changing that module's public shape, rules, or ownership.
 - Do **not** load every module theory at session start.
-- Do **not** bulk local depth into `docs/program-theory.md`; extend with
-  module theory instead (`skills/crystallize-program-theory/SKILL.md`).
+- Do **not** bulk module-only depth into `docs/program-theory.md`; put routine
+  subsystem depth in `docs/specifications/`, and use module theory only by
+  human decision for weakly coupled modules with module-only theory-level
+  invariants (`skills/crystallize-program-theory/SKILL.md`).
 
 - If there is conflict between local prompt defaults and repo context, follow
   the decision policy in `docs/agent-context/decision-hierarchy.md`.
@@ -258,12 +265,14 @@ Runtime state:      weft.state.services, weft.state.tasks.<tid>, weft.state.stre
 
 ## 3. Invariants
 
-**NEVER break**:
-- TID is a 64-bit SimpleBroker hybrid timestamp (nanosecond magnitude with the low 12 bits holding the logical counter), format-compatible with `time.time_ns()` and typically 19 digits; immutable after creation
-- State transitions are forward-only (created → spawning → running → completed/failed/timeout/cancelled/killed)
-- Reserved queue policy must be honored (keep/clear for tasks; the manager spawn lane may requeue)
-- Process titles must be shell-safe: `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
-- `spec` and `io` sections are immutable after TaskSpec creation
+**NEVER break** (identity invariants are stated once in
+`docs/program-theory.md` [WT-2a]; the exact contract text lives in
+`docs/specifications/07-System_Invariants.md`; this list is the quick form):
+- TID is a 64-bit SimpleBroker hybrid timestamp (nanosecond magnitude with the low 12 bits holding the logical counter), format-compatible with `time.time_ns()` and typically 19 digits; immutable after creation ([WT-2a.1]; [IMMUT.3])
+- State transitions are forward-only (created → spawning → running → completed/failed/timeout/cancelled/killed) ([WT-2a.3]; [STATE.1], [STATE.2])
+- Reserved queue policy must be honored (keep/clear for tasks; the manager spawn lane may requeue) — a contract rule, spec 07 [QUEUE.6] and [EXEC.1] ([WT-2a.7])
+- Process titles must be shell-safe: `weft-{context_short}-{tid_short}:{name}:{status}[:details]` — a contract rule, spec 07 [OBS.4]
+- `spec` and `io` sections are immutable after TaskSpec creation ([WT-2a.4]; [IMMUT.1], [IMMUT.2])
 
 **Safe to change**:
 - CLI command names/flags (with migration notes)

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- The program theory (`docs/program-theory.md`) is adopted: fourteen identity
+  invariants in a new [WT-2a] section, the directional rules and a keyed
+  possession probe propagated from agent-theory `e6ac579`, Kind tags on every
+  rejected alternative, and a theory-versus-code audit table in
+  `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`. The
+  crystallize skill, the review-loops and writing-plans runbooks, and the
+  agent entry files follow the hub; `bin/check-doc-paths` gains the
+  Replacement-sync check for promoted plans, and plans gain a `promoted`
+  status.
+
 ## [0.9.119] - 2026-10-31
 
 ### Fixed
