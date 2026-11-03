@@ -741,6 +741,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 9
 Reviewer inputs when run: this plan including §5, the seven target spec
 files at `b7eed9f9`, `docs/program-theory.md` [WT-2a.8], [WT-2a.11], [WT-5],
 [ALT-WT-014], and the two SimpleBroker sources named in §2.
+- Cross-family review of the landed implementation (codex 0.161.0, 2026-11-03, range da957a29..f2d9b36f): no blocker. All ten Replacement blocks verified byte-exact against the approved plan and present once in their targets; E9 (149 paths, none missing) and E10 (245 references, none dead) reproduced; the eight repaired mapping pointers confirmed to name live owners by direct inspection; an in-memory reversion of spec 00 produces the two containment failures `bin/check-doc-paths` is expected to raise. Task 5's keyed possession probe recorded as unrun by accepted constraint; Status stays `promoted` until the owner supplies the key.
 
 ## Execution log
 
