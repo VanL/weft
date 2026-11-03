@@ -1871,14 +1871,8 @@ WEFT_COMPLETED_RESULT_GRACE_SECONDS: Final[float] = 0.5
 INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Final[float] = 0.25
 """Best-effort drain window for late stdout/stderr after an interactive session exits."""
 
-INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL: Final[float] = 0.01
-"""Polling interval while draining late interactive stdout/stderr chunks."""
-
 INTERACTIVE_STOP_GRACE_SECONDS: Final[float] = 2.0
 """Grace period for interactive tasks to exit cleanly after stdin closure."""
-
-INTERACTIVE_STOP_POLL_INTERVAL: Final[float] = 0.05
-"""Polling interval while waiting for an interactive session to exit cooperatively."""
 
 COMMAND_SESSION_TERMINATION_TIMEOUT: Final[float] = 2.0
 """Base timeout for command-session termination steps."""

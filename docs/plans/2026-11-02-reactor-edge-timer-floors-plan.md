@@ -1515,3 +1515,58 @@ default `poll_interval` of `_spawn_submission.reconcile_submitted_spawn` (§9),
 which this plan leaves untouched. No behavior or test change.
 `grep -n "CONTROL_SURFACE_WAIT_INTERVAL" -A12 weft/_constants.py` shows the
 new docstring; `./.venv/bin/ruff check weft/_constants.py` passes.
+
+#### Task 3. Interactive drain and shutdown wait on the activity callback
+
+Baseline (Task 0 item 3, D8 and D10) at `9249be00`, production unchanged,
+taken with a temporary print in the two new tests (`-n0 -s`, then removed):
+
+```text
+BASELINE drain sleeps 20 poll_stdout 25
+BASELINE shutdown sleeps 10 is_alive 24
+```
+
+Red at the same commit (three runs, identical):
+
+```text
+tests/core/test_debugger.py::test_debugger_exit_does_not_wait_out_the_drain_budget
+E           assert 22 <= 3
+tests/tasks/test_task_interactive.py::test_interactive_drain_waits_once_while_descendant_holds_pipes
+E           assert [0.01, 0.01, ...01, 0.01, ...] == []
+E             Left contains 21 more items, first extra item: 0.01
+tests/tasks/test_task_interactive.py::test_interactive_shutdown_waits_for_exit_callback
+E           assert [0.05, 0.05, ...05, 0.05, ...] == []
+E             Left contains 10 more items, first extra item: 0.05
+3 failed
+```
+
+GREEN after the implementation: the three tests pass; the Task 3 Verify line
+(`tests/tasks/test_task_interactive.py tests/core/test_debugger.py
+tests/specs/test_reactor_architecture.py tests/cli/test_cli_long_session.py`,
+plus `tests/specs/test_ruff_policy.py`) reports `81 passed`; `./bin/pytest-pg
+tests/tasks/test_task_interactive.py tests/core/test_debugger.py` reports
+`35 passed`. Both retired constants are deleted from `weft/_constants.py` and
+added to `RETIRED_REACTOR_CAPS`; `[CC-2.2.1]` is added to the
+`weft/core/tasks/interactive.py` module docstring (the Task 5 docstring item,
+landed with the code it describes).
+
+Deviations:
+
+- `test_interactive_drain_waits_once_while_descendant_holds_pipes` wraps
+  `CommandSession.poll_stdout` at class level (a delegating counter) and
+  installs the `time` recorder before the first `task.process_once()`, rather
+  than wrapping the live instance after it. The first attempt at the plan's
+  shape showed the parent can exit inside the turn that starts the session,
+  so the instance wrap could miss the drain (one run never observed a live
+  session). The counter still counts only real calls on the real session
+  class; the bound 1..8 includes the creation turn's one flush.
+- `_assert_quiet_interactive_stream_wakes_reactor` (used by
+  `test_quiet_interactive_stdout_wakes_retained_watcher` and
+  `test_quiet_interactive_stderr_wakes_retained_watcher`) asserted that the
+  runner received the reactor strategy's bound `notify_activity` itself. Step 2
+  of this task wraps that callback (set the task-local event, then call the
+  received `on_activity`), so identity no longer holds by design. The assertion
+  now proves the same contract behaviorally: invoking the runner's callback
+  calls the reactor's `notify_activity` exactly once (a delegating counter on
+  the real strategy) and sets `_interactive_activity`; the real quiet-stream
+  wake through `drive_until` is unchanged. No ordering assertion changed.

@@ -11,6 +11,7 @@ import pytest
 from simplebroker import Queue
 from tests.helpers.typing import BrokerEnv
 from weft.core.tasks.debugger import Debugger
+from weft.core.tasks.sessions import InProcessCommandSession
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 
@@ -93,3 +94,46 @@ def test_debugger_info(broker_env: BrokerEnv, tid: str) -> None:
     assert payload["tid"] == tid
     assert payload["name"] == "debugger"
     dbg.cleanup()
+
+
+@pytest.mark.shared
+def test_debugger_exit_does_not_wait_out_the_drain_budget(
+    broker_env: BrokerEnv,
+    tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner-local session drains with one emit, not the 0.25 s budget.
+
+    Spec: [CC-2.2.1], [RM-5.2]
+    """
+
+    db_path, make_queue = broker_env
+    spec = make_debugger_spec(tid)
+    dbg = Debugger(db_path, spec)
+    real_poll_stdout = InProcessCommandSession.poll_stdout
+    poll_stdout_calls: list[None] = []
+
+    def counting_poll_stdout(self: InProcessCommandSession) -> list[str]:
+        poll_stdout_calls.append(None)
+        return real_poll_stdout(self)
+
+    monkeypatch.setattr(InProcessCommandSession, "poll_stdout", counting_poll_stdout)
+    try:
+        inbox = make_queue(spec.io.inputs["inbox"])
+        outbox = make_queue(spec.io.outputs["outbox"])
+        inbox.write(
+            json.dumps({"stdin": json.dumps({"command": "ping"}), "close": True})
+        )
+
+        dbg.process_once()
+        dbg._interactive_flush_outputs()
+
+        assert 1 <= len(poll_stdout_calls) <= 3
+        message = outbox.read_one()
+        assert message is not None
+        payload = json.loads(json.loads(message)["data"])
+        assert payload["command"] == "ping"
+        assert payload["response"] == "pong"
+        assert dbg._interactive_session is None
+    finally:
+        dbg.cleanup()

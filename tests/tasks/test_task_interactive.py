@@ -26,8 +26,10 @@ from weft._constants import (
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
+from weft.core.tasks import interactive as interactive_module
 from weft.core.tasks.base import BaseTask
 from weft.core.tasks.runner import TaskRunner
+from weft.core.tasks.sessions import CommandSession
 from weft.core.taskspec import (
     IOSection,
     LimitsSection,
@@ -343,6 +345,14 @@ def _assert_quiet_interactive_stream_wakes_reactor(
         return original_start_session(runner, on_activity=on_activity)
 
     monkeypatch.setattr(TaskRunner, "start_session", capture_start_session)
+    real_notify_activity = task._strategy.notify_activity
+    reactor_notifications: list[None] = []
+
+    def counting_notify_activity() -> None:
+        reactor_notifications.append(None)
+        real_notify_activity()
+
+    monkeypatch.setattr(task._strategy, "notify_activity", counting_notify_activity)
     output_queue = make_queue(
         spec.io.outputs["outbox"] if stream == "stdout" else spec.io.control["ctrl_out"]
     )
@@ -351,11 +361,13 @@ def _assert_quiet_interactive_stream_wakes_reactor(
         task.process_once()
         assert task._interactive_session is not None
         assert len(callbacks) == 1
-        assert getattr(callbacks[0], "__self__", None) is task._strategy
-        assert (
-            getattr(callbacks[0], "__func__", None)
-            is type(task._strategy).notify_activity
-        )
+        # The runner's callback is the reactor's coalescing notification,
+        # wrapped only to also set the task-local drain/shutdown event.
+        notifications_before = len(reactor_notifications)
+        task._interactive_activity.clear()
+        callbacks[0]()
+        assert len(reactor_notifications) == notifications_before + 1
+        assert task._interactive_activity.is_set()
 
         def stream_messages() -> list[dict[str, Any]]:
             return [json.loads(raw) for raw in output_queue.peek_generator()]
@@ -635,6 +647,199 @@ def test_interactive_parent_exit_finishes_while_descendant_holds_pipes(
                 child.wait(timeout=5.0)
             except psutil.Error:
                 pass
+        task.cleanup()
+
+
+class _RecordingTimeModule:
+    """Delegating stand-in for ``weft.core.tasks.interactive.time``.
+
+    Records each requested ``sleep`` duration, then calls through; every
+    other attribute resolves to the real ``time`` module.
+    """
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        time.sleep(seconds)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+def _install_recording_time(monkeypatch: pytest.MonkeyPatch) -> _RecordingTimeModule:
+    recorder = _RecordingTimeModule()
+    monkeypatch.setattr(interactive_module, "time", recorder)
+    return recorder
+
+
+@pytest.mark.shared
+def test_interactive_drain_waits_once_while_descendant_holds_pipes(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-exit drain waits on the activity callback, not a 10 ms cadence.
+
+    Spec: [CC-2.2.1], [CC-3.1], [RM-5.2]
+    """
+
+    psutil = pytest.importorskip("psutil")
+    db_path, make_queue = broker_env
+    pidfile = tmp_path / "interactive-descendant.pid"
+    pidfile_pending = tmp_path / "interactive-descendant.pid.pending"
+    script = tmp_path / "interactive_parent_exit.py"
+    script.write_text(
+        (
+            "import subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen("
+            "[sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"pending = Path({str(pidfile_pending)!r})\n"
+            "pending.write_text(str(child.pid), encoding='utf-8')\n"
+            f"pending.replace(Path({str(pidfile)!r}))\n"
+        ),
+        encoding="utf-8",
+    )
+    spec = make_interactive_spec(
+        unique_tid,
+        script_path=str(script),
+        polling_interval=5.0,
+    )
+    task = Consumer(db_path, spec)
+    child: Any | None = None
+    try:
+        # The parent can exit inside the turn that starts it, so the
+        # delegating counter wraps the session class before the first turn.
+        real_poll_stdout = CommandSession.poll_stdout
+        poll_stdout_calls: list[None] = []
+
+        def counting_poll_stdout(self: CommandSession) -> list[str]:
+            poll_stdout_calls.append(None)
+            return real_poll_stdout(self)
+
+        monkeypatch.setattr(CommandSession, "poll_stdout", counting_poll_stdout)
+        recorder = _install_recording_time(monkeypatch)
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
+        task.process_once()
+        pidfile_deadline = time.monotonic() + 5.0
+        while not pidfile.exists() and time.monotonic() < pidfile_deadline:
+            time.sleep(0.01)
+        assert pidfile.exists()
+        child_pid = int(pidfile.read_text(encoding="utf-8"))
+        child = psutil.Process(child_pid)
+
+        _drive_interactive(task, lambda: _finished(task))
+
+        assert recorder.sleeps == []
+        assert 1 <= len(poll_stdout_calls) <= 8
+        assert child.is_running()
+        assert task.taskspec.state.status == "completed"
+    finally:
+        if child is not None:
+            try:
+                child.kill()
+                child.wait(timeout=5.0)
+            except psutil.Error:
+                pass
+        task.cleanup()
+
+
+@pytest.mark.shared
+def test_interactive_shutdown_waits_for_exit_callback(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STOP shutdown waits on the exit and EOF callbacks, not a 50 ms cadence.
+
+    Spec: [CC-2.2.1], [CC-3.1], [MF-3]
+    """
+
+    db_path, make_queue = broker_env
+    script = tmp_path / "ready_then_linger.py"
+    script.write_text(
+        "import sys, time; print('ready', flush=True); "
+        "sys.stdin.read(); time.sleep(0.5)\n",
+        encoding="utf-8",
+    )
+    spec = make_interactive_spec(unique_tid, script_path=str(script))
+    task = Consumer(db_path, spec)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
+        drive_until(
+            lambda: [
+                raw
+                for raw in outbox.peek_generator()
+                if json.loads(raw).get("data") == "ready\n"
+            ],
+            bool,
+            step=task.process_once,
+            wait=task.wait_for_activity,
+            timeout=10,
+        )
+        session = task._interactive_session
+        assert session is not None and session.is_alive()
+        recorder = _install_recording_time(monkeypatch)
+        real_is_alive = session.is_alive
+        is_alive_calls: list[None] = []
+
+        def counting_is_alive() -> bool:
+            is_alive_calls.append(None)
+            return real_is_alive()
+
+        monkeypatch.setattr(session, "is_alive", counting_is_alive)
+        make_queue(spec.io.control["ctrl_in"]).write(
+            encode_control_message("STOP", request_id="interactive-shutdown")
+        )
+        drive_until(
+            lambda: task.should_stop,
+            bool,
+            step=task.process_once,
+            wait=task.wait_for_activity,
+            timeout=10,
+        )
+
+        assert recorder.sleeps == []
+        assert 1 <= len(is_alive_calls) <= 12
+        assert task.taskspec.state.status == "cancelled"
+        rows = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in ctrl_out.peek_generator(with_timestamps=True)
+        ]
+        terminals = [
+            timestamp for row, timestamp in rows if row.get("type") == "terminal"
+        ]
+        assert len(terminals) == 1
+        terminal_timestamp = terminals[0]
+        lifecycle = [
+            (json.loads(raw), timestamp)
+            for raw, timestamp in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator(
+                with_timestamps=True
+            )
+            if json.loads(raw).get("type") == "terminal"
+        ]
+        assert len(lifecycle) == 1
+        stderr_finals = [
+            timestamp
+            for row, timestamp in rows
+            if row.get("stream") == "stderr" and row.get("final")
+        ]
+        stdout_finals = [
+            timestamp
+            for raw, timestamp in outbox.peek_generator(with_timestamps=True)
+            if _is_final_marker(raw)
+        ]
+        assert len(stderr_finals) == len(stdout_finals) == 1
+        assert stderr_finals[0] < terminal_timestamp
+        assert stdout_finals[0] < terminal_timestamp
+        assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
+    finally:
         task.cleanup()
 
 

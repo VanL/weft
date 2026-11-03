@@ -1,7 +1,7 @@
 """Line-oriented interactive task mixin and helpers.
 
 Spec references:
-- docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.4]
+- docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3], [CC-2.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
 """
 
@@ -20,10 +20,8 @@ from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
-    INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL,
     INTERACTIVE_OUTPUT_DRAIN_TIMEOUT,
     INTERACTIVE_STOP_GRACE_SECONDS,
-    INTERACTIVE_STOP_POLL_INTERVAL,
     TERMINAL_TASK_STATUSES,
 )
 from weft.core.control_messages import ControlRequest
@@ -52,6 +50,7 @@ class InteractiveTaskMixin(ABC):
     _interactive_stderr_final_sent: bool
     _interactive_total_stdout_bytes: int
     _interactive_next_limit_check_at: float | None
+    _interactive_activity: threading.Event
     _stop_event: threading.Event
 
     @property
@@ -155,6 +154,7 @@ class InteractiveTaskMixin(ABC):
         self._interactive_stderr_final_sent = False
         self._interactive_total_stdout_bytes = 0
         self._interactive_next_limit_check_at = None
+        self._interactive_activity = threading.Event()
 
     # ------------------------------------------------------------------
     # Interactive helpers
@@ -241,8 +241,16 @@ class InteractiveTaskMixin(ABC):
         self._report_state_change(event="work_spawning", message_id=message_id)
 
         runner = self._make_task_runner(interactive=True)
+
+        def notify_activity() -> None:
+            # The runner publishes stream or exit state before this callback,
+            # so the task-local event wakes drain and shutdown waits after the
+            # publication they wait for ([CC-3.1]).
+            self._interactive_activity.set()
+            on_activity()
+
         try:
-            session = runner.start_session(on_activity=on_activity)
+            session = runner.start_session(on_activity=notify_activity)
         except Exception as exc:
             diagnostics = runner_diagnostics(
                 phase="process_spawn",
@@ -364,14 +372,31 @@ class InteractiveTaskMixin(ABC):
     def _interactive_drain_remaining(
         self, session: CommandSessionProtocol, outbox_queue: Queue
     ) -> None:
+        """Emit remaining output until both streams report EOF or the budget ends.
+
+        A runner session's stream readers publish each chunk or EOF and then
+        call the activity callback, which sets ``_interactive_activity``; the
+        drain waits on that event, cleared before each read so a publication
+        after the read still wakes it. An owner-local session (no runner, the
+        built-in Debugger) has no asynchronous producer, so one emit suffices.
+
+        Spec: [CC-2.2.1], [CC-3.1], [RM-5.2]
+        """
+        if self._interactive_runner is None:
+            self._interactive_emit_chunks(session, outbox_queue)
+            return
         deadline = time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT
-        while time.monotonic() < deadline:
+        while True:
+            self._interactive_activity.clear()
             self._interactive_emit_chunks(session, outbox_queue)
             if getattr(session, "_stdout_closed", False) and getattr(
                 session, "_stderr_closed", False
             ):
                 break
-            time.sleep(INTERACTIVE_OUTPUT_DRAIN_POLL_INTERVAL)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._interactive_activity.wait(remaining)
 
     def _interactive_finalize_session(self, failure_reason: str | None = None) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-044] exception
         if getattr(self, "_interactive_session", None) is None:
@@ -522,12 +547,19 @@ class InteractiveTaskMixin(ABC):
             if deadline is None
             else deadline
         )
-        while session.is_alive() and time.monotonic() < shutdown_deadline:
+        # The host runner's exit waiter records exit and then calls the
+        # activity callback, so this waits on that event rather than a cadence;
+        # it does not depend on the reactor arbiter, which may have stopped
+        # ([CC-2.2.1], [CC-3.1]).
+        while time.monotonic() < shutdown_deadline:
+            self._interactive_activity.clear()
             self._interactive_flush_outputs()
-            remaining = max(0.0, shutdown_deadline - time.monotonic())
+            if not session.is_alive():
+                break
+            remaining = shutdown_deadline - time.monotonic()
             if remaining <= 0:
                 break
-            time.sleep(min(INTERACTIVE_STOP_POLL_INTERVAL, remaining))
+            self._interactive_activity.wait(remaining)
         if session.is_alive():
             session.terminate(deadline=shutdown_deadline)
         session.stop_monitor()
