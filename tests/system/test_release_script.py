@@ -5,8 +5,10 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import os
+import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -46,6 +48,248 @@ def _release_state(
         local_tag_commit=local_tag_commit,
         remote_tag_commit=remote_tag_commit,
     )
+
+
+# Workflow structure is found by content, never by job id or step `env` key,
+# so the tests below survive identifier-only refactors and action upgrades
+# (Ruling D1 in docs/plans/2026-11-02-test-suite-structure-plan.md).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
+# [TS-4] names both files.
+_RELEASE_WORKFLOW = _WORKFLOWS / "release.yml"
+_TEST_WORKFLOW = _WORKFLOWS / "test.yml"
+_INPUT_REFERENCE = re.compile(r"^\$\{\{\s*inputs\.([A-Za-z_][\w-]*)\s*\}\}$")
+
+
+def _load_workflow(path: Path) -> dict[Any, Any]:
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict), path
+    return loaded
+
+
+def _workflow_trigger(workflow: dict[Any, Any]) -> dict[str, Any]:
+    # PyYAML parses the bare key `on` as the boolean True.
+    trigger = workflow.get("on", workflow.get(True))
+    return trigger if isinstance(trigger, dict) else {}
+
+
+def _release_gate_workflows() -> dict[Path, dict[str, Any]]:
+    """Return the tag-triggered workflows, keyed by resolved path."""
+
+    gates: dict[Path, dict[str, Any]] = {}
+    for path in sorted(_WORKFLOWS.glob("*.yml")):
+        workflow = _load_workflow(path)
+        push = _workflow_trigger(workflow).get("push")
+        if isinstance(push, dict) and push.get("tags"):
+            gates[path.resolve()] = workflow
+    return gates
+
+
+def _publishing_jobs(gate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a gate's jobs that call a reusable workflow in this repository."""
+
+    return [
+        job
+        for job in gate.get("jobs", {}).values()
+        if str(job.get("uses", "")).startswith("./")
+    ]
+
+
+def _jobs_with_step(workflow: dict[str, Any], uses_prefix: str) -> list[str]:
+    """Return the ids of jobs holding a step whose `uses` has the prefix."""
+
+    return [
+        job_id
+        for job_id, job in workflow["jobs"].items()
+        if any(
+            str(step.get("uses", "")).startswith(uses_prefix)
+            for step in job.get("steps", [])
+        )
+    ]
+
+
+def _needs_closure(jobs: dict[str, Any], job_id: str) -> set[str]:
+    """Return every job the given job transitively needs."""
+
+    closure: set[str] = set()
+    pending = [job_id]
+    while pending:
+        needs = jobs[pending.pop()].get("needs", [])
+        for needed in [needs] if isinstance(needs, str) else needs:
+            if needed not in closure:
+                closure.add(needed)
+                pending.append(needed)
+    return closure
+
+
+def _input_reference(value: object) -> str | None:
+    """Return `<name>` when the value is exactly `${{ inputs.<name> }}`."""
+
+    if not isinstance(value, str):
+        return None
+    match = _INPUT_REFERENCE.match(value.strip())
+    return None if match is None else match.group(1)
+
+
+def _checkout_ref_inputs(workflow: dict[str, Any]) -> set[str]:
+    """Return the inputs the workflow's checkout steps use as `ref`."""
+
+    names: set[str] = set()
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if str(step.get("uses", "")).startswith("actions/checkout@"):
+                name = _input_reference((step.get("with") or {}).get("ref"))
+                if name is not None:
+                    names.add(name)
+    return names
+
+
+def _carries_built_commit(
+    name: str | None,
+    gate_inputs: list[dict[str, Any]],
+    checkout_refs: set[str],
+) -> bool:
+    """Whether every gate passes for `name` the commit the build checks out."""
+
+    if name is None:
+        return False
+    return any(
+        all(
+            name in inputs and ref in inputs and inputs[name] == inputs[ref]
+            for inputs in gate_inputs
+        )
+        for ref in checkout_refs
+    )
+
+
+def _release_switch_input(reusable: dict[str, Any]) -> str:
+    """Return the input the release-asset job's `if:` consumes."""
+
+    names = {
+        name
+        for job_id in _jobs_with_step(reusable, "softprops/action-gh-release@")
+        for name in re.findall(
+            r"\binputs\.([A-Za-z_][\w-]*)", str(reusable["jobs"][job_id].get("if", ""))
+        )
+    }
+    (name,) = names
+    return str(name)
+
+
+def _tag_pattern_prefix(pattern: str) -> str:
+    """Return the literal prefix of a supported `<literal>*` tag filter."""
+
+    assert re.fullmatch(r"[^*?+\[\]!]*\*", pattern), (
+        f"unsupported tag filter {pattern!r}"
+    )
+    return pattern.removesuffix("*")
+
+
+def _prefix_matches(prefix: str, tag: str) -> bool:
+    """Whether `<prefix>*` matches the tag (`*` matches anything but `/`)."""
+
+    return tag.startswith(prefix) and "/" not in tag.removeprefix(prefix)
+
+
+def _balanced_end(text: str, open_index: int, opener: str, closer: str) -> int:
+    """Return the index just past the closer that matches `text[open_index]`."""
+
+    depth = 0
+    for index in range(open_index, len(text)):
+        if text[index] == opener:
+            depth += 1
+        elif text[index] == closer:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(text)
+
+
+def _loop_bodies(script: str) -> list[str]:
+    """Return the body of each `for`, `while`, or `do` loop in a JS script."""
+
+    bodies: list[str] = []
+    for match in re.finditer(r"\b(?:for|while)\s*\(|\bdo\s*\{", script):
+        if match.group().startswith("do"):
+            start = match.end() - 1
+            bodies.append(script[start : _balanced_end(script, start, "{", "}")])
+            continue
+        header_end = _balanced_end(script, match.end() - 1, "(", ")")
+        rest = script[header_end:].lstrip()
+        if rest.startswith("{"):
+            bodies.append(rest[: _balanced_end(rest, 0, "{", "}")])
+        else:
+            statement, _separator, _tail = rest.partition(";")
+            bodies.append(statement)
+    return bodies
+
+
+def _extension_targets(release: ModuleType) -> list[Any]:
+    """Return every release target other than the root target."""
+
+    return [
+        target
+        for target in release.RELEASE_TARGETS.values()
+        if target.tag_namespace is not None
+    ]
+
+
+def _suite_path(target: Any) -> str:
+    """Return a first-party package's test-suite path relative to the root."""
+
+    return str((target.package_dir / "tests").relative_to(_REPO_ROOT).as_posix())
+
+
+def _assert_gate_publishes_target(
+    gate: dict[str, Any], target: Any, targets: list[Any]
+) -> set[str]:
+    """Check a gate's publishing jobs against its target; return what they call.
+
+    Identifier-free relations only: the target's package name is passed and no
+    other target's is, exactly one input names the target's package directory,
+    and the input the reusable workflow consumes as its release-asset switch
+    (or that input's default) equals the target's release-enabled flag.
+    """
+
+    publishing = _publishing_jobs(gate)
+    assert publishing, target.key
+    called: set[str] = set()
+    for job in publishing:
+        # No condition, so every matching tag reaches the publication.
+        assert "if" not in job, target.key
+        called.add(job["uses"])
+        reusable = _load_workflow(_REPO_ROOT / job["uses"])
+        reusable_trigger = _workflow_trigger(reusable)
+        assert "workflow_call" in reusable_trigger, job["uses"]
+        inputs = job.get("with", {})
+        values = list(inputs.values())
+        assert target.package_name in values, target.key
+        for other in targets:
+            if other is not target:
+                assert other.package_name not in values, (target.key, other.key)
+        package_dir_values = [
+            value
+            for value in values
+            if isinstance(value, str)
+            and (_REPO_ROOT / value).resolve() == target.package_dir.resolve()
+        ]
+        assert len(package_dir_values) == 1, target.key
+        switch = _release_switch_input(reusable)
+        declared = reusable_trigger["workflow_call"]["inputs"]
+        assert switch in declared
+        enabled = inputs.get(switch, declared[switch].get("default"))
+        assert enabled == target.github_release_enabled, target.key
+    return called
+
+
+def _requirement_name(requirement: str) -> str:
+    match = re.match(r"[A-Za-z0-9._-]+", requirement)
+    assert match is not None, requirement
+    return match.group()
+
+
+def _normalized_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 @pytest.mark.parametrize(
@@ -175,32 +419,41 @@ def test_inspect_release_state_uses_target_package_name_and_tag_namespace(
     """Target-specific tag namespaces and package names should be preserved."""
 
     release = _load_release_module()
+    target = dataclasses.replace(
+        release.DOCKER_RELEASE_TARGET,
+        package_name="example-package",
+        tag_namespace="example_namespace",
+    )
     monkeypatch.setattr(release, "github_release_exists", lambda tag_name: False)
     monkeypatch.setattr(
         release,
         "pypi_version_exists",
         lambda package_name, version: (
-            package_name == "weft-docker" and version == "0.1.0"
+            package_name == "example-package" and version == "0.1.0"
         ),
     )
     monkeypatch.setattr(release, "local_tag_commit", lambda tag_name: "a" * 40)
     monkeypatch.setattr(release, "remote_tag_commit", lambda tag_name: None)
 
-    state = release.inspect_release_state("0.1.0", target=release.DOCKER_RELEASE_TARGET)
+    state = release.inspect_release_state("0.1.0", target=target)
 
-    assert state.tag_name == "weft_docker/v0.1.0"
+    assert state.tag_name == "example_namespace/v0.1.0"
     assert state.pypi_release_exists is True
-    assert state.target is release.DOCKER_RELEASE_TARGET
+    assert state.target is target
 
 
 def test_django_release_target_uses_namespaced_tag_and_package_dir() -> None:
     """The Django integration should publish like the other first-party packages."""
 
     release = _load_release_module()
+    django = release.DJANGO_RELEASE_TARGET
 
-    assert release.DJANGO_RELEASE_TARGET.package_name == "weft-django"
-    assert release.DJANGO_RELEASE_TARGET.tag_name("0.1.0") == "weft_django/v0.1.0"
-    assert release.DJANGO_RELEASE_TARGET.package_dir == release.DJANGO_INTEGRATION_DIR
+    assert django.tag_namespace is not None
+    assert django.pyproject_path.parent == django.package_dir
+    project = tomllib.loads(django.pyproject_path.read_text(encoding="utf-8"))
+    assert project["project"]["name"] == django.package_name
+    owned = dataclasses.replace(django, tag_namespace="example_namespace")
+    assert owned.tag_name("0.1.0") == "example_namespace/v0.1.0"
 
 
 def test_main_rejects_removed_publish_flag() -> None:
@@ -708,10 +961,8 @@ def test_main_dry_run_defaults_to_core_only(
 
     output = capsys.readouterr().out
     assert "$ git push origin v0.1.0" in output
-    assert "weft_docker/v" not in output
-    assert "weft_django/v" not in output
-    assert "weft_macos_sandbox/v" not in output
-    assert "weft_microsandbox/v" not in output
+    for target in _extension_targets(release):
+        assert target.tag_name("") not in output, target.key
     assert output.index("$ git push origin main") < output.index(
         "would wait for the exact main/master push run"
     )
@@ -720,10 +971,13 @@ def test_main_dry_run_defaults_to_core_only(
     )
 
 
-def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
+def test_build_precheck_commands_cover_release_gate_and_quality_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The helper precheck should always cover the core release-gate suites."""
 
     release = _load_release_module()
+    monkeypatch.setattr(release, "_pytest_worker_count", lambda: "17")
     commands = release.build_precheck_commands(
         include_docker_extension_tests=False,
         include_macos_sandbox_extension_tests=False,
@@ -741,11 +995,16 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         command for command in commands if "ruff" in command and "format" in command
     )
     mypy_command = next(command for command in commands if "mypy" in command)
-    live_provider_command = next(
-        command for command in commands if "bin/pytest-live-providers" in command
-    )
+    assert any("bin/pytest-live-providers" in command for command in commands)
 
-    # Gate coverage matters; harmless reordering of extras and gate commands does not.
+    extensions = _extension_targets(release)
+    assert extensions
+    pyproject = tomllib.loads(
+        (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    optional_dependencies = pyproject["project"]["optional-dependencies"]
+    # Every first-party package must be installed by the extras each gate
+    # passes; extra extras and reordering are harmless.
     for command in (
         sqlite_command,
         postgres_command,
@@ -753,54 +1012,42 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates() -> None:
         ruff_format_command,
         mypy_command,
     ):
-        assert command[:2] == ("uv", "run")
         extras = {
             command[index + 1] for index, arg in enumerate(command) if arg == "--extra"
         }
-        assert extras == {"dev", "docker", "django", "macos-sandbox", "microsandbox"}
+        installed = {
+            _normalized_package_name(_requirement_name(requirement))
+            for extra in extras
+            for requirement in optional_dependencies[extra]
+        }
+        for target in extensions:
+            assert _normalized_package_name(target.package_name) in installed, (
+                command,
+                target.key,
+            )
+
+    # All markers, so the slow tests run ([TS-4]).
     assert sqlite_command[sqlite_command.index("-m") + 1] == ""
     assert "--all" in postgres_command
-    pytest_targets = {
-        arg
-        for command in commands
-        if "pytest" in command
-        for arg in command
-        if arg.endswith("/tests")
-    }
-    assert pytest_targets == {
-        "integrations/weft_django/tests",
-        "extensions/weft_microsandbox/tests",
-    }
-    quality_targets = {
-        "weft",
-        "tests",
-        "integrations/weft_django",
-        "extensions/weft_docker",
-        "extensions/weft_macos_sandbox",
-        "extensions/weft_microsandbox",
-    }
-    for command in (ruff_check_command, ruff_format_command):
-        assert quality_targets <= set(command)
     assert "--check" in ruff_format_command
-    assert {
-        "weft",
-        "tests",
-        "bin",
-        "integrations/weft_django/weft_django",
-        "extensions/weft_docker/weft_docker",
-        "extensions/weft_macos_sandbox/weft_macos_sandbox",
-        "extensions/weft_microsandbox/weft_microsandbox",
-    } <= set(mypy_command)
-    assert mypy_command[mypy_command.index("--config-file") + 1] == "pyproject.toml"
-    assert live_provider_command[:2] == ("uv", "run")
-    assert "python" in live_provider_command
-    assert "dev" in live_provider_command
-    assert release.PRECHECK_ENV_OVERRIDES == {
-        "PYTEST_ADDOPTS": "-x --maxfail=1",
-        "WEFT_EAGER_FAILURE_TRACEBACK": "1",
-        "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS": "0",
-        "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS": "0",
-    }
+    for command in (ruff_check_command, ruff_format_command):
+        assert "weft" in command
+        assert "tests" in command
+        for target in extensions:
+            assert target.package_dir.relative_to(_REPO_ROOT).as_posix() in command
+    # [TS-3]: mypy covers tests/ and bin/ as well as every first-party package.
+    assert "weft" in mypy_command
+    assert "tests" in mypy_command
+    assert "bin" in mypy_command
+    for target in extensions:
+        relative = target.package_dir.relative_to(_REPO_ROOT)
+        assert (relative / relative.name).as_posix() in mypy_command
+
+    addopts = release.build_precheck_env_overrides()["PYTEST_ADDOPTS"].split()
+    assert "-x" in addopts or "--exitfirst" in addopts or "--maxfail=1" in addopts
+    # Live provider suites run only through their own command.
+    assert release.PRECHECK_ENV_OVERRIDES["WEFT_RUN_LIVE_PROVIDER_CLI_TESTS"] == "0"
+    assert release.PRECHECK_ENV_OVERRIDES["WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS"] == "0"
 
 
 def test_build_precheck_env_overrides_sets_worker_count(
@@ -811,13 +1058,10 @@ def test_build_precheck_env_overrides_sets_worker_count(
     release = _load_release_module()
     monkeypatch.setattr(release, "_pytest_worker_count", lambda: "17")
 
-    assert release.build_precheck_env_overrides() == {
-        "PYTEST_ADDOPTS": "-x --maxfail=1",
-        "WEFT_EAGER_FAILURE_TRACEBACK": "1",
-        "WEFT_RUN_LIVE_PROVIDER_CLI_MCP_TESTS": "0",
-        "WEFT_RUN_LIVE_PROVIDER_CLI_TESTS": "0",
-        "PYTEST_XDIST_AUTO_NUM_WORKERS": "17",
-    }
+    result = release.build_precheck_env_overrides()
+
+    assert result["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "17"
+    assert release.PRECHECK_ENV_OVERRIDES.items() <= result.items()
 
 
 def test_build_postupdate_steps_build_all_publishable_packages() -> None:
@@ -827,30 +1071,22 @@ def test_build_postupdate_steps_build_all_publishable_packages() -> None:
 
     steps = release.build_postupdate_steps()
 
-    assert steps[0].command == (
-        "uv",
-        "run",
-        "pytest",
-        "tests/system/test_constants.py",
-        "-q",
-    )
-    assert steps[1] == release.CommandStep(("uv", "build"), cwd=release.PROJECT_ROOT)
-    assert steps[2] == release.CommandStep(
-        ("uv", "build"),
-        cwd=release.DJANGO_INTEGRATION_DIR,
-    )
-    assert steps[3] == release.CommandStep(
-        ("uv", "build"),
-        cwd=release.DOCKER_EXTENSION_DIR,
-    )
-    assert steps[4] == release.CommandStep(
-        ("uv", "build"),
-        cwd=release.MACOS_SANDBOX_EXTENSION_DIR,
-    )
-    assert steps[5] == release.CommandStep(
-        ("uv", "build"),
-        cwd=release.MICROSANDBOX_EXTENSION_DIR,
-    )
+    built_dirs = {step.cwd.resolve() for step in steps if "build" in step.command}
+    # [TS-4]: packages are added to the release gates and the release helper
+    # atomically, so the gates' package directories are the independent oracle.
+    gate_package_dirs: set[Path] = set()
+    for gate_path, gate in _release_gate_workflows().items():
+        for job in _publishing_jobs(gate):
+            package_dirs = {
+                (_REPO_ROOT / value).resolve()
+                for value in job.get("with", {}).values()
+                if isinstance(value, str)
+                and (_REPO_ROOT / value / "pyproject.toml").is_file()
+            }
+            assert len(package_dirs) == 1, gate_path
+            gate_package_dirs |= package_dirs
+    assert gate_package_dirs
+    assert built_dirs == gate_package_dirs
 
 
 def test_build_precheck_commands_include_extension_tests_when_supported() -> None:
@@ -869,12 +1105,8 @@ def test_build_precheck_commands_include_extension_tests_when_supported() -> Non
         for arg in command
         if arg.endswith("/tests")
     }
-    assert targets == {
-        "integrations/weft_django/tests",
-        "extensions/weft_microsandbox/tests",
-        "extensions/weft_docker/tests",
-        "extensions/weft_macos_sandbox/tests",
-    }
+    for target in _extension_targets(release):
+        assert _suite_path(target) in targets, target.key
 
 
 def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None:
@@ -893,10 +1125,15 @@ def test_build_precheck_commands_skip_extension_tests_when_unavailable() -> None
         for arg in command
         if arg.endswith("/tests")
     }
-    assert targets == {
-        "integrations/weft_django/tests",
-        "extensions/weft_microsandbox/tests",
-    }
+    host_dependent = (
+        release.DOCKER_RELEASE_TARGET,
+        release.MACOS_SANDBOX_RELEASE_TARGET,
+    )
+    for target in _extension_targets(release):
+        if target in host_dependent:
+            assert _suite_path(target) not in targets, target.key
+        else:
+            assert _suite_path(target) in targets, target.key
 
 
 def test_docker_extension_tests_are_disabled_on_windows(
@@ -930,7 +1167,7 @@ def test_merge_command_env_appends_pytest_addopts() -> None:
 
     release = _load_release_module()
     merged = release._merge_command_env(
-        release.PRECHECK_ENV_OVERRIDES,
+        {"PYTEST_ADDOPTS": "-k example", "EXAMPLE_FLAG": "1"},
         base_env={
             "PATH": "/tmp/bin",
             "PYTEST_ADDOPTS": "--lf",
@@ -940,8 +1177,8 @@ def test_merge_command_env_appends_pytest_addopts() -> None:
     assert merged is not None
     assert merged["PATH"] == "/tmp/bin"
     assert merged["UV_PROJECT_ENVIRONMENT"] == str(release.PROJECT_VENV_PATH)
-    assert merged["PYTEST_ADDOPTS"] == "--lf -x --maxfail=1"
-    assert merged["WEFT_EAGER_FAILURE_TRACEBACK"] == "1"
+    assert merged["PYTEST_ADDOPTS"] == "--lf -k example"
+    assert merged["EXAMPLE_FLAG"] == "1"
 
 
 def test_merge_command_env_drops_non_project_virtualenv() -> None:
@@ -977,12 +1214,12 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
         ("pytest", "-q"),
         cwd=release.DOCKER_EXTENSION_DIR,
         dry_run=True,
-        env_overrides=release.PRECHECK_ENV_OVERRIDES,
+        env_overrides={"PYTEST_ADDOPTS": "-k example", "EXAMPLE_FLAG": "1"},
     )
 
     captured = capsys.readouterr()
-    assert "PYTEST_ADDOPTS='-x --maxfail=1'" in captured.out
-    assert "WEFT_EAGER_FAILURE_TRACEBACK=1" in captured.out
+    assert "PYTEST_ADDOPTS='-k example'" in captured.out
+    assert "EXAMPLE_FLAG=1" in captured.out
     assert "pytest -q" in captured.out
     assert "(cwd=extensions/weft_docker)" in captured.out
 
@@ -990,81 +1227,147 @@ def test_run_command_dry_run_shows_env_prefix_and_cwd(
 def test_release_gate_routes_each_tag_to_exactly_one_package() -> None:
     """Each immutable package tag must invoke only its matching publication."""
 
-    root = Path(__file__).resolve().parents[2]
-    expected = {
-        "release-gate.yml": ("v*", "weft", ".", True),
-        "release-gate-django.yml": (
-            "weft_django/v*",
-            "weft-django",
-            "integrations/weft_django",
-            False,
-        ),
-        "release-gate-docker.yml": (
-            "weft_docker/v*",
-            "weft-docker",
-            "extensions/weft_docker",
-            False,
-        ),
-        "release-gate-macos-sandbox.yml": (
-            "weft_macos_sandbox/v*",
-            "weft-macos-sandbox",
-            "extensions/weft_macos_sandbox",
-            False,
-        ),
-        "release-gate-microsandbox.yml": (
-            "weft_microsandbox/v*",
-            "weft-microsandbox",
-            "extensions/weft_microsandbox",
-            False,
-        ),
-    }
-    gate_paths = sorted((root / ".github" / "workflows").glob("release-gate*.yml"))
-    assert {path.name for path in gate_paths} == expected.keys()
+    release = _load_release_module()
+    targets = list(release.RELEASE_TARGETS.values())
+    gates = _release_gate_workflows()
 
-    for path in gate_paths:
-        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-        tag, package, package_dir, github_release = expected[path.name]
-        assert workflow[True]["push"]["tags"] == [tag]
-        assert set(workflow["jobs"]) == {"publish-release"}
-        publish = workflow["jobs"]["publish-release"]
-        assert publish["uses"] == "./.github/workflows/release.yml"
-        assert publish["with"] == {
-            "package_name": package,
-            "package_dir": package_dir,
-            "tag_name": "${{ github.ref_name }}",
-            "release_ref": "${{ github.sha }}",
-            "expected_tag_commit": "${{ github.sha }}",
-            "create_github_release": github_release,
+    def gate_path_of(target: Any) -> Path:
+        return (_REPO_ROOT / str(target.release_gate_workflow)).resolve()
+
+    # Every tag-triggered workflow is some target's gate, and every target has one.
+    assert set(gates) == {gate_path_of(target) for target in targets}
+
+    # Supported tag language: `<literal>*` only, so each pattern matches exactly
+    # the tags that begin with its literal prefix and have no `/` after it.
+    prefixes = {
+        gate_path: [
+            _tag_pattern_prefix(pattern)
+            for pattern in _workflow_trigger(gate)["push"]["tags"]
+        ]
+        for gate_path, gate in gates.items()
+    }
+    for target in targets:
+        namespace = target.tag_name("")
+        covering = {
+            gate_path
+            for gate_path, gate_prefixes in prefixes.items()
+            if any(_prefix_matches(prefix, namespace) for prefix in gate_prefixes)
         }
-        assert publish["permissions"]["actions"] == "read"
+        assert covering == {gate_path_of(target)}, target.key
+    for gate_path, gate_prefixes in prefixes.items():
+        covered = [
+            target
+            for target in targets
+            if any(
+                _prefix_matches(prefix, target.tag_name("")) for prefix in gate_prefixes
+            )
+        ]
+        assert len(covered) == 1, gate_path
+    # Exclusivity: no tag of any version can match two gates.
+    gate_prefix_pairs = [
+        (gate_path, prefix)
+        for gate_path, gate_prefixes in prefixes.items()
+        for prefix in gate_prefixes
+    ]
+    for gate_path, prefix in gate_prefix_pairs:
+        for other_path, other_prefix in gate_prefix_pairs:
+            assert other_path == gate_path or not other_prefix.startswith(prefix), (
+                gate_path,
+                other_path,
+            )
+    # Readable sanity case, not the proof.
+    for target in targets:
+        tag = target.tag_name("1.2.3")
+        matching = {
+            gate_path
+            for gate_path, gate_prefixes in prefixes.items()
+            if any(_prefix_matches(prefix, tag) for prefix in gate_prefixes)
+        }
+        assert matching == {gate_path_of(target)}, tag
+
+    # Each gate calls the sole package build/publish workflow for its target.
+    called_workflows: set[str] = set()
+    for target in targets:
+        called_workflows |= _assert_gate_publishes_target(
+            gates[gate_path_of(target)], target, targets
+        )
+    assert len(called_workflows) == 1
 
 
 def test_publish_checks_completed_main_push_once_without_polling() -> None:
     """Publication must fail closed on one exact completed Test push lookup."""
 
-    root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load(
-        (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    )
+    workflow = _load_workflow(_RELEASE_WORKFLOW)
     jobs = workflow["jobs"]
-    verification = jobs["verify-main-test-workflow"]
-    verification_step = next(
-        step
-        for step in verification["steps"]
-        if step.get("uses", "").startswith("actions/github-script@")
-    )
-    script = verification_step["with"]["script"]
+    run_checks = [
+        (job_id, step)
+        for job_id, job in jobs.items()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("actions/github-script@")
+        and "listWorkflowRuns(" in str((step.get("with") or {}).get("script", ""))
+    ]
+    assert run_checks
 
-    assert verification_step["env"]["EXPECTED_SHA"] == (
-        "${{ inputs.expected_tag_commit }}"
-    )
-    assert 'workflow_id: "test.yml"' in script
-    assert "head_sha: expectedSha" in script
-    assert 'event: "push"' in script
-    assert '["main", "master"]' in script
-    assert 'latest.status !== "completed"' in script
-    assert 'latest.conclusion !== "success"' in script
-    assert "while (" not in script
-    assert "setTimeout" not in script
-    assert "verify-main-test-workflow" in jobs["publish-to-pypi"]["needs"]
-    assert "publish-to-pypi" in jobs["github-release"]["needs"]
+    gate_inputs = [
+        job.get("with", {})
+        for gate in _release_gate_workflows().values()
+        for job in _publishing_jobs(gate)
+    ]
+    assert gate_inputs
+    checkout_refs = _checkout_ref_inputs(workflow)
+    assert checkout_refs
+    test_workflow = _load_workflow(_TEST_WORKFLOW)
+    # [TS-4]: the `Test` workflow is the sole automated test owner.
+    assert test_workflow["name"] == "Test"
+
+    for job_id, step in run_checks:
+        script = step["with"]["script"]
+        commit_keys = [
+            key
+            for key, value in (step.get("env") or {}).items()
+            if _carries_built_commit(
+                _input_reference(value), gate_inputs, checkout_refs
+            )
+        ]
+        assert commit_keys, job_id
+        filtered_keys = []
+        for key in commit_keys:
+            binding = re.search(
+                rf"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*process\.env\.{re.escape(key)}\b",
+                script,
+            )
+            if binding is not None and re.search(
+                rf"\bhead_sha\s*:\s*{re.escape(binding.group(1))}\b", script
+            ):
+                filtered_keys.append(key)
+        assert filtered_keys, job_id
+
+        workflow_id = re.search(r"workflow_id:\s*[\"']([^\"']+)[\"']", script)
+        assert workflow_id is not None
+        assert workflow_id.group(1) == _TEST_WORKFLOW.name
+        assert re.search(r"\bevent:\s*[\"']push[\"']", script)
+        assert re.search(r"[\"']main[\"']", script)
+        assert re.search(r"[\"']master[\"']", script)
+        # Owner, 2026-11-03: kept unchanged. They prove both comparisons are
+        # present with inequality polarity; they do not prove the connective
+        # between them, and they depend on the script's variable name.
+        assert 'latest.status !== "completed"' in script
+        assert 'latest.conclusion !== "success"' in script
+        # No polling: no timer, and no loop around the workflow-run lookup.
+        assert re.search(r"\bset(?:Timeout|Interval)\s*\(", script) is None
+        for body in _loop_bodies(script):
+            assert "listWorkflowRuns" not in body
+
+    pypi_jobs = [
+        job_id
+        for job_id, job in jobs.items()
+        if isinstance(job.get("permissions"), dict)
+        and job["permissions"].get("id-token") == "write"
+    ]
+    (pypi_job,) = pypi_jobs
+    for job_id, _step in run_checks:
+        assert job_id in _needs_closure(jobs, pypi_job)
+    asset_jobs = _jobs_with_step(workflow, "softprops/action-gh-release@")
+    assert asset_jobs
+    for asset_job in asset_jobs:
+        assert pypi_job in _needs_closure(jobs, asset_job)

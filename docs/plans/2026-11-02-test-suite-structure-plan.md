@@ -204,6 +204,12 @@ snapshot need not. The owner decides whether Task 1's scope widens to these
 locations. Until the owner says so, Task 1 leaves them unchanged, as
 consequence 2 directs.
 
+Scope-note closure: closed on the owner's implement instruction (2026-11-03)
+with the recommended option: Task 1's scope widens to the six locations in
+the table above, and each row's recommendation is applied as written (see
+the Execution log, Task 1). Consequence 2 is superseded for those locations
+only; the rest of group (i) stays unchanged.
+
 **D1a (only if D1 = B).** Is "a `pytest` step precedes the first `uv build`"
 in `bin/release.py::build_postupdate_steps` a contract? Task 1 drops that
 ordering assertion unless the owner rules it one.
@@ -1508,3 +1514,171 @@ append below.
   `tests/system/test_reactor_driver.py:123`).
 - Index row: present in `docs/plans/README.md` as `draft` (uncommitted
   series change); `tests/specs/test_plan_metadata.py` passes.
+
+### Implementation execution (2026-11-03, landing after plan 10 at `f2d9b36f`)
+
+Task 0, rulings and comprehension answers (recorded before the first edit).
+D1 (reading B, per-assertion criterion), D1a (dropped), D2 (`drifted`, with
+the calibrated-ratio addendum) and D3 (authorized) are all recorded above
+with owner and date; none is `pending`, so Tasks 1 to 10 may start.
+
+1. If Task 2's restored load turns
+   `test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap`
+   red on macOS: stop corrective work and acceptance reruns at once, and
+   preserve the exact command, backend (SQLite), worker count (default
+   xdist parallelism), and the failure output and harness diagnostics
+   ([TS-0] contention stop, [ALT-WT-017], Pattern 1). Re-derive what the
+   theory predicts: repeated concurrent `weft run` bootstraps in one context
+   converge on exactly one live Manager (a Manager belongs to the context;
+   supersession changes who takes future work and never kills children),
+   and every submitted task completes within its budget. Locate the causal
+   flaw in the product, the harness, the oracle, or the environment before
+   any correction. A lower-load run is allowed only as a labelled
+   diagnostic of a stated hypothesis and never closes the failure. I may
+   not restore the platform load reduction, re-add a macOS timeout branch,
+   raise the ceiling, fix a factor, or pad any timeout to obtain green. On
+   Windows the 2026-11-01 trigger table additionally refuses raising a
+   deadline or lowering the worker count when the proposal cites CI stalls.
+2. The publish-check test may inspect the `actions/github-script` body as
+   text because the gate's JavaScript runs only in GitHub Actions, so text
+   inspection is the cheapest independent guard of the [TS-4] clauses (one
+   lookup of a completed Test push run, no polling), and the retention bar
+   keeps source inspection when it is that guard and survives an
+   identifier-only refactor. Loop keywords, `setTimeout`/`setInterval`, and
+   the REST parameters `workflow_id`, `event`, `head_sha` are defined by
+   JavaScript and the GitHub API, so no refactor of the script can rename
+   them. `expectedSha` and `latest` are names the script author chose;
+   renaming them changes no behavior, so checking them is what the owner's
+   criterion calls wrong (the two `latest` polarity substrings are kept
+   anyway by the owner's explicit 2026-11-03 ruling, blind spots named). The
+   same criterion removes the exact dict equality in
+   `test_build_precheck_env_overrides_sets_worker_count`, which fails when
+   anyone adds an unrelated key while a narrower assertion holds the
+   forwarding claim.
+
+Task 1 (Ruling D1, D1a, and the group (i) scope-note closure).
+
+- Lint aid before the edits (the Verify command, run from the repository
+  root after `. ./.envrc`): exit 1, `44 finding(s)`, the same count as at
+  `b7eed9f9`; deny list `['EXPECTED_SHA', 'REPOSITORY', 'TAG_NAME',
+  'expectedSha', 'github-release', 'latest', 'leftTimestamp',
+  'publish-release', 'publish-to-pypi', 'response', 'rightTimestamp',
+  'runs', 'verify-main-test-workflow', 'verify-tag-current']`.
+- Lint aid after the edits: exit 1, `2 finding(s)`, both
+  `R4 names workflow-local identifier 'latest'` in
+  `test_publish_checks_completed_main_push_once_without_polling`, on the two
+  polarity substrings `'latest.status !== "completed"'` and
+  `'latest.conclusion !== "success"'`. Disposition: false positive by
+  ruling. The owner kept both substrings unchanged on 2026-11-03 ("Can we
+  just keep it as is?"); their blind spots are named in the Task 1 table
+  and in a comment above them in the test.
+- Shared rules applied: module-level `_REPO_ROOT =
+  Path(__file__).resolve().parents[2]`; triggers read through
+  `workflow.get("on", workflow.get(True))` (`_workflow_trigger`); gates
+  found by content (`_release_gate_workflows`: every `.github/workflows/*.yml`
+  whose trigger has `push.tags`); the run-check step found as an
+  `actions/github-script@` step whose script calls `listWorkflowRuns(`;
+  the PyPI publish job is the only job whose `permissions` grant
+  `id-token: write`; the release-asset job is the job with a
+  `softprops/action-gh-release@` step. Helper functions live at module
+  level next to `_release_state`.
+- Group (ii), as the table directs:
+  `test_build_precheck_commands_cover_release_gate_and_quality_gates` keeps
+  the six gate lookups (the live-provider lookup is now an `any(...)`
+  presence check), `-m ""`, `--all`, `--check`; the extras equality became
+  the `pyproject.toml` `[project.optional-dependencies]` relation over every
+  non-root target's `package_name` (names normalized PEP 503 style); the
+  quality and mypy target sets became per-name `in` checks plus the
+  per-target `package_dir` and `<package_dir>/<name>` relations; the
+  `PRECHECK_ENV_OVERRIDES ==` equality became the fail-fast check on
+  `build_precheck_env_overrides()["PYTEST_ADDOPTS"].split()` (with
+  `_pytest_worker_count` patched) and the two live-provider `"0"` checks.
+  Dropped as the table says: `command[:2] == ("uv", "run")`, `"python"` and
+  `"dev"` in the live-provider command, `--config-file pyproject.toml`, the
+  `pytest_targets ==` set, and the `WEFT_EAGER_FAILURE_TRACEBACK` value.
+  `test_build_precheck_env_overrides_sets_worker_count` asserts the `"17"`
+  forwarding and `PRECHECK_ENV_OVERRIDES.items() <= result.items()`.
+  `test_build_postupdate_steps_build_all_publishable_packages` compares the
+  set of resolved `cwd`s of steps whose command contains `"build"` with the
+  set of package directories the gates pass to the reusable workflow, with
+  no index checks and no order (Ruling D1a). Deviation, small: the gate's
+  package-directory value is identified as the one `with` value that names
+  a directory holding a `pyproject.toml` (exactly one per publishing job is
+  asserted), because naming the `package_dir` input would write an input
+  name into the test; the routing test checks the same value against
+  `target.package_dir` independently.
+- Group (iii), per the disposition table: routing over the supported tag
+  language (pattern form `<literal>*`, coverage of `target.tag_name("")`,
+  exactly one target per gate, prefix exclusivity across gates, and the
+  `tag_name("1.2.3")` sanity case); the publishing job found by
+  `uses: ./...` naming an existing `workflow_call` workflow with no `if:`;
+  one shared `uses` value across gates; the `with` relations (own
+  `package_name` present, no other target's, exactly one value resolving to
+  `target.package_dir`, and the release switch read from the release-asset
+  job's `if:` expression with the declared default). The publishing-job
+  relations sit in the module helper `_assert_gate_publishes_target`, and
+  the exclusivity loop is one flat pair loop, because the inline form
+  exceeded ruff's C901 complexity limit (14 > 10); the assertions are the
+  ones the table names. The publish-check test: run-check found by the
+  lookup; the commit data-flow check (an `env` entry `${{ inputs.<name> }}`
+  where every gate passes the same value for `<name>` as for the build
+  job's checkout `ref` input, then the `process.env.<KEY>` binding whose
+  identifier is the `head_sha:` value); `workflow_id` equals the file name
+  of `.github/workflows/test.yml`, whose `name` is `Test`; quote-agnostic
+  `event: push`, `main`, `master`; the two polarity substrings unchanged;
+  no `setTimeout`/`setInterval` and no loop body containing
+  `listWorkflowRuns`; the `needs` closures computed from parsed ids.
+  `test_github_release_uploads_only_python_distributions`: the release-asset
+  job by content; every `files` entry ends with `.whl` or `.tar.gz`, at
+  least one of each; `id-token` absent from the job's permissions; the
+  sigstore check is gone (guard lost as the table names).
+- Group (i) locations (scope-note closure, each row applied):
+  `:191` `test_inspect_release_state_uses_target_package_name_and_tag_namespace`
+  now runs on a test-owned target (`dataclasses.replace` of the Docker
+  target with `example-package` and `example_namespace`) and asserts
+  `example_namespace/v0.1.0`; `:201`-`:203`
+  `test_django_release_target_uses_namespaced_tag_and_package_dir` asserts
+  the Django target is namespaced, its `pyproject_path` sits in its
+  `package_dir`, the `pyproject.toml` project name equals its
+  `package_name`, and tag composition on a test-owned namespace; `:711` and
+  siblings in `test_main_dry_run_defaults_to_core_only` assert
+  `target.tag_name("") not in output` for every non-root target; `:872`
+  and `:896` assert inclusion of every non-root target's `tests` suite
+  path, and exclusion of the Docker and macOS-sandbox suites when those
+  runners are unavailable; `:943` uses test-owned overrides
+  (`-k example`, `EXAMPLE_FLAG`) and asserts `--lf -k example`; `:984`-`:985`
+  asserts `PYTEST_ADDOPTS='-k example'` and `EXAMPLE_FLAG=1`.
+- Sensitivity controls, run one at a time in a disposable checkout
+  (`git worktree add --detach <scratchpad>/plan9/wt HEAD`, the two edited
+  test files copied in, each mutation restored before the next, then
+  `git worktree remove --force`), each with
+  `pytest <test> -q -n 0 -o addopts=`:
+  (a) Docker `uv build` step deleted: postupdate test fails at the
+  `built_dirs == gate_package_dirs` set equality.
+  (b) `WEFT_RUN_LIVE_PROVIDER_CLI_TESTS` set to `"1"`: precheck test fails,
+  `assert '1' == '0'`.
+  (c) `_pytest_worker_count()` replaced by `"4"`: worker-count test fails,
+  `assert '4' == '17'`.
+  (d) `"--extra", "django"` removed from the PostgreSQL command: precheck
+  test fails, `assert 'weft-django' in {...}` for that command.
+  (e) `"extensions/weft_docker"` removed from `ruff check`: precheck test
+  fails, `assert 'extensions/weft_docker' in (...)`.
+  (f) Docker gate pattern changed to `weft_django/v*`: routing test fails
+  on coverage for target `docker`, `assert set() == {...release-gate-docker.yml}`.
+  (g) Docker gate `expected_tag_commit` set to `${{ github.event.before }}`:
+  publish-check test fails, `commit_keys` empty for the run-check job.
+  (h) `setTimeout` promise inserted: publish-check test fails on the timer
+  regex.
+  (i) `dist/*` added to `files`: asset test fails on the suffix `all(...)`.
+  (j) `head_sha: context.sha`: publish-check test fails, `filtered_keys`
+  empty.
+  (k) `.status` `!==` to `===`, then `.conclusion`: the unchanged substring
+  assertions fail in both runs.
+  (l) `weft_django/v2*` added to the Docker gate: routing test fails on the
+  exclusivity assertion (Docker prefix extends Django's).
+  (m) root pattern `v1*`: routing test fails on coverage for target `core`.
+  (n), not a control: `||` to `&&` in the failure condition; the
+  publish-check test passes, as the owner's ruling records (the named blind
+  spot).
+  Unmutated: `pytest tests/system/test_release_script.py
+  tests/system/test_release_workflow.py -q` passes (47 cases).
