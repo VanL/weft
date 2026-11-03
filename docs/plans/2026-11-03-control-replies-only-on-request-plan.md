@@ -588,8 +588,7 @@ row is D.
 - Promotion baseline identifier: diff base `0cd077e4` plus worktree state
   (the blocks were applied to the live specs at `0cd077e4`, which carry plans
   10, 9, 5 and 2 on top of `b7eed9f9`; every Current-text quote still matched
-  exactly once), then the landing commit SHA, recorded in the Execution log by
-  the theory commit that follows it (strategy B lands spec and code
+  exactly once); landing commit `29cd89bb` (strategy B lands spec and code
   together).
 
 ## Proposed Spec Delta
@@ -3087,3 +3086,41 @@ Still open for `completed`: the Task 6 completed-work cross-family review and
 the [WT-7] keyed possession probe (owner key first, including the re-keyed
 bank item B1) and the audit-row refresh of I-12, 4.1-a and 4.1-b, left to
 the series coordinator.
+
+#### Theory commit (after `29cd89bb`)
+
+The owner accepted the theory edits on 2026-11-03 ("I accept the theory
+edits"). Applied verbatim to `docs/program-theory.md` from the plan's
+"Theory clause" section: the [WT-2a.12] clause, the [WT-2] item 1
+consistency edit, the [WT-4] 4.1 row "Everything is a task", and the
+optional [WT-8] "Evolved" cell ("short-lived requesters that receive
+messages are tasks too"). The [WT-4] rows "It is just a message" and
+"Address a fact to its observers" and [ALT-WT-003] are unchanged, as the
+plan states.
+
+[WT-7] audit refresh (Task 6 item 2), by reference to the audit table in
+`docs/plans/2026-11-02-program-theory-reconciliation-plan.md` (rows at lines
+5440, 5443, 5444; that plan is not edited), against `29cd89bb` and the
+accepted theory text:
+
+- I-12 ([WT-2a.12]): aligned. The accepted clause gives identity to code
+  that receives a message; STOP/KILL/PAUSE/RESUME requesters observe and
+  hold none, which is what `weft/commands/tasks.py::_send_control` and
+  `weft/commands/run.py::_stop_interactive_run_session` do. PING and STATUS
+  replies are pushed to the requester's `reply_to`
+  (`BaseTask._send_control_reply`); no reply lands on a target queue;
+  `_matching_stop_ack` is deleted.
+- 4.1-a Everything is a task: aligned under the accepted [WT-4] row (a
+  STOP/KILL requester reads the broadcast terminal envelope and needs no
+  identity).
+- 4.1-b It is just a message: aligned. No reply is pull-scanned; the
+  remaining ctrl_out read in `_observe_control_envelopes` is a peek-only
+  observation of a broadcast fact ([WT-4] "Address a fact to its
+  observers"); [MF-3] lines that sanctioned the scan are replaced. The test
+  rows the audit cited are renamed
+  (`test_active_stop_waits_named_budget_for_terminal_evidence`,
+  `test_stop_kill_command_publishes_terminal_and_writes_no_reply`).
+
+Not done by the implementing agent: the keyed possession probe (owner key
+first) and the completed-work cross-family review; the plan stays
+`promoted` until both are recorded.

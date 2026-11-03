@@ -159,10 +159,14 @@ of SimpleBroker queues and OS processes:
 
 1. **Everything is a task (`T{tid}.*`)**:
    A Manager is a task that spawns and supervises other tasks. An agent is a
-   task. A pipeline is a task. Even a short-lived CLI requester (`weft status`,
-   `PING`, result waiter) mints a TID and receives replies on its own
-   `T{tid}.ctrl_in`. The owner stated this invariant on 2026-09-17: "In weft,
-   everything is a task" and "There is no code without a task identity."
+   task. A pipeline is a task. Any code that needs to receive a message has
+   a task identity: even a short-lived CLI requester that receives a reply
+   (`weft status`, `PING`, result waiter) mints a TID and receives it on its
+   own `T{tid}.ctrl_in`. A requester that only observes a broadcast, such as
+   `weft task stop` reading the terminal envelope, needs no identity. The
+   owner stated this invariant on 2026-09-17, "In weft, everything is a
+   task", and on 2026-11-03: "Any code that needs to receive a message has a
+   task identity."
 
 2. **Queues carry durable facts; processes carry ephemeral hints; consumed queues disappear**:
    If a Weft lifecycle or coordination fact is durable, it is durable because a
@@ -333,12 +337,22 @@ theory revision, not a spec edit.
   or sanitizer that would imply one ([WT-5], [ALT-WT-014]; owner decision,
   2026-11-02).
 - **[WT-2a.12] Everything is a task, and every protocol is a message.** Any
-  Weft code that exchanges facts with a task does so as a task: it holds a
-  TID from SimpleBroker's hybrid-timestamp generator and receives replies on
-  its own `T{tid}.ctrl_in`. A protocol is an ordinary message on an ordinary
-  queue, pushed to a queue its recipient already watches; no caller has a
-  privileged side-channel ([MF-3]). (Owner, 2026-09-17: "In weft, everything
-  is a task" and "There is no code without a task identity.")
+  code that needs to receive a message has a task identity: it holds a TID
+  from SimpleBroker's hybrid-timestamp generator and owns the
+  `T{tid}.ctrl_in` where messages addressed to it are delivered. To receive
+  a message is to have one addressed to you and delivered to a queue you
+  own; to observe a broadcast is to read a fact addressed to observers from
+  the queue it was published on. A STOP, KILL, PAUSE, or RESUME requester
+  observes and does not receive: it reads the published outcome (for STOP
+  and KILL, the terminal envelope on the target's `ctrl_out`) as any
+  observer does, so it needs no identity. A PING or STATUS requester
+  receives a reply addressed to it, so it holds a TID and owns the
+  `ctrl_in` the reply lands on. A protocol is an ordinary message on an
+  ordinary queue, pushed to a queue its recipient already watches; no
+  caller has a privileged side-channel ([MF-3]).
+  (Owner, 2026-09-17: "In weft, everything is a task." Owner, 2026-11-03:
+  "Any code that needs to receive a message has a task identity." and "It
+  seems like just relying on the broadcast is operationally much simpler.")
 - **[WT-2a.13] Independent lifetimes; death needs proof.** A shared Manager,
   each task it launches, and each waiting client have independent
   lifetimes: Manager supersession, idle exit, or crash changes who takes
@@ -410,7 +424,7 @@ engineering rule.
 
 | Principle | Design consequence | Evidence | Contract |
 |-----------|--------------------|----------|----------|
-| Everything is a task | No caller gets a privileged side-channel. Even a short-lived CLI requester mints a TID and receives control replies on `T{tid}.ctrl_in`. | Owner, 2026-09-17 | [MF-3]; `2026-09-18` PONG plan; [WT-2a.12] |
+| Everything is a task | No caller gets a privileged side-channel. Any code that needs to receive a message has a task identity: a PING or STATUS requester, even a short-lived CLI requester, mints a TID and owns the `T{tid}.ctrl_in` its reply is addressed to. A STOP, KILL, PAUSE, or RESUME requester observes rather than receives: it reads the outcome the task broadcasts (for STOP and KILL, the terminal envelope on the target's `ctrl_out`), so it needs no identity. | Owner, 2026-09-17; owner, 2026-11-03 | [MF-3]; `2026-09-18` PONG plan; [WT-2a.12] |
 | It is just a message | Protocols are ordinary messages on ordinary queues. Replies are pushed to a queue the requester's reactor already watches—push, never pull-scan. | Owner, 2026-09-17: "this should not be a special case. It is just a message." | [MF-3]; [WT-2a.12] |
 | Queues carry facts; processes carry hints | No in-memory lifecycle database. Detached task lineage and process evidence live in `weft.state.tasks.<tid>`; local Manager tables are caches/hints rebuilt from queues. | Owner, 2026-09-23; `2026-10-12` burst plan | OBS.1, OBS.6; [MF-5]; [WT-2a.2] |
 | Task-internal state is private; Weft never depends on it | An individual task may maintain its own internal state (`TaskMonitor` uses `broker.sidecar()` tables to collate and export `weft.log.tasks` before pruning), but Weft's execution, control, status, and result paths must not read or depend on a task's internal state. | Owner, 2026-10-14 and 2026-10-15; `2026-10-14-task-monitor-read-separation-and-simplification-plan.md` | [OBS.13], [SB-0.4a] |
@@ -1046,7 +1060,7 @@ application of that line.
 
 | Current principle | Founding text | Maintained | Evolved |
 |-------------------|---------------|------------|---------|
-| Everything is a task | "Everything is a Task" | Still the first rule | Agents, pipelines, services, and short-lived requesters are tasks too |
+| Everything is a task | "Everything is a Task" | Still the first rule | Agents, pipelines, services, and short-lived requesters that receive messages are tasks too |
 | Queues carry facts; consumed queues disappear | "State lives in queues, not databases" | Still the only durable record for Weft | Runtime-state queues (`weft.state.tasks.*`) hold detached process/lineage snapshots deleted by `LivenessMonitor`; pending family queues (`weft.state.labels.*.pending.*`) are consumed on dispatch so they vanish automatically; completion facts broadcast to `ctrl_out`; individual tasks (such as `TaskMonitor`) may hold private task-internal state (`MonitorStore`), which Weft never reads or depends on |
 | Specs are the contract | "The specs are the source of truth. Code must align to them." | Still the contract | The theory now sits above the specs for design judgment; a spec that contradicts the theory changes through a planned change, and the theory sentence becomes that plan's acceptance test ([WT-0]) |
 | Small observable substrate | "the durable task substrate for agent systems" (`CLAUDE.md`) | Still the product boundary | Measured admission, ancestry scheduling, labels, and sessions were added as classical algorithms over existing primitives without a second control plane |
