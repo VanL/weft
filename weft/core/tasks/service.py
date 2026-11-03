@@ -65,12 +65,7 @@ class ServiceWorkerContext:
         """Yield input-queue items until the worker group is stopping."""
 
         while not self.stop_requested():
-            try:
-                item = self.input_queue.get(
-                    timeout=LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
-                )
-            except thread_queue.Empty:
-                continue
+            item = self.input_queue.get()
             if item is _service_worker_stop:
                 return
             yield item
@@ -433,14 +428,24 @@ class ServiceTask(BaseTask):
             return False
         return True
 
-    def _stop_service_worker(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-046] exception
+    def _stop_service_worker(
         self,
         name: str,
         *,
-        drain: bool = False,
         deadline: float | None = None,
     ) -> None:
-        """Request stop for one service-worker group."""
+        """Request stop for one service-worker group.
+
+        Sets the group stop event, then delivers one stop sentinel per worker.
+        Each sentinel is first offered with ``put_nowait`` before any deadline
+        check: a worker can block in ``get()`` only on an empty queue, and every
+        group's queue is unbounded or holds at least ``worker_count`` items, so
+        a blocked worker always receives its sentinel, even when the cleanup
+        deadline has already expired. Only a full queue (no worker blocked)
+        falls into the deadline-bounded put-and-evict retry.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.9], [IMPL.10]
+        """
 
         with self._service_worker_lock:
             registration = self._service_worker_registrations.get(name)
@@ -452,6 +457,11 @@ class ServiceTask(BaseTask):
             input_queue = registration.input_queue
 
         for _ in range(worker_count):
+            try:
+                input_queue.put_nowait(_service_worker_stop)
+                continue
+            except thread_queue.Full:
+                pass
             while True:
                 if deadline is not None:
                     remaining = self._remaining_deadline(deadline)
@@ -476,24 +486,6 @@ class ServiceTask(BaseTask):
                         pass
                     if self._worker_stopping.is_set():
                         break
-
-        if drain:
-            while self._service_worker_snapshot(name).get("active"):
-                if deadline is not None and self._remaining_deadline(deadline) <= 0:
-                    return
-                handled = self._drain_worker_results()
-                if handled == 0:
-                    if not self._has_active_worker_threads():
-                        return
-                    wait_timeout = LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
-                    if deadline is not None:
-                        wait_timeout = min(
-                            wait_timeout,
-                            self._remaining_deadline(deadline),
-                        )
-                        if wait_timeout <= 0:
-                            return
-                    self._worker_result_event.wait(timeout=wait_timeout)
 
     def _service_worker_snapshot(self, name: str | None = None) -> Mapping[str, Any]:
         """Return cached in-memory worker state for diagnostics."""

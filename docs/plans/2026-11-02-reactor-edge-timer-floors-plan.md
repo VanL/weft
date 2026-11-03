@@ -1468,3 +1468,37 @@ one policy turn ran in the window. The prediction was no policy turns and one
 probe per native idle interval; the probe count matches, and the one turn
 is recorded as measured. The classification of "A quiet task does nothing"
 on PostgreSQL is left to the owner (Owner Decisions item 3).
+
+#### Task 1. Service workers block on their input queue
+
+Red at `fbd79c66` (tests added, production unchanged):
+
+```text
+$ ./.venv/bin/python -m pytest tests/tasks/test_service_task.py -n0 -k "idle_service_worker or sentinel_after_cleanup"
+>           assert len(counting_queue.get_timeouts) == 1
+E           assert 10 == 1
+FAILED tests/tasks/test_service_task.py::test_idle_service_worker_does_not_wake_until_stopped
+(test_stop_delivers_sentinel_after_cleanup_deadline_expired passed: the guard)
+```
+
+Intermediate red, after edit 1 only (untimed `get()`, no `put_nowait`):
+
+```text
+E           assert not True
+E            +  where True = any(<generator object test_stop_delivers_sentinel_after_cleanup_deadline_expired.<locals>.<genexpr> ...>)
+```
+
+GREEN after edits 2 and 3: both new tests pass; the Task 1 Verify line
+(`tests/tasks/test_service_task.py tests/tasks/test_liveness_monitor.py
+tests/core/test_manager.py`) exits 0 on SQLite, and `./bin/pytest-pg` on the
+same targets reports `340 passed, 12 skipped`.
+
+Deviation (mechanical consequence, not in the plan's file list): deleting the
+`drain` branch dropped `ServiceTask._stop_service_worker` below the `C901`
+threshold, and the repository's Ruff config reports the now-unused
+`# noqa: C901 ... [RUFF-SUP-046]` directive (`RUF100`). The directive is
+removed, and with it the `RUFF-SUP-046` group row, its generated index row and
+the aggregate `C901` count in `docs/ruff-suppression-registry.md`
+(regenerated with `bin/ruff_suppression_index.py --write`; `--check` passes),
+plus the pinned group list and counts in `tests/specs/test_ruff_policy.py`
+(195 → 194 groups, 325 → 324 directives, 113 → 112 `C901`).

@@ -7,6 +7,7 @@ Spec references:
 from __future__ import annotations
 
 import json
+import queue as thread_queue
 import threading
 import time
 from collections.abc import Callable
@@ -239,10 +240,8 @@ def test_service_task_cleanup_passes_one_absolute_deadline_to_worker_groups(
     def record_stop(
         _name: str,
         *,
-        drain: bool = False,
         deadline: float | None = None,
     ) -> None:
-        del drain
         assert deadline is not None
         observed_deadlines.append(deadline)
 
@@ -291,6 +290,91 @@ def test_service_task_full_sentinel_queue_respects_cleanup_deadline(
 
     assert elapsed < 0.3
     assert task._task_lifecycle.value == "closed"
+
+
+class _CountingInputQueue(thread_queue.Queue[Any]):
+    """Delegating input queue that records each ``get`` call and its budget."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self.get_timeouts: list[float | None] = []
+        self.entered_get = threading.Event()
+
+    def get(self, block: bool = True, timeout: float | None = None) -> Any:
+        self.get_timeouts.append(timeout)
+        self.entered_get.set()
+        return super().get(block=block, timeout=timeout)
+
+
+def _register_idle_iterating_worker(
+    task: ServiceTestTask,
+    name: str,
+) -> _CountingInputQueue:
+    """Register a worker that loops over ``iter_items`` behind a counting queue."""
+
+    def target(context: ServiceWorkerContext) -> None:
+        for _item in context.iter_items():
+            pass
+
+    task._register_service_worker(ServiceWorkerSpec(name=name, target=target))
+    counting_queue = _CountingInputQueue()
+    task._service_worker_registrations[name].input_queue = counting_queue
+    return counting_queue
+
+
+def test_idle_service_worker_does_not_wake_until_stopped(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """An idle service worker blocks in one untimed ``get`` until stop.
+
+    Spec: [CC-2.2.1], [IMPL.9]
+    """
+
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    counting_queue = _register_idle_iterating_worker(task, "idle")
+    threads: tuple[threading.Thread, ...] = ()
+    try:
+        task._start_service_worker("idle")
+        threads = task._service_worker_registrations["idle"].threads
+        assert counting_queue.entered_get.wait(2.0)
+        time.sleep(0.5)
+
+        assert len(counting_queue.get_timeouts) == 1
+        assert counting_queue.get_timeouts == [None]
+    finally:
+        task.stop(timeout=2.0)
+
+    assert len(threads) == 1
+    assert not any(thread.is_alive() for thread in threads)
+
+
+def test_stop_delivers_sentinel_after_cleanup_deadline_expired(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """Stop wakes a blocked worker even when the cleanup deadline has passed.
+
+    Spec: [IMPL.10]
+    """
+
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    counting_queue = _register_idle_iterating_worker(task, "expired")
+    try:
+        task._start_service_worker("expired")
+        threads = task._service_worker_registrations["expired"].threads
+        assert counting_queue.entered_get.wait(2.0)
+
+        task._stop_service_worker("expired", deadline=time.monotonic() - 1.0)
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        assert len(threads) == 1
+        assert not any(thread.is_alive() for thread in threads)
+    finally:
+        task.stop(timeout=2.0)
 
 
 def test_service_task_due_time_helpers_bound_waits(
