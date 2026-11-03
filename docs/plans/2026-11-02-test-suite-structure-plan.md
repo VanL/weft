@@ -1682,3 +1682,110 @@ Task 1 (Ruling D1, D1a, and the group (i) scope-note closure).
   spot).
   Unmutated: `pytest tests/system/test_release_script.py
   tests/system/test_release_workflow.py -q` passes (47 cases).
+
+Task 2 (Ruling D2 and addendum).
+
+- Steps 1 and 2: both stress tests now run `iterations = 8` /
+  `max_workers = 4` and `iterations = 5` / `max_workers = 4` with no
+  platform condition; `constrained_parallelism` is deleted. The interim
+  `sys.platform == "win32"` branches of Step 2 were not written, because
+  the measurement branch of Step 4 is not run here (see Step 4); Step 5's
+  final form landed directly.
+- Step 3: `tests/helpers/runner_calibration.py` holds `RunnerCalibration`,
+  `probe_runner()` (spawn-context start-to-join of a no-op child and a
+  SimpleBroker `Queue("weft.calibration.probe", persistent=True)` write
+  cycle in a fresh temporary directory, five samples each, medians; the
+  child join bounded by `RUNNER_PROBE_JOIN_TIMEOUT_S = 30.0` with
+  terminate, join 5.0 s, kill; the disk cycles bounded by one deadline of
+  the same length), `REFERENCE_SPAWN_MEDIAN_S` and
+  `REFERENCE_SQLITE_MEDIAN_S` (both `None  # unmeasured`),
+  `RUNNER_TIME_FACTOR_CEILING = 20.0`, `windows_time_factor`,
+  `scale_linux_budget`, and `describe_calibration` (the header line). A
+  failed or stalled probe catches `OSError`, `RuntimeError`,
+  `sqlite3.Error`, and SimpleBroker's `BrokerError` (not a blind
+  `Exception`, which ruff's BLE001 refuses without a [TS-3.1] registry
+  entry) and returns the error text with a neutral factor.
+  `tests/conftest.py` probes in `pytest_configure` in the controller only
+  (no `config.workerinput`), stores the result in `config.stash`, hands it
+  to workers through an `optionalhook` `pytest_configure_node` into
+  `workerinput["weft_runner_calibration"]`, prints it from
+  `pytest_report_header` in the controller, and exposes the session
+  fixture `runner_calibration`. A worker-side check (a throwaway test,
+  deleted after use, run with `-n 2`) showed `gw0` reading the controller's
+  medians with `error=None`. The header shows at the CI verbosity
+  (`pytest -v` with `addopts=-q`); with the local default `-q` alone pytest
+  prints no header.
+- Step 4: pending: owner-run measurement. This session cannot push or
+  dispatch workflows. Procedure, copy-pastable from the repository root:
+
+  ```bash
+  git switch -c plan9-runner-baselines main      # main already holds Task 2
+  git push -u origin plan9-runner-baselines
+  for n in 1 2 3; do gh workflow run test.yml --ref plan9-runner-baselines; sleep 20; done
+  gh run list --workflow test.yml --branch plan9-runner-baselines --event workflow_dispatch --limit 3
+  # for each <run-id>:
+  gh run view <run-id> --json jobs --jq '.jobs[] | select(.name | endswith(", cli)")) | "\(.databaseId) \(.name) \(.startedAt) \(.completedAt)"'
+  # for each cli <job-id>:
+  gh run view <run-id> --log --job <job-id> | grep "weft runner calibration:"
+  ```
+
+  Read the medians from the `test (ubuntu-latest, 3.12, cli)` and
+  `test (ubuntu-latest, 3.14, cli)` jobs only (the Ubuntu 3.13 job runs with
+  coverage and `-m ""`). Apply this plan's stall rule per job across the
+  three dispatches (discard a job whose wall time or probe median exceeds
+  three times the median of the other two; dispatch again if fewer than
+  two survive). Each baseline is the median of the surviving Ubuntu jobs'
+  medians. Fill `REFERENCE_SPAWN_MEDIAN_S` and `REFERENCE_SQLITE_MEDIAN_S`
+  in `tests/helpers/runner_calibration.py` (drop `# unmeasured`; name the
+  runner, Python versions, run IDs, and date in their docstrings), and
+  record every header line, every discard, and the Windows and macOS
+  header lines here. Then
+  `windows_time_factor` goes from neutral (`unmeasured` in the header) to
+  active (`applied` or `capped`) on the Windows `cli` jobs, which is where
+  `test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap`
+  and `test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse`
+  receive the scaled budgets; `tests/system/test_runner_calibration.py`
+  is independent of the committed values. Until then the Windows budgets
+  equal the Linux budgets (factor 1.0), a tightening from today's
+  unmeasured 120.0 s / 10.0 s / 120.0 s; a Windows red in that window is
+  read through the 2026-11-01 trigger table, not answered by padding.
+  Local data point, not a reference (Apple M4 Max, macOS 27.0.1,
+  Python 3.14.9, three `probe_runner()` calls):
+  `spawn_median=0.0537s sqlite_median=0.0028s`,
+  `spawn_median=0.0574s sqlite_median=0.0029s`,
+  `spawn_median=0.0600s sqlite_median=0.0030s`, each
+  `factor=1.00 platform=darwin pinned`.
+- Step 5: `MANAGER_REUSE_SUBMIT_TIMEOUT_S = 60.0`,
+  `MANAGER_REUSE_STATUS_TIMEOUT_S = 5.0`,
+  `MANAGER_REUSE_TASK_COMPLETION_TIMEOUT_S = 10.0`, and
+  `_manager_reuse_timeouts(calibration, *, platform=sys.platform)` in
+  `tests/cli/test_cli_run.py`; both stress tests take `runner_calibration`
+  and set all three timeouts from it only.
+  `PARALLEL_MANAGER_REUSE_CONSTRAINED_TASK_TIMEOUT` keeps its value; its
+  docstring now names `test_cli_run_parallel_no_wait_adopts_active_manager`
+  on Windows or PostgreSQL. That test is otherwise untouched (owner note).
+  Done-when grep, `grep -nE "(submit|status|task_completion)_timeout = "
+  tests/cli/test_cli_run.py`: `:3013`, `:3014`, `:3015` belong to
+  `test_cli_run_parallel_no_wait_adopts_active_manager` (untouched); the
+  two stress tests assign all three by tuple unpacking from
+  `_manager_reuse_timeouts(runner_calibration)` (`:3036`, `:3072`).
+- Step 6: `tests/system/test_runner_calibration.py` (`shared`), 12 cases.
+  RED before the symbols existed: `ImportError: cannot import name
+  'MANAGER_REUSE_STATUS_TIMEOUT_S' from 'tests.cli.test_cli_run'` (the
+  helper module was also absent). GREEN: `12 passed`. Sensitivity controls
+  in a disposable worktree (`git worktree add --detach`, new files copied
+  in, each mutation restored, worktree removed): factor applied off
+  Windows, pinned test fails `assert 20.0 == 1.0`; floor removed, floor test
+  fails `assert 0.5 == 1.0`; ratios averaged, larger-ratio test fails
+  `assert 4.5 == 6.0`; spawn ratio only, it fails `assert 3.0... == 6.0`;
+  cap removed, ceiling test fails `assert 50.0 == 20.0`; unbounded
+  `join()`, the bounded-probe test fails `Timeout (>60.0s) from
+  pytest-timeout`; a literal 120.0 s Windows completion budget in
+  `_manager_reuse_timeouts`, budgets test fails
+  `(240.0, 20.0, 120.0) == (240.0, 20.0, 40.0)`; a macOS doubling inside
+  it, budgets test fails `(60.0, 5.0, 20.0) == (60.0, 5.0, 10.0)`.
+- Stop-if check on macOS (default parallelism, both tests together, three
+  runs, SQLite): repeated-bootstrap 17.02 s, 16.83 s, 17.45 s; harness
+  cleanup integrity 10.52 s, 10.33 s, 10.61 s; all passed at full load and
+  the Linux budgets. Linux and Windows are verified only by the owner's CI
+  run.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import multiprocessing
@@ -17,6 +18,11 @@ from typing import Any
 import pytest
 
 from simplebroker import BrokerTarget, Queue
+from tests.helpers.runner_calibration import (
+    RunnerCalibration,
+    describe_calibration,
+    probe_runner,
+)
 from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.typing import BrokerEnv, QueueFactory, TaskFactory
 from tests.helpers.weft_harness import WeftTestHarness
@@ -628,10 +634,64 @@ def _write_progress_heartbeats(interval: float) -> None:
             )
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    """Start opt-in progress diagnostics for CI timeout investigation."""
+_RUNNER_CALIBRATION_KEY = pytest.StashKey[RunnerCalibration]()
+_RUNNER_CALIBRATION_WORKERINPUT = "weft_runner_calibration"
 
-    del config
+
+def _configure_runner_calibration(config: pytest.Config) -> None:
+    """Probe the runner once per session, in the controller only.
+
+    A per-worker probe would run concurrently in every xdist worker and
+    inflate both medians, so the controller (or the single process when xdist
+    is off) probes before the workers start, and each worker reads the result
+    from its ``workerinput``. Ruling D2 addendum in
+    ``docs/plans/2026-11-02-test-suite-structure-plan.md``.
+    """
+
+    workerinput = getattr(config, "workerinput", None)
+    if workerinput is None:
+        calibration = probe_runner()
+    else:
+        fields = workerinput.get(_RUNNER_CALIBRATION_WORKERINPUT)
+        calibration = (
+            RunnerCalibration(**fields)
+            if fields is not None
+            else RunnerCalibration(
+                spawn_median_s=0.0,
+                sqlite_median_s=0.0,
+                error="calibration not provided by the xdist controller",
+            )
+        )
+    config.stash[_RUNNER_CALIBRATION_KEY] = calibration
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    """Hand the controller's calibration to each xdist worker."""
+
+    calibration = node.config.stash[_RUNNER_CALIBRATION_KEY]
+    node.workerinput[_RUNNER_CALIBRATION_WORKERINPUT] = dataclasses.asdict(calibration)
+
+
+def pytest_report_header(config: pytest.Config) -> str | None:
+    """Print the runner calibration once, in the controller."""
+
+    if getattr(config, "workerinput", None) is not None:
+        return None
+    return describe_calibration(config.stash[_RUNNER_CALIBRATION_KEY])
+
+
+@pytest.fixture(scope="session")
+def runner_calibration(pytestconfig: pytest.Config) -> RunnerCalibration:
+    """Return the session's runner calibration (Windows stress-test budgets)."""
+
+    return pytestconfig.stash[_RUNNER_CALIBRATION_KEY]
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Calibrate the runner, then start opt-in progress diagnostics."""
+
+    _configure_runner_calibration(config)
     global _progress_thread
     interval = _progress_heartbeat_interval()
     if interval is None or _progress_thread is not None:

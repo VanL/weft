@@ -20,6 +20,7 @@ from tests.fixtures.provider_cli_fixture import (
     PROVIDER_FIXTURE_NAMES,
     write_provider_cli_wrapper,
 )
+from tests.helpers.runner_calibration import RunnerCalibration, scale_linux_budget
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec import fixtures as taskspec_fixtures
@@ -45,13 +46,44 @@ INTERACTIVE_SCRIPT = (
     Path(__file__).resolve().parents[1] / "tasks" / "interactive_echo.py"
 )
 PARALLEL_MANAGER_REUSE_CONSTRAINED_TASK_TIMEOUT = 120.0
-"""Timeout for Windows/macOS parallel manager reuse tests under CI load.
+"""Timeout for ``test_cli_run_parallel_no_wait_adopts_active_manager`` on
+Windows or PostgreSQL under CI load.
 
 These tests intentionally combine subprocess bootstrap, SQLite coordination,
 and xdist-level parallelism. Windows 3.14 CI has shown that a child can reach
 ``work_started`` and then wait far longer than the generic 30s constrained
 timeout before committing its outbox and terminal event.
 """
+MANAGER_REUSE_SUBMIT_TIMEOUT_S = 60.0
+"""Linux budget for submitting one Manager-reuse stress cycle."""
+MANAGER_REUSE_STATUS_TIMEOUT_S = 5.0
+"""Linux budget for each status check in a Manager-reuse stress cycle."""
+MANAGER_REUSE_TASK_COMPLETION_TIMEOUT_S = 10.0
+"""Linux budget for each task to complete in a Manager-reuse stress cycle."""
+
+
+def _manager_reuse_timeouts(
+    calibration: RunnerCalibration, *, platform: str = sys.platform
+) -> tuple[float, float, float]:
+    """Return the stress tests' submit, status, and completion budgets.
+
+    Each is the Linux budget times the session's calibrated Windows time
+    factor, which is 1.0 off Windows (Ruling D2 and its addendum, owner
+    2026-11-03, in ``docs/plans/2026-11-02-test-suite-structure-plan.md``).
+    Load is the same on every platform; only time is scaled.
+    """
+
+    return (
+        scale_linux_budget(
+            MANAGER_REUSE_SUBMIT_TIMEOUT_S, calibration, platform=platform
+        ),
+        scale_linux_budget(
+            MANAGER_REUSE_STATUS_TIMEOUT_S, calibration, platform=platform
+        ),
+        scale_linux_budget(
+            MANAGER_REUSE_TASK_COMPLETION_TIMEOUT_S, calibration, platform=platform
+        ),
+    )
 
 
 @pytest.mark.parametrize("wait", [False, True])
@@ -2996,18 +3028,13 @@ def test_cli_run_parallel_no_wait_adopts_active_manager(
 
 
 @pytest.mark.sqlite_only
-def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap() -> (
-    None
-):
-    constrained_parallelism = os.name == "nt" or sys.platform == "darwin"
-    iterations = 3 if constrained_parallelism else 8
-    max_workers = 2 if constrained_parallelism else 4
-    submit_timeout = 120.0 if constrained_parallelism else 60.0
-    status_timeout = 10.0 if constrained_parallelism else 5.0
-    task_completion_timeout = (
-        PARALLEL_MANAGER_REUSE_CONSTRAINED_TASK_TIMEOUT
-        if constrained_parallelism
-        else 10.0
+def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap(
+    runner_calibration: RunnerCalibration,
+) -> None:
+    iterations = 8
+    max_workers = 4
+    submit_timeout, status_timeout, task_completion_timeout = _manager_reuse_timeouts(
+        runner_calibration
     )
 
     for _ in range(iterations):
@@ -3037,18 +3064,13 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
 
 
 @pytest.mark.sqlite_only
-def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse() -> (
-    None
-):
-    constrained_parallelism = os.name == "nt" or sys.platform == "darwin"
-    iterations = 3 if constrained_parallelism else 5
-    max_workers = 2 if constrained_parallelism else 4
-    submit_timeout = 120.0 if constrained_parallelism else 60.0
-    status_timeout = 10.0 if constrained_parallelism else 5.0
-    task_completion_timeout = (
-        PARALLEL_MANAGER_REUSE_CONSTRAINED_TASK_TIMEOUT
-        if constrained_parallelism
-        else 10.0
+def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse(
+    runner_calibration: RunnerCalibration,
+) -> None:
+    iterations = 5
+    max_workers = 4
+    submit_timeout, status_timeout, task_completion_timeout = _manager_reuse_timeouts(
+        runner_calibration
     )
 
     for _ in range(iterations):
