@@ -28,6 +28,7 @@ from simplebroker.ext import PollingStrategy
 from tests.helpers import multiqueue_sigint_probe
 from tests.helpers.test_backend import POSTGRES_TEST_BACKEND, active_test_backend
 from tests.helpers.typing import BrokerEnv
+from tests.tasks.test_task_execution import AcquireEntryWitness
 from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL, load_config
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
@@ -1482,6 +1483,8 @@ def test_background_mutation_committed_before_stop_returns_success(
         stop_event=stop_event,
         polling_strategy=GatedReplaceStrategy(stop_event),
     )
+    topology_lock = AcquireEntryWitness(watcher._topology_lock)
+    monkeypatch.setattr(watcher, "_topology_lock", topology_lock)
     drive = watcher.run_in_thread()
     assert waiters[0].wait_entered.wait(timeout=2.0)
     mutation_errors: list[Exception] = []
@@ -1502,8 +1505,11 @@ def test_background_mutation_committed_before_stop_returns_success(
         stop_returned.set()
 
     stopper = threading.Thread(target=stop)
+    topology_lock.watch(stopper)
     stopper.start()
-    assert not stop_returned.wait(timeout=0.05)
+    # stop() has reached the topology lock the committing mutation holds.
+    assert topology_lock.entered.wait(timeout=2.0)
+    assert not stop_returned.is_set()
     assert watcher._topology_stopping is False
     replace_release.set()
     mutator.join(timeout=2.0)

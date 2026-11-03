@@ -1789,3 +1789,145 @@ Task 2 (Ruling D2 and addendum).
   cleanup integrity 10.52 s, 10.33 s, 10.61 s; all passed at full load and
   the Linux budgets. Linux and Windows are verified only by the owner's CI
   run.
+
+Task 3 (T1 to T3).
+
+- T1, `test_serve_forces_no_idle_timeout`: the `time.sleep(0.2)` window
+  and its "test invariant" comment are gone. The module helper
+  `_published_manager_idle_timeouts` reads `weft.log.tasks` and collects
+  `taskspec.metadata.idle_timeout` from the serve Manager's own events
+  (`row["tid"] == record["tid"]`); the test asserts the set is `{0.0}`
+  while the child env sets `WEFT_MANAGER_LIFETIME_TIMEOUT=0.05`, then keeps
+  `process.poll() is None` and the `manager stop` tail. Redaction does not
+  strip the field (`redact_taskspec_dump` touches only configured paths),
+  so the Stop-if fallback was not needed. Control (disposable worktree):
+  `idle_timeout_override=0.0` to `None` in `serve_manager_foreground`; the
+  test fails `assert {0.05} == {0.0}`.
+- T2, `test_base_task_worker_result_queue_backpressures_when_full`: the
+  instance's `_worker_result_queue.put` is wrapped; the wrapper calls the
+  real `put` and re-raises `queue.Full`. Deviation, small: the wrapper sets
+  `blocked` on the second `Full`, not the first, so the witness shows the
+  publisher retried after a `Full` (it is in its loop) rather than only that
+  one `put` timed out; with the first-`Full` form the control below would
+  race the `publisher_finished` check. `time.sleep(0.05)` is replaced by
+  `assert blocked.wait(timeout=2.0)`, then `publisher_finished.is_set() is
+  False`. Control: `_publish_worker_result` returns `True` on `Full`; the
+  test fails at `assert blocked.wait(timeout=2.0)`.
+- T3, `test_postgres_dynamic_membership_rebinds_native_waiter`: retained
+  unchanged, sleep and `true_count == quiet_baseline` equality included,
+  and not presented as repaired. No positive exclusion proof exists at
+  this seam without reading SimpleBroker's PostgreSQL waiter internals:
+  `_RecordingNativeWaiter.signature` is computed by the test from the
+  queue list it passes, so a delegate that stays subscribed to `b` would
+  not change it, and the waiter exposes no public subscription set to
+  assert on. Reported back. It passes under `./bin/pytest-pg
+  tests/tasks/test_multiqueue_watcher.py` (see below).
+
+Task 4 (T4). Each site now asserts an entry witness on the dependency
+primitive the stopper or cleaner blocks on before it asserts that the call
+has not returned; the witnesses delegate to the real primitive. The
+release-then-returns assertions are unchanged.
+
+- `test_base_task_process_entry_publishes_turn_active_with_owner_claim`
+  and `test_base_task_run_loop_entry_publishes_active_with_owner_claim`:
+  the paused claim runs inside `with self._task_lifecycle_lock`, so the
+  first block is that lock's acquire. `AcquireEntryWitness` (module class
+  in `tests/tasks/test_task_execution.py`) replaces
+  `task._task_lifecycle_lock` with a delegating wrapper and signals when
+  the stop thread enters `acquire`; `not stop_returned.wait(timeout=0.05)`
+  became `lifecycle_lock.entered.wait(timeout=2.0)` then
+  `not stop_returned.is_set()`. The second, immediate
+  `not stop_returned.is_set()` (after the claim is released) now follows a
+  witness that the stop thread entered `drive_thread.join`
+  (`witness_thread_join`), the owner join that `stop()` performs while the
+  drive is active; this extends the same claim's second check, which the
+  plan did not list.
+- `test_base_task_stop_waits_for_starting_interlock`: `run_in_thread`
+  holds `_task_lifecycle_lock` across the blocked `thread.start()`, so the
+  witness is the same lock wrapper, watched for the stopper;
+  `stop_returned.wait(timeout=0.05) is False` became
+  `lifecycle_lock.entered.wait(timeout=2.0)` then
+  `stop_returned.is_set() is False`.
+- `test_background_mutation_committed_before_stop_returns_success`: the
+  committing mutation holds the watcher's `_topology_lock` (an `RLock`);
+  the same `AcquireEntryWitness` (imported from
+  `tests/tasks/test_task_execution.py`, no new module) wraps it, watched
+  for the stopper.
+- `test_manager_cleanup_waits_for_active_child_launch_worker`: cleanup's
+  `_drain_active_child_launches_for_cleanup` waits on
+  `manager._worker_result_event.wait`; `_witness_event_wait` (module helper
+  in `tests/core/test_manager.py`) wraps that `threading.Event.wait` for
+  the cleanup thread; `not cleanup_returned.wait(timeout=0.25)` became
+  `drain_wait_entered.wait(timeout=3.0)` then
+  `not cleanup_returned.is_set()`. The helper was extracted because the
+  inline wrapper exceeded ruff's C901 limit.
+- Controls (disposable worktree; each restored): `stop()` returning at the
+  top of `_request_stop_and_maybe_finalize` fails the process-entry,
+  run-loop, and starting-interlock tests at `lifecycle_lock.entered.wait`;
+  removing the `owner.join(timeout=remaining)` call fails the process-entry
+  and run-loop tests at `join_entered.wait`; `MultiQueueWatcher.stop`
+  without its `with self._topology_lock:` fails the watcher test at
+  `topology_lock.entered.wait`; `_drain_active_child_launches_for_cleanup`
+  returning at once fails the Manager test at `drain_wait_entered.wait`.
+- The seven rewritten Task 3 and Task 4 tests passed five consecutive runs
+  at default parallelism.
+
+Task 6 (C1), candidate-evidence ledger, written before the edits.
+
+| Test | What it can detect today | Observable contract | Non-test callers of the seam | Stronger owner-boundary proof | Decision before edits |
+|---|---|---|---|---|---|
+| `test_manager_does_not_probe_inactive_public_spawn_queue` (`tests/core/test_manager.py`) | With cursors forced to "no active queue, discovery not due, no precheck", one `process_once` leaves a written request on `weft.spawn.requests` | A quiet Manager does not claim a request on an inactive public spawn queue until broad discovery is due or an activity wake confirms pending work ([WT-4] 4.3 "A quiet task does nothing"; `MultiQueueWatcher._update_active_queues`) | `_update_active_queues` is the drain loop's own step; the cursors are its private state | None found; the reserved-custody idle test proves a different claim | Rewrite at the public seam: real `Queue` write, `process_once`, queue contents; control discovery timing through the watcher module's own `time` binding (a module-owned clock seam, Pattern 12) instead of assigning `_next_inactive_probe_at`; add the positive half (claimed once discovery is due) so the absence is reached |
+| `test_manager_pending_precheck_activates_public_spawn_queue` | With the precheck flag forced on, `process_once` claims the request | A spawn request is claimed on the turn after a real activity wake, without waiting for broad discovery | `_mark_pending_messages_prechecked` is called from the wait path (`MultiQueueWatcher` activity-hint handling) and Manager service convergence | None found | Rewrite: real write, real `wait_for_activity` through `drive_until`, discovery held not due by the clock seam, assert claim and reserved custody |
+| `test_manager_idle_discovery_skips_reserved_queues` | A patched `_queue_has_pending` raises if discovery probes a reserved queue; no assertion in the body | Reserved queues are custody, never spawn sources or discovery activity (`Manager._queue_counts_as_wait_activity`) | `_queue_counts_as_wait_activity` is used by the watcher's discovery and wait-activity paths | `test_manager_idle_pending_work_excludes_retained_reserved_custody` covers idle pending work through `_manager_owned_work_pending`, a different function | Try a public rewrite (retained reserved row, discovery due, `process_once`, row untouched and nothing launched) and keep it only if the reserved-exclusion mutation turns it red; otherwise retain the original with a visible body assertion |
+
+Task 5 (T5). `test_drive_task_until_applies_ready_result_after_wall_deadline`
+now patches the driver module's own binding,
+`monkeypatch.setattr(reactor_driver, "time", SimpleNamespace(monotonic=...))`
+(`from tests.helpers import reactor_driver`, `from types import
+SimpleNamespace`), with the two-value iterator, the `drive_task_until` call,
+and `process_calls == 2` unchanged; `import time` stays (the module still
+uses `time.time_ns`). Control (disposable worktree): deleting
+`pending_work=(task._has_pending_worker_results,)` from `drive_task_until`
+fails the test, `reactor evidence did not match before timeout
+(timeout=5.0, turns=1, latest=False, ...)`.
+`pytest tests/tasks/test_task_observability.py tests/system/test_reactor_driver.py`
+passes (52 cases).
+
+Task 6 (C1), after the ledger above.
+
+- `test_manager_does_not_probe_inactive_public_spawn_queue` and
+  `test_manager_pending_precheck_activates_public_spawn_queue` are rewritten
+  at the public seam with no cursor assignment. Shared setup moved to
+  `_discovery_manager` and `_INACTIVE_QUEUE_SPAWN_PAYLOAD`. Discovery timing
+  is controlled by `_WatcherClock`, which replaces the
+  `weft.core.tasks.multiqueue_watcher` module's `time` binding (its only use
+  is `time.monotonic`) with a real-rate clock plus an offset. The first test:
+  initial `process_once`, write a real request, hold discovery not due,
+  `process_once` leaves the request on `weft.spawn.requests` and out of the
+  reserved queue; then make discovery due and the next `process_once`
+  claims it (the positive half shows the decision was reached). The second
+  test: discovery held not due, a real write, then `drive_until` with
+  `manager.process_once` and `manager.wait_for_activity` until the launch is
+  recorded; it asserts the claim and reserved custody.
+- `test_manager_idle_discovery_skips_reserved_queues`: no queue-level
+  effect exists to observe (the reserved queues' peek handler,
+  `BaseTask._handle_reserved_message`, only logs), and the stronger-looking
+  keeper `test_manager_idle_pending_work_excludes_retained_reserved_custody`
+  stays green under the reserved-exclusion mutation below, so it is not a
+  keeper. The test is rewritten without cursor assignment and ends with
+  visible assertions: discovery is made due through `_WatcherClock`, one
+  public `process_once` runs, and a delegating wrapper on
+  `Manager._queue_has_pending` records the probed queue names (the real
+  probe still runs); the test asserts `weft.spawn.requests` was probed
+  (discovery ran) and that no reserved queue name was. The witness is a
+  wrapper on a production helper, not a dependency primitive; it is
+  recorded here as the remaining coupling, chosen over retaining the cursor
+  assignments.
+- Controls (disposable worktree; each restored): `discovery_due = True` in
+  `MultiQueueWatcher._update_active_queues` fails the first test,
+  `assert ['<tid>'] == []`; `_mark_pending_messages_prechecked` as a no-op
+  fails the second, `reactor evidence did not match before timeout
+  (timeout=5.0, turns=85, latest=[])`; removing the reserved-name exclusion
+  from `Manager._queue_counts_as_wait_activity` fails the third at
+  `reserved_names.isdisjoint(probed)` (and leaves the reserved-custody idle
+  test green).

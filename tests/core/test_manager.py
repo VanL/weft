@@ -35,7 +35,7 @@ import pytest
 import weft.core.manager as manager_mod
 import weft.core.manager_runtime as manager_runtime_mod
 import weft.core.tasks.base as base_task_mod
-from simplebroker import Queue
+from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
@@ -76,6 +76,7 @@ from weft._constants import (
     SERVICE_STATUS_SUPERSEDED,
     SERVICE_TYPE_MANAGED,
     TASK_CLEANUP_TIMEOUT_SECONDS,
+    TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
@@ -106,6 +107,7 @@ from weft.core.tasks import (
     PipelineEdgeTask,
     PipelineTask,
 )
+from weft.core.tasks import multiqueue_watcher as multiqueue_watcher_module
 from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import (
@@ -6697,6 +6699,25 @@ def test_manager_seeded_child_inbox_does_not_enter_queue_cache(
         assert drain(reader) == [json.dumps({"args": ["payload"]})]
 
 
+def _witness_event_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    event: threading.Event,
+    caller: threading.Thread,
+) -> threading.Event:
+    """Signal when ``caller`` enters ``event.wait``; the real wait still runs."""
+
+    entered = threading.Event()
+    real_wait = event.wait
+
+    def wait(timeout: float | None = None) -> bool:
+        if threading.current_thread() is caller:
+            entered.set()
+        return real_wait(timeout)
+
+    monkeypatch.setattr(event, "wait", wait)
+    return entered
+
+
 def test_manager_cleanup_waits_for_active_child_launch_worker(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
@@ -6762,11 +6783,17 @@ def test_manager_cleanup_waits_for_active_child_launch_worker(
     )
 
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
+    # Entry witness on the dependency primitive cleanup's launch drain waits
+    # on; the real Event.wait still runs (testing-patterns Pattern 12).
+    drain_wait_entered = _witness_event_wait(
+        monkeypatch, manager._worker_result_event, cleanup_thread
+    )
     try:
         assert manager._launch_child_task(child_spec, None) is True
         assert launch_entered.wait(timeout=3.0)
         cleanup_thread.start()
-        assert not cleanup_returned.wait(timeout=0.25), (
+        assert drain_wait_entered.wait(timeout=3.0)
+        assert not cleanup_returned.is_set(), (
             "Manager.cleanup() returned while a child launch worker was still active"
         )
     finally:
@@ -9054,29 +9081,53 @@ def test_manager_services_successfully_reserved_public_work(
     assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
 
 
-def test_manager_does_not_probe_inactive_public_spawn_queue(
-    broker_env: BrokerEnv,
-    unique_tid: str,
+_INACTIVE_QUEUE_SPAWN_PAYLOAD: dict[str, Any] = {
+    "name": "inactive-public-queue",
+    "spec": {
+        "type": "function",
+        "function_target": "tests.tasks.sample_targets:echo_payload",
+    },
+}
+
+
+class _WatcherClock:
+    """Module-owned clock seam for the watcher's broad-discovery cadence.
+
+    Replaces the ``time`` binding of ``weft.core.tasks.multiqueue_watcher``
+    (its only use is ``time.monotonic``) with a clock that runs at the real
+    rate plus a test-controlled offset, so wait deadlines still expire while
+    discovery can be held not due or made due (testing-patterns Pattern 12).
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._offset = 0.0
+        monkeypatch.setattr(multiqueue_watcher_module, "time", self)
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self._offset
+
+    def hold_discovery_not_due(self) -> None:
+        self._offset -= 3600.0
+
+    def make_discovery_due(self) -> None:
+        self._offset += 3600.0 + TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS
+
+
+def _discovery_manager(
+    db_path: BrokerTarget,
+    tid: str,
+    make_queue: Callable[[str], Queue],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, make_queue = broker_env
+) -> tuple[Manager, Queue, Queue, list[str]]:
+    """Return a leader Manager whose child launches are recorded, not run."""
+
     config = load_config(
         {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
     )
-    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    manager = Manager(db_path, make_manager_spec(tid), config=config)
     spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
     reserved_queue = make_queue(manager._queue_names["reserved"])
     drain(spawn_queue)
-
-    payload = {
-        "name": "inactive-public-queue",
-        "spec": {
-            "type": "function",
-            "function_target": "tests.tasks.sample_targets:echo_payload",
-        },
-    }
-    spawn_queue.write(json.dumps(payload))
-    message_id = pending_timestamps(spawn_queue)[0]
     launched: list[str] = []
 
     def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
@@ -9084,22 +9135,46 @@ def test_manager_does_not_probe_inactive_public_spawn_queue(
         launched.append(child_spec.tid)
         return True
 
-    manager._active_queues = []
-    manager._queue_iterator = itertools.cycle([])
-    manager._next_inactive_probe_at = time.monotonic() + 60
-    manager._pending_messages_precheck_confirmed = False
     monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
     monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
+    return manager, spawn_queue, reserved_queue, launched
+
+
+def test_manager_does_not_probe_inactive_public_spawn_queue(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet Manager leaves a spawn request until broad discovery is due."""
+
+    db_path, make_queue = broker_env
+    clock = _WatcherClock(monkeypatch)
+    manager, spawn_queue, reserved_queue, launched = _discovery_manager(
+        db_path, unique_tid, make_queue, monkeypatch
+    )
 
     try:
+        manager.process_once()  # the initial broad discovery: nothing pending
+        spawn_queue.write(json.dumps(_INACTIVE_QUEUE_SPAWN_PAYLOAD))
+        message_id = pending_timestamps(spawn_queue)[0]
+        clock.hold_discovery_not_due()
+
+        # No activity wake and no due discovery: the turn must not claim.
         manager.process_once()
+        assert launched == []
+        assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
+        assert reserved_queue.peek_one(exact_timestamp=message_id) is None
+
+        # The same turn claims it once discovery is due, so the decision above
+        # was reached and could have claimed.
+        clock.make_discovery_due()
+        manager.process_once()
+        assert launched == [str(message_id)]
+        assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+        assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
     finally:
         manager.stop(join=False)
         manager.cleanup()
-
-    assert launched == []
-    assert spawn_queue.peek_one(exact_timestamp=message_id) is not None
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is None
 
 
 def test_manager_pending_precheck_activates_public_spawn_queue(
@@ -9107,47 +9182,34 @@ def test_manager_pending_precheck_activates_public_spawn_queue(
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A real activity wake claims a spawn request before discovery is due."""
+
     db_path, make_queue = broker_env
-    config = load_config(
-        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    clock = _WatcherClock(monkeypatch)
+    manager, spawn_queue, reserved_queue, launched = _discovery_manager(
+        db_path, unique_tid, make_queue, monkeypatch
     )
-    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
-    spawn_queue = make_queue(WEFT_SPAWN_REQUESTS_QUEUE)
-    reserved_queue = make_queue(manager._queue_names["reserved"])
-    drain(spawn_queue)
-
-    payload = {
-        "name": "inactive-public-queue",
-        "spec": {
-            "type": "function",
-            "function_target": "tests.tasks.sample_targets:echo_payload",
-        },
-    }
-    spawn_queue.write(json.dumps(payload))
-    message_id = pending_timestamps(spawn_queue)[0]
-    launched: list[str] = []
-
-    def _record_launch(child_spec: TaskSpec, *_args: object, **_kwargs: object) -> bool:
-        assert child_spec.tid is not None
-        launched.append(child_spec.tid)
-        return True
-
-    manager._active_queues = []
-    manager._queue_iterator = itertools.cycle([])
-    manager._next_inactive_probe_at = time.monotonic() + 60
-    manager._pending_messages_precheck_confirmed = True
-    monkeypatch.setattr(manager, "_leader_tid", lambda: manager.tid)
-    monkeypatch.setattr(manager, "_launch_child_task", _record_launch)
 
     try:
-        manager.process_once()
+        manager.process_once()  # the initial broad discovery: nothing pending
+        clock.hold_discovery_not_due()
+        spawn_queue.write(json.dumps(_INACTIVE_QUEUE_SPAWN_PAYLOAD))
+        message_id = pending_timestamps(spawn_queue)[0]
+
+        drive_until(
+            lambda: list(launched),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=5.0,
+        )
+
+        assert launched == [str(message_id)]
+        assert spawn_queue.peek_one(exact_timestamp=message_id) is None
+        assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
     finally:
         manager.stop(join=False)
         manager.cleanup()
-
-    assert launched == [str(message_id)]
-    assert spawn_queue.peek_one(exact_timestamp=message_id) is None
-    assert reserved_queue.peek_one(exact_timestamp=message_id) is not None
 
 
 def test_manager_idle_discovery_skips_reserved_queues(
@@ -9155,7 +9217,10 @@ def test_manager_idle_discovery_skips_reserved_queues(
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Broad discovery never probes reserved custody queues as spawn sources."""
+
     db_path, _make_queue = broker_env
+    clock = _WatcherClock(monkeypatch)
     config = load_config(
         {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
     )
@@ -9164,24 +9229,25 @@ def test_manager_idle_discovery_skips_reserved_queues(
         reserved_queue
         for reserved_queue, _source_queue in manager._spawn_reserved_queue_pairs()
     }
+    probed: list[str] = []
+    real_probe = manager._queue_has_pending
 
-    def pending_probe(queue: object) -> bool:
-        queue_name = getattr(queue, "name", "")
-        if queue_name in reserved_names:
-            raise AssertionError("reserved queues are not ordinary idle discovery")
-        return False
+    def recording_probe(queue: Queue) -> bool:
+        probed.append(queue.name)
+        return real_probe(queue)
 
-    monkeypatch.setattr(manager, "_queue_has_pending", pending_probe)
-    manager._active_queues = []
-    manager._queue_iterator = itertools.cycle([])
-    manager._pending_messages_precheck_confirmed = True
-    manager._next_inactive_probe_at = 0
+    monkeypatch.setattr(manager, "_queue_has_pending", recording_probe)
 
     try:
-        manager._drain_queue()
+        clock.make_discovery_due()
+        manager.process_once()
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+    assert WEFT_SPAWN_REQUESTS_QUEUE in probed  # broad discovery ran
+    assert reserved_names
+    assert reserved_names.isdisjoint(probed)
 
 
 def test_manager_spawn_drains_require_pending_evidence(

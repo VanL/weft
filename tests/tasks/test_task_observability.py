@@ -8,12 +8,14 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any, Protocol, cast, get_args
 
 import pytest
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
+from tests.helpers import reactor_driver
 from tests.helpers.queue_payloads import terminal_envelopes
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.typing import BrokerEnv, TaskFactory
@@ -148,7 +150,11 @@ def test_drive_task_until_applies_ready_result_after_wall_deadline(
             raise AssertionError(f"unexpected wait after deadline: {timeout}")
 
     monotonic_values = iter((0.0, 6.0))
-    monkeypatch.setattr(time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        reactor_driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
+    )
     task = DelayedReadyTask()
 
     drive_task_until(task, lambda: task.completed, timeout=5.0)

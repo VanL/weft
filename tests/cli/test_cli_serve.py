@@ -166,6 +166,23 @@ def _wait_for_active_canonical_manager(
     raise AssertionError("Timed out waiting for an active canonical manager")
 
 
+def _published_manager_idle_timeouts(context: WeftContext, tid: str) -> set[float]:
+    """Return the idle timeouts in a Manager's own published TaskSpec events."""
+
+    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        rows = list(iter_queue_json_entries(log_queue))
+    finally:
+        log_queue.close()
+    timeouts = {
+        row["taskspec"]["metadata"]["idle_timeout"]
+        for row, _timestamp in rows
+        if row.get("tid") == tid and isinstance(row.get("taskspec"), dict)
+    }
+    assert timeouts, f"no published TaskSpec for manager {tid}"
+    return timeouts
+
+
 def _wait_for_started_task_tid(
     harness: WeftTestHarness,
     *,
@@ -682,10 +699,10 @@ def test_serve_forces_no_idle_timeout(
         record = _wait_for_active_canonical_manager(context, process=process)
         weft_harness.register_manager_tid(record["tid"])
 
-        # 4× the configured WEFT_MANAGER_LIFETIME_TIMEOUT (0.05s). Proves a
-        # negative — the manager does not exit while it has active work.
-        # The duration is the test invariant; do not shorten it.
-        time.sleep(0.2)
+        # Serve overrides the configured 0.05s lifetime with no idle timeout:
+        # the serve Manager's own published TaskSpec carries idle_timeout 0.0,
+        # and the Manager's idle path returns at once for a value <= 0.
+        assert _published_manager_idle_timeouts(context, record["tid"]) == {0.0}
         assert process.poll() is None
 
         rc, out, err = run_cli(

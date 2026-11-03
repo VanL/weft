@@ -139,6 +139,56 @@ class LauncherTerminalTask(LauncherWaitTask):
         _launcher_process_calls = 1
 
 
+class AcquireEntryWitness:
+    """Delegate to a real lock and signal when a watched thread enters acquire.
+
+    A Pattern 12 entry fence: it wraps the dependency primitive a stopper
+    blocks on, so a "still blocked" assertion follows proof that the stopper
+    reached the block, and the real lock keeps its semantics.
+    """
+
+    def __init__(self, lock: Any) -> None:
+        self._lock = lock
+        self._watched: threading.Thread | None = None
+        self.entered = threading.Event()
+
+    def watch(self, thread: threading.Thread) -> None:
+        self._watched = thread
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if threading.current_thread() is self._watched:
+            self.entered.set()
+        return bool(self._lock.acquire(blocking, timeout))
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+
+def witness_thread_join(
+    monkeypatch: pytest.MonkeyPatch,
+    thread: threading.Thread,
+    caller: threading.Thread,
+) -> threading.Event:
+    """Signal when ``caller`` enters ``thread.join``; the real join still runs."""
+
+    entered = threading.Event()
+    real_join = thread.join
+
+    def join(timeout: float | None = None) -> None:
+        if threading.current_thread() is caller:
+            entered.set()
+        real_join(timeout)
+
+    monkeypatch.setattr(thread, "join", join)
+    return entered
+
+
 class ReactorTestTask(BaseTask):
     """Small concrete task for BaseTask reactor worker tests."""
 
@@ -317,6 +367,8 @@ def test_base_task_process_entry_publishes_turn_active_with_owner_claim(
         pause_after_claim,
     )
 
+    lifecycle_lock = AcquireEntryWitness(task._task_lifecycle_lock)
+    monkeypatch.setattr(task, "_task_lifecycle_lock", lifecycle_lock)
     drive_thread = threading.Thread(target=task.process_once)
     drive_thread.start()
     assert post_claim.wait(timeout=2.0)
@@ -327,14 +379,20 @@ def test_base_task_process_entry_publishes_turn_active_with_owner_claim(
         stop_returned.set()
 
     stop_thread = threading.Thread(target=stop_task)
+    lifecycle_lock.watch(stop_thread)
+    join_entered = witness_thread_join(monkeypatch, drive_thread, stop_thread)
     stop_thread.start()
     assert stop_started.wait(timeout=2.0)
-    assert not stop_returned.wait(timeout=0.05)
+    # stop() has reached the lifecycle lock the claiming drive still holds.
+    assert lifecycle_lock.entered.wait(timeout=2.0)
+    assert not stop_returned.is_set()
     assert task._task_lifecycle.value != "closed"
     assert task._queue_cache
 
     release_claim.set()
     assert turn_entered.wait(timeout=2.0)
+    # stop() now waits on the active drive owner.
+    assert join_entered.wait(timeout=2.0)
     assert not stop_returned.is_set()
     assert task._task_lifecycle.value != "closed"
     release_turn.set()
@@ -389,6 +447,8 @@ def test_base_task_run_loop_entry_publishes_active_with_owner_claim(
     )
     monkeypatch.setattr(task, "_has_pending_termination_request", pause_in_loop)
 
+    lifecycle_lock = AcquireEntryWitness(task._task_lifecycle_lock)
+    monkeypatch.setattr(task, "_task_lifecycle_lock", lifecycle_lock)
     drive_thread = threading.Thread(target=task.run_until_stopped)
     drive_thread.start()
     assert post_claim.wait(timeout=2.0)
@@ -399,14 +459,20 @@ def test_base_task_run_loop_entry_publishes_active_with_owner_claim(
         stop_returned.set()
 
     stop_thread = threading.Thread(target=stop_task)
+    lifecycle_lock.watch(stop_thread)
+    join_entered = witness_thread_join(monkeypatch, drive_thread, stop_thread)
     stop_thread.start()
     assert stop_started.wait(timeout=2.0)
-    assert not stop_returned.wait(timeout=0.05)
+    # stop() has reached the lifecycle lock the claiming drive still holds.
+    assert lifecycle_lock.entered.wait(timeout=2.0)
+    assert not stop_returned.is_set()
     assert task._task_lifecycle.value != "closed"
     assert task._queue_cache
 
     release_claim.set()
     assert loop_entered.wait(timeout=2.0)
+    # stop() now waits on the active drive owner.
+    assert join_entered.wait(timeout=2.0)
     assert not stop_returned.is_set()
     assert task._task_lifecycle.value != "closed"
     release_loop.set()
@@ -1135,13 +1201,18 @@ def test_base_task_stop_waits_for_starting_interlock(
 
     starter = threading.Thread(target=start_task)
     stopper = threading.Thread(target=stop_task)
+    lifecycle_lock = AcquireEntryWitness(task._task_lifecycle_lock)
+    lifecycle_lock.watch(stopper)
+    monkeypatch.setattr(task, "_task_lifecycle_lock", lifecycle_lock)
     original_thread_start(starter)
     assert start_entered.wait(timeout=2.0)
     assert task._task_lifecycle.value == "starting"
     assert task._start_pending is True
 
     original_thread_start(stopper)
-    assert stop_returned.wait(timeout=0.05) is False
+    # stop() has reached the lifecycle lock the starting interlock holds.
+    assert lifecycle_lock.entered.wait(timeout=2.0)
+    assert stop_returned.is_set() is False
 
     release_start.set()
     starter.join(timeout=3.0)
@@ -4322,6 +4393,25 @@ def test_base_task_worker_result_queue_backpressures_when_full(
     )
     task = ReactorTestTask(db_path, spec)
     publisher_finished = threading.Event()
+    blocked = threading.Event()
+    full_raises = 0
+    real_put = task._worker_result_queue.put
+
+    def witness_put(
+        item: Any, block: bool = True, timeout: float | None = None
+    ) -> None:
+        # Dependency witness on the bounded stdlib queue: the real put runs.
+        # A second Full proves the publisher retried instead of returning.
+        nonlocal full_raises
+        try:
+            real_put(item, block, timeout)
+        except queue.Full:
+            full_raises += 1
+            if full_raises >= 2:
+                blocked.set()
+            raise
+
+    monkeypatch.setattr(task._worker_result_queue, "put", witness_put)
 
     assert task._publish_worker_result("unit", value="first") is True
 
@@ -4333,7 +4423,7 @@ def test_base_task_worker_result_queue_backpressures_when_full(
     publisher.start()
 
     try:
-        time.sleep(0.05)
+        assert blocked.wait(timeout=2.0)
         assert publisher_finished.is_set() is False
 
         assert task._drain_worker_results() == 1
