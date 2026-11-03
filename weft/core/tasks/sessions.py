@@ -485,8 +485,11 @@ class AgentSession:
                     if self._limit_sampling_active(progress)
                     else None
                 )
+                # A fresh clock reading: the pass's ``now`` predates the
+                # limit sample, and a sample that takes time would otherwise
+                # stretch this wait past the deadline armed after it.
                 wait_for = self._terminal_handoff_wait_seconds(
-                    now=now,
+                    now=time.monotonic(),
                     start_time=start_time,
                     drain_deadline=drain_deadline,
                     cancel_requested=cancel_requested,

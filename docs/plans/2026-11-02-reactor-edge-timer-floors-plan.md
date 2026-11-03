@@ -1447,6 +1447,85 @@ pid=8599 vcs_delta=15150 cpu_delta_s=0.269 /Users/van/Developer/weft/.venv/bin/p
 TOTAL window=30.0s vcs_delta=25562 (852.1/s) cpu_delta_s=0.874
 ```
 
+Source of `idle_tree.py` (the version used for every recorded run, before and after):
+
+```python
+"""Task 0 item 1: idle manager tree voluntary context switches and CPU over 30 s."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import psutil
+
+REPO = Path("/Users/van/Developer/weft")
+sys.path.insert(0, str(REPO))
+from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root  # noqa: E402
+
+WEFT = str(REPO / ".venv/bin/weft")
+WINDOW = float(os.environ.get("WINDOW", "30"))
+
+
+def weft(*args: str) -> str:
+    return subprocess.run([WEFT, *args], check=True, capture_output=True, text=True, timeout=60).stdout
+
+
+def snap(pids: list[int]) -> dict[int, tuple[str, int, float]]:
+    out = {}
+    for pid in pids:
+        try:
+            p = psutil.Process(pid)
+            ct = p.cpu_times()
+            label = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:60]
+            out[pid] = (label, p.num_ctx_switches().voluntary, ct.user + ct.system)
+        except psutil.Error:
+            pass
+    return out
+
+
+def main() -> None:
+    root = Path(tempfile.mkdtemp(prefix="plan2-idle-"))
+    prepare_project_root(root)
+    preexisting = {p.pid for p in psutil.process_iter()}
+    try:
+        weft("manager", "start", "--context", str(root))
+        time.sleep(3.0)  # let startup settle
+        managers = json.loads(weft("manager", "list", "--json", "--context", str(root)))
+        pid = int(managers[0]["runtime_handle"]["id"])
+        proc = psutil.Process(pid)
+        pids = {pid} | {c.pid for c in proc.children(recursive=True)}
+        # Detached service children are not psutil children; add the new weft- titled processes.
+        for p in psutil.process_iter(["pid", "cmdline"]):
+            cmd = " ".join(p.info["cmdline"] or [])
+            if cmd.startswith("weft-") and p.pid not in preexisting:
+                pids.add(p.pid)
+        pids = sorted(pids)
+        before = snap(pids)
+        time.sleep(WINDOW)
+        after = snap(pids)
+        total_cs = 0
+        total_cpu = 0.0
+        for p, (name, cs0, cpu0) in before.items():
+            if p not in after:
+                continue
+            _, cs1, cpu1 = after[p]
+            total_cs += cs1 - cs0
+            total_cpu += cpu1 - cpu0
+            print(f"pid={p} vcs_delta={cs1 - cs0} cpu_delta_s={cpu1 - cpu0:.3f} {name}")
+        print(f"TOTAL window={WINDOW}s vcs_delta={total_cs} ({total_cs / WINDOW:.1f}/s) cpu_delta_s={total_cpu:.3f}")
+    finally:
+        subprocess.run([WEFT, "manager", "stop", "--context", str(root)], capture_output=True, timeout=60)
+        cleanup_prepared_roots(root)
+
+
+main()
+```
+
 Item 2 (D5, D7): not run; deferred with Task 2 (owner item 2 closed as (a)).
 
 Item 3 (D8, D10, D12): the counts the red tests assert, taken by running
@@ -1469,6 +1548,88 @@ backend=postgres window=30.0s (after 2 s settle)
   turns: 1 in window (total incl. startup 2)
   pending_probes: 19 in window (total incl. startup 20)
   strategy_returns: 20 in window (total incl. startup 21)
+```
+
+Source of `quiet_task.py`:
+
+```python
+"""Task 0 item 4 (owner item 6): does a quiet persistent task run turns when the native idle poll returns?"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+REPO = Path("/Users/van/Developer/weft")
+sys.path.insert(0, str(REPO))
+import simplebroker.watcher as sbw  # noqa: E402
+
+from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root  # noqa: E402
+from tests.tasks.test_task_execution import make_function_taskspec  # noqa: E402
+from weft.context import build_context  # noqa: E402
+from weft.core.tasks import Consumer  # noqa: E402
+from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher  # noqa: E402
+
+WINDOW = float(os.environ.get("WINDOW", "30"))
+counts = {"turns": 0, "pending_probes": 0, "strategy_returns": 0}
+
+orig_pending = MultiQueueWatcher._has_pending_messages
+
+
+def pending(self):  # type: ignore[no-untyped-def]
+    counts["pending_probes"] += 1
+    return orig_pending(self)
+
+
+MultiQueueWatcher._has_pending_messages = pending  # type: ignore[method-assign]
+orig_wait = sbw.PollingStrategy.wait_for_activity
+
+
+def wait(self, *a, **k):  # type: ignore[no-untyped-def]
+    try:
+        return orig_wait(self, *a, **k)
+    finally:
+        counts["strategy_returns"] += 1
+
+
+sbw.PollingStrategy.wait_for_activity = wait  # type: ignore[method-assign]
+
+
+def main() -> None:
+    root = prepare_project_root(Path(tempfile.mkdtemp(prefix="plan2-quiet-")))
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    spec = make_function_taskspec(tid, "tests.tasks.sample_targets:echo_payload")
+    from weft.core.taskspec import TaskSpec
+    data = spec.model_dump()
+    data["spec"]["persistent"] = True
+    spec = TaskSpec.model_validate(data)
+    task = Consumer(ctx.broker_target, spec, config=ctx.config)
+    orig_turn = task._process_reactor_turn
+
+    def turn(*a, **k):  # type: ignore[no-untyped-def]
+        counts["turns"] += 1
+        return orig_turn(*a, **k)
+
+    task._process_reactor_turn = turn  # type: ignore[method-assign]
+    th = threading.Thread(target=task.run_until_stopped, daemon=True)
+    th.start()
+    time.sleep(2.0)
+    base = dict(counts)
+    time.sleep(WINDOW)
+    after = dict(counts)
+    task.stop()
+    th.join(10)
+    print(f"backend={os.environ.get('BROKER_TEST_BACKEND', 'sqlite')} window={WINDOW}s (after 2 s settle)")
+    for k in counts:
+        print(f"  {k}: {after[k] - base[k]} in window (total incl. startup {after[k]})")
+    cleanup_prepared_roots(root)
+
+
+main()
 ```
 
 Reading: on SQLite the strategy returns about 9 times per second (its idle
@@ -1764,3 +1925,33 @@ $ ./.venv/bin/python -m pytest -m "" tests/tasks tests/commands tests/core tests
 $ ./bin/pytest-pg --fast
 6234 passed, 24 skipped in 288.30s (0:04:48)
 ```
+
+#### Review fix: the handoff wait after a time-consuming limit sample (cross-family F1)
+
+`AgentSession.execute` computed the wait from the pass's `now`, read before
+the limit sample, while the next sampling instant is armed from a clock
+reading taken after the sample, so a sample that takes time stretched the
+requested wait past that instant. The wait is now computed from a fresh
+`time.monotonic()` taken after the observation pass (observation precedence
+unchanged). New test
+`tests/tasks/test_runner.py::test_agent_session_wait_after_slow_sample_ends_at_the_sampling_deadline`:
+a monitor whose `check_limits` sleeps 0.2 s at a 0.5 s `polling_interval`, a
+0.4 s work item, `cancel_requested=None`; it asserts the first recorded wait
+budget is at most the interval (plus 0.05 s) and ends no later than the
+first sample's end plus one interval.
+
+RED before the fix (at `4ac6a1e7`):
+
+```text
+E           assert 0.7036462081596255 <= (0.5 + 0.05)
+1 failed in 1.83s
+```
+
+GREEN after the fix: `1 passed in 1.73s`; the Task 4 Verify line reports
+`852 passed`; `./bin/pytest-pg tests/core/test_terminal_handoff_transport.py
+tests/tasks/test_runner.py` reports `216 passed`.
+
+Cross-family F2 and F3: a CHANGELOG `[Unreleased]` entry now covers the
+plan's observable changes (including the owner-accepted D12 sampling change),
+and the exact sources of `idle_tree.py` and `quiet_task.py` are in the Task 0
+measurements above.

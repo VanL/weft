@@ -1239,6 +1239,66 @@ def test_agent_session_samples_limits_at_monitor_interval(
         session.close()
 
 
+class _SlowSampleMonitor(_RecordingLimitMonitor):
+    """Recording monitor whose limit check consumes a measurable time."""
+
+    def __init__(self, *, polling_interval: float, sample_seconds: float) -> None:
+        super().__init__(polling_interval=polling_interval)
+        self.sample_ends: list[float] = []
+        self._sample_seconds = sample_seconds
+
+    def check_limits(self) -> tuple[bool, str | None]:
+        verdict = super().check_limits()
+        time.sleep(self._sample_seconds)
+        self.sample_ends.append(time.monotonic())
+        return verdict
+
+
+@pytest.mark.shared
+def test_agent_session_wait_after_slow_sample_ends_at_the_sampling_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A time-consuming sample cannot push the wake past the armed deadline.
+
+    The next instant is armed one interval after the sample ends, so the wait
+    requested after the sample must end no later than that instant ([RM-5.1]).
+
+    Spec: [RM-5.1], [CC-3.5]
+    """
+
+    interval = 0.5
+    monitor = _SlowSampleMonitor(polling_interval=interval, sample_seconds=0.2)
+    session = _spawn_agent_session_for_target(
+        functools.partial(_agent_session_hold_then_reply_worker, 0.4),
+        monitor=monitor,
+    )
+    waits: list[tuple[float, float | None]] = []
+    real_wait_seconds = session._terminal_handoff_wait_seconds
+
+    def recording_wait_seconds(**kwargs: Any) -> float | None:
+        budget = real_wait_seconds(**kwargs)
+        waits.append((time.monotonic(), budget))
+        return budget
+
+    monkeypatch.setattr(
+        session, "_terminal_handoff_wait_seconds", recording_wait_seconds
+    )
+    try:
+        session.wait_ready(timeout=10.0)
+        result = session.execute("hello", cancel_requested=None)
+
+        assert result.status == "ok"
+        assert monitor.sample_ends
+        first_sample_end = monitor.sample_ends[0]
+        called_at, budget = waits[0]
+        assert called_at >= first_sample_end
+        assert budget is not None
+        assert budget <= interval + 0.05
+        assert called_at + budget <= first_sample_end + interval + 0.05
+    finally:
+        session.close()
+
+
 @pytest.mark.shared
 def test_agent_session_short_items_cannot_starve_sampling() -> None:
     """Short work items neither restart nor outpace the session's sampling instant.

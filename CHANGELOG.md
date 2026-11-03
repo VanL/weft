@@ -23,6 +23,25 @@
   list in the Manager checkpoint follows that order. No compatibility shim:
   nothing reads that order back.
 
+- Reactor edges wait on their real event sources instead of fixed timer
+  floors (`docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md`). An idle
+  service worker (the eight LivenessMonitor probe workers) blocks on its input
+  queue until stop delivers its sentinel, instead of waking every 50 ms.
+  Interactive sessions wait on the runner's activity callback for the
+  post-exit output drain and for STOP, KILL and cleanup shutdown, instead of
+  10 ms and 50 ms sleeps, with the same drain budget and stop grace; the
+  Debugger's owner-local session no longer waits out the 0.25 s drain budget
+  on exit. Persistent agent sessions wait on the private result channel
+  together with the producer's process sentinel; the 50 ms re-check remains
+  only while a pull-style `cancel_requested` predicate is supplied.
+- Persistent agent-session resource limits are now sampled at the monitor's
+  `polling_interval` (1.0 s by default, `spec.polling_interval`), as for
+  interactive sessions and the subprocess runner, instead of on every 50 ms
+  pass: an immediate first sample, then at most one per interval while a
+  work item is supervised ([RM-5.1]). This is an owner-accepted diminution:
+  a sustained CPU violation (four of five samples) is now detected after
+  about four intervals rather than about 0.2 s.
+
 ## [0.9.119] - 2026-10-31
 
 ### Fixed
