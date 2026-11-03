@@ -232,6 +232,19 @@ class FamilyScheduler:
 
     Spec: [MA-1.8]. Only the caller can declare a resident positively exited.
     No method performs broker I/O or infers death from a missing observation.
+
+    Frontier stacks are the childless registered residents; a resident is
+    registered when it has a ``_live_children`` count, which every resident
+    has except a deferred adoption awaiting ``finish_recovery``. The ring is
+    a circular doubly linked list of stack ids (``_ring_next``,
+    ``_ring_prev``) with one tip per stack (``_ring_tip``); ``_turn`` is the
+    stack asked first. A stack's path is derived from its tip's ancestry,
+    never stored. ``_up`` is a union-find over residents and former
+    residents: each entry points at an ancestor with no registered resident
+    in between, and lookups compress chains of unregistered nodes (the
+    contracted scheduling-parent pointer). ``_live_children`` counts the
+    registered residents whose nearest registered ancestor is the key. All
+    of these are hints rebuilt by ``finish_recovery``.
     """
 
     def __init__(self) -> None:
@@ -243,13 +256,29 @@ class FamilyScheduler:
         self._roots: list[tuple[int, str]] = []
         self._indexed_roots: set[str] = set()
         self._residents: dict[str, _Resident] = {}
-        self._stacks: list[list[str]] = []
-        self._turn = 0
+        self._up: dict[str, str | None] = {}
+        self._live_children: dict[str, int] = {}
+        self._ring_next: dict[int, int] = {}
+        self._ring_prev: dict[int, int] = {}
+        self._ring_tip: dict[int, str] = {}
+        self._tip_stack: dict[str, int] = {}
+        self._turn: int | None = None
+        self._next_stack_id = 0
 
     @property
     def frontiers(self) -> tuple[tuple[str, ...], ...]:
-        """Return checkpoint stacks; process evidence stays with the Manager."""
-        return tuple(tuple(stack) for stack in self._stacks)
+        """Return checkpoint stacks in rotation order; derived, never stored.
+
+        Filtering a tip's ancestry yields its path only because every launch
+        registers a leaf; a registration that adds a live ancestor of an
+        existing resident must rebuild through ``finish_recovery``.
+        """
+        residents = self._residents
+        live = residents.__contains__
+        return tuple(
+            (*filter(live, residents[tip].ancestry_tids), tip)
+            for tip in self._rotation_tips()
+        )
 
     @property
     def resident_tids(self) -> frozenset[str]:
@@ -262,6 +291,94 @@ class FamilyScheduler:
         return next(
             (tid for tid in reversed(ancestry_tids) if tid in self._residents), root_tid
         )
+
+    def _find(self, tid: str | None) -> str | None:
+        """Return the nearest registered resident at or above ``tid``; compress.
+
+        Only a resident with a live-child count stops the walk. A former
+        resident and a deferred adoption with a retained pointer are both
+        followed past, so lookups see the registered set until
+        ``finish_recovery`` registers the deferred residents.
+
+        Spec: [MA-1.8] ("Cache contracted scheduling-parent pointers").
+        """
+        registered = self._live_children
+        root = tid
+        while root is not None and root not in registered:
+            root = self._up[root]
+        while tid is not None and tid not in registered:
+            self._up[tid], tid = root, self._up[tid]
+        return root
+
+    def _live_parent(self, tid: str) -> str | None:
+        parent = self._find(self._up[tid])
+        self._up[tid] = parent
+        return parent
+
+    def _nearest_live(self, ancestry_tids: tuple[str, ...]) -> str | None:
+        for tid in reversed(ancestry_tids):
+            if tid in self._up:
+                return self._find(tid)
+        return None
+
+    def _rotation_tips(self) -> list[str]:
+        """Return the tips in rotation order, starting at ``_turn``."""
+        tips: list[str] = []
+        stack_id = self._turn
+        if stack_id is not None:
+            for _ in range(len(self._ring_tip)):
+                tips.append(self._ring_tip[stack_id])
+                stack_id = self._ring_next[stack_id]
+        return tips
+
+    def _start_stack(self, tip: str) -> None:
+        """Link a new stack at the ring's tail, just before ``_turn``."""
+        stack_id = self._next_stack_id
+        self._next_stack_id += 1
+        self._ring_tip[stack_id] = tip
+        self._tip_stack[tip] = stack_id
+        head = self._turn
+        if head is None:
+            self._ring_next[stack_id] = self._ring_prev[stack_id] = stack_id
+            self._turn = stack_id
+            return
+        tail = self._ring_prev[head]
+        self._ring_next[tail] = self._ring_prev[head] = stack_id
+        self._ring_next[stack_id] = head
+        self._ring_prev[stack_id] = tail
+
+    def _drop_stack(self, stack_id: int) -> None:
+        """Unlink a stack; ``_turn`` moves to its successor if it was the head."""
+        del self._ring_tip[stack_id]
+        following = self._ring_next.pop(stack_id)
+        preceding = self._ring_prev.pop(stack_id)
+        if following == stack_id:
+            self._turn = None
+            return
+        self._ring_next[preceding] = following
+        self._ring_prev[following] = preceding
+        if self._turn == stack_id:
+            self._turn = following
+
+    def _contract(self, tid: str, live_parent: str | None, children: int) -> None:
+        """Hand an exited resident's children to its parent and fix its stack."""
+        if live_parent is not None:
+            self._live_children[live_parent] += children - 1
+        stack_id = self._tip_stack.pop(tid, None)
+        if stack_id is not None:
+            # A childless exit contracts its stack in place or, when a sibling
+            # path still holds the parent, drops the stack.
+            if live_parent is not None and not self._live_children[live_parent]:
+                self._ring_tip[stack_id] = live_parent
+                self._tip_stack[live_parent] = stack_id
+            else:
+                self._drop_stack(stack_id)
+        self._compact_up()
+
+    def _compact_up(self) -> None:
+        """Drop former residents once they outnumber residents (cf. ``_compact``)."""
+        if len(self._up) > 2 * len(self._live_children):
+            self._up = {tid: self._live_parent(tid) for tid in self._live_children}
 
     def add_pending(self, request: PendingRequest) -> None:
         """Index accepted work once; a repeated projection is idempotent."""
@@ -303,7 +420,7 @@ class FamilyScheduler:
             self._indexed_roots.add(root_tid)
 
     def _active_roots(self) -> set[str]:
-        return {self._residents[stack[-1]].root_tid for stack in self._stacks}
+        return {self._residents[tip].root_tid for tip in self._ring_tip.values()}
 
     def _oldest_independent(self) -> PendingRequest | None:
         active = self._active_roots()
@@ -323,32 +440,40 @@ class FamilyScheduler:
         return candidate
 
     def select(self) -> PendingRequest | None:
-        """Choose one candidate without consuming work or reserving a place."""
-        count = len(self._stacks)
-        for offset in range(count):
-            index = (self._turn + offset) % count
-            tip = self._stacks[index][-1]
-            bucket = self._parents.get(tip)
+        """Choose one candidate without consuming work or reserving a place.
+
+        Each pass walks the ring from ``_turn``; a hit moves ``_turn`` to the
+        successor of the stack that supplied it, and a miss leaves it unchanged.
+        """
+        start = self._turn
+        if start is None:
+            return self._oldest_independent()
+        ring_next, ring_tip = self._ring_next, self._ring_tip
+        stack_id = start
+        for _ in range(len(ring_tip)):
+            bucket = self._parents.get(ring_tip[stack_id])
             candidate = (
                 bucket.candidate(self._pending, self._request_indexes)
                 if bucket
                 else None
             )
             if candidate is not None:
-                self._turn = (index + 1) % count
+                self._turn = ring_next[stack_id]
                 return candidate
+            stack_id = ring_next[stack_id]
         candidate = self._oldest_independent()
         if candidate is not None:
             return candidate
         # Live paths supply sibling candidates when no independent family waits.
-        for offset in range(count):
-            index = (self._turn + offset) % count
-            root = self._residents[self._stacks[index][-1]].root_tid
-            family = self._family_pending.get(root)
+        for _ in range(len(ring_tip)):
+            family = self._family_pending.get(
+                self._residents[ring_tip[stack_id]].root_tid
+            )
             candidate = family.candidate(self._pending) if family else None
             if candidate is not None:
-                self._turn = (index + 1) % count
+                self._turn = ring_next[stack_id]
                 return candidate
+            stack_id = ring_next[stack_id]
         return None
 
     def launched(
@@ -364,18 +489,23 @@ class FamilyScheduler:
             if existing != resident:
                 raise ValueError("resident scheduling identity changed")
             return
-        path = [
-            ancestor
-            for ancestor in request.ancestry_tids
-            if ancestor in self._residents
-        ]
-        parent = path[-1] if path else None
+        # A deferred adoption is not registered: the scan steps over it when it
+        # has no pointer, and _find follows its retained pointer past it when it
+        # has one; finish_recovery repairs the path either way.
+        parent = self._nearest_live(request.ancestry_tids)
         self._residents[tid] = resident
-        for stack in self._stacks:
-            if parent is not None and stack[-1] == parent:
-                stack.append(tid)
-                return
-        self._stacks.append([*path, tid])
+        self._up[tid] = parent
+        self._live_children[tid] = 0
+        if parent is None:
+            self._start_stack(tid)
+            return
+        self._live_children[parent] += 1
+        stack_id = self._tip_stack.pop(parent, None)
+        if stack_id is None:
+            self._start_stack(tid)
+        else:
+            self._ring_tip[stack_id] = tid
+            self._tip_stack[tid] = stack_id
 
     def release_background(self, tid: str) -> None:
         """Release a validated background task after its startup gate clears."""
@@ -384,7 +514,13 @@ class FamilyScheduler:
             self.retire(tid)
 
     def retire(self, tid: str) -> None:
-        """Contract a positively exited resident without touching pending tokens."""
+        """Contract a positively exited resident without touching pending tokens.
+
+        Pending custody follows residents, deferred ones included: the bucket
+        merges into ``_parent`` exactly as before. Frontier bookkeeping follows
+        the registered set: counts and ring contract through ``_find``, and a
+        deferred adoption, in no stack yet, is left to ``finish_recovery``.
+        """
         resident = self._residents.pop(tid, None)
         if resident is None:
             return
@@ -392,13 +528,9 @@ class FamilyScheduler:
         source = self._parents.pop(tid, None) if parent != tid else None
         if source is not None:
             self._parents.setdefault(parent, _PendingIndex()).merge(source)
-        stacks = [[item for item in stack if item != tid] for stack in self._stacks]
-        # Borrowed paths may collapse to the same shared ancestor after exit.
-        maximal: list[list[str]] = []
-        for stack in sorted(stacks, key=len, reverse=True):
-            if stack and not any(other[: len(stack)] == stack for other in maximal):
-                maximal.append(stack)
-        self._stacks = maximal
+        children = self._live_children.pop(tid, None)
+        if children is not None:
+            self._contract(tid, self._find(tid), children)
         if self._family_counts.get(resident.root_tid):
             self._offer_root(resident.root_tid)
 
@@ -411,7 +543,13 @@ class FamilyScheduler:
         *,
         defer: bool = False,
     ) -> None:
-        """Adopt live/unknown finite evidence; bootstrap may defer path rebuilding."""
+        """Adopt live/unknown finite evidence; bootstrap may defer path rebuilding.
+
+        Until ``finish_recovery`` runs, a deferred resident has no count or
+        stack, and any pointer it kept as a former resident is followed past:
+        ``retire`` merges its pending bucket and leaves the frontier to the
+        rebuild, and lookups resolve to its nearest registered ancestor.
+        """
         if scheduling_class != "finite":
             return
         self._residents[tid] = _Resident(root_tid, ancestry_tids, scheduling_class)
@@ -419,13 +557,21 @@ class FamilyScheduler:
             self.finish_recovery()
 
     def finish_recovery(self) -> None:
-        """Reconstruct all maximal live paths once after an unordered state sweep."""
-        paths = [
-            [*(item for item in resident.ancestry_tids if item in self._residents), tid]
-            for tid, resident in self._residents.items()
-        ]
-        maximal: list[list[str]] = []
-        for path in sorted(paths, key=len, reverse=True):
-            if not any(other[: len(path)] == path for other in maximal):
-                maximal.append(path)
-        self._stacks = maximal
+        """Rebuild pointers, counts and the ring once after an unordered sweep."""
+        residents = self._residents
+        self._up = {
+            tid: next(
+                (item for item in reversed(r.ancestry_tids) if item in residents), None
+            )
+            for tid, r in residents.items()
+        }
+        self._live_children = dict.fromkeys(residents, 0)
+        for parent in self._up.values():
+            if parent is not None:
+                self._live_children[parent] += 1
+        self._ring_next, self._ring_prev = {}, {}
+        self._ring_tip, self._tip_stack = {}, {}
+        self._turn = None
+        for tid, children in self._live_children.items():
+            if not children:
+                self._start_stack(tid)

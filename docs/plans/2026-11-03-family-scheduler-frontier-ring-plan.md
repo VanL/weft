@@ -2148,6 +2148,10 @@ sentence are text, reversible by revert).
    to the exits that created the dead entries; the checkpoint write stays
    proportional to the lineage it publishes). Declining leaves the theory
    as is; the plan proceeds.
+   Status 2026-11-03: awaiting the owner. The implementer applied both
+   blocks, confirmed `./bin/check-doc-paths` passes with them, saved the
+   diff outside the repository and reverted it; the theory commit lands only
+   on the owner's acceptance.
 2. **The rotation-order sentence** for [MA-1.8] and [MANAGER.18]. Proposed
    text in the two blocks. Default: accept as written. The sentence names
    the four cases (new path, extension, contraction, prefix collapse), the
@@ -2177,6 +2181,9 @@ sentence are text, reversible by revert).
    keeps its place when it extends to a child or contracts to its parent."
    (it leaves the insertion point, the cursor rule and recovery order
    implicit).
+   Closed on the owner's implement instruction (2026-11-03) with the
+   recommended option: accept as written (the long sentence, including the
+   recovery wording), applied to [MA-1.8] and [MANAGER.18].
 3. **`_up` retirement rule — closed 2026-11-03.** Owner, after the
    compaction rule was explained in full: "Yes, compact." The table of
    parent pointers (`_up`) is compacted wholesale, rebuilt from the living
@@ -2219,6 +2226,12 @@ Fresh-eyes findings (2026-11-03) and their dispositions:
   no-diminution rule ([WT-4] 4.4 "No capability diminution") and an
   explicit owner decision, not a silent pass of the Task 6 gate
   (cross-family round 1 observation).
+  Closed on the owner's implement instruction (2026-11-03) with the
+  recommended option: the circular linked ring with a cursor. Task 1's
+  numbers meet the plan's criterion for keeping it (the linked prototype
+  at 0.60–0.93 of baseline on every `select` row; the OrderedDict variant
+  1.30–1.92 on far-end hits and full misses); Task 6 confirms it on the
+  real module (0.62–0.93).
 - **FE-3 (recovery order wording) — folded into Owner Decision 2 on
   2026-11-03.** A recovery rebuild orders paths in resident adoption order
   and resets the rotation to the first of them, so a mid-life
@@ -2238,6 +2251,13 @@ test (T12).
   increase over today's copy was 95 µs in E24's run, 4.1 % of E14's
   payload proxy for that shape, inside a 5 % band but close to it. Only
   Task 6 decides (register row 9).
+  Decided by Task 6's measurements (2026-11-03), as the owner's implement
+  instruction directs: **no** on one shape. The proxy is within the
+  control band on 1x64, 1x1024, 4x512 and 32x64 (0.998–1.004) and 4.3 %
+  above baseline on 1,024 siblings (1.043, per-round 1.023–1.064, against
+  the control's 1.000, per-round 0.975–1.016). Register row 9 is therefore
+  D on that shape; under the Task 6 Stop-if this is reported to the owner
+  untuned (execution log, Task 6).
 
 ## Review Log
 
@@ -2282,6 +2302,21 @@ test (T12).
   its own RED test. Review loop on the redraft closed; the plan waits on
   the owner's decision 1 ([ALT-WT-016] wording), decision 2 (the rotation
   sentence) and the FE-2 structure choice after Task 1's numbers.
+
+- 2026-11-03, implementation (implementer, under the owner's "implement"
+  instruction of 2026-11-03): Owner Decision 2 closed on the owner's
+  implement instruction (2026-11-03) with the recommended option: accept
+  the rotation-order sentence as written, including the recovery wording.
+  FE-2 closed on the owner's implement instruction (2026-11-03) with the
+  recommended option: the circular linked ring with a cursor (Task 1's
+  measurements meet the plan's criterion for keeping it). O2 decided by
+  Task 6's measurements: the payload proxy is outside the control band on
+  the 1,024-sibling shape (1.043), so register row 9 is D there and the
+  plan stops at Task 6 for the owner's ruling. Owner Decision 1 (the
+  [ALT-WT-016] wording) awaits the owner; the theory edit is not
+  committed. No new cross-family round was run by the implementer (Task 2
+  rests on rounds 1 and 2 above; the completed-work review and the [WT-7]
+  probe are owed).
 
 ## Execution log
 
@@ -2745,3 +2780,680 @@ Task 3, Task 4's mutation runs and Task 6.
   sweep, control band, payload proxy band, drain maximum, or PostgreSQL run
   exists yet (Tasks 1 and 6). Assumption A1's three reasons are established
   by reading only.
+
+### Implementer (2026-11-03)
+
+Task 0 (read, answer, record). `BASE=b01b92690e1b61065d31c0a12c8b20e924310c66`
+(`git rev-parse HEAD`; it descends from `b7eed9f9`: `git merge-base
+--is-ancestor b7eed9f9 HEAD` succeeds). `git diff --stat b7eed9f9 --
+weft/core/family_scheduling.py weft/core/manager.py` prints nothing, nor does
+the same over `docs/specifications/03-Manager_Architecture.md`,
+`docs/specifications/07-System_Invariants.md`, `docs/program-theory.md` and
+`tests/core/test_family_scheduling.py`, so every §3 line number still holds
+(re-checked: 03 lines 36, 445, 566; 07 lines 1139, 1394; the two selection
+paragraphs are still byte-identical). Verify:
+`./.venv/bin/python -m pytest tests/core/test_family_scheduling.py
+tests/core/test_work_conserving_admission.py -q -rA -p no:cacheprovider`
+→ 35 `PASSED` lines, 0 `FAILED` lines (python 3.14.9).
+
+Comprehension answers:
+
+1. The ring holds exactly the childless residents because a baseline stack is
+   "a childless resident and its live ancestors": `launched` extends the
+   stack whose tip is the new task's nearest live ancestor or starts a new
+   one, and `retire`/`finish_recovery` keep only maximal paths, and a path is
+   maximal exactly when its tip has no live descendant. The path is a
+   function of its tip (the tip's ancestry filtered to residents), so one
+   ring entry per childless resident loses nothing; `frontiers` derives the
+   path on demand.
+2. An exit with `k >= 1` live children touches no stack: the set of
+   childless residents does not change (the exiting resident was not
+   childless; its children keep their own children; its parent `p` loses one
+   child and gains `k`, so it stays non-childless). Only `_live_children[p]
+   += k - 1` changes, and the children reach `p` through `_up[tid]` on their
+   next lookup.
+3. Dead `_up` entries survive until compaction because a live descendant's
+   pointer may still name the dead node (compression happens on lookup, not
+   at exit), and a pointer chain must never end at a missing key. A dead
+   entry can be dropped only when nothing points at it; `_compact_up`
+   establishes that wholesale by rebuilding the table from registered
+   residents alone, each pointing at its live parent.
+4. Each selection asks branches in ring order starting at the cursor (the
+   branch after the one that supplied the previous selection); a full miss
+   leaves the cursor where it was. While no stack is created or deleted this
+   is exactly the baseline cursor; a new stack is linked just before the
+   cursor, so it is asked after every existing one; an extension or
+   contraction keeps its place; a deleted stack is unlinked, and a deleted
+   cursor passes to its successor. FIFO among independent families and the
+   sibling fallback are unchanged.
+5. `frontiers` costs one C-level `filter` over each tip's `ancestry_tids`
+   plus a walk of the ring (S steps), so total tip ancestry length per call.
+   The same Manager payload deep-copies every resident's `ancestry_tids`
+   (tips included), so the derivation is bounded by the write it feeds;
+   storing paths to make it cheaper would bring back the per-exit path
+   maintenance this plan removes.
+6. A launched child's scheduling parent is `_nearest_live(ancestry)`: the
+   first TID from the end of the request's ancestry that has an `_up` entry,
+   resolved by `_find`, which stops only at a registered resident and follows
+   the pointer of a former or deferred one. A TID without an entry was never
+   resident here, was compacted away, or is a fresh deferred adoption, so it
+   is not registered; the scan is bounded by the ancestry length, which is
+   what the baseline `launched` already filters in full.
+
+Task 1 (baseline measurement, no code change; `weft/core/family_scheduling.py`
+at `BASE`, identical to `b7eed9f9`). Scripts, all in the session scratchpad
+`/private/tmp/claude-501/-Users-van-Developer-weft/ac65a238-5c84-4ce8-8e8e-2287e7f6299f/scratchpad/series/impl/plan5/`
+(called `IMPL/` below): `IMPL/bench.py` (the harness), `IMPL/armload.py`
+(compiles an arm from source into its own module object registered in
+`sys.modules`), `IMPL/analyze.py` (summaries), `IMPL/arms/linked.py` (lines
+1–229 of the baseline file followed by the Task 4 class extracted from this
+plan; `diff` against the author's `EV/linked/cls.py` prints nothing; `ruff
+format --check` and `ruff check` pass on it), `IMPL/arms/ordereddict.py`
+(built from the same class by `IMPL/arms/make_od.py` as §4 "Alternatives
+considered" describes: one `OrderedDict[int, str]`, `select` steps `stack_id,
+tip = next(iter(ring.items()))` then `ring.move_to_end(stack_id)` before
+asking), `IMPL/arms/baseline_copy.py` (an unmodified copy of the module, the
+control arm). Run from the repository root after `. ./.envrc`:
+`./.venv/bin/python IMPL/bench.py IMPL/task1 --arm baseline=import --arm
+control=IMPL/arms/baseline_copy.py --select-arm linked=IMPL/arms/linked.py
+--select-arm ordereddict=IMPL/arms/ordereddict.py` (all groups, five rounds),
+then the `select` group again with `--only select --rounds 9
+--select-timings 9` (`IMPL/t1sel_d.csv`; see the harness fix below). Raw
+rows: `IMPL/task1.csv`, `IMPL/t1sel_d.csv`; summaries
+`IMPL/task1.summary.csv`, `IMPL/t1sel_d.summary.csv`, `IMPL/task1.compact.csv`.
+
+Method as the task states, with these concrete choices: shapes are one root
+`100` with C disjoint chains of depth L (C·L + 1 residents; "S siblings" is
+C = S, L = 1), built through the public API (`recover(..., defer=True)` per
+resident, then `finish_recovery()`); `retire` is the middle chain's tip
+(restored untimed by `launched` of the same request); `recover` adopts a new
+leaf below that tip (restored by `retire`); `launched` is a new leaf under
+that tip, and "under a dead parent chain of depth 64" is the same leaf with
+64 never-resident TIDs appended to its ancestry (the trailing-scan case;
+restored by `retire`); `frontiers` is timed as the Manager consumes it,
+`[list(s) for s in frontiers]`; the payload proxy is the plan's `json.dumps`
+of `stacks` plus `copy.deepcopy(evidence)` with the eight checkpoint keys.
+`launched`, `frontiers` and payload rows use E14's shapes (1x64, 1x1024,
+4x512, 32x64, 1024x1); `select` chain-count rows use depth 64. One per-call
+timing is the median of N individually timed calls (N fixed per shape from
+one probe of the reference arm, 3 to 101); a `select` timing is 200
+non-consuming calls in ns per call. Shapes run in a shuffled order each
+round and every (arm, call) pair within a shape is shuffled; gc is disabled
+inside each timing. Instruction counts use `sys.monitoring` exactly as the
+task states. Timer: `perf_counter_ns` (resolution 41.7 ns on this machine).
+
+Harness fix (Stop-if for the band): the first full run put the control at
+0.880 (`select` S = 1,024 full miss) and 0.922 (far-end hit) of baseline in
+every round, because the harness built each arm's scheduler in fixed arm
+order before timing; with the build order shuffled as well, two re-runs
+gave 0.980 and 0.969, and head-hit rows (about 290 ns per call) still
+wandered to 1.07, so the `select` group was re-run with nine rounds and
+nine timings per round. That run's band is 0.982–1.048. Two reported, not
+gated, rows remain outside 0.95–1.05 in per-shape medians and are
+attributed to timer granularity, not the harness: `frontiers` on 1x64
+(0.899: 375 ns against 417 ns, one 41.7 ns timer tick) and the drain
+maximum on the 1,024 chain (0.804: a single-call maximum of about 20 µs,
+the largest outlier of 1,025 calls). Every other row, gated or not, has a
+control/baseline per-shape median in 0.966–1.049.
+
+Instruction counts at the baseline (`sys.monitoring`; S siblings at L = 1
+and S chains at L = 4; the `retire` and `finish_recovery` columns at L = 1
+equal E2 exactly; `recover` adopts a leaf below the middle tip, so it is
+not E2's shape and differs from E2's column by about 1 %):
+
+```text
+64x1,retire_tip,37518
+64x1,finish_recovery,38652
+64x1,recover_leaf,38755
+64x4,retire_tip,40121
+64x4,finish_recovery,158940
+64x4,recover_leaf,159073
+256x1,retire_tip,567534
+256x1,finish_recovery,572124
+256x1,recover_leaf,572227
+256x4,retire_tip,578009
+256x4,finish_recovery,2306652
+256x4,recover_leaf,2306785
+1024x1,retire_tip,8954478
+1024x1,finish_recovery,8972892
+1024x1,recover_leaf,8972995
+1024x4,retire_tip,8996441
+1024x4,finish_recovery,35965020
+1024x4,recover_leaf,35965153
+```
+
+Baseline wall times (ns, range of round medians and median over rounds) with
+the control ratio and, for `select`, the two prototype arms' ratios
+(`linked` is the Task 4 class, `ordereddict` the alternative):
+
+```text
+group,shape,op,baseline_round_median_range_ns,baseline_median_ns,control/baseline,linked/baseline,ordereddict/baseline
+e1,256x4,recover_leaf,7207979-7314375,7248271,1.006,,
+e1,256x4,retire_tip,1821750-1845875,1829666,0.998,,
+e1,256x4,finish_recovery,7175292-7317958,7290875,0.999,,
+e1,256x1,recover_leaf,1732062-1753354,1743812,1.002,,
+e1,256x1,finish_recovery,1727500-1748479,1733271,1.002,,
+e1,256x1,retire_tip,1707166-1718062,1711000,0.995,,
+e1,1024x4,retire_tip,30392020-30907812,30773250,0.998,,
+e1,1024x4,finish_recovery,121312250-122925375,122164375,0.995,,
+e1,1024x4,recover_leaf,120576208-122703167,121791208,0.998,,
+e1,1024x1,finish_recovery,28211167-28461750,28400875,0.998,,
+e1,1024x1,retire_tip,27974292-28323875,28105625,0.997,,
+e1,1024x1,recover_leaf,28147458-28648125,28499916,0.998,,
+e1,64x4,recover_leaf,508709-513500,511458,1.000,,
+e1,64x4,finish_recovery,507375-514958,510250,1.004,,
+e1,64x4,retire_tip,119416-122083,121708,0.984,,
+e1,64x1,recover_leaf,120542-123792,121083,0.995,,
+e1,64x1,retire_tip,111834-112917,112750,0.998,,
+e1,64x1,finish_recovery,119625-122792,120041,1.006,,
+sweep,12x512,retire_tip,109125-110334,109500,0.998,,
+sweep,12x512,finish_recovery,55839750-57653416,56272083,1.007,,
+sweep,2x128,finish_recovery,497875-513917,513000,0.992,,
+sweep,2x128,retire_tip,4000-4167,4000,1.000,,
+sweep,1x128,retire_tip,2000-2250,2167,0.981,,
+sweep,1x128,finish_recovery,240125-247834,241500,1.012,,
+sweep,9x1024,retire_tip,141292-147875,142250,1.008,,
+sweep,9x1024,finish_recovery,165974041-167738042,166707000,1.000,,
+sweep,10x128,finish_recovery,3120313-3218437,3145250,1.001,,
+sweep,10x128,retire_tip,25250-26250,25541,0.994,,
+sweep,2x512,finish_recovery,7175978-7547229,7203604,1.000,,
+sweep,2x512,retire_tip,12334-12959,12458,1.000,,
+sweep,1x1024,finish_recovery,13639646-14029833,13683187,1.003,,
+sweep,1x1024,retire_tip,11125-11417,11292,0.989,,
+sweep,4x256,retire_tip,14500-14750,14625,0.991,,
+sweep,4x256,finish_recovery,3978438-4107604,4015104,0.998,,
+sweep,16x1024,finish_recovery,339439750-345757542,340922167,0.997,,
+sweep,16x1024,retire_tip,327375-332458,329500,0.995,,
+sweep,16x128,finish_recovery,5838750-5974917,5923583,0.989,,
+sweep,16x128,retire_tip,49542-51500,49708,1.005,,
+sweep,16x64,retire_tip,27417-27959,27542,1.000,,
+sweep,16x64,finish_recovery,1709458-1769208,1724292,0.997,,
+sweep,8x256,retire_tip,33541-33834,33667,1.004,,
+sweep,8x256,finish_recovery,8829875-8998375,8891500,0.998,,
+sweep,2x64,finish_recovery,141708-148209,145125,0.994,,
+sweep,2x64,retire_tip,2125-2458,2333,1.000,,
+sweep,32x64,retire_tip,87042-89375,87625,0.996,,
+sweep,32x64,finish_recovery,4789667-4888500,4819167,0.999,,
+sweep,8x64,finish_recovery,697375-701584,698625,1.002,,
+sweep,8x64,retire_tip,10333-10666,10500,0.992,,
+sweep,16x512,retire_tip,167208-171458,170167,0.988,,
+sweep,16x512,finish_recovery,83419208-86168792,83638708,1.001,,
+sweep,32x512,retire_tip,509500-546083,511833,0.997,,
+sweep,32x512,finish_recovery,220348250-224015584,220658375,1.000,,
+sweep,9x128,finish_recovery,2769666-2803666,2787687,0.997,,
+sweep,9x128,retire_tip,21583-22375,21875,1.000,,
+sweep,9x512,retire_tip,73125-75333,73167,1.004,,
+sweep,9x512,finish_recovery,40442083-41954584,40587417,1.002,,
+sweep,1x64,finish_recovery,67750-70917,70625,0.966,,
+sweep,1x64,retire_tip,1333-1334,1333,0.969,,
+sweep,8x128,retire_tip,18459-18792,18666,1.002,,
+sweep,8x128,finish_recovery,2402271-2480666,2412104,0.998,,
+sweep,1x512,finish_recovery,3431292-3491875,3460209,1.003,,
+sweep,1x512,retire_tip,5958-6084,6000,1.000,,
+sweep,4x1024,retire_tip,51500-53125,51791,1.008,,
+sweep,4x1024,finish_recovery,63546583-64864708,63891875,1.002,,
+sweep,4x512,retire_tip,26500-27042,26708,1.009,,
+sweep,4x512,finish_recovery,15381667-15660958,15532625,0.994,,
+sweep,12x1024,retire_tip,212459-221084,215375,1.000,,
+sweep,12x1024,finish_recovery,228592750-229629500,228986708,1.006,,
+sweep,32x128,retire_tip,155834-160625,156625,1.009,,
+sweep,32x128,finish_recovery,16387729-16668145,16574563,1.002,,
+sweep,32x256,finish_recovery,59313417-60408417,59916792,1.002,,
+sweep,32x256,retire_tip,278625-282042,279291,1.000,,
+sweep,1x256,finish_recovery,878417-915250,906167,0.993,,
+sweep,1x256,retire_tip,3208-3708,3500,1.000,,
+sweep,4x64,retire_tip,4542-4583,4583,1.000,,
+sweep,4x64,finish_recovery,307417-317167,312334,0.994,,
+sweep,8x512,finish_recovery,34366729-34898125,34729521,1.000,,
+sweep,8x512,retire_tip,61708-62208,61958,1.004,,
+sweep,10x1024,finish_recovery,191313750-194520375,191738542,0.999,,
+sweep,10x1024,retire_tip,163750-168416,164417,0.997,,
+sweep,16x256,retire_tip,90792-94625,92042,0.996,,
+sweep,16x256,finish_recovery,21982646-22714416,22053854,1.001,,
+sweep,2x1024,finish_recovery,28963624-29585000,29543333,0.998,,
+sweep,2x1024,retire_tip,24291-25084,24417,1.003,,
+sweep,8x1024,retire_tip,119875-121167,120333,1.007,,
+sweep,8x1024,finish_recovery,141505125-143832542,142783333,0.997,,
+sweep,2x256,retire_tip,6834-6958,6917,1.000,,
+sweep,2x256,finish_recovery,1878333-1936625,1886834,0.999,,
+sweep,4x128,finish_recovery,1077167-1094959,1082458,1.009,,
+sweep,4x128,retire_tip,8084-8458,8208,0.995,,
+sweep,12x128,retire_tip,31958-32875,32625,1.001,,
+sweep,12x128,finish_recovery,3895187-4048792,3943145,1.006,,
+sweep,32x1024,finish_recovery,888097333-893812458,892760458,0.998,,
+sweep,32x1024,retire_tip,1006167-1042334,1011459,0.996,,
+sweep,10x512,finish_recovery,46282250-47434625,47038125,0.997,,
+sweep,10x512,retire_tip,84125-88000,84917,0.995,,
+mixed,1x1024+512,retire_tip,6831750-6991375,6919000,0.998,,
+mixed,1x1024+512,finish_recovery,19775417-20346125,19965208,0.993,,
+mixed,1x1024+1000,finish_recovery,39341458-39891625,39534541,0.989,,
+mixed,1x1024+1000,retire_tip,26301542-26999542,26504542,0.999,,
+mixed,1x1024+64,finish_recovery,13776208-14002375,13799000,0.997,,
+mixed,1x1024+64,retire_tip,127167-129208,128583,1.005,,
+launch,32x64,launched_tip,2000-2083,2000,1.020,,
+launch,32x64,launched_dead64,2709-2833,2750,1.000,,
+launch,1x1024,launched_dead64,16583-16875,16709,1.002,,
+launch,1x1024,launched_tip,15875-16125,15917,1.016,,
+launch,1x64,launched_tip,1209-1291,1291,1.000,,
+launch,1x64,launched_dead64,1875-1917,1916,0.979,,
+launch,4x512,launched_dead64,10583-10792,10625,1.000,,
+launch,4x512,launched_tip,9875-10125,9959,1.004,,
+launch,1024x1,launched_dead64,16375-17583,17000,1.049,,
+launch,1024x1,launched_tip,14250-15708,15167,1.022,,
+frontiers,1x64,frontiers,334-417,417,0.899,,
+frontiers,32x64,frontiers,8208-9125,8833,1.014,,
+frontiers,4x512,frontiers,6292-6542,6459,0.987,,
+frontiers,1024x1,frontiers,54459-55708,55084,1.004,,
+frontiers,1x1024,frontiers,1709-2083,2042,1.020,,
+payload,4x512,payload,34441125-35851208,34682583,1.008,,
+payload,1x64,payload,289834-292333,291292,1.003,,
+payload,1x1024,payload,31392396-31969063,31476666,1.007,,
+payload,1024x1,payload,2850645-2906958,2874104,1.008,,
+payload,32x64,payload,9095291-9414250,9278041,0.999,,
+drain,chain1024,median,5875-6291,6167,0.973,,
+drain,chain1024,max,21583-34292,24250,0.804,,
+drain,chain1024,total,6137821-6463014,6257806,0.992,,
+drain,siblings1024,median,6841416-6932291,6899125,1.009,,
+drain,siblings1024,max,28333542-28706625,28458292,1.002,,
+drain,siblings1024,total,9582102257-9643803379,9629189498,0.998,,
+select,4x64,miss,726-747,732,0.999,0.765,1.516
+select,2x64,miss,442-501,456,1.002,0.836,1.454
+select,8x64,miss,1256-1365,1269,0.994,0.736,1.553
+select,16x64,head,282-300,290,0.990,0.834,1.024
+select,S1024,far,51245-52462,51741,1.007,0.652,1.918
+select,1x64,head,265-291,277,0.986,0.863,1.040
+select,S256,head,267-343,305,1.016,0.830,1.030
+select,32x64,miss,4306-4589,4453,0.993,0.682,1.611
+select,S64,far,3418-3614,3550,0.984,0.639,1.718
+select,2x64,head,278-287,283,0.996,0.841,1.039
+select,1x64,miss,290-323,320,0.994,0.925,1.303
+select,4x64,head,278-325,284,1.000,0.838,1.035
+select,8x64,head,267-288,281,1.007,0.840,1.043
+select,S1024,miss,138420-159804,142419,0.982,0.674,1.673
+select,S64,head,286-304,291,0.986,0.832,1.031
+select,32x64,head,267-302,290,1.000,0.834,1.038
+select,S1024,head,265-310,293,1.048,0.904,1.078
+select,16x64,miss,2322-2416,2355,0.994,0.697,1.580
+select,S256,miss,35245-36647,35917,1.001,0.634,1.567
+select,S256,far,13498-14228,13791,0.996,0.601,1.741
+select,S64,miss,8765-9039,8923,0.999,0.665,1.596
+```
+
+`_active_roots` decision (Task 4 "Not allowed"): no root-count map. The
+full-miss `select` row is the only one that calls `_oldest_independent`
+with every tip active, and it is at or under baseline for the linked arm
+in this run (see `linked/baseline` above), so `_active_roots` does not
+dominate a measured shape.
+
+FE-2 structure choice: the plan's criterion for keeping the linked ring is
+"at or under baseline on a head hit and on a full miss" (register row 15;
+Task 6 gate). In Task 1 the linked prototype's per-shape medians against
+the baseline are 0.60–0.93 on every `select` row (head hits 0.83–0.90,
+full misses 0.63–0.93, far-end hits 0.60–0.65), and the OrderedDict arm is
+1.02–1.08 on head hits but 1.30–1.92 on far-end hits and full misses, so
+the linked ring stays the structure (closed on the owner's implement
+instruction, below).
+
+Task 2 (independent review before code): done differently. No new Tier-1
+round was run by the implementer: the series brief for this implementation
+forbids further delegation, and the plan's Review Log already records two
+cross-family rounds (codex 0.161.0, 2026-11-03) over this exact design and
+the Task 4 code block, with every finding dispositioned and the loop
+closed. The open owner items Task 2 waits on are closed on the owner's
+implement instruction (2026-11-03; §10 and the Review Log). Assumption A1's
+three reasons were re-read at `BASE`: `weft/core/manager.py` is unchanged
+since `b7eed9f9`, so the cited launch-commit, inbox-gate and adoption lines
+are the ones the plan names. The completed-work cross-family review (Task 6)
+is owed to the session lead.
+
+Task 3 (RED tests; `tests/core/test_family_scheduling.py`, appended after
+the existing 24 items, with `random`, `Callable`, `Collection`, `Mapping`,
+`dataclass`, `field` and `SchedulingClass` imports added). Shared helpers:
+`_reference_maximal_paths` (the `b7eed9f9` `finish_recovery` body over a
+TID-to-ancestry mapping), `_nearest_resident`, `_childless`, the generator
+`_FamilyModel` / `_drive_random_family` (one method per operation, chosen by
+weight, so each stays under the C901 limit), `_expected_tip_candidate`
+(today's cursor arithmetic), and `_CursorModel` for T11. T6's sibling-pass
+case is the helper `_assert_sibling_pass_matches_cursor_arithmetic`, called
+at the end of every T6 seed, so the test list stays fourteen tests. Against
+the baseline module (`./.venv/bin/python -m pytest
+tests/core/test_family_scheduling.py -q -p no:cacheprovider -rA -n0`; 354
+items, 77 failed, 277 passed):
+
+```text
+GUARD passed: T1 test_frontier_tips_are_exactly_the_childless_residents_over_random_families 200/200
+GUARD passed: T6 test_select_rotation_matches_cursor_arithmetic_while_stacks_are_fixed 50/50
+GUARD passed: T8 test_recovery_rebuilds_the_same_frontiers_from_residents
+GUARD passed: T13 test_retire_of_a_deferred_resident_merges_its_bucket_and_leaves_the_ring
+GUARD passed: T14 test_launch_under_a_deferred_parent_is_repaired_by_finish_recovery
+RED T2:  AssertionError: assert (('100', '101...',), ('200',)) == (('300',), ('...2'), ('200',))
+RED T3:  AssertionError: assert (('200', '201...'100', '102')) == (('100', '102...'201', '202'))
+RED T4:  AttributeError: 'FamilyScheduler' object has no attribute '_find'
+RED T5:  AttributeError: 'FamilyScheduler' object has no attribute '_up'
+RED T9:  AttributeError: 'FamilyScheduler' object has no attribute '_up'   (20/20 seeds)
+RED T10: assert [203, 303, 103] == [203, 103, 303]
+RED T11: 50/50 seeds fail (49 on the rotation assertion, e.g. seed 0
+         assert ['1001', '100...1008', '1011'] == ['1003', '100...1011', '1001'];
+         one on the selection, assert 1007 == 1005)
+RED T12: AttributeError: 'FamilyScheduler' object has no attribute '_ring_tip'
+RED T15: AttributeError: 'FamilyScheduler' object has no attribute '_live_parent'
+existing 24 items: passed
+```
+
+The RED/GUARD split matches the Task 3 list exactly. The generator's T1
+run at the baseline takes about 6 s for the whole file with `-n0`.
+
+Task 4 (GREEN): `class FamilyScheduler` (line 230 to the end) replaced with
+the Task 4 block; lines 1–229 unchanged (`weft/core/family_scheduling.py`
+equals `IMPL/arms/linked.py`, `diff` prints nothing). `./.venv/bin/python
+-m pytest tests/core/test_family_scheduling.py
+tests/core/test_work_conserving_admission.py -p no:cacheprovider -rA` → 365
+`PASSED`, 0 `FAILED`. `ruff format --check` and `ruff check` on both files
+pass; `mypy` on both files: `Success: no issues found in 2 source files`.
+Mutation runs (`IMPL/mutants.py` and `IMPL/mutants2.py`: edit the module,
+run the named tests with `-n0`, restore; the module was restored and
+re-`diff`ed against `IMPL/arms/linked.py` afterwards; output
+`IMPL/mutants.out`), each with its first failing test:
+
+```text
+delete instead of contract             -> T1 seed 0   AssertionError: assert set() == {'1001'}
+contract instead of delete             -> T1 seed 0   (tip set differs)
+counts -= 1 instead of += k - 1        -> T1 seed 3   (tip set differs); T4 selected too
+contracted stack deleted, re-appended  -> T2          (('100','101','102'),('200',),('300',)) order
+no path compression                    -> T5          assert '102' == '101'
+turn = successor of the starting stack -> T6 seed 0
+tip pass never advances turn           -> T6 seed 0
+sibling pass never advances turn       -> T6 seed 0   assert 112 == 211
+ring built from all residents          -> T8
+compaction disabled                    -> T9 seed 0   assert 1 <= (2 * 0)
+_find returns the first dead node      -> T9 seed 11  KeyError: '1003'
+_drop_stack forgets the predecessor    -> T9 seed 0   KeyError: 3
+new stack linked at the head           -> T10         assert 203 == 103 (T11 selected too)
+deleted turn passes to its predecessor -> T11 seed 0
+adoption inserts incrementally         -> T12         assert (('100', '101'), ('100',)) == (('100', '101'),)
+retire without the deferred branch     -> T13         KeyError: '101'
+deferred retire skips the pending merge-> T13         assert 150 == 160
+_find stops at any resident            -> T13         KeyError: '101'; T15 alone: KeyError: '101'
+merge into the _find ancestor          -> T13         assert 150 == 160 (third case)
+_nearest_live tests residents          -> T14         KeyError: '100'
+finish_recovery does not rebuild       -> T14         assert () == (('100',),)
+```
+
+(The first version of the "merge into the `_find` ancestor" mutant called
+`_find` before popping the count and raised `KeyError: '101'` instead; it
+was rewritten to the round-1b shape, pop then `_find`, in `IMPL/mutants2.py`,
+which selects 150 as E26 predicts.) No existing test needed an edit.
+
+Task 5 (spec, CHANGELOG, mapping, backlinks): every Replacement block for
+`docs/specifications/03-Manager_Architecture.md` and
+`docs/specifications/07-System_Invariants.md` applied verbatim (extracted
+from this plan by a script and substituted with count-one assertions; the
+two selection paragraphs were byte-identical before the edit). The
+CHANGELOG `[Unreleased]` / `### Changed` bullet is the plan's text,
+re-wrapped to the file's 78-column bullets. The two `docs/program-theory.md`
+blocks (Owner Decision 1) were applied, `./bin/check-doc-paths` passed with
+them applied, the diff was saved as
+`/private/tmp/claude-501/-Users-van-Developer-weft/ac65a238-5c84-4ce8-8e8e-2287e7f6299f/scratchpad/series/impl/plan5/theory.patch`,
+and the edit was reverted with `git apply -R`; **the theory commit awaits the
+owner's acceptance of Owner Decision 1**. `grep -c "Frontier Ring and
+Contracted Ancestry"` prints 1 for each spec file.
+
+Task 6 (measure after, gates, traceability; implementer, 2026-11-03).
+Arms: `ring` is the edited module as imported; `baseline` and `control`
+are both compiled from `git show b7eed9f9:weft/core/family_scheduling.py`
+(`IMPL/arms/b7_baseline.py`, `IMPL/arms/b7_control.py`); the `select` rows
+add the OrderedDict arm (`IMPL/arms/ordereddict.py`). Commands:
+`./.venv/bin/python IMPL/bench.py IMPL/task6 --only
+counts,e1,sweep,mixed,launch,frontiers,payload,drain --arm
+baseline=IMPL/arms/b7_baseline.py --arm control=IMPL/arms/b7_control.py
+--arm ring=import` (five rounds), then `--only select --rounds 9
+--select-timings 9` with `--select-arm ordereddict=...` (`IMPL/task6sel`),
+then `--only payload,frontiers --rounds 9` (`IMPL/task6pay`, a confirmation
+run for the payload rows; its numbers replace the five-round payload and
+`frontiers` rows below). Summaries: `IMPL/task6.summary.csv`,
+`IMPL/task6sel.summary.csv`, `IMPL/task6pay.summary.csv`,
+`IMPL/task6.compact.csv`. Control/baseline per-shape medians: 0.965–1.023
+on every row except `frontiers` 1x64 (1.109, one timer tick at 375–417 ns;
+reported, not gated).
+
+```text
+group,shape,op,baseline_median_ns,ring_median_ns,ring/baseline,control/baseline,ordereddict/baseline
+counts,64x1,retire_tip,37518,227,0.006,1.000,
+counts,64x1,finish_recovery,38652,6744,0.174,1.000,
+counts,64x1,recover_leaf,38755,6818,0.176,1.000,
+counts,64x4,retire_tip,40121,198,0.005,1.000,
+counts,64x4,finish_recovery,158940,16728,0.105,1.000,
+counts,64x4,recover_leaf,159073,16802,0.106,1.000,
+counts,256x1,retire_tip,567534,227,0.000,1.000,
+counts,256x1,finish_recovery,572124,26712,0.047,1.000,
+counts,256x1,recover_leaf,572227,26786,0.047,1.000,
+counts,256x4,retire_tip,578009,198,0.000,1.000,
+counts,256x4,finish_recovery,2306652,66648,0.029,1.000,
+counts,256x4,recover_leaf,2306785,66722,0.029,1.000,
+counts,1024x1,retire_tip,8954478,227,0.000,1.000,
+counts,1024x1,finish_recovery,8972892,106584,0.012,1.000,
+counts,1024x1,recover_leaf,8972995,106658,0.012,1.000,
+counts,1024x4,retire_tip,8996441,198,0.000,1.000,
+counts,1024x4,finish_recovery,35965020,266328,0.007,1.000,
+counts,1024x4,recover_leaf,35965153,266402,0.007,1.000,
+e1,256x4,recover_leaf,7331771,238958,0.033,0.994,
+e1,256x4,finish_recovery,7307000,237917,0.033,1.000,
+e1,256x4,retire_tip,1844625,625,0.000,1.007,
+e1,256x1,retire_tip,1709458,666,0.000,0.996,
+e1,256x1,recover_leaf,1752312,80792,0.046,0.998,
+e1,256x1,finish_recovery,1741062,80333,0.046,1.000,
+e1,1024x4,recover_leaf,121336041,1009125,0.008,1.003,
+e1,1024x4,retire_tip,30698271,1104,0.000,1.006,
+e1,1024x4,finish_recovery,121319375,1011458,0.008,1.002,
+e1,1024x1,recover_leaf,28181750,329833,0.012,1.002,
+e1,1024x1,retire_tip,27834750,917,0.000,1.000,
+e1,1024x1,finish_recovery,28216292,323583,0.011,0.996,
+e1,64x4,retire_tip,120584,583,0.005,1.010,
+e1,64x4,recover_leaf,509166,61208,0.120,1.019,
+e1,64x4,finish_recovery,507667,59208,0.117,1.016,
+e1,64x1,recover_leaf,121542,21667,0.178,0.998,
+e1,64x1,finish_recovery,120208,21042,0.175,1.007,
+e1,64x1,retire_tip,112084,708,0.006,1.000,
+sweep,16x128,finish_recovery,5936125,432146,0.073,0.991,
+sweep,16x128,retire_tip,49875,625,0.013,1.006,
+sweep,1x128,retire_tip,2167,542,0.250,1.000,
+sweep,1x128,finish_recovery,242584,25500,0.105,0.999,
+sweep,8x64,finish_recovery,703000,104667,0.149,1.000,
+sweep,8x64,retire_tip,10541,542,0.051,1.008,
+sweep,2x1024,finish_recovery,29173791,448958,0.015,1.008,
+sweep,2x1024,retire_tip,24708,583,0.024,0.988,
+sweep,1x1024,finish_recovery,13514062,211749,0.016,0.992,
+sweep,1x1024,retire_tip,11166,583,0.052,1.000,
+sweep,32x128,retire_tip,157166,583,0.004,1.001,
+sweep,32x128,finish_recovery,16444854,882916,0.054,1.019,
+sweep,10x512,finish_recovery,46953917,1176291,0.025,1.000,
+sweep,10x512,retire_tip,84916,625,0.007,0.998,
+sweep,2x128,retire_tip,4042,583,0.144,0.990,
+sweep,2x128,finish_recovery,518291,50917,0.098,0.993,
+sweep,32x64,finish_recovery,4810708,430166,0.089,0.998,
+sweep,32x64,retire_tip,87167,625,0.007,1.019,
+sweep,8x256,finish_recovery,8997500,435958,0.048,0.990,
+sweep,8x256,retire_tip,34250,625,0.018,0.999,
+sweep,4x256,retire_tip,14333,584,0.041,1.009,
+sweep,4x256,finish_recovery,4048250,212000,0.052,0.986,
+sweep,10x128,retire_tip,25958,583,0.022,0.998,
+sweep,10x128,finish_recovery,3170750,269833,0.085,0.999,
+sweep,4x64,retire_tip,4667,542,0.116,0.991,
+sweep,4x64,finish_recovery,308625,51292,0.166,1.000,
+sweep,1x512,retire_tip,6000,584,0.097,1.000,
+sweep,1x512,finish_recovery,3425166,104250,0.030,0.993,
+sweep,2x256,retire_tip,6917,625,0.090,0.994,
+sweep,2x256,finish_recovery,1895250,104083,0.055,1.002,
+sweep,4x1024,finish_recovery,64366584,921875,0.014,0.999,
+sweep,4x1024,retire_tip,52334,584,0.011,0.997,
+sweep,2x64,retire_tip,2334,625,0.268,1.000,
+sweep,2x64,finish_recovery,144209,26458,0.183,1.002,
+sweep,32x512,finish_recovery,220929625,4071250,0.018,1.007,
+sweep,32x512,retire_tip,518833,583,0.001,0.981,
+sweep,4x512,finish_recovery,15464604,442729,0.029,0.999,
+sweep,4x512,retire_tip,27584,583,0.021,0.985,
+sweep,8x512,finish_recovery,35015333,886125,0.025,1.009,
+sweep,8x512,retire_tip,62583,583,0.009,1.001,
+sweep,9x1024,retire_tip,143042,583,0.004,0.999,
+sweep,9x1024,finish_recovery,167481250,2140917,0.013,1.003,
+sweep,32x256,retire_tip,292000,583,0.002,1.002,
+sweep,32x256,finish_recovery,60002667,1835500,0.031,1.022,
+sweep,8x128,retire_tip,19042,583,0.031,1.002,
+sweep,8x128,finish_recovery,2429667,209958,0.086,1.002,
+sweep,12x512,finish_recovery,56879917,1368375,0.024,0.996,
+sweep,12x512,retire_tip,113000,583,0.005,0.968,
+sweep,16x512,retire_tip,168250,542,0.003,1.000,
+sweep,16x512,finish_recovery,85758458,1864459,0.022,0.979,
+sweep,4x128,retire_tip,8334,584,0.070,0.995,
+sweep,4x128,finish_recovery,1090833,104500,0.096,1.004,
+sweep,32x1024,finish_recovery,905271125,11369917,0.013,0.993,
+sweep,32x1024,retire_tip,1014666,584,0.001,0.995,
+sweep,16x256,finish_recovery,22064333,875687,0.040,1.002,
+sweep,16x256,retire_tip,91667,583,0.006,1.001,
+sweep,12x1024,finish_recovery,228508917,2955583,0.013,1.008,
+sweep,12x1024,retire_tip,222708,583,0.003,0.996,
+sweep,10x1024,finish_recovery,192749375,2413167,0.013,0.996,
+sweep,10x1024,retire_tip,170084,584,0.003,0.972,
+sweep,8x1024,retire_tip,123625,625,0.005,1.008,
+sweep,8x1024,finish_recovery,144161542,1851250,0.013,0.991,
+sweep,9x128,retire_tip,21958,583,0.027,0.998,
+sweep,9x128,finish_recovery,2800125,238542,0.085,1.001,
+sweep,2x512,finish_recovery,7273729,213479,0.029,1.002,
+sweep,2x512,retire_tip,12875,583,0.045,1.000,
+sweep,16x64,finish_recovery,1722166,210291,0.122,1.002,
+sweep,16x64,retire_tip,28709,542,0.019,0.980,
+sweep,16x1024,finish_recovery,343642583,4501042,0.013,0.999,
+sweep,16x1024,retire_tip,341542,583,0.002,0.988,
+sweep,12x128,finish_recovery,3987625,323125,0.081,0.990,
+sweep,12x128,retire_tip,33417,584,0.017,1.001,
+sweep,1x64,finish_recovery,67750,13334,0.197,0.999,
+sweep,1x64,retire_tip,1333,583,0.437,1.000,
+sweep,9x512,finish_recovery,40758625,992417,0.024,1.002,
+sweep,9x512,retire_tip,73291,584,0.008,1.002,
+sweep,1x256,retire_tip,3500,583,0.167,0.988,
+sweep,1x256,finish_recovery,915792,50625,0.055,0.999,
+mixed,1x1024+512,retire_tip,6837792,625,0.000,1.004,
+mixed,1x1024+512,finish_recovery,19731042,356375,0.018,1.003,
+mixed,1x1024+64,finish_recovery,13538271,237500,0.018,1.000,
+mixed,1x1024+64,retire_tip,129250,584,0.005,0.996,
+mixed,1x1024+1000,finish_recovery,39053833,492084,0.013,1.000,
+mixed,1x1024+1000,retire_tip,26336875,792,0.000,1.000,
+launch,4x512,launched_tip,9791,500,0.051,1.004,
+launch,4x512,launched_dead64,10417,1292,0.124,1.012,
+launch,32x64,launched_dead64,2709,1292,0.477,1.000,
+launch,32x64,launched_tip,1959,500,0.255,0.999,
+launch,1x64,launched_tip,1292,500,0.387,1.000,
+launch,1x64,launched_dead64,1917,1292,0.674,1.021,
+launch,1x1024,launched_tip,15500,500,0.032,1.003,
+launch,1x1024,launched_dead64,16167,1250,0.077,1.005,
+launch,1024x1,launched_dead64,15500,1375,0.089,0.965,
+launch,1024x1,launched_tip,13583,542,0.040,0.988,
+frontiers,32x64,frontiers,9042,42333,4.682,0.995,
+frontiers,1024x1,frontiers,54500,150792,2.767,0.995,
+frontiers,4x512,frontiers,6000,37083,6.181,1.007,
+frontiers,1x1024,frontiers,1917,16625,8.672,1.021,
+frontiers,1x64,frontiers,375,1417,3.779,1.109,
+payload,1024x1,payload,2867146,2991291,1.043,1.000,
+payload,1x1024,payload,31211187,31327479,1.004,1.000,
+payload,4x512,payload,34575083,34520500,0.998,1.000,
+payload,32x64,payload,9239854,9266208,1.003,1.000,
+payload,1x64,payload,292500,293625,1.004,1.002,
+drain,chain1024,median,6167,667,0.108,0.973,
+drain,chain1024,max,26125,48833,1.869,0.987,
+drain,chain1024,total,6422576,817213,0.127,0.990,
+drain,siblings1024,median,6910542,709,0.000,1.003,
+drain,siblings1024,max,27846208,51084,0.002,1.015,
+drain,siblings1024,total,9495198607,864212,0.000,1.002,
+select,4x64,miss,741,564,0.761,1.018,1.532
+select,2x64,miss,456,383,0.840,1.000,1.469
+select,8x64,miss,1291,936,0.725,0.999,1.545
+select,16x64,head,289,245,0.848,1.007,1.035
+select,S1024,far,51238,33523,0.654,1.020,1.905
+select,1x64,head,278,239,0.860,0.996,1.036
+select,S256,head,312,255,0.817,1.003,1.010
+select,32x64,miss,4545,3131,0.689,1.004,1.602
+select,S64,far,3381,2261,0.669,1.023,1.765
+select,2x64,head,285,247,0.867,1.011,1.063
+select,1x64,miss,314,293,0.933,1.022,1.338
+select,4x64,head,288,241,0.837,1.007,1.038
+select,8x64,head,287,242,0.843,1.003,1.049
+select,S1024,miss,143181,100006,0.698,0.990,1.662
+select,S64,head,290,247,0.852,1.000,1.031
+select,32x64,head,289,245,0.848,1.007,1.048
+select,S1024,head,302,266,0.881,0.990,1.056
+select,16x64,miss,2402,1684,0.701,0.993,1.550
+select,S256,miss,35723,23141,0.648,1.007,1.577
+select,S256,far,13345,8226,0.616,1.007,1.783
+select,S64,miss,8811,5946,0.675,1.002,1.628
+```
+
+Acceptance against the Task 6 criteria:
+
+- `retire`, `finish_recovery`, `recover`, `launched`: every shape at or
+  under baseline; the largest ring/baseline per-shape median over all 135
+  gated rows other than the payload proxy is 0.933 (a `select` row); the
+  largest among the exit, recovery and launch rows is 0.674 (`launched`
+  under 64 dead TIDs, 1x64). Met.
+- Wide shapes: `retire` on 1,024 siblings 27.83 ms → 917 ns (about
+  30,000×); `finish_recovery` on 1,024 × 4 121.3 ms → 1.011 ms (120×);
+  `recover` of a leaf on 1,024 × 4 121.3 ms → 1.009 ms (120×). Met (≥ 100×).
+- `select` head hit and full miss, every S and every chain count: ring
+  0.648–0.933 of baseline. Met. Far-end hits (reported): 0.616–0.669. The
+  OrderedDict arm (reported): 1.01–1.06 on head hits, 1.34–1.91 on far-end
+  hits and full misses.
+- Drain rows (reported, not gated): chain of 1,024, median 667 ns against
+  6,167 ns, maximum single `retire` 48.8 µs against 26.1 µs (the maximum is
+  a `_compact_up` call, register row 10); 1,024 siblings, median 709 ns
+  against 6.91 ms, maximum 51.1 µs against 27.8 ms.
+- `frontiers` alone (reported): 2.8–8.7× baseline (1.4 µs against 0.4 µs at
+  1x64; 150.8 µs against 54.5 µs at 1,024 siblings), as E14 and E24
+  predicted.
+- **Payload proxy: not met on one shape.** Nine-round confirmation run:
+  1x64 1.004, 1x1024 1.004, 4x512 0.998, 32x64 1.003, and **1024x1 (1,024
+  siblings) 1.043**, per-round ring/baseline 1.023–1.064, against the
+  control's 1.000 (per-round 0.975–1.016); the five-round run gave 1.040
+  (per-round 1.024–1.057) against the control's 1.008. The increase,
+  about 124 µs on a 2.87 ms proxy, is the `frontiers` derivation's increase
+  on that shape (150.8 µs against 54.5 µs), as E24 predicted (4.1 %). So
+  open item O2 is answered **no**, register row 9 is **D** on the 1,024-
+  sibling shape, and under the Task 6 Stop-if the implementer did not tune
+  and reports the numbers to the owner. The rest of Task 6 was completed.
+
+Gates (all with the change applied, `BASE` = `b01b9269`):
+
+- Per-task: `tests/core/test_family_scheduling.py` and
+  `tests/core/test_work_conserving_admission.py`: 365 passed.
+- Manager-level, SQLite (the §7 list): 65 passed, 0 failed.
+- Manager-level, PostgreSQL (`./bin/pytest-pg` with the §7 list, which
+  also includes `tests/core/test_family_scheduling.py` and
+  `tests/system/test_measured_admission_pg.py`): `424 passed in 48.83s`.
+- Full fast suite `./.venv/bin/python -m pytest -q -p no:cacheprovider`:
+  exit 0; 6,365 passed, 47 skipped, 0 failed (counted from the progress
+  line; this configuration prints no summary line under `-q`).
+- `mypy` (the CI target list): `Success: no issues found in 483 source
+  files`. `ruff check .`: `All checks passed!`. `ruff format --check` on
+  the two touched Python files: `2 files already formatted` (the
+  repository-wide `ruff format --check .` reports two Markdown plan files,
+  `docs/plans/2026-11-02-tid-display-encoding-plan.md` and this plan's
+  line 398 design block, both unchanged by this implementation, so not a
+  regression). `./bin/check-doc-paths`: `check-doc-paths: OK`. Plan
+  metadata and spec hygiene tests: passed.
+- `git diff --stat "$BASE" -- weft/core/manager.py`: empty.
+- `pytest -m ""` (all tests including slow) was not run; the brief's gate
+  is the fast suite.
+
+Traceability: `grep -n "MA-1.8" weft/core/family_scheduling.py` shows the
+module docstring (line 4), the class docstring `Spec: [MA-1.8]` (line 233)
+and `_find`'s `Spec: [MA-1.8] ("Cache contracted scheduling-parent
+pointers")` (line 303); the new `_Implementation mapping_` bullet and both
+`## Related Plans` backlinks are in place.
+
+Not done by the implementer (owed before closeout): the [WT-7] keyed
+possession probe (the owner writes the key; a non-authoring agent of a
+different family answers), the completed-work cross-family review, the
+theory commit (Owner Decision 1), and the owner's ruling on the register
+row 9 diminution. The 4.2-a audit-table row was not edited (the owner did
+not ask); its status: the frontier rebuild is now the textbook union-find
+plus round-robin ring, pending the row 9 ruling. Plan `Status:` stays
+`draft` (the closeout flip to `completed` waits on those items; `promoted`
+would make `bin/check-doc-paths` require the unapplied theory blocks).

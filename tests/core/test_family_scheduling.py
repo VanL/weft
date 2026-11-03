@@ -6,12 +6,19 @@ fakes. Manager integration separately owns reservation and liveness proof.
 
 from __future__ import annotations
 
+import random
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
 import pytest
 
 import weft.core.family_scheduling as scheduling_mod
-from weft.core.family_scheduling import FamilyScheduler, PendingRequest
+from weft.core.family_scheduling import (
+    FamilyScheduler,
+    PendingRequest,
+    SchedulingClass,
+)
 
 pytestmark = pytest.mark.shared
 
@@ -477,3 +484,602 @@ def test_contracted_reclamation_is_local_and_compresses_owner_handles(
     scheduler.remove_pending(999)
     assert selected(scheduler).request_id == 303
     assert_pending_storage_bounded(scheduler)
+
+
+# --- Frontier ring and contracted ancestry (plan 2026-11-03 frontier ring) ---
+# Spec: [MA-1.8], [MANAGER.18]. Plan:
+# docs/plans/2026-11-03-family-scheduler-frontier-ring-plan.md Task 3.
+
+
+def _reference_maximal_paths(
+    residents: Mapping[str, tuple[str, ...]],
+) -> set[tuple[str, ...]]:
+    """Return today's maximal live paths for ``residents`` (TID -> ancestry).
+
+    The body is ``FamilyScheduler.finish_recovery`` at ``b7eed9f9``
+    (``weft/core/family_scheduling.py`` lines 423-430), copied verbatim except
+    that it reads a mapping of ancestries. It changes only if the frontier
+    contract changes on purpose.
+    """
+    paths = [
+        [*(item for item in ancestry_tids if item in residents), tid]
+        for tid, ancestry_tids in residents.items()
+    ]
+    maximal: list[list[str]] = []
+    for path in sorted(paths, key=len, reverse=True):
+        if not any(other[: len(path)] == path for other in maximal):
+            maximal.append(path)
+    return {tuple(path) for path in maximal}
+
+
+def _nearest_resident(
+    ancestry_tids: tuple[str, ...], residents: Collection[str]
+) -> str | None:
+    return next((tid for tid in reversed(ancestry_tids) if tid in residents), None)
+
+
+def _childless(residents: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """Residents no other resident names as its nearest live ancestor."""
+    parents = {
+        _nearest_resident(ancestry, residents) for ancestry in residents.values()
+    }
+    return [tid for tid in residents if tid not in parents]
+
+
+@dataclass
+class _FamilyModel:
+    """The generator's own table: every launched node and its lineage.
+
+    A finite parent appends its own TID to its child's ancestry; a background
+    parent passes its ancestry through unchanged (``submission_lineage``).
+    """
+
+    scheduler: FamilyScheduler
+    rng: random.Random
+    nodes: dict[str, tuple[str, tuple[str, ...], SchedulingClass]] = field(
+        default_factory=dict
+    )
+    next_id: int = 1000
+
+    def resident_ancestries(self) -> dict[str, tuple[str, ...]]:
+        return {tid: self.nodes[tid][1] for tid in self.scheduler.resident_tids}
+
+    def _new_id(self) -> int:
+        self.next_id += 1
+        return self.next_id
+
+    def _residents(self) -> list[str]:
+        return sorted(self.scheduler.resident_tids)
+
+    def _exited_finite(self) -> list[str]:
+        live = self.scheduler.resident_tids
+        return sorted(
+            tid
+            for tid, (_, _, cls) in self.nodes.items()
+            if cls == "finite" and tid not in live
+        )
+
+    def add_root(self) -> None:
+        request_id = self._new_id()
+        self.scheduler.add_pending(pending(request_id, str(request_id)))
+
+    def add_child(self) -> None:
+        if not self.nodes:
+            return self.add_root()
+        parent = self.rng.choice(sorted(self.nodes))
+        root, ancestry, cls = self.nodes[parent]
+        lineage = (*ancestry, parent) if cls == "finite" else ancestry
+        self.scheduler.add_pending(
+            PendingRequest(self._new_id(), root, parent, lineage)
+        )
+
+    def launch(self) -> None:
+        request = self.scheduler.select()
+        if request is None:
+            return
+        self.scheduler.remove_pending(request.request_id)
+        cls: SchedulingClass = "background" if self.rng.random() < 1 / 6 else "finite"
+        self.scheduler.launched(request, cls)
+        self.nodes[str(request.request_id)] = (
+            request.root_tid,
+            request.ancestry_tids,
+            cls,
+        )
+
+    def retire(self) -> None:
+        if residents := self._residents():
+            self.scheduler.retire(self.rng.choice(residents))
+
+    def release_background(self) -> None:
+        if residents := self._residents():
+            self.scheduler.release_background(self.rng.choice(residents))
+
+    def recover(self) -> None:
+        if exited := self._exited_finite():
+            tid = self.rng.choice(exited)
+            self.scheduler.recover(tid, self.nodes[tid][0], self.nodes[tid][1])
+
+    def recover_deferred(self) -> None:
+        exited = self._exited_finite()
+        if not exited:
+            return
+        for tid in self.rng.sample(exited, min(len(exited), self.rng.randint(1, 3))):
+            root, ancestry, _ = self.nodes[tid]
+            self.scheduler.recover(tid, root, ancestry, defer=True)
+        self.scheduler.finish_recovery()
+
+
+def _drive_random_family(
+    seed: int, steps: int, check: Callable[[_FamilyModel], None]
+) -> None:
+    """Apply random scheduler operations and ``check`` the model after each.
+
+    Every entry point the Manager uses is exercised: launch, retire (interior
+    residents included), background release, non-deferred recovery, and a
+    deferred sweep followed by ``finish_recovery``.
+    """
+    rng = random.Random(seed)
+    model = _FamilyModel(FamilyScheduler(), rng)
+    operations = (
+        (model.add_root, 12),
+        (model.add_child, 30),
+        (model.launch, 30),
+        (model.retire, 18),
+        (model.release_background, 4),
+        (model.recover, 3),
+        (model.recover_deferred, 3),
+    )
+    actions = [action for action, _ in operations]
+    weights = [weight for _, weight in operations]
+    for _ in range(steps):
+        rng.choices(actions, weights)[0]()
+        check(model)
+
+
+def _assert_public_frontier(model: _FamilyModel) -> None:
+    residents = model.resident_ancestries()
+    frontiers = model.scheduler.frontiers
+    tips = [path[-1] for path in frontiers]
+    assert len(tips) == len(set(tips))
+    assert set(tips) == set(_childless(residents))
+    assert set(frontiers) == _reference_maximal_paths(residents)
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_frontier_tips_are_exactly_the_childless_residents_over_random_families(
+    seed: int,
+) -> None:
+    """Derived frontiers equal today's maximal live paths on every step."""
+    _drive_random_family(seed, 400, _assert_public_frontier)
+
+
+def test_contracted_stack_keeps_its_rotation_position() -> None:
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(300, "300"),
+        pending(301, "300", ("300",)),
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100", "101")),
+        pending(200, "200"),
+    ):
+        scheduler.launched(request)
+    assert scheduler.frontiers == (("300", "301"), ("100", "101", "102"), ("200",))
+    scheduler.retire("301")
+    assert scheduler.frontiers == (("300",), ("100", "101", "102"), ("200",))
+
+
+def test_exit_beside_a_live_sibling_drops_the_stack_and_keeps_order() -> None:
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100",)),
+        pending(200, "200"),
+        pending(201, "200", ("200",)),
+        pending(202, "200", ("200", "201")),
+    ):
+        scheduler.launched(request)
+    scheduler.retire("101")
+    assert scheduler.frontiers == (("100", "102"), ("200", "201", "202"))
+
+
+def test_interior_exit_leaves_ring_unchanged_and_children_contract_to_ancestor() -> (
+    None
+):
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100", "101")),
+        pending(103, "100", ("100", "101")),
+        pending(200, "200"),
+    ):
+        scheduler.launched(request)
+    scheduler.retire("101")
+    assert scheduler.frontiers == (("100", "102"), ("100", "103"), ("200",))
+    assert scheduler._find("101") == "100"
+    scheduler.retire("102")
+    assert scheduler.frontiers == (("100", "103"), ("200",))
+    scheduler.retire("103")
+    assert scheduler.frontiers == (("100",), ("200",))
+
+
+def test_contracted_pointer_lookup_compresses_dead_chain() -> None:
+    """Inspect pointers: this test's subject is the compression mechanism."""
+    scheduler = FamilyScheduler()
+    for root in range(900, 910):
+        scheduler.recover(str(root), str(root), ())
+    ancestry: tuple[str, ...] = ()
+    for request_id in range(100, 105):
+        scheduler.launched(pending(request_id, "100", ancestry))
+        ancestry = (*ancestry, str(request_id))
+    for tid in ("103", "102", "101"):
+        scheduler.retire(tid)
+    assert scheduler._up["103"] == "102"
+    assert scheduler._up["102"] == "101"
+    assert scheduler._find("103") == "100"
+    assert scheduler._up["103"] == scheduler._up["102"] == "100"
+
+
+def _expected_tip_candidate(
+    tips: list[str], turn: int, waiting: Mapping[str, set[int]]
+) -> tuple[int | None, int]:
+    """Today's cursor arithmetic: the first tip from ``turn`` with work."""
+    for offset in range(len(tips)):
+        index = (turn + offset) % len(tips)
+        if waiting.get(tips[index]):
+            return max(waiting[tips[index]]), (index + 1) % len(tips)
+    return None, turn
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_select_rotation_matches_cursor_arithmetic_while_stacks_are_fixed(
+    seed: int,
+) -> None:
+    rng = random.Random(seed)
+    scheduler = FamilyScheduler()
+    roots = [str(index * 100) for index in range(1, 9)]
+    waiting: dict[str, set[int]] = {root: set() for root in roots}
+    next_id = 1000
+    for root in roots:
+        scheduler.recover(root, root, ())
+    for root in roots:
+        for _ in range(rng.randint(0, 3)):
+            next_id += 1
+            scheduler.add_pending(pending(next_id, root, (root,)))
+            waiting[root].add(next_id)
+    tips = [path[-1] for path in scheduler.frontiers]
+    turn = 0
+    selections = 0
+    while True:
+        if selections < 40 and rng.random() < 0.5:
+            # New work under a tip that missed earlier makes rotation visible.
+            root = rng.choice(roots)
+            next_id += 1
+            scheduler.add_pending(pending(next_id, root, (root,)))
+            waiting[root].add(next_id)
+        expected, turn = _expected_tip_candidate(tips, turn, waiting)
+        actual = scheduler.select()
+        if expected is None:
+            assert actual is None
+            break
+        assert actual is not None and actual.request_id == expected
+        scheduler.remove_pending(expected)
+        waiting[actual.root_tid].discard(expected)
+        selections += 1
+    _assert_sibling_pass_matches_cursor_arithmetic()
+
+
+def _assert_sibling_pass_matches_cursor_arithmetic() -> None:
+    """With no tip work and no independent family, siblings rotate by cursor."""
+    scheduler = FamilyScheduler()
+    for tid, ancestry in (
+        ("100", ()),
+        ("101", ("100",)),
+        ("200", ()),
+        ("201", ("200",)),
+    ):
+        scheduler.recover(tid, tid if not ancestry else ancestry[0], ancestry)
+    oldest: dict[str, list[int]] = {"100": [111, 112, 113], "200": [211, 212, 213]}
+    family_of = {"101": "100", "201": "200"}
+    for root, request_ids in oldest.items():
+        for request_id in request_ids:
+            scheduler.add_pending(pending(request_id, root, (root,)))
+    tips = [path[-1] for path in scheduler.frontiers]
+    assert set(tips) == {"101", "201"}
+    turn = 0
+    while any(oldest.values()):
+        expected = None
+        for offset in range(len(tips)):
+            index = (turn + offset) % len(tips)
+            family = oldest[family_of[tips[index]]]
+            if family:
+                expected = family.pop(0)
+                turn = (index + 1) % len(tips)
+                break
+        actual = selected(scheduler)
+        assert actual.request_id == expected
+        scheduler.remove_pending(actual.request_id)
+    assert scheduler.select() is None
+
+
+def test_recovery_rebuilds_the_same_frontiers_from_residents() -> None:
+    first = FamilyScheduler()
+    chain: tuple[str, ...] = ()
+    for request_id in range(100, 105):
+        first.launched(pending(request_id, "100", chain))
+        chain = (*chain, str(request_id))
+    first.launched(pending(200, "200"))
+    for request_id in (201, 202, 203):
+        first.launched(pending(request_id, "200", ("200",)))
+    first.retire("102")
+    first.retire("200")
+    chain_ancestry = ("100", "101", "102", "103")
+    ancestries = {str(tid): chain_ancestry[: tid - 100] for tid in range(100, 105)}
+    ancestries |= {"200": (), "201": ("200",), "202": ("200",), "203": ("200",)}
+    second = FamilyScheduler()
+    order = sorted(first.resident_tids)
+    for tid in order:
+        root = ancestries[tid][0] if ancestries[tid] else tid
+        second.recover(tid, root, ancestries[tid], defer=True)
+    second.finish_recovery()
+    assert set(second.frontiers) == set(first.frontiers)
+    assert len(second.frontiers) == len(first.frontiers) == 4
+    residents = {tid: ancestries[tid] for tid in order}
+    assert [path[-1] for path in second.frontiers] == _childless(residents)
+
+
+def _assert_pointer_mechanics(model: _FamilyModel) -> None:
+    scheduler = model.scheduler
+    residents = model.resident_ancestries()
+    assert len(scheduler._up) <= 2 * len(scheduler.resident_tids)
+    for tid, ancestry in residents.items():
+        assert scheduler._live_parent(tid) == _nearest_resident(ancestry, residents)
+    ring_tip = scheduler._ring_tip
+    assert (scheduler._turn is None) == (not ring_tip)
+    assert set(scheduler._ring_next) == set(scheduler._ring_prev) == set(ring_tip)
+    for stack_id in ring_tip:
+        assert scheduler._ring_prev[scheduler._ring_next[stack_id]] == stack_id
+    if scheduler._turn is not None:
+        visited = [scheduler._turn]
+        while (following := scheduler._ring_next[visited[-1]]) != scheduler._turn:
+            visited.append(following)
+        assert sorted(visited) == sorted(ring_tip)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_contracted_pointers_stay_bounded_by_live_residents(seed: int) -> None:
+    """Inspect pointers and ring links: their bounds are the subject here."""
+    _drive_random_family(seed, 400, _assert_pointer_mechanics)
+
+
+def test_new_stack_joins_rotation_after_existing_stacks() -> None:
+    scheduler = FamilyScheduler()
+    for root in ("100", "200"):
+        scheduler.recover(root, root, ())
+        for offset in (1, 2, 3):
+            scheduler.add_pending(pending(int(root) + offset, root, (root,)))
+    assert selected(scheduler).request_id == 103
+    scheduler.launched(pending(300, "300"))
+    for request_id in (301, 302, 303):
+        scheduler.add_pending(pending(request_id, "300", ("300",)))
+    sequence = []
+    for _ in range(3):
+        request = selected(scheduler)
+        scheduler.remove_pending(request.request_id)
+        sequence.append(request.request_id)
+    assert sequence == [203, 103, 303]
+
+
+@dataclass
+class _CursorModel:
+    """Today's cursor list edited by the [MA-1.8] rotation rules.
+
+    A new stack is inserted before the cursor; a deleted stack is removed and
+    a deleted cursor passes to its successor; an extension or contraction
+    replaces its tip in place.
+    """
+
+    scheduler: FamilyScheduler
+    rng: random.Random
+    tips: list[str] = field(default_factory=list)
+    cursor: int = 0
+    ancestry: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    parent: dict[str, str | None] = field(default_factory=dict)
+    children: dict[str, int] = field(default_factory=dict)
+    waiting: dict[str, set[int]] = field(default_factory=dict)
+    next_id: int = 1000
+
+    def _new_id(self) -> int:
+        self.next_id += 1
+        return self.next_id
+
+    def rotation(self) -> list[str]:
+        return self.tips[self.cursor :] + self.tips[: self.cursor]
+
+    def has_tip_work(self) -> bool:
+        return any(self.waiting.get(tip) for tip in self.tips)
+
+    def add_child(self, tip: str) -> None:
+        request_id = self._new_id()
+        root = (self.ancestry[tip] or (tip,))[0]
+        lineage = (*self.ancestry[tip], tip)
+        self.scheduler.add_pending(pending(request_id, root, lineage))
+        self.waiting.setdefault(tip, set()).add(request_id)
+
+    def add_child_anywhere(self) -> None:
+        self.add_child(self.rng.choice(self.tips))
+
+    def launch_root(self) -> str:
+        tid = str(self._new_id())
+        self.scheduler.launched(pending(int(tid), tid))
+        self.ancestry[tid], self.parent[tid], self.children[tid] = (), None, 0
+        if self.tips:
+            self.tips.insert(self.cursor, tid)
+            self.cursor += 1
+        else:
+            self.tips, self.cursor = [tid], 0
+        return tid
+
+    def select_and_check(self) -> tuple[PendingRequest, str]:
+        expected, self.cursor = _expected_tip_candidate(
+            self.tips, self.cursor, self.waiting
+        )
+        request = selected(self.scheduler)
+        assert request.request_id == expected
+        self.scheduler.remove_pending(request.request_id)
+        holder = next(t for t in reversed(request.ancestry_tids) if t in self.children)
+        self.waiting[holder].discard(request.request_id)
+        return request, holder
+
+    def extend(self, request: PendingRequest, holder: str) -> None:
+        tid = str(request.request_id)
+        self.scheduler.launched(request)
+        self.ancestry[tid], self.parent[tid], self.children[tid] = (
+            request.ancestry_tids,
+            holder,
+            0,
+        )
+        self.children[holder] += 1
+        self.tips[self.tips.index(holder)] = tid
+        if self.rng.random() < 0.5:
+            self.add_child(tid)
+
+    def retire_tip(self) -> None:
+        tid = self.rng.choice(self.tips)
+        index = self.tips.index(tid)
+        self.scheduler.retire(tid)
+        up = self.parent[tid]
+        del self.children[tid]
+        moved = self.waiting.pop(tid, set())
+        if up is not None:
+            self.waiting.setdefault(up, set()).update(moved)
+            self.children[up] -= 1
+            if not self.children[up]:
+                self.tips[index] = up
+                return
+        self.tips.pop(index)
+        if index < self.cursor:
+            self.cursor -= 1
+        if self.cursor == len(self.tips):
+            self.cursor = 0
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_select_rotation_matches_cursor_model_across_stack_edits(seed: int) -> None:
+    """A cursor list edited by the [MA-1.8] rotation rules predicts each choice."""
+    rng = random.Random(seed)
+    model = _CursorModel(FamilyScheduler(), rng)
+    for _ in range(6):
+        root = model.launch_root()
+        for _ in range(rng.randint(0, 2)):
+            model.add_child(root)
+    for _ in range(120):
+        if not model.has_tip_work():
+            if model.tips:
+                model.add_child_anywhere()
+            else:
+                model.launch_root()
+        else:
+            request, holder = model.select_and_check()
+            action = rng.randrange(4)
+            if action == 0:
+                model.extend(request, holder)
+            elif action == 1:
+                model.add_child(model.launch_root())
+            elif action == 2:
+                model.retire_tip()
+            else:
+                model.add_child_anywhere()
+        assert [path[-1] for path in model.scheduler.frontiers] == model.rotation()
+
+
+def test_adoption_after_child_launch_rebuilds_the_parent_path() -> None:
+    """Inspect the ring: the handoff case of the leaf-launch assumption."""
+    scheduler = FamilyScheduler()
+    scheduler.launched(PendingRequest(101, "100", "100", ("100",)))
+    assert scheduler.frontiers == (("101",),)
+    assert len(scheduler._ring_tip) == 1
+    assert list(scheduler._ring_tip.values()) == ["101"]
+    assert scheduler._live_parent("101") is None
+    scheduler.recover("100", "100", ())
+    assert scheduler.frontiers == (("100", "101"),)
+    assert "100" not in scheduler._tip_stack
+    assert len(scheduler._ring_tip) == 1
+    assert scheduler._live_parent("101") == "100"
+
+
+def test_retire_of_a_deferred_resident_merges_its_bucket_and_leaves_the_ring() -> None:
+    scheduler = FamilyScheduler()
+    scheduler.recover("100", "100", ())
+    scheduler.recover("101", "100", ("100",), defer=True)
+    scheduler.add_pending(pending(150, "100", ("100",)))
+    scheduler.add_pending(pending(160, "100", ("100", "101")))
+    scheduler.retire("101")
+    assert scheduler.frontiers == (("100",),)
+    scheduler.finish_recovery()
+    assert scheduler.frontiers == (("100",),)
+    assert selected(scheduler).request_id == 160
+
+    # A former resident's retained pointer is followed past while deferred.
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100", "101")),
+    ):
+        scheduler.launched(request)
+    scheduler.retire("101")
+    scheduler.recover("101", "100", ("100",), defer=True)
+    scheduler.retire("102")
+    assert scheduler.frontiers == (("100",),)
+    scheduler.finish_recovery()
+    assert scheduler.frontiers == (("100", "101"),)
+
+    # The exiting resident's bucket merges into the deferred resident.
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100", "101")),
+    ):
+        scheduler.launched(request)
+    scheduler.retire("101")
+    scheduler.recover("101", "100", ("100",), defer=True)
+    scheduler.add_pending(pending(150, "100", ("100", "101")))
+    scheduler.add_pending(pending(160, "100", ("100", "101", "102")))
+    scheduler.retire("102")
+    scheduler.finish_recovery()
+    assert scheduler.frontiers == (("100", "101"),)
+    assert selected(scheduler).request_id == 160
+
+
+def test_launch_under_a_deferred_parent_is_repaired_by_finish_recovery() -> None:
+    scheduler = FamilyScheduler()
+    scheduler.recover("100", "100", (), defer=True)
+    scheduler.launched(PendingRequest(101, "100", "100", ("100",)))
+    scheduler.finish_recovery()
+    assert scheduler.frontiers == (("100", "101"),)
+    scheduler.retire("101")
+    assert scheduler.frontiers == (("100",),)
+
+
+def test_launch_under_a_deferred_parent_with_a_retained_pointer_attaches_to_the_registered_ancestor() -> (
+    None
+):
+    """Inspect the pointer: ``frontiers`` filters by residents and cannot show it."""
+    scheduler = FamilyScheduler()
+    for request in (
+        pending(100, "100"),
+        pending(101, "100", ("100",)),
+        pending(102, "100", ("100", "101")),
+    ):
+        scheduler.launched(request)
+    scheduler.retire("101")
+    scheduler.recover("101", "100", ("100",), defer=True)
+    scheduler.launched(PendingRequest(103, "100", "101", ("100", "101")))
+    assert scheduler._live_parent("103") == "100"
+    scheduler.finish_recovery()
+    assert scheduler.frontiers == (("100", "101", "102"), ("100", "101", "103"))
+    assert scheduler._live_parent("103") == "101"

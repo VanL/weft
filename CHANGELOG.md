@@ -14,6 +14,15 @@
   Replacement-sync check for promoted plans, and plans gain a `promoted`
   status.
 
+- The Manager's family scheduler keeps its live frontier as a ring over
+  childless residents with contracted scheduling-parent pointers (union-find),
+  so a task exit and a recovery no longer rebuild and re-sort every frontier
+  path. Branches now take turns in a ring with a cursor instead of longest
+  first: a new branch joins the rotation after every branch already waiting,
+  and a branch keeps its place as its path extends or contracts; the `stacks`
+  list in the Manager checkpoint follows that order. No compatibility shim:
+  nothing reads that order back.
+
 ## [0.9.119] - 2026-10-31
 
 ### Fixed
