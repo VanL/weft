@@ -1471,8 +1471,7 @@ _Implementation mapping_: `tests/core/test_family_source_reconciliation.py`; `te
 `weft/cli/run.py`; `weft/commands/submission.py::ensure_manager_after_submission`;
 `weft/commands/_spawn_submission.py` —
 `_inspect_task_log_for_tid`, `_reconcile_submitted_spawn_once`,
-`weft/commands/_spawn_submission.py` static reconciliation queue inventory,
-`weft/commands/_spawn_submission.py::_find_reserved_spawn_request_queue`,
+`weft/commands/_spawn_submission.py` static reconciliation queue inventory
 and `weft/commands/_spawn_submission.py::_reserved_spawn_request_queue_names` recognize every source/reserved pair;
 `weft/core/runtime_identity.py` supplies the runtime submitter and launch record;
 `weft/core/service_convergence.py::project_manager_service_record` preserves

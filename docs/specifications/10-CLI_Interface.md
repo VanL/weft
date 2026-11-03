@@ -546,7 +546,7 @@ Related plan: [Direct result observation spec changes](../plans/2026-10-09-direc
 _Implementation mapping_: `weft/commands/tasks.py` owns task snapshot and watch
 capabilities; `weft/commands/system.py` owns snapshot projection; the CLI-only
 process projection is owned by
-`weft/cli/app.py::_task_status_process_fields()` and
+`weft/cli/app.py::task_status()` and
 `weft/cli/app.py::_task_status_plain_lines()`. The command and Python-client
 snapshot surfaces do not accept a process-rendering flag.
 

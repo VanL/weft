@@ -65,8 +65,9 @@ packages.
 - `weft/commands/queue.py` owns direct queue operations, endpoint resolution,
   queue watching, and alias management.
 - `weft/commands/specs.py` owns stored-spec management and structured
-  validation; `weft/cli/validate_taskspec.py` owns TaskSpec validation
-  rendering and exit-code adaptation; `weft/core/spec_store.py` owns the
+  validation; `weft/cli/app.py` (`spec_validate`, `_render_spec_validation`)
+  owns TaskSpec validation rendering and exit-code adaptation;
+  `weft/core/spec_store.py` owns the
   shared `NAME|PATH` resolution logic; `weft/core/taskspec/parameterization.py`
   and `weft/core/taskspec/run_input.py` own submission-time materialization and
   run-input shaping; `weft/core/pipelines.py` owns pipeline validation and

@@ -1188,9 +1188,10 @@ not silently skipped. A surface that cannot honor an option rejects it
 explicitly.
 
 _Implementation mapping_: `weft/commands/specs.py` owns the structured,
-ordered validation capability; `weft/cli/validate_taskspec.py` owns terminal
-rendering and exit-code adaptation; `weft/core/runner_validation.py` and
-`weft/core/agents/validation.py` own runner and agent-runtime probes.
+ordered validation capability; `weft/cli/app.py` (`spec_validate`,
+`_render_spec_validation`) owns terminal rendering and exit-code adaptation;
+`weft/core/runner_validation.py` and `weft/core/agents/validation.py` own
+runner and agent-runtime probes.
 
 ### 3.4 Monitoring Ownership [CC-3.4]
 

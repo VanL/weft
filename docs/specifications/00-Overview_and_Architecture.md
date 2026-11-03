@@ -231,6 +231,113 @@ The reason this matters is operational clarity. When something fails, the
 system should leave behind enough durable evidence that the operator can answer
 what happened without guessing.
 
+### Trust Domain
+
+Weft operates within one operator trust domain. It trusts whatever the
+operating system let the current user place or reach; the operating system,
+filesystem permissions, and database grants decide who can. This is
+SimpleBroker's security model, adopted: inputs that choose where the boundary
+sits are trusted by placement, inputs that shape names inside it are checked
+for shape, and intent is never inspected. The identity statement is
+[WT-2a.11] in `docs/program-theory.md`; the sibling account is the "Security"
+and "General security considerations" sections of SimpleBroker's
+configuration guide.
+
+**Trusted by placement.** Weft uses these as given:
+
+- the broker target and its location: the SQLite database (by default
+  `.weft/broker.db` under the project root) and the directory that holds it,
+  or the PostgreSQL database and schema. Whoever can write the target can
+  write any queue, including `weft.spawn.requests` and every `T{tid}.ctrl_in`.
+- the Weft-scoped project config, by default `.weft/broker.toml`. Project
+  scoping is on by default (`WEFT_PROJECT_SCOPE`), so the nearest such file at
+  or above the discovery start directory selects the backend, target, and
+  backend options for every command run beneath it, including absolute paths,
+  parent paths, and remote backends. Do not run Weft beneath a project config
+  you would not trust. An explicit root (`--context` or `WEFT_CONTEXT`) is
+  trusted the same way.
+- the Weft metadata directory: `config.json`, stored task and pipeline specs,
+  and autostart manifests ([TS-1.2]) when autostart is enabled.
+- the commands, Python callables, and agent runtimes a TaskSpec names. A
+  TaskSpec that validates may run any program the current user can run.
+
+**Checked for shape.** Weft validates shape for correctness and portability,
+not as a trust boundary:
+
+- TaskSpecs: every public TaskSpec model rejects unknown fields ([TS-1]), and
+  `spec` and `io` are immutable after creation.
+- control messages: the strict envelope of [QUEUE.2a]; a rejected row is
+  acknowledged, never obeyed.
+- task IDs and message IDs: canonical 19-digit decimal identifiers
+  ([SB-0.2]).
+- queue names: SimpleBroker validates every queue name; Weft composes its own
+  names from validated task IDs.
+- names Weft derives: `WEFT_DIRECTORY_NAME` must be a single directory name,
+  not a path; process-title segments keep only letters, digits, `_`, and `-`
+  ([OBS.4]); PostgreSQL owner labels match `[!-~]{1,54}` ([SB-0.4]).
+
+**Recognized as its own.** SimpleBroker records a magic string and a schema
+version in its broker metadata. It refuses a database whose recorded magic
+string is not its own or whose recorded schema version is newer than it
+supports. A database with no broker metadata is not refused: SimpleBroker
+installs its metadata and tables there and leaves any existing tables in
+place. Weft accepts a
+stored task or pipeline spec only when it validates as one; an existing
+`.weft/config.json` that is not a JSON object is an error that Weft reports
+without rewriting the file ([SB-0.4]); Monitor tables are versioned and
+verified before use ([SB-0.4a]). Recognition protects correctness. It says
+nothing about who wrote the artifact.
+
+**Bounds on effect, not trust.** Resource limits ([RM-0]) and restricted
+runners, such as the first-party Docker, macOS sandbox, and Microsandbox
+runner extensions ([CC-3.1], [TS-1.3]), bound what a task may do. They do not
+decide whether a caller is trusted. Resource limits are a cooperative
+operational control, not isolation against an adversarial task.
+
+**Never.** Weft does not:
+
+- authenticate in band: control messages, spawn requests, and owner labels
+  carry no credential or signature, and owner labels confer no authority.
+  Anyone who can write a queue can send to it.
+- treat a sanitizer as a boundary: commands run as argv lists, never through
+  a shell (`shell=True` is rejected), and message content is not inspected
+  for intent ([ALT-WT-014] in `docs/program-theory.md`).
+- infer confidentiality or integrity from file mode, ownership,
+  parent-directory permissions, or ACLs, and it does not chmod, tighten,
+  repair, or preflight them ([CTX.5]). Weft creates files with ordinary
+  defaults (on POSIX, the process umask applies).
+- provision operating-system users, groups, ACLs, PostgreSQL roles, or
+  grants.
+
+### Shared Access
+
+**SQLite with more than one OS user.** Every intended writer needs effective
+read and write access to the broker database and to every companion file
+SimpleBroker creates or may create (its journal, WAL, shared-memory, lock,
+status, and vacuum-lock files). The containing directory must let every
+writer traverse it and create, replace, and remove entries. Weft adds entries
+of its own: `config.json` in the metadata directory and the same-directory
+temporary files that replace it atomically, `outputs/`, the logs directory
+(`WEFT_LOGS_DIR`, by default `.weft/logs`), and `autostart/` when enabled.
+Shared writers need the same rights there. On POSIX that means suitable file
+permissions or ACLs plus directory write and execute permission; on Windows,
+the equivalent file and directory ACL rights. Operators own placement,
+ownership, groups or principals, ACLs, and (on POSIX) the umask. For
+sensitive contents, use a directory restricted to the intended users.
+
+**PostgreSQL.** Database grants decide who can read and write queues. The
+database must already exist: SimpleBroker initialization creates its managed
+schema and tables inside it, and the TaskMonitor creates and migrates only
+its own Monitor tables in an initialized broker database ([SB-0.4a]). The
+role Weft connects as needs the privileges those objects require. Every role
+that can write the broker schema shares one trust domain with every Weft
+process that uses it. Prefer `WEFT_BACKEND_PASSWORD`, or the driver's own
+convention such as libpq's `PGPASSWORD`, over a password embedded in
+`.weft/broker.toml`. Weft shows targets through SimpleBroker's redacted
+display form. It strips a URL-userinfo password from the context keys and
+runtime identities it derives ([MF-1]); a password given as a libpq
+`password=` keyword or in a URI query stays in those derived identities.
+
 ## Scope Boundaries
 
 The canonical architecture spec covers what Weft does now. Planned extensions,
@@ -246,6 +353,7 @@ The companion file answers "what may exist later."
 
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
+- [Docs and the broker boundary](../plans/2026-11-02-docs-and-broker-boundary-plan.md)
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)

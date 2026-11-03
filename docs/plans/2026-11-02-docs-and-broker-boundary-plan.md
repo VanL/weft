@@ -1,6 +1,6 @@
 # Docs and the Broker Boundary: Security Account and Layer Ownership
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/00-Overview_and_Architecture.md "Observability and Security"; docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.2], [SB-0.3], [SB-0.4], [SB-0.4a]
 Superseded by: none
 
@@ -184,7 +184,11 @@ A wrong answer is a stop-and-re-read blocker.
   10-CLI_Interface.md, 11-CLI_Architecture_Crosswalk.md at plan authoring
   time.
 - Plan type: spec-authoring (the spec text is the deliverable).
-- Promotion baseline identifier: pending (recorded by Task 3).
+- Promotion baseline identifier: diff base `da957a29` plus the worktree state
+  of the promotion; the promotion lands as the single commit directly on top
+  of `da957a29` that changes this plan file (a commit cannot record its own
+  SHA; `git log --format=%h -1 -- docs/plans/2026-11-02-docs-and-broker-boundary-plan.md`
+  names it).
 
 ## 5. Proposed Spec Delta
 
@@ -707,6 +711,33 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 9
 
 - owner rulings applied 2026-11-03: R1 closed (no decoder request; Weft decodes no timestamp component, the TID is opaque everywhere but plan 12's whole-integer short display form), R2 closed (the eight watcher overrides stay as they are; no hook-declaration request), the stream-marker observation routed to a later code plan. Nothing in the plan's tasks changes beyond recording the rulings; no review round is needed for record-only edits.
 
+- Theory-versus-code audit refresh (Task 5, 2026-11-03, at `da957a29` plus
+  this promotion): the audit table in
+  `docs/plans/2026-11-02-program-theory-reconciliation-plan.md` ("### Audit
+  table") is carried forward by reference; only its two rows this plan
+  touches were re-audited. I-7 → [WT-2a.8]: still `aligned`; its evidence
+  holds (`weft/core/queue_wait.py` imports and calls
+  `simplebroker.create_activity_waiter_for_queues`; `weft/core/runtime_identity.py`
+  binds the connection owner through `simplebroker_pg.bind_connection_owner`),
+  and §8 B1 to B8 add the wider sweep (B1 leaves with plan 12; B3 kept by
+  owner ruling). I-8 → [WT-2a.11]: still `aligned`, now with a spec
+  statement: spec 00 "Observability and Security" carries the Trust Domain
+  and Shared Access text (§5.1); `weft/commands/submission.py` lines 975–976
+  still raise `NotImplementedError` for `shell=True`; a word-bounded grep for
+  `chmod`, `st_mode`, `S_IMODE`, `umask` over `weft/`, `extensions/*/weft_*`,
+  and `integrations/weft_django/weft_django` returns 0 lines. No row changes
+  classification. This refresh was done by the implementing agent and is a
+  re-audit, not a probe.
+- Keyed possession probe (Task 5, [WT-7]): NOT RUN. It needs an
+  owner-written key first (one hypothetical feature and where it belongs,
+  one category error and the entry that refuses it, the defect class an
+  audit of a named subsystem should find), then a non-author agent of a
+  different family answering from `docs/program-theory.md` alone. No key was
+  supplied with the 2026-11-03 implement instruction, and an implementer may
+  not write or grade it ("A self-graded probe is not a probe"). The plan
+  therefore stays `promoted`; it moves to `completed` in the change that
+  records the key and the graded result here.
+
 Reviewer inputs when run: this plan including §5, the seven target spec
 files at `b7eed9f9`, `docs/program-theory.md` [WT-2a.8], [WT-2a.11], [WT-5],
 [ALT-WT-014], and the two SimpleBroker sources named in §2.
@@ -826,7 +857,24 @@ repository root unless a path says otherwise.
   `grep -rn "commands/interactive\|_task_status_process_fields\|_find_reserved_spawn_request_queue\|interactive queue client" tests/ bin/ skills/ AGENTS.md docs/agent-context docs/lessons.md README.md`
   → no lines. (`validate_taskspec` hits in `tests/` are an unrelated runner
   plugin method.)
-- Comprehension answers: pending (Task 0).
+- Comprehension answers (Task 0, 2026-11-03, before the first spec edit):
+  1. Weft does not reject it. TaskSpec validation checks shape only
+     (unknown fields rejected, `spec` and `io` frozen); the command a TaskSpec
+     names is trusted by placement. The bound is the operating-system
+     permissions of the user Weft runs as, or a restricted runner the TaskSpec
+     selects (Docker, macOS sandbox, Microsandbox); resource limits bound
+     effect, not trust. A content check on the command would be the sanitizer
+     [ALT-WT-014] refuses.
+  2. No turn. With a native waiter, no hint, and no deadline reached,
+     `weft/core/tasks/multiqueue_watcher.py::_activity_hint_action` calls
+     `_has_pending_messages()` (an `any()` over eligible delivery queues, so at
+     most one `has_pending()` each, exactly one each on an empty pass;
+     observation interests are checked separately by
+     `_has_pending_observation()`), returns `"continue"` when nothing is
+     pending, and `_wait_for_activity_body` keeps waiting. The idle-poll cadence
+     (base `max(1.0, 10 × max_interval)`, deadline jittered to one to two times
+     the base, checked after a native wait finishes) belongs to SimpleBroker.
+     Weft changes nothing. Re-read at `da957a29`: lines 1189–1220 match.
 - E18 Promotion dry run (throwaway copy of `docs/specifications/`, not
   committed): every quoted span in §5 occurs exactly once in its target, all
   10 Replacement blocks are contained after substitution, the
@@ -862,3 +910,49 @@ repository root unless a path says otherwise.
   block, which is a prefix of the unrepaired bullet. At baseline
   `grep -c "interactive queue client" docs/specifications/04-SimpleBroker_Integration.md`
   prints `1`.
+
+Implementation evidence, 2026-11-03, on top of `da957a29`. Commands run from
+the repository root after `. ./.envrc`.
+
+- Task 0: the Status Index row already existed (`draft`); comprehension
+  answers recorded above before any spec edit.
+- Tasks 1 and 2: the ten §5 Replacement blocks were extracted from this file
+  by a throwaway script (session scratchpad, not committed) and applied
+  verbatim; each quoted old span occurred exactly once in its target.
+  `grep -c "### Trust Domain" docs/specifications/00-Overview_and_Architecture.md`
+  → `1`. `grep -c "interactive queue client" docs/specifications/04-SimpleBroker_Integration.md`
+  → `0`. E9 re-run (149 distinct paths) → no `MISSING` lines. E10 re-run
+  (245 distinct references) → no `DEAD` lines. The new pointers resolve:
+  `weft/cli/app.py` defines `spec_validate` (line 1158),
+  `_render_spec_validation` (1372), `_task_status_plain_lines` (1505), and
+  `task_status` (1618); `weft/commands/_spawn_submission.py` defines
+  `_reserved_spawn_request_queue_names` (147); `weft/commands/run.py:372`
+  builds the run-session input queue through `context.queue(...)`.
+- Task 3: `Status: promoted` here and `promoted` in the
+  `docs/plans/README.md` row, set in one edit before the §7 commands.
+  `bin/check-doc-paths` → `check-doc-paths: OK (/Users/van/Developer/weft)`,
+  exit 0. `./.venv/bin/python -m pytest tests/specs -p no:cacheprovider -o addopts="" -q`
+  → `164 passed`. Negative overlay (throwaway copy of the tracked tree in the
+  session scratchpad, plan and index at `promoted`, spec 00 reset to
+  `da957a29`): `bin/check-doc-paths --root <copy>` → 2 failures, the §5.1
+  and §5.2 blocks, so the containment check ran on this plan. Full fast
+  suite `./.venv/bin/python -m pytest -q -p no:cacheprovider` → exit 0;
+  mypy → `Success: no issues found in 481 source files`; `ruff check .` →
+  `All checks passed!`; `tests/specs/test_plan_metadata.py` → `4 passed`.
+  `ruff format --check .` reports 2 files that would be reformatted, both
+  Python blocks inside other plans
+  (`docs/plans/2026-11-02-tid-display-encoding-plan.md`,
+  `docs/plans/2026-11-03-family-scheduler-frontier-ring-plan.md`), present
+  at `da957a29` and not touched here.
+- Task 4: §8 and Owner Decisions already carry the 2026-11-03 rulings (R1
+  and R2 not sent; stream-marker observation routed to a later code plan).
+  No SimpleBroker file and no Weft code changed.
+- Task 5: audit refresh done (Review Log); keyed possession probe not run
+  (no owner key); status left at `promoted`.
+- Evidence correction to E12: the unbounded pattern
+  `grep -rnE "chmod|st_mode|S_IMODE|umask"` matches 3 lines in
+  `weft/core/manager.py` (7479, 7489, 7533), all the substring `st_mode` in
+  `_autostart_manifest_mode`, which was already present at `b7eed9f9`. The
+  word-bounded `grep -rnwE` form returns 0 lines. The §5.1 clause it
+  supports (Weft never sets or reads permission bits) is unchanged.
+- No theory edit is implied by this promotion.

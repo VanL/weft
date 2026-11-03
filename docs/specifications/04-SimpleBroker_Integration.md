@@ -8,7 +8,7 @@ workflow on top of that.
 
 _Implementation mapping_: `weft/context.py`, `weft/commands/queue.py`,
 `weft/commands/init.py`, `weft/commands/dump.py`, `weft/commands/load.py`,
-`weft/commands/interactive.py`, `weft/_constants.py`, `weft/bootstrap.py`,
+`weft/commands/run.py`, `weft/_constants.py`, `weft/bootstrap.py`,
 `weft/core/manager.py`, `weft/core/pipelines.py`, `weft/core/queue_wait.py`,
 `weft/core/spawn_requests.py`,
 `weft/core/tasks/multiqueue_watcher.py`, `weft/core/tasks/base.py`,
@@ -722,7 +722,7 @@ _Implementation mapping_: `weft/context.py` (`build_context`,
 `weft/core/launcher.py` (launch_task_process, _task_process_entry);
 `weft/core/manager_runtime.py` (_build_manager_process_command);
 `weft/manager_process.py` (main, run_manager_process); `weft/commands/init.py`;
-`weft/commands/interactive.py`;
+`weft/commands/run.py`;
 `weft/core/manager.py`; `weft/core/pipelines.py`; `weft/core/queue_wait.py`;
 `weft/core/spawn_requests.py`; `weft/core/tasks/base.py`;
 `weft/core/tasks/multiqueue_watcher.py`; `weft/bootstrap.py` for
@@ -759,8 +759,7 @@ Current contract:
   activity waiters and `QueueWatcher` fallback) rather than layering Weft-owned
   sleep loops on top of queue peeks
 - direct `Queue(...)` construction in command-layer code is reserved for
-  explicit low-level edges that do not carry a `WeftContext`, such as the
-  interactive queue client that owns its own task-local inbox lifecycle
+  explicit low-level edges that do not carry a `WeftContext`
 - `weft queue` and `weft status` helpers also honor `WEFT_CONTEXT` as an
   explicit project-root override before falling back to discovery
 
