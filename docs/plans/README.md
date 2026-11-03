@@ -32,7 +32,7 @@ There are currently 63 plan files in this directory.
 | [`2026-11-02-cli-client-surface-parity-plan.md`](./2026-11-02-cli-client-surface-parity-plan.md) | CLI and Client Surface Parity, and the Shell Refusal Test | `draft` | none |
 | [`2026-11-02-docs-and-broker-boundary-plan.md`](./2026-11-02-docs-and-broker-boundary-plan.md) | Docs and the Broker Boundary: Security Account and Layer Ownership | `promoted` | none |
 | [`2026-11-02-python-craft-late-imports-plan.md`](./2026-11-02-python-craft-late-imports-plan.md) | Python Craft: Late Imports and the Expert-Developer Test (owner decision first) | `draft` | none |
-| [`2026-11-02-reactor-edge-timer-floors-plan.md`](./2026-11-02-reactor-edge-timer-floors-plan.md) | Reactor Edges: Replace Timer Floors with Readiness Waits | `draft` | none |
+| [`2026-11-02-reactor-edge-timer-floors-plan.md`](./2026-11-02-reactor-edge-timer-floors-plan.md) | Reactor Edges: Replace Timer Floors with Readiness Waits | `completed` | none |
 | [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `draft` | none |
 | [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `draft` | none |
 | [`2026-11-02-test-suite-structure-plan.md`](./2026-11-02-test-suite-structure-plan.md) | Test Suite: Release-Tool Tests and Structural Flakiness (owner decision first) | `draft` | none |

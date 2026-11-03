@@ -1,6 +1,6 @@
 # Reactor Edges: Replace Timer Floors with Readiness Waits
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.5], [CC-3.1], [CC-3.5]; docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2]; docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.9]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/14-Python_API_Surfaces.md [PY-1]
 Superseded by: none
 
@@ -1156,9 +1156,14 @@ here.
      it removes the cap without diminution. Not in this plan.
 3. **Owner item 6 classification** (Task 0 item 4). Whether "A quiet task does
    nothing" holds on PostgreSQL given the measured native idle returns. This
-   plan only measures.
+   plan only measures. **Closed on the owner's implement instruction
+   (2026-11-03) with the recommended option: measured only, as the plan
+   states** (the measurement is in the Execution log under Task 0; the
+   classification itself stays with the owner).
 4. **Out-of-scope follow-ups** (§9). Each listed site is recorded for a
-   follow-up decision and is not changed here.
+   follow-up decision and is not changed here. **Closed on the owner's
+   implement instruction (2026-11-03) with the recommended option: recorded,
+   nothing to implement.**
 5. **Sampling between work items.** A persistent agent session's producer
    is alive between `execute()` calls but no observation pass runs then, so
    no limit sample is taken until the next work item starts. Interactive
@@ -1169,7 +1174,10 @@ here.
    pass); (b) extend sampling between items by giving the Consumer's
    reactor a deadline for the agent session, as for interactive sessions.
    Recommendation: (a) for this plan; (b) is an expansion with its own
-   plan. Raised by the cross-family round of 2026-11-03.
+   plan. Raised by the cross-family round of 2026-11-03. **Closed on the
+   owner's implement instruction (2026-11-03) with the recommended option:
+   (a), the plan's current shape (sampling only while a work item is
+   supervised).**
 
 Finding behind item 2 (fresh-eyes pass, reachability confirmed at
 cross-family round 1 and re-verified against the live code): in
@@ -1280,6 +1288,9 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
   recommendation (a). Round 2 (codex 0.161.0, 2026-11-03, scoped to F1, F2, F3, F5, F6; F4 scoping confirmed): no blocker; all closed with live evidence (`poll_limits()` clears `_monitor` on a metrics failure and returns normally, sessions.py:189–212; both precedents re-arm after the sample, subprocess_runner.py:266 and interactive.py:299; `_observe_terminal_handoff` samples on every eligible pass, sessions.py:534, so consecutive short items expose every-pass sampling; spec lines 183–190 match byte for byte; five samples at 1.0 s give about 4 s). Review loop on the sampling change closed; the plan waits on the owner's remaining decisions (item 2, the deferred control-surface cap, options a/b/c; item 3, PostgreSQL quiet-task classification; item 4, the host-handoff floor; item 5, sampling between work items).
 - owner ruling applied 2026-11-03: item 2 closed as (a) ("I think we keep it for now in Plan 2 and Plan 3"): the 50 ms cap stays as a named absent-event timer; Task 2 not executed; Task 2a added for the docstring. Items 3–5 remain.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): Task 3's `test_interactive_shutdown_waits_for_exit_callback` asserted final frames before the acknowledgement, an oracle series plan 3 retires; it now reuses the existing test's three output-before-terminal assertions (final frames before the `ctrl_out` terminal envelope and before the lifecycle terminal row) and asserts nothing about acknowledgements; plan 3's rename of the reused test recorded in the hidden couplings. Plan metadata gate and `bin/check-doc-paths` re-run.
+
+- owner items closed 2026-11-03: item 3 closed on the owner's implement instruction (2026-11-03) with the recommended option: measured only, as the plan states; item 4 closed on the owner's implement instruction (2026-11-03) with the recommended option: recorded, nothing to implement; item 5 closed on the owner's implement instruction (2026-11-03) with the recommended option: (a), the plan's current shape (sampling only while a work item is supervised).
+- implementation 2026-11-03: Tasks 0, 1, 2a, 3, 4 and 5 executed from `fbd79c66`, one commit each (Task 2 not executed, owner item 2 (a)). The §8 cross-family review of the completed work is not run by the implementing agent; it is left to the series coordinator.
 
 ## Execution log
 
@@ -1688,3 +1699,68 @@ Deviations:
   landing. This checkout cannot push, so the `PipeConnection`/sentinel pair in
   `multiprocessing.connection.wait` is not verified on Windows here; it is
   the documented Windows form of the same call. Recorded as open.
+
+#### Task 5. After-measurements and traceability
+
+Task 0 item 1 repeated after Task 4 (`da2e3b92`), same script and method:
+
+```text
+SQLite, da2e3b92:
+pid=31004 vcs_delta=2205 cpu_delta_s=0.466 weft-plan2-id-6333904053:manager:running
+pid=31006 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31007 vcs_delta=2289 cpu_delta_s=0.331 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31008 vcs_delta=2404 cpu_delta_s=0.315 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31009 vcs_delta=3190 cpu_delta_s=0.381 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=10088 (336.3/s) cpu_delta_s=1.492
+
+PostgreSQL, da2e3b92:
+pid=31107 vcs_delta=4046 cpu_delta_s=0.887 weft-plan2-id-6344750141:manager:running
+pid=31109 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31110 vcs_delta=3434 cpu_delta_s=0.162 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31111 vcs_delta=3219 cpu_delta_s=0.089 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=31112 vcs_delta=9648 cpu_delta_s=0.155 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=20347 (678.2/s) cpu_delta_s=1.293
+```
+
+| Measure | Backend | Before (`fbd79c66` / `58c1de5b`) | After (`da2e3b92`) |
+|---|---|---|---|
+| D1 idle manager tree, voluntary context switches over 30 s | SQLite | 18,663 (622/s); LivenessMonitor process 10,554 | 10,088 (336/s); LivenessMonitor process 3,190 |
+| D1 idle manager tree, voluntary context switches over 30 s | PostgreSQL | 25,562 (852/s); LivenessMonitor process 15,150 | 20,347 (678/s); LivenessMonitor process 9,648 |
+| D8 interactive drain with a descendant holding the pipes: interactive-module sleeps / `poll_stdout` calls | in-process (both backends run the test green) | 20 / 25 | 0 / 7 |
+| D10 interactive STOP shutdown with a 0.5 s exit: interactive-module sleeps / `is_alive` calls | in-process | 10 / 24 | 0 / 6 |
+| D11 silent 1.0 s agent work item, no predicate, no monitor: handoff waits / budgets | in-process | 20 / all 0.05 s | 1 / `None` |
+| D12 monitored agent session, `polling_interval=1.0`, one 2.0 s item, Consumer-style predicate: samples | in-process | 41 (20.4/s) | 3 (at 0, 1 and 2 s: one per interval plus the immediate first) |
+
+The D1 drop sits in the process whose context switches fell by about
+7,400 (SQLite) and 5,500 (PostgreSQL) over 30 s, the eight idle LivenessMonitor
+probe workers (about 160 wakes/s predicted; each idle wake costs more than
+one switch). D8, D10, D11 and D12 are process-local loops whose counts do not
+depend on the broker backend; their tests are `shared` and pass under
+`./bin/pytest-pg` (Tasks 3 and 4). Item 2 (D5, D7) is not run (Task 2
+deferred).
+
+Traceability: a `## Related Plans` bullet for this plan in
+`docs/specifications/01-Core_Components.md` (the second section, near the end)
+and in `docs/specifications/06-Resource_Management.md`; `[CC-2.2.1]` added to
+the `weft/core/tasks/interactive.py` module docstring in Task 3. The
+`weft/core/tasks/service.py` and `weft/core/tasks/sessions.py` module
+docstrings already cite the sections they implement. The disposable
+PostgreSQL measurement container `weft-plan2-pg` was removed after this
+measurement.
+
+Final gates at the closing working tree (code identical to `da2e3b92`):
+
+```text
+$ ./.venv/bin/python -m pytest -p no:cacheprovider
+6375 passed, 47 skipped
+$ ./.venv/bin/mypy weft tests bin integrations/... extensions/... --config-file pyproject.toml
+Success: no issues found in 484 source files
+$ ./.venv/bin/ruff check .
+All checks passed!
+$ ./bin/check-doc-paths
+check-doc-paths: OK (/Users/van/Developer/weft)
+$ ./.venv/bin/python -m pytest -m "" tests/tasks tests/commands tests/core tests/specs -p no:cacheprovider
+5237 passed, 45 skipped in 154.09s (0:02:34)
+$ ./bin/pytest-pg --fast
+6234 passed, 24 skipped in 288.30s (0:04:48)
+```

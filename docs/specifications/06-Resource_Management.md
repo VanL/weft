@@ -420,6 +420,7 @@ controls stay here only when they are already shipped and observable:
 
 - [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 - [PR48 reactor and test hygiene repairs](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md) replaces timer-polled subprocess pipe supervision with the platform readiness adapter (`[RM-5.2]`).
+- [Reactor edge timer floors](../plans/2026-11-02-reactor-edge-timer-floors-plan.md) replaces fixed timer floors on agent-session and interactive waits with their real event sources and samples persistent agent sessions at the monitor's `polling_interval` ([RM-5.1], [RM-5.2]).
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

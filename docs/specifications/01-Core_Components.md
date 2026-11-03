@@ -1303,6 +1303,7 @@ observations, apply effects, and own cleanup.
 ## Related Plans
 
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
+- [Reactor edge timer floors](../plans/2026-11-02-reactor-edge-timer-floors-plan.md) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).
 
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
