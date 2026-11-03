@@ -188,6 +188,18 @@ Enforcement mechanics and security boundary:
   `TaskRunner` whose TaskSpec names a `monitor_class`. The built-in Debugger's
   owner-local session bypasses `TaskRunner` and publishes no sampling timer. A
   session with no monitor class likewise waits on events alone.
+- A persistent agent session samples the same way, at its monitor's
+  `polling_interval`: `AgentSession` holds one session-scoped next-sample
+  instant, takes its first sample on its first observation pass with a live
+  producer, samples on any later observation pass once that instant is due
+  and never sooner, re-arms the instant one interval after a clock reading
+  taken after each sample, and publishes the instant as a deadline of its
+  handoff wait. Sampling runs while a work item is being supervised: the
+  deadline bounds the requested wait, and the spacing between samples,
+  measured after each sample, is at least one interval. Between work items
+  no sample is taken. A new work item neither resets nor postpones the
+  instant, so an instant that fell due between items is honored on the first
+  observation pass of the next work item.
 - Memory and file-descriptor/connection limits are enforced on a **single
   sample**: `ResourceMonitor.check_limits` kills the runtime the first
   poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the

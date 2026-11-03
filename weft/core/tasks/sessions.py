@@ -51,6 +51,7 @@ from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
     poll_terminal_payload,
     receive_terminal_payload,
+    wait_terminal_payload,
 )
 from weft.ext import RunnerHandle, SessionExecutionResult
 from weft.helpers import safe_cancel, terminate_process_tree
@@ -237,6 +238,10 @@ class AgentSession:
         self._handle = handle
         self._last_metrics: ResourceMetrics | None = None
         self._closed = False
+        # Session-scoped next limit-sample instant ([RM-5.1]); never reset per
+        # work item, so short items cannot postpone sampling. ``None`` means
+        # the session's immediate first sample is still due.
+        self._next_limit_sample_at: float | None = None
 
     @property
     def pid(self) -> int | None:
@@ -434,6 +439,7 @@ class AgentSession:
 
         while True:
             now = time.monotonic()
+            next_sample_at = self._next_limit_sample_at
             observations, limit_error = self._observe_terminal_handoff(
                 progress,
                 now=now,
@@ -441,6 +447,8 @@ class AgentSession:
                 pending_transport_failure=pending_transport_failure,
                 limit_error=limit_error,
                 cancel_requested=cancel_requested,
+                sample_limits=self._limit_sampling_active(progress)
+                and (next_sample_at is None or now >= next_sample_at),
             )
             pending_transport_failure = None
 
@@ -469,13 +477,34 @@ class AgentSession:
                 tuple(observations),
             )
             if step is None:
+                # Recomputed after the pass: a monitor that poll_limits()
+                # stopped, an accepted stop, or a consumed producer exit
+                # removes the sampling deadline from this same wait (D14).
+                sampling_deadline = (
+                    self._next_limit_sample_at
+                    if self._limit_sampling_active(progress)
+                    else None
+                )
                 wait_for = self._terminal_handoff_wait_seconds(
                     now=now,
                     start_time=start_time,
                     drain_deadline=drain_deadline,
+                    cancel_requested=cancel_requested,
+                    next_sample_at=sampling_deadline,
+                )
+                # The sentinel is level-triggered, so it leaves the wait set
+                # once producer exit has been reduced.
+                producer_sentinel = (
+                    None
+                    if "producer_exited" in progress.consumed_edge_kinds
+                    else self._process.sentinel
                 )
                 try:
-                    poll_terminal_payload(self._response_receiver, wait_for)
+                    wait_terminal_payload(
+                        self._response_receiver,
+                        producer_sentinel=producer_sentinel,
+                        timeout=wait_for,
+                    )
                 except (OSError, ValueError) as exc:
                     pending_transport_failure = str(exc)
                 continue
@@ -505,8 +534,16 @@ class AgentSession:
         pending_transport_failure: str | None,
         limit_error: str | None,
         cancel_requested: Callable[[], bool] | None,
+        sample_limits: bool,
     ) -> tuple[list[TerminalHandoffEvent], str | None]:
-        """Collect one persistent-session observation batch."""
+        """Collect one persistent-session observation batch.
+
+        A limit sample is taken only when ``sample_limits`` says the
+        session's next-sample instant is due, and never for a dead producer or
+        after an accepted stop. The next instant is armed one monitor
+        ``polling_interval`` after a clock reading taken after the sample, so
+        samples are never closer than one interval ([RM-5.1]).
+        """
 
         observations: dict[str, TerminalHandoffEvent] = {}
         if (
@@ -531,8 +568,19 @@ class AgentSession:
         if response_event is not None:
             observations[response_event.kind] = response_event
 
-        if progress.accepted_stop is None and self.is_alive():
+        monitor = self._monitor
+        if (
+            sample_limits
+            and monitor is not None
+            and progress.accepted_stop is None
+            and self.is_alive()
+        ):
+            # Read before sampling: poll_limits() stops the monitor on a
+            # monitor failure, so it may be gone afterwards.
+            interval = float(monitor.polling_interval)
             ok, violation = self.poll_limits()
+            if self._monitor is not None:
+                self._next_limit_sample_at = time.monotonic() + interval
             if not ok:
                 limit_error = violation or "Resource limit exceeded"
                 observations["limit_reached"] = TerminalHandoffEvent(
@@ -722,20 +770,51 @@ class AgentSession:
             policy="persistent_session",
         )
 
+    def _limit_sampling_active(self, progress: TerminalHandoffProgress) -> bool:
+        """Return whether limit sampling is clock work for this pass.
+
+        Sampling needs a monitor, no accepted stop, and a producer whose exit
+        has not been reduced ([RM-5.1]; D14 of the reactor-edge plan).
+        """
+
+        return (
+            self._monitor is not None
+            and progress.accepted_stop is None
+            and "producer_exited" not in progress.consumed_edge_kinds
+        )
+
     def _terminal_handoff_wait_seconds(
         self,
         *,
         now: float,
         start_time: float,
         drain_deadline: float | None,
-    ) -> float:
-        """Return the bounded wait until the next session observation boundary."""
+        cancel_requested: Callable[[], bool] | None,
+        next_sample_at: float | None,
+    ) -> float | None:
+        """Return the wait until the next session observation boundary.
 
-        deadlines = [now + ACTIVE_CONTROL_POLL_INTERVAL]
+        Readiness (a payload, channel seal or producer exit) wakes the wait;
+        this returns only its deadlines: the work-item timeout, the drain
+        deadline, the active limit-sampling instant, and, only while a
+        pull-style ``cancel_requested`` predicate exists, the
+        ``ACTIVE_CONTROL_POLL_INTERVAL`` re-check. ``None`` means wait on
+        readiness alone.
+
+        Spec: [CC-2.2.1], [CC-3.5], [RM-5.1]
+        """
+
+        deadlines: list[float] = []
+        if cancel_requested is not None:
+            deadlines.append(now + ACTIVE_CONTROL_POLL_INTERVAL)
         if self._timeout is not None:
             deadlines.append(start_time + self._timeout)
         if drain_deadline is not None:
             deadlines.append(drain_deadline)
+        if next_sample_at is not None:
+            deadlines.append(next_sample_at)
+        if not deadlines:
+            return None
         return max(0.0, min(deadlines) - now)
 
     def _finish_invalid_result(

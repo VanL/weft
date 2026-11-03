@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from typing import Any
 
@@ -99,6 +99,33 @@ def poll_terminal_payload(receiver: Connection, timeout: float = 0.0) -> bool:
         return True
 
 
+def wait_terminal_payload(
+    receiver: Connection,
+    *,
+    producer_sentinel: int | None,
+    timeout: float | None,
+) -> bool:
+    """Wait until a frame, a channel seal, or producer exit is ready.
+
+    The receiver and, when given, the producer's process sentinel join one
+    readiness wait, so producer exit is its own input and never inferred
+    from channel EOF ([CC-3.5]). ``timeout=None`` waits on readiness alone.
+    The sentinel is level-triggered: callers pass it only until the producer
+    exit has been observed. Windows ``BrokenPipeError`` is normalized to a
+    ready channel as in ``poll_terminal_payload``.
+
+    Spec: docs/specifications/01-Core_Components.md [CC-3.5]
+    """
+
+    waitables: list[Connection | int] = [receiver]
+    if producer_sentinel is not None:
+        waitables.append(producer_sentinel)
+    try:
+        return bool(wait(waitables, timeout))
+    except BrokenPipeError:
+        return True
+
+
 def receive_terminal_payload(receiver: Connection) -> Any:
     """Receive and decode one framed private terminal payload.
 
@@ -132,4 +159,5 @@ __all__ = [
     "poll_terminal_payload",
     "receive_terminal_payload",
     "send_terminal_payload",
+    "wait_terminal_payload",
 ]

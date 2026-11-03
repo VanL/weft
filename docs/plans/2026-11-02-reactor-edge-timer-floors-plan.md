@@ -1570,3 +1570,121 @@ Deviations:
   calls the reactor's `notify_activity` exactly once (a delegating counter on
   the real strategy) and sets `_interactive_activity`; the real quiet-stream
   wake through `drive_until` is unchanged. No ordering assertion changed.
+
+#### Task 4. Agent-session handoff waits on the channel and the producer sentinel
+
+Baseline (Task 0 item 3, D11 to D13) at `58c1de5b`, production unchanged.
+Script `baseline_counts.py` (throwaway) drives the new test targets directly:
+a 1.0 s silent item with no monitor and no predicate, and a monitored
+session (`polling_interval=1.0`) holding one 2.0 s item with a Consumer-style
+`cancel_requested` predicate:
+
+```text
+silent 1.0 s item: waits=20 distinct budgets=[0.05] status=ok
+D12 monitored polling_interval=1.0, 2.0 s item, Consumer-style cancel predicate: samples=41 over 2.01s (20.4/s) status=ok
+```
+
+Lookup re-run before editing:
+`grep -n "AgentSession(\|_response_receiver = \|class .*Receiver\|class .*Connection" tests/tasks/test_runner.py`
+and `grep -rln "AgentSession" tests` (`tests/tasks/test_runner.py`,
+`tests/tasks/test_task_execution.py`, `tests/core/test_public_extension_contracts.py`,
+`tests/fixtures/public_extension_contract.py`, `tests/architecture/test_import_boundaries.py`).
+The additional doubles the lookup found (the fake processes and monitors in
+the earlier `AgentSession` unit tests) were left as they are: none reaches the
+new wait or reads `polling_interval`, as the green run below proves.
+
+Red at `58c1de5b` (new tests added, production unchanged):
+
+```text
+FAILED tests/tasks/test_runner.py::test_agent_session_short_items_cannot_starve_sampling
+E           AssertionError: [0.025233708322048187, 0.00011949986219406128, 0.025195749942213297, ...]
+E            +  where False = all(<generator object test_agent_session_short_items_cannot_starve_sampling.<locals>.<genexpr> ...>)
+FAILED tests/tasks/test_runner.py::test_agent_session_silent_producer_waits_without_cadence
+E            +  where False = all(<generator object test_agent_session_silent_producer_waits_without_cadence.<locals>.<genexpr> ...>)
+2 failed, 2 passed  (the leaked-sender and monitor-interval guards pass)
+```
+
+The short-items gap failure at baseline is the sampling-on-every-pass
+mutation. `test_wait_terminal_payload_returns_on_producer_sentinel` carries no
+baseline-red claim (new helper); its `producer_sentinel=None, timeout=0.2`
+mutation check returns `False` as asserted.
+
+Intermediate red (the unconditional 50 ms term removed, waits on the channel
+alone through `wait_terminal_payload(..., producer_sentinel=None, ...)`, no
+sampling deadline):
+
+```text
+FAILED tests/tasks/test_runner.py::test_agent_session_samples_limits_at_monitor_interval
+E           AssertionError: assert 'ok' == 'limit'
+FAILED tests/tasks/test_runner.py::test_agent_session_leaked_sender_still_drains_after_producer_exit
+E           AssertionError: assert 'channel_sealed' == 'drain_expired'
+2 failed in 31.39s
+```
+
+(The leaked-sender run took about 30 s: with no sentinel the wait ended only
+when the grandchild's 30 s hold released the channel.)
+
+Rejected-shape mutation (the next-sample instant restarted at every
+`execute()`, temporary edit, reverted):
+
+```text
+E           assert 1 >= 2
+E            +  where 1 = len([2233703.900132])
+samples=1 per-execute durations s: min=0.0211 max=0.0256 all<0.2=True
+```
+
+The durations (every item under the 0.2 s interval) are the evidence that
+the mutation's prerequisite held.
+
+GREEN after the implementation: the Task 4 Verify line
+(`tests/core/test_terminal_handoff_transport.py tests/tasks/test_runner.py
+tests/tasks/test_agent_execution.py tests/core/test_terminal_handoff.py`)
+reports `851 passed`; `./bin/pytest-pg tests/core/test_terminal_handoff_transport.py
+tests/tasks/test_runner.py` reports `215 passed`. After-counts at the
+implementation:
+
+```text
+silent 1.0 s item: waits=1 distinct budgets=[None] status=ok
+D12 monitored polling_interval=1.0, 2.0 s item, Consumer-style cancel predicate: samples=3 over 2.01s (1.5/s) status=ok
+```
+
+D12 at the default-shaped interval: three samples over a 2.0 s item at
+`polling_interval=1.0` (at 0, 1 and 2 s), one per interval plus the immediate
+first, down from 41.
+
+Migrations applied (every behavioral assertion kept):
+`test_agent_session_producer_exit_starts_bounded_drain` and
+`test_session_stop_after_begin_drain_preserves_first_deadline` move their
+fake clock wait to `sessions_module.wait_terminal_payload` through one shared
+`_fake_clock_wait(clock)` helper; `test_agent_session_blocking_poll_failure_is_consumed_as_next_turn_transport_failure`
+keeps the real receiver and injects through a delegating wrapper of
+`sessions_module.wait_terminal_payload` that raises once (`_FailingFirstBlockingPollConnection`
+stays for the host test); `LimitMonitor`, `ExplodingMetricsMonitor` and
+`LateLimitMonitor` gain `polling_interval = DEFAULT_POLLING_INTERVAL`. Only the
+first three and the first two monitors failed before migration; the
+`fileno()` additions to `_FailingResponseReadConnection` and
+`_WindowsSealedResponseConnection`, the `sentinel` attribute for the live
+`Process` fake in `test_session_stop_effect_cannot_reset_absolute_drain_deadline`,
+and any change to `test_agent_session_does_not_poll_limits_after_producer_exit`
+were not needed (each passes unchanged: the step is terminal, or the dead
+producer's exit is consumed before any wait reads the sentinel).
+
+The [RM-5.1] Replacement block is applied verbatim to
+`docs/specifications/06-Resource_Management.md` in this commit.
+
+Deviations:
+
+- The shared descendant construction lives in a new helper module,
+  `tests/helpers/leaked_sender.py` (module-level, spawn-picklable targets
+  `hold_sender`, `silent_leaking_producer`, `leaking_session_producer`, plus
+  `wait_for_pidfile` and `kill_pid`), rather than being defined twice in the two
+  test modules that use it.
+- In `leaking_session_producer` the grandchild is started after `booted` and
+  before `ready` (the plan: after taking the work item), and the producer then
+  takes the work item and exits. The sender is still proven held by a live
+  descendant before `execute()`, and the < 2.0 s bound then measures the
+  drain rather than the grandchild's interpreter start-up under load.
+- Windows: the plan's stop condition asks for the Windows CI slice before
+  landing. This checkout cannot push, so the `PipeConnection`/sentinel pair in
+  `multiprocessing.connection.wait` is not verified on Windows here; it is
+  the documented Windows form of the same call. Recorded as open.

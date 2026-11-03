@@ -105,7 +105,20 @@ DEFAULT_POLLING_INTERVAL: Final[float] = 1.0
 """Default psutil polling interval in seconds."""
 
 ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
-"""Internal control-loop polling interval for active task execution."""
+"""Re-check cadence for a pull-style ``cancel_requested`` predicate.
+
+``TaskRunner``/``AgentSessionProtocol.execute`` take cancellation as a
+``Callable[[], bool]`` with no waitable, so it cannot wake a readiness wait
+([WT-7] "Event-driven against absence": the event cannot arrive). Used so,
+only while a predicate is present, by
+``weft/core/tasks/sessions.py::AgentSession._terminal_handoff_wait_seconds``
+and ``weft/core/runners/subprocess_runner.py::_supervision_wait_timeout``.
+``weft/core/runners/host.py::HostTaskRunner._terminal_handoff_wait_seconds``
+still uses it as an unconditional observation floor in the one-shot
+function-runner handoff; that remaining site is recorded for an owner
+follow-up (``docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md`` §9,
+Owner Decisions item 4) and is not replaced.
+"""
 
 TASK_LIFECYCLE_STATUS_VALUES: Final[frozenset[str]] = frozenset(
     (

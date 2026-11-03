@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import multiprocessing
+import time
+from pathlib import Path
 
 import pytest
 
+from tests.helpers.leaked_sender import (
+    kill_pid,
+    silent_leaking_producer,
+    wait_for_pidfile,
+)
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
     poll_terminal_payload,
     receive_terminal_payload,
     send_terminal_payload,
+    wait_terminal_payload,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -118,3 +126,38 @@ def test_terminal_transport_normalizes_windows_broken_pipe_to_eof() -> None:
     assert poll_terminal_payload(receiver) is True  # type: ignore[arg-type]
     with pytest.raises(EOFError):
         receive_terminal_payload(receiver)  # type: ignore[arg-type]
+
+
+def test_wait_terminal_payload_returns_on_producer_sentinel(tmp_path: Path) -> None:
+    """A producer's exit wakes the wait while a descendant holds the channel open.
+
+    Spec: [CC-3.5]
+    """
+
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    pidfile = tmp_path / "grandchild.pid"
+    process = ctx.Process(target=silent_leaking_producer, args=(sender, str(pidfile)))
+    process.start()
+    sender.close()
+    grandchild_pid: int | None = None
+    try:
+        grandchild_pid = wait_for_pidfile(pidfile)
+
+        started = time.monotonic()
+        ready = wait_terminal_payload(
+            receiver, producer_sentinel=process.sentinel, timeout=5.0
+        )
+        elapsed = time.monotonic() - started
+
+        assert ready is True
+        assert elapsed < 2.0
+        assert receiver.poll(0) is False
+        assert (
+            wait_terminal_payload(receiver, producer_sentinel=None, timeout=0.2)
+            is False
+        )
+    finally:
+        kill_pid(grandchild_pid)
+        process.join(timeout=5.0)
+        receiver.close()

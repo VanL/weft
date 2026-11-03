@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import multiprocessing
 import os
@@ -22,11 +23,19 @@ import psutil
 import pytest
 
 from tests.fixtures.llm_test_models import TEST_MODEL_ID
+from tests.helpers.leaked_sender import (
+    kill_pid,
+    leaking_session_producer,
+    wait_for_pidfile,
+)
 from tests.helpers.typing import record_and_return
 from tests.tasks.sample_targets import wait_for_file
 from weft import helpers as helpers_module
-from weft._constants import AGENT_SESSION_READY_TIMEOUT_SECONDS
-from weft.core.resource_monitor import ResourceMetrics
+from weft._constants import (
+    AGENT_SESSION_READY_TIMEOUT_SECONDS,
+    DEFAULT_POLLING_INTERVAL,
+)
+from weft.core.resource_monitor import BaseResourceMonitor, ResourceMetrics
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
@@ -43,6 +52,7 @@ from weft.core.tasks.agent_session_protocol import (
     make_result_response,
     make_startup_error_response,
     make_stop_request,
+    parse_request_type,
 )
 from weft.core.tasks.runner import TaskRunner
 from weft.core.tasks.sessions import AgentSession
@@ -1062,6 +1072,205 @@ def _spawn_agent_session_for_target(
     )
 
 
+def _agent_session_hold_then_reply_worker(
+    hold_seconds: float,
+    request_queue: Any,
+    response_sender: Connection,
+) -> None:
+    """Reply ready, then answer each work item ``hold_seconds`` after taking it."""
+
+    try:
+        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_ready_response())
+        while True:
+            request = request_queue.get()
+            if parse_request_type(request) != "execute":
+                return
+            time.sleep(hold_seconds)
+            send_terminal_payload(response_sender, make_result_response(status="ok"))
+    finally:
+        response_sender.close()
+
+
+class _RecordingLimitMonitor(BaseResourceMonitor):
+    """Monitor double that records a monotonic timestamp per limit check."""
+
+    def __init__(
+        self,
+        *,
+        polling_interval: float,
+        violation_at: int | None = None,
+    ) -> None:
+        super().__init__(polling_interval=polling_interval)
+        self.sample_times: list[float] = []
+        self._violation_at = violation_at
+
+    def start(self, pid: int) -> None:
+        self._pid = pid
+
+    def stop(self) -> None:
+        return
+
+    def snapshot(self) -> ResourceMetrics:
+        return ResourceMetrics(memory_mb=1.0)
+
+    def check_limits(self) -> tuple[bool, str | None]:
+        self.sample_times.append(time.monotonic())
+        if self._violation_at is not None and len(self.sample_times) >= (
+            self._violation_at
+        ):
+            return False, "test sustained violation"
+        return True, None
+
+    def last_metrics(self) -> ResourceMetrics | None:
+        return ResourceMetrics(memory_mb=1.0)
+
+
+@pytest.mark.shared
+def test_agent_session_silent_producer_waits_without_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no cancel predicate and no monitor, the handoff wait has no timer.
+
+    Spec: [CC-2.2.1], [CC-3.5]
+    """
+
+    session = _spawn_agent_session_for_target(
+        functools.partial(_agent_session_hold_then_reply_worker, 1.0)
+    )
+    budgets: list[float | None] = []
+    passes: list[None] = []
+    real_wait_seconds = session._terminal_handoff_wait_seconds
+    real_observe = session._observe_terminal_handoff
+
+    def recording_wait_seconds(**kwargs: Any) -> float | None:
+        budget = real_wait_seconds(**kwargs)
+        budgets.append(budget)
+        return budget
+
+    def counting_observe(*args: Any, **kwargs: Any) -> Any:
+        passes.append(None)
+        return real_observe(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session, "_terminal_handoff_wait_seconds", recording_wait_seconds
+    )
+    monkeypatch.setattr(session, "_observe_terminal_handoff", counting_observe)
+    try:
+        session.wait_ready(timeout=10.0)
+        result = session.execute("hello", cancel_requested=None)
+
+        assert budgets
+        assert all(budget is None for budget in budgets)
+        assert 1 <= len(passes) <= 3
+        assert result.status == "ok"
+    finally:
+        session.close()
+
+
+@pytest.mark.shared
+def test_agent_session_leaked_sender_still_drains_after_producer_exit(
+    tmp_path: Path,
+) -> None:
+    """Producer exit, seen on its sentinel, starts drain while the channel stays open.
+
+    Spec: [CC-3.5]
+    """
+
+    pidfile = tmp_path / "grandchild.pid"
+    session = _spawn_agent_session_for_target(
+        functools.partial(leaking_session_producer, str(pidfile))
+    )
+    grandchild_pid: int | None = None
+    try:
+        session.wait_ready(timeout=10.0)
+        grandchild_pid = wait_for_pidfile(pidfile)
+
+        started = time.monotonic()
+        result = session.execute("hello", cancel_requested=None)
+        elapsed = time.monotonic() - started
+
+        assert result.status == "error"
+        assert result.diagnostics is not None
+        assert result.diagnostics["handoff_event"] == "drain_expired"
+        assert elapsed < 2.0
+        assert psutil.Process(grandchild_pid).is_running()
+    finally:
+        kill_pid(grandchild_pid)
+        session.close()
+
+
+@pytest.mark.shared
+def test_agent_session_samples_limits_at_monitor_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent monitored session samples on its monitor's interval deadline.
+
+    Spec: [RM-5.1]
+    """
+
+    monitor = _RecordingLimitMonitor(polling_interval=0.05, violation_at=5)
+    session = _spawn_agent_session_for_target(
+        functools.partial(_agent_session_hold_then_reply_worker, 5.0),
+        monitor=monitor,
+    )
+    wait_times: list[float] = []
+    real_wait_seconds = session._terminal_handoff_wait_seconds
+
+    def recording_wait_seconds(**kwargs: Any) -> float | None:
+        wait_times.append(time.monotonic())
+        return real_wait_seconds(**kwargs)
+
+    monkeypatch.setattr(
+        session, "_terminal_handoff_wait_seconds", recording_wait_seconds
+    )
+    try:
+        session.wait_ready(timeout=10.0)
+        started = time.monotonic()
+        result = session.execute("hello", cancel_requested=None)
+        elapsed = time.monotonic() - started
+
+        assert result.status == "limit"
+        assert len(monitor.sample_times) == 5
+        assert wait_times
+        assert monitor.sample_times[0] < wait_times[0]
+        assert elapsed < 2.0
+    finally:
+        session.close()
+
+
+@pytest.mark.shared
+def test_agent_session_short_items_cannot_starve_sampling() -> None:
+    """Short work items neither restart nor outpace the session's sampling instant.
+
+    Spec: [RM-5.1]
+    """
+
+    monitor = _RecordingLimitMonitor(polling_interval=0.2)
+    session = _spawn_agent_session_for_target(
+        functools.partial(_agent_session_hold_then_reply_worker, 0.02),
+        monitor=monitor,
+    )
+    statuses: list[str] = []
+    try:
+        session.wait_ready(timeout=10.0)
+        for index in range(20):
+            result = session.execute(f"item-{index}", cancel_requested=None)
+            statuses.append(result.status)
+
+        gaps = [
+            later - earlier
+            for earlier, later in zip(
+                monitor.sample_times, monitor.sample_times[1:], strict=False
+            )
+        ]
+        assert len(monitor.sample_times) >= 2
+        assert all(gap >= 0.18 for gap in gaps), gaps
+        assert statuses == ["ok"] * 20
+    finally:
+        session.close()
+
+
 class _PostReadyFailingRequestQueue:
     """Picklable request seam that fails inside the production worker loop."""
 
@@ -1205,6 +1414,8 @@ def test_agent_session_invalidating_verdict_closes_session(verdict: str) -> None
     """Every accepted stop verdict cleans up before a deterministic rejection."""
 
     class LimitMonitor:
+        polling_interval = DEFAULT_POLLING_INTERVAL
+
         def __init__(self) -> None:
             self.stopped = False
 
@@ -1243,6 +1454,8 @@ def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() ->
     """Best-effort metrics never outrank cancellation or endpoint cleanup."""
 
     class ExplodingMetricsMonitor:
+        polling_interval = DEFAULT_POLLING_INTERVAL
+
         def __init__(self) -> None:
             self.stopped = False
 
@@ -1394,6 +1607,8 @@ def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # no
             return
 
     class LateLimitMonitor:
+        polling_interval = DEFAULT_POLLING_INTERVAL
+
         def __init__(self) -> None:
             self.check_calls = 0
 
@@ -3713,22 +3928,55 @@ def test_agent_session_windows_broken_pipe_is_channel_seal() -> None:
         session.close()
 
 
-def test_agent_session_blocking_poll_failure_is_consumed_as_next_turn_transport_failure() -> (
-    None
-):
-    """A session blocking-poll failure is reduced on the following turn."""
+def _fake_clock_wait(clock: dict[str, float]) -> Any:
+    """Fake handoff wait that advances a fake clock by the requested budget.
+
+    It replaces the session's real wait boundary, ``wait_terminal_payload``,
+    one-for-one with the fake receiver ``poll(timeout)`` these fake-clock tests
+    used before the wait joined the producer sentinel.
+    """
+
+    def wait(
+        _receiver: object,
+        *,
+        producer_sentinel: int | None,
+        timeout: float | None,
+    ) -> bool:
+        del producer_sentinel
+        assert timeout is not None
+        clock["now"] += timeout
+        return False
+
+    return wait
+
+
+def test_agent_session_blocking_poll_failure_is_consumed_as_next_turn_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session blocking-wait failure is reduced on the following turn."""
 
     session = _spawn_agent_session_for_target(_agent_session_ready_then_hang_worker)
+    real_wait = sessions_module.wait_terminal_payload
+    failure = {"raised": False}
+
+    def failing_first_wait(
+        receiver: Connection,
+        *,
+        producer_sentinel: int | None,
+        timeout: float | None,
+    ) -> bool:
+        if not failure["raised"]:
+            failure["raised"] = True
+            raise OSError("blocking terminal poll failed")
+        return real_wait(receiver, producer_sentinel=producer_sentinel, timeout=timeout)
+
+    monkeypatch.setattr(sessions_module, "wait_terminal_payload", failing_first_wait)
     try:
         session.wait_ready(timeout=5.0)
-        wrapped_receiver = _FailingFirstBlockingPollConnection(
-            session._response_receiver
-        )
-        session._response_receiver = wrapped_receiver  # type: ignore[assignment]
 
         result = session.execute("hello")
 
-        assert wrapped_receiver.blocking_poll_failed is True
+        assert failure["raised"] is True
         assert result.status == "error"
         assert result.diagnostics is not None
         assert result.diagnostics["handoff_event"] == "transport_failed"
@@ -3785,6 +4033,9 @@ def test_agent_session_producer_exit_starts_bounded_drain(
         timeout=None,
     )
     monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        sessions_module, "wait_terminal_payload", _fake_clock_wait(clock)
+    )
 
     result = session.execute("hello")
 
@@ -3846,6 +4097,9 @@ def test_session_stop_after_begin_drain_preserves_first_deadline(
         timeout=None,
     )
     monkeypatch.setattr(sessions_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        sessions_module, "wait_terminal_payload", _fake_clock_wait(clock)
+    )
     monkeypatch.setattr(
         session,
         "terminate",
