@@ -27,7 +27,7 @@ There are currently 63 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-03-control-replies-only-on-request-plan.md`](./2026-11-03-control-replies-only-on-request-plan.md) | Control Replies Only on Request: Outcomes Are Broadcast | `draft` | none |
+| [`2026-11-03-control-replies-only-on-request-plan.md`](./2026-11-03-control-replies-only-on-request-plan.md) | Control Replies Only on Request: Outcomes Are Broadcast | `promoted` | none |
 | [`2026-11-03-family-scheduler-frontier-ring-plan.md`](./2026-11-03-family-scheduler-frontier-ring-plan.md) | Family Scheduler: Frontier Ring and Contracted Ancestry | `promoted` | none |
 | [`2026-11-02-cli-client-surface-parity-plan.md`](./2026-11-02-cli-client-surface-parity-plan.md) | CLI and Client Surface Parity, and the Shell Refusal Test | `draft` | none |
 | [`2026-11-02-docs-and-broker-boundary-plan.md`](./2026-11-02-docs-and-broker-boundary-plan.md) | Docs and the Broker Boundary: Security Account and Layer Ownership | `promoted` | none |

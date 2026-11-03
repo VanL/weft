@@ -932,7 +932,7 @@ def test_interactive_external_termination_publishes_after_final_frames(
 @pytest.mark.parametrize("command", ["STOP", "KILL"])
 @pytest.mark.parametrize("started", [False, True], ids=["before-input", "active"])
 @pytest.mark.parametrize("fail_once", [False, True], ids=["write-ok", "write-retry"])
-def test_interactive_command_control_unwinds_before_terminal_and_ack(
+def test_interactive_command_control_unwinds_before_terminal(
     broker_env: BrokerEnv,
     unique_tid: str,
     command: str,
@@ -1009,9 +1009,7 @@ def test_interactive_command_control_unwinds_before_terminal_and_ack(
             for row, timestamp in rows
             if row.get("command") == command and row.get("status") == "ack"
         ]
-        assert len(acknowledgements) == 1
-        assert acknowledgements[0][0]["request_id"] == request_id
-        assert terminal_timestamp < acknowledgements[0][1]
+        assert acknowledgements == []
         lifecycle = [
             (json.loads(raw), timestamp)
             for raw, timestamp in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator(
@@ -1187,12 +1185,19 @@ def test_interactive_control_commands_report_live_status(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = make_queue(spec.io.control["ctrl_out"])
     ping_reply = make_queue(f"test.{unique_tid}.ping.ctrl_in")
+    status_reply = make_queue(f"test.{unique_tid}.status.ctrl_in")
 
     try:
         inbox.write(json.dumps({"stdin": "hello\n"}))
         _drive_interactive(task, lambda: task._interactive_session is not None)
 
-        ctrl_in.write(encode_control_message("STATUS"))
+        ctrl_in.write(
+            encode_control_message(
+                "STATUS",
+                request_id="interactive-status",
+                reply_to=f"test.{unique_tid}.status.ctrl_in",
+            )
+        )
         ctrl_in.write(
             encode_control_message(
                 "PING",
@@ -1206,7 +1211,7 @@ def test_interactive_control_commands_report_live_status(
         while time.monotonic() < deadline:
             task.process_once()
             task.wait_for_activity(timeout=0.02)
-            responses = [json.loads(msg) for msg in ctrl_out.peek_generator()]
+            responses = [json.loads(msg) for msg in status_reply.peek_generator()]
             ping_responses = [json.loads(msg) for msg in ping_reply.peek_generator()]
             if any(r.get("command") == "STATUS" for r in responses) and any(
                 r.get("command") == "PING" for r in ping_responses
@@ -1217,7 +1222,12 @@ def test_interactive_control_commands_report_live_status(
         ping_response = next(r for r in ping_responses if r.get("command") == "PING")
 
         assert status_response["status"] == "ok"
+        assert status_response["request_id"] == "interactive-status"
         assert status_response["task_status"] == "running"
+        assert not any(
+            json.loads(msg).get("command") == "STATUS"
+            for msg in ctrl_out.peek_generator()
+        )
         assert ping_response["status"] == "ok"
         assert ping_response["message"] == "PONG"
     finally:
@@ -1225,6 +1235,7 @@ def test_interactive_control_commands_report_live_status(
         _drive_interactive(task, lambda: _finished(task))
         task.stop(join=False)
         ping_reply.close()
+        status_reply.close()
 
 
 def test_interactive_late_input_is_dropped_after_completion(

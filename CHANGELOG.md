@@ -23,6 +23,21 @@
   list in the Manager checkpoint follows that order. No compatibility shim:
   nothing reads that order back.
 
+- STOP, KILL, PAUSE, and RESUME no longer write an acknowledgement row to
+  `ctrl_out` (or anywhere); their outcome is the published state change
+  (`weft.log.tasks`, `weft.state.tasks.<tid>`, and the terminal `ctrl_out`
+  envelope for STOP and KILL). `weft task stop`, `weft task kill`, and
+  interactive teardown wait for terminal evidence only and no longer delete
+  rows on a task's `ctrl_out`. STATUS now takes the PING envelope
+  `{command, request_id, reply_to}` and replies only to `reply_to`; a bare
+  STATUS is rejected without reply. No compatibility shim: a hand-written
+  controller that waited for a `{"status": "ack"}` row or sent a bare
+  STATUS must watch the published state or name a `reply_to`. The
+  command-control convergence reducer (`weft/commands/control_convergence.py`)
+  drops its `accepted` state, its `ack_seen` input, and its `wait` action;
+  no production decision changes
+  (`docs/plans/2026-11-03-control-replies-only-on-request-plan.md`).
+
 - Reactor edges wait on their real event sources instead of fixed timer
   floors (`docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md`). An idle
   service worker (the eight LivenessMonitor probe workers) blocks on its input

@@ -23,6 +23,7 @@ from weft._constants import (
 )
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.manager import Manager
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -37,6 +38,18 @@ def _read_all(queue: Queue) -> list[str]:
             break
         messages.append(value)
     return messages
+
+
+def _has_control_reply_row(rows: list[dict[str, object]]) -> bool:
+    return any("command" in row and "status" in row for row in rows)
+
+
+def _newest_projection_event(queue: Queue) -> object:
+    rows = [json.loads(raw) for raw in queue.peek_generator()]
+    assert rows
+    projection = rows[-1]["projection"]
+    assert isinstance(projection, dict)
+    return projection.get("event")
 
 
 def _requester_queue(
@@ -93,18 +106,16 @@ def test_pause_resume_control_flow(broker_env: BrokerEnv, unique_tid: str) -> No
     ctrl_out = task._ctrl_out_queue
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    state_queue = make_queue(task_state_queue_name(unique_tid))
 
     ctrl_in.write(encode_control_message("PAUSE", request_id="pause-1"))
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    all_responses = list(responses)
-    assert any(
-        r.get("command") == "PAUSE"
-        and r["status"] == "ack"
-        and r["request_id"] == "pause-1"
-        for r in responses
-    )
+    assert _read_all(ctrl_out) == []
+    events = [json.loads(msg).get("event") for msg in log_queue.peek_generator()]
+    assert "control_pause" in events
+    assert _newest_projection_event(state_queue) == "control_pause"
 
     inbox.write(json.dumps({"payload": "work"}))
     task.process_once()
@@ -116,38 +127,45 @@ def test_pause_resume_control_flow(broker_env: BrokerEnv, unique_tid: str) -> No
     ctrl_in.write(encode_control_message("RESUME", request_id="resume-1"))
     task.wait_for_activity(timeout=0.02)
     task.process_once()
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    all_responses.extend(responses)
+    assert _read_all(ctrl_out) == []
+    events = [json.loads(msg).get("event") for msg in log_queue.peek_generator()]
+    assert "control_resume" in events
+    assert _newest_projection_event(state_queue) == "control_resume"
 
     task.process_once()
     assert task._paused is False
-    all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
 
     _drive_task_until(task, lambda: outbox.peek_one() is not None)
-    all_responses.extend(json.loads(msg) for msg in _read_all(ctrl_out))
-
-    assert any(
-        r.get("command") == "RESUME"
-        and r["status"] == "ack"
-        and r["request_id"] == "resume-1"
-        for r in all_responses
-    ), all_responses
+    assert not _has_control_reply_row(
+        [json.loads(msg) for msg in ctrl_out.peek_generator()]
+    )
     assert outbox.read_one() == "work"
 
 
-def test_status_command_reports_state(broker_env: BrokerEnv, unique_tid: str) -> None:
+def test_status_command_replies_to_reply_to(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
     db_path, make_queue = broker_env
     spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
     task = Consumer(db_path, spec)
 
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
+    reply_name = f"T{int(unique_tid) + 1}.ctrl_in"
+    replies = make_queue(reply_name)
 
-    ctrl_in.write(encode_control_message("STATUS", request_id="status-1"))
+    ctrl_in.write(
+        encode_control_message("STATUS", request_id="status-1", reply_to=reply_name)
+    )
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    status_response = next(r for r in responses if r.get("command") == "STATUS")
+    responses = [json.loads(msg) for msg in _read_all(replies)]
+    assert len(responses) == 1
+    status_response = responses[0]
+    assert status_response["command"] == "STATUS"
+    assert status_response["tid"] == unique_tid
+    assert "reply_to" not in status_response
+    assert _read_all(ctrl_out) == []
     assert status_response["status"] == "ok"
     assert status_response["paused"] is False
     assert status_response["request_id"] == "status-1"
@@ -159,7 +177,7 @@ def test_status_command_reports_state(broker_env: BrokerEnv, unique_tid: str) ->
     ("command", "expected_status"),
     [("STOP", "cancelled"), ("KILL", "killed")],
 )
-def test_stop_kill_command_sends_keyed_ack(
+def test_stop_kill_command_publishes_terminal_and_writes_no_reply(
     broker_env: BrokerEnv,
     unique_tid: str,
     command: str,
@@ -172,6 +190,7 @@ def test_stop_kill_command_sends_keyed_ack(
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
     ctrl_out = task._ctrl_out_queue
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
 
     task.taskspec.mark_started(pid=0)
     task.taskspec.mark_running(pid=0)
@@ -182,14 +201,24 @@ def test_stop_kill_command_sends_keyed_ack(
     task.process_once()
 
     responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    response = next(r for r in responses if r.get("command") == command)
-    assert response["status"] == "ack"
-    assert response["request_id"] == request_id
+    assert len(responses) == 1, responses
+    assert not _has_control_reply_row(responses), responses
+    terminal = responses[0]
+    assert terminal["type"] == "terminal"
+    assert terminal["source"] == "task"
+    assert terminal["tid"] == unique_tid
+    assert terminal["status"] == expected_status
+    events = [json.loads(msg) for msg in _read_all(log_queue)]
+    assert any(
+        event.get("event") == f"control_{command.lower()}"
+        and event.get("status") == expected_status
+        for event in events
+    ), events
     assert task.should_stop is True
     assert task.taskspec.state.status == expected_status
 
 
-def test_late_stop_after_terminal_state_acks_without_state_regression(
+def test_late_stop_after_terminal_state_writes_nothing(
     broker_env: BrokerEnv, unique_tid: str
 ) -> None:
     db_path, make_queue = broker_env
@@ -207,9 +236,7 @@ def test_late_stop_after_terminal_state_acks_without_state_regression(
     ctrl_in.write(encode_control_message("STOP"))
     task.process_once()
 
-    responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-    stop_response = next(r for r in responses if r.get("command") == "STOP")
-    assert stop_response["status"] == "ack"
+    assert _read_all(ctrl_out) == []
     assert task.taskspec.state.status == "completed"
     assert task.should_stop is True
 
@@ -634,12 +661,15 @@ def test_manager_ping_includes_manager_selection_fields(
         assert task.should_stop is False
         assert task._control_snapshot_fields()["should_stop"] is True
 
-        stop_responses = [json.loads(msg) for msg in _read_all(ctrl_out)]
-        stop_response = next(
-            response for response in stop_responses if response.get("command") == "STOP"
-        )
-        assert stop_response["status"] == "ack"
-        assert stop_response["request_id"] == "manager-stop"
+        assert _read_all(ctrl_out) == []
+        events = [
+            json.loads(msg)
+            for msg in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator()
+        ]
+        assert any(
+            event.get("event") == "control_stop" and event.get("draining") is True
+            for event in events
+        ), events
     finally:
         task.cleanup()
 

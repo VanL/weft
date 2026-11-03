@@ -1667,7 +1667,7 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _handle_control_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
-        """React to control messages and emit responses on the control-out queue.
+        """React to control requests; replies go only to a request's `reply_to`.
 
         Spec: [CC-2.4], [MF-3]
         """
@@ -1707,7 +1707,7 @@ class BaseTask(MultiQueueWatcher, ABC):
 
         Subclass override contract:
         - declare `control_policy`
-        - send a ctrl-out response for handled STOP/KILL commands
+        - publish the state change; write no reply for STOP, KILL, PAUSE, or RESUME
         - emit exactly one terminal task-log event when the command changes state
         - apply reserved-queue policy or explicitly document why it is not applicable
 
@@ -1734,11 +1734,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
             )
-            self._send_control_response(
-                "STOP",
-                "ack",
-                **self._control_request_id_extra(request),
-            )
             return True
 
         if command == CONTROL_KILL:
@@ -1747,11 +1742,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 event="control_kill",
                 message_id=context.timestamp,
                 apply_reserved_policy=True,
-            )
-            self._send_control_response(
-                "KILL",
-                "ack",
-                **self._control_request_id_extra(request),
             )
             return True
 
@@ -1762,12 +1752,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                     event="control_pause", message_id=context.timestamp
                 )
                 self._update_process_title("paused")
-            self._send_control_response(
-                CONTROL_PAUSE,
-                "ack",
-                paused=True,
-                **self._control_request_id_extra(request),
-            )
             return True
 
         if command == CONTROL_RESUME:
@@ -1777,16 +1761,12 @@ class BaseTask(MultiQueueWatcher, ABC):
                     event="control_resume", message_id=context.timestamp
                 )
                 self._update_process_title("running")
-            self._send_control_response(
-                CONTROL_RESUME,
-                "ack",
-                paused=False,
-                **self._control_request_id_extra(request),
-            )
             return True
 
         if command == CONTROL_STATUS:
-            self._send_control_response(
+            assert request.reply_to is not None
+            self._send_control_reply(
+                request.reply_to,
                 CONTROL_STATUS,
                 "ok",
                 **self._control_response_extras(request),
@@ -1794,14 +1774,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             return True
 
         return False
-
-    @staticmethod
-    def _control_request_id_extra(request: ControlRequest) -> dict[str, str]:
-        """Return the optional request-correlation reply field."""
-
-        if request.request_id is None:
-            return {}
-        return {"request_id": request.request_id}
 
     def _control_response_extras(
         self,
@@ -2109,20 +2081,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 payload.setdefault("waiting_on", self._waiting_on)
         payload.update(extra)
         return payload
-
-    def _send_control_response(
-        self, command: str, status: str, /, **extra: Any
-    ) -> None:
-        """Publish a control response on ``ctrl_out`` for observability/testing.
-
-        Spec: [CC-2.4], [MF-3]
-        """
-        payload = self._control_response_payload(command, status, extra)
-        serialized_payload = json.dumps(payload)
-        try:
-            self._ctrl_out_queue.write(serialized_payload)
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Failed to write control response %s", payload, exc_info=True)
 
     def _send_control_reply(
         self,

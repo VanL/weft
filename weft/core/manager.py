@@ -1307,14 +1307,16 @@ class Manager(ServiceTask):
     def _handle_control_command(
         self, request: ControlRequest, context: QueueMessageContext
     ) -> bool:
-        """Override STOP to drain active children before manager exit."""
+        """Override STOP to drain active children before manager exit.
+
+        The drain is published as `control_stop` with `draining=True`; STOP
+        writes no reply.
+
+        Spec: [CC-2.4], [MF-3]
+        """
 
         if request.command == CONTROL_STOP:
             self._begin_graceful_shutdown(message_id=context.timestamp)
-            response_extra: dict[str, Any] = {"draining": True}
-            if request.request_id is not None:
-                response_extra["request_id"] = request.request_id
-            self._send_control_response("STOP", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)
 

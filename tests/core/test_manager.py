@@ -10495,7 +10495,11 @@ def test_manager_control_replies_do_not_reset_idle_clock(
         assert ctrl_queue.peek_one() is None
         assert manager._last_activity_ns == 1
 
-        ctrl_queue.write(encode_control_message("STATUS"))
+        ctrl_queue.write(
+            encode_control_message(
+                "STATUS", request_id="idle-status", reply_to="T1.ctrl_in"
+            )
+        )
         manager._drain_control_queue_first()
 
         assert ctrl_queue.peek_one() is None

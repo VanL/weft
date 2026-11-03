@@ -202,10 +202,7 @@ def test_monitor_stop_command(broker_env: BrokerEnv) -> None:
         terminal_responses = [
             item for item in responses if item.get("type") == "terminal"
         ]
-        response = next(item for item in control_responses if item["command"] == "STOP")
-        assert response["command"] == "STOP"
-        assert response["status"] == "ack"
-        assert response["request_id"] == "monitor-stop"
+        assert control_responses == []
         terminal = next(item for item in terminal_responses if item["tid"] == spec.tid)
         assert terminal["source"] == "task"
         assert terminal["status"] == "cancelled"

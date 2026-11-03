@@ -245,7 +245,7 @@ Queue-plane mental model:
 - `weft.log.tasks` is the runtime lifecycle evidence plane while retained
 
 This is why pipeline child tasks do **not** report to `ctrl_out`. `ctrl_out`
-is public and observer-facing for control replies. Child-to-owner coordination
+is public and observer-facing for terminal notifications. Child-to-owner coordination
 belongs on the private events queue. Live pipeline snapshots belong on the
 dedicated `status` queue.
 
@@ -256,7 +256,7 @@ Target state:
 - user-facing status may also expose a derived `activity` plus optional
   `waiting_on` so pre-started watchers do not look like active work merely
   because their task state is still `running`
-- `ctrl_out` carries control replies for the pipeline run as a unit
+- `ctrl_out` carries terminal notifications for the pipeline run as a unit
 - `P{pipeline_tid}.status` carries retained `pipeline_status` snapshots for the
   pipeline run as a unit
 - `weft.state.pipelines` carries the active pipeline registry used to record
@@ -279,7 +279,7 @@ Rationale:
   asking observers to reconstruct state from logs alone
 
 Weft follows the same shape. `outbox` stays pure data. `ctrl_out` stays the
-control reply surface. Pipelines get one additional public observability
+terminal-notification surface. Pipelines get one additional public observability
 surface, `P{pipeline_tid}.status`, because orchestration is a higher-order
 object and retained public status is clearer than asking callers to peek or
 drain `ctrl_out`. `weft.log.tasks` remains runtime lifecycle evidence
@@ -498,7 +498,7 @@ pipeline-owned private name; it should not become a second hidden transport.
 The pipeline should not treat public `ctrl_in` as the normal child-to-parent
 report path.
 Public `ctrl_in` remains command ingress. Public `ctrl_out` remains the
-pipeline's public control-reply surface. Public `P{pipeline_tid}.status`
+pipeline's public terminal-notification surface. Public `P{pipeline_tid}.status`
 remains the pipeline's live status and terminal-report surface.
 
 ### Phase 2: Pipeline-native status and autostart [PL-3.3]
@@ -671,7 +671,7 @@ Baseline fail-fast propagation:
 3. The pipeline task stops admitting new work onto later edges.
 4. The pipeline task sends `STOP` to waiting stage and edge children.
 5. Active children apply their normal reserved-queue semantics before
-   acknowledging or terminating.
+   terminating.
 6. The pipeline task aggregates the stop outcome and transitions to its own
    terminal failed state.
 
@@ -717,7 +717,7 @@ without leaving normal Weft tools.
 Target surfaces:
 
 - the pipeline task's own `P{pipeline_tid}.status` snapshots
-- the pipeline task's own `ctrl_out` control replies
+- the pipeline task's own `ctrl_out` terminal notifications
 - the pipeline task's own `outbox` for the final result
 - `weft.state.pipelines`
 - `weft.log.tasks`
@@ -939,6 +939,7 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([PL-1.5]).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.

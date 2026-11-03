@@ -153,7 +153,7 @@ def test_independent_idle_stop_may_clear_prior_failed_ack_residue(
         assert len(delete_attempts) == 1
         responses = [json.loads(body) for body in ctrl_out.peek_generator()]
         assert sum(row.get("type") == "terminal" for row in responses) == 1
-        assert any(
+        assert not any(
             row.get("command") == "STOP" and row.get("status") == "ack"
             for row in responses
         )

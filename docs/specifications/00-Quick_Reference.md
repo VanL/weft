@@ -12,8 +12,8 @@ Per-task queues (generated from TID):
 | `T{tid}.inbox` | Task input messages |
 | `T{tid}.reserved` | WIP / reserved messages (DLQ-style recovery) |
 | `T{tid}.outbox` | Final task output |
-| `T{tid}.ctrl_in` | Control messages (STOP, KILL, STATUS, PING, PAUSE, RESUME) |
-| `T{tid}.ctrl_out` | Non-PONG control responses and terminal notifications |
+| `T{tid}.ctrl_in` | Control requests (STOP, KILL, STATUS, PING, PAUSE, RESUME), and PONG or STATUS replies addressed to this TID as requester |
+| `T{tid}.ctrl_out` | Terminal notifications and other observer-addressed facts; never a control reply |
 
 Per-pipeline queues (generated from pipeline TID):
 
@@ -22,7 +22,7 @@ Per-pipeline queues (generated from pipeline TID):
 | `P{tid}.inbox` | Pipeline input messages |
 | `P{tid}.outbox` | Final pipeline result |
 | `P{tid}.ctrl_in` | Pipeline control messages (same control set) |
-| `P{tid}.ctrl_out` | Non-PONG pipeline control replies |
+| `P{tid}.ctrl_out` | Pipeline terminal notifications; never a control reply |
 | `P{tid}.status` | Retained pipeline status snapshots |
 | `P{tid}.events` | Private child-owner coordination |
 
@@ -152,18 +152,19 @@ State transitions and rules live in `05-Message_Flow_and_State.md`.
 
 ## Control Messages
 
-Every non-PING request is a JSON object containing exactly `command` and, when
-keyed, `request_id`. A PING is exactly `{command, request_id, reply_to}`;
-`request_id` and `reply_to` are nonblank strings, and `reply_to` is the
-requester's own `ctrl_in`. `command` is one of the exact uppercase values
-below. Raw strings, extra keys, and case-normalized variants are not current
-request formats.
+Every STOP, KILL, PAUSE, or RESUME request is a JSON object containing exactly
+`command` and, when keyed, `request_id`; these commands get no reply, and
+their outcome is the task's published state change. A PING or STATUS is
+exactly `{command, request_id, reply_to}`; `request_id` and `reply_to` are
+nonblank strings, and `reply_to` is the requester's own `ctrl_in`. `command`
+is one of the exact uppercase values below. Raw strings, extra keys, and
+case-normalized variants are not current request formats.
 
 | Message | Effect |
 |---------|--------|
 | `STOP` | Graceful shutdown (task cancels and reports) |
 | `KILL` | Force terminate the task |
-| `STATUS` | Emit current task-local status on `ctrl_out` |
+| `STATUS` | Writes one current task-local status reply to the requester's named `reply_to` and echoes `request_id` |
 | `PING` | Health check; writes one `PONG` to the requester's named `reply_to`, echoes `request_id`, includes manager-selection fields for Manager tasks, and may include task-registered extension data under `extended` |
 | `PAUSE` | Pause task processing |
 | `RESUME` | Resume a paused task |
@@ -247,6 +248,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` (the Queue Names and Control Messages tables).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.

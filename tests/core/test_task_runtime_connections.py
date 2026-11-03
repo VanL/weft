@@ -477,11 +477,11 @@ def test_manager_dynamic_control_queues_reuse_task_connection(
         initial_connections = len(connections)
         for index in range(5):
             name = f"connection-test.{index}.ctrl"
-            manager._send_child_control_command(name, "STATUS")
+            manager._send_child_control_command(name, "STOP")
             with manager._get_connected_queue().get_connection() as broker:
                 observed = broker.peek_one(name)
                 assert isinstance(observed, tuple)
-                assert observed[0] == encode_control_message("STATUS")
+                assert observed[0] == encode_control_message("STOP")
         assert len(connections) == initial_connections
         assert set(manager._queue_cache) == cached_names
         manager._get_connected_queue().write("owner remains usable")

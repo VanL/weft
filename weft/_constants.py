@@ -571,7 +571,6 @@ TERMINAL_HANDOFF_ERROR_CAUSE_MAX_CHARS: Final[int] = 500
 CONTROL_CONVERGENCE_STATE_VALUES: Final[frozenset[str]] = frozenset(
     (
         "command_sent",
-        "accepted",
         "terminal_observed",
         "runtime_dead_after_control",
         "escalating_runner",
@@ -588,7 +587,6 @@ TERMINAL_CONTROL_CONVERGENCE_STATE_VALUES: Final[frozenset[str]] = frozenset(
 
 CONTROL_CONVERGENCE_ACTION_VALUES: Final[frozenset[str]] = frozenset(
     (
-        "wait",
         "accept_terminal",
         "accept_dead_runtime",
         "escalate_runner",
@@ -745,9 +743,9 @@ and dies before publishing its terminal state turns terminal only when its
 process is gone, and the death of a process that is not the observer's child
 produces no queue write (``weft/core/task_evidence.py::known_tid_evidence``
 consults the one-shot outbox only when no live host-pid runtime handle
-remains). The same constant is reused as the public-signal and KILL-ack
-grace length until series plan 3 removes the acknowledgement-driven windows,
-and as the default ``poll_interval`` of
+remains). The control-surface wait has no acknowledgement-driven grace
+window ([MF-3]: STOP and KILL write no reply); the same constant is reused
+only as the default ``poll_interval`` of
 ``weft/commands/_spawn_submission.py::reconcile_submitted_spawn``. A platform process-exit watcher (owner decision 2, option (c), of
 ``docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md``) would remove
 the cap.
@@ -1812,6 +1810,11 @@ CONTROL_COMMANDS: Final[frozenset[str]] = frozenset(
     }
 )
 """Exact commands accepted by the canonical task control envelope."""
+
+CONTROL_REPLY_COMMANDS: Final[frozenset[str]] = frozenset(
+    {CONTROL_PING, CONTROL_STATUS}
+)
+"""Commands whose outcome is a private fact, answered to the request's `reply_to` ([MF-3], [QUEUE.2a])."""
 
 # Resource Limits
 # ---------------

@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Protocol, cast, get_args
 
@@ -696,7 +697,7 @@ def test_state_logging_propagates_unserializable_payload(
         task._report_state_change("task_custom", marker=object())
 
 
-def test_control_response_broker_error_is_best_effort(
+def test_control_reply_broker_error_is_best_effort(
     monkeypatch: pytest.MonkeyPatch,
     task_factory: TaskFactory,
     unique_tid: str,
@@ -704,17 +705,24 @@ def test_control_response_broker_error_is_best_effort(
     spec = build_function_spec(unique_tid)
     task = task_factory(spec)
 
-    attempted: list[str] = []
+    attempted: list[tuple[str, str]] = []
 
-    def _fail_write(payload: str) -> None:
-        attempted.append(payload)
-        raise BrokerError("ctrl-out unavailable")
+    class _FailingBroker:
+        def write(self, queue_name: str, payload: str) -> None:
+            attempted.append((queue_name, payload))
+            raise BrokerError("reply queue unavailable")
 
-    monkeypatch.setattr(task._ctrl_out_queue, "write", _fail_write)
+    class _FailingQueue:
+        @contextmanager
+        def get_connection(self) -> Iterator[_FailingBroker]:
+            yield _FailingBroker()
 
-    task._send_control_response("PING", "ok", message="PONG")
+    monkeypatch.setattr(task, "_get_connected_queue", lambda: _FailingQueue())
+
+    task._send_control_reply("T1.ctrl_in", "PING", "ok", message="PONG")
     assert len(attempted) == 1
-    assert json.loads(attempted[0])["message"] == "PONG"
+    assert attempted[0][0] == "T1.ctrl_in"
+    assert json.loads(attempted[0][1])["message"] == "PONG"
 
 
 def test_control_stop_logged_and_cancelled(

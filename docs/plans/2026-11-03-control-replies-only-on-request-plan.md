@@ -1,6 +1,6 @@
 # Control Replies Only on Request: Outcomes Are Broadcast
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-2], [MF-5]; docs/specifications/01-Core_Components.md [CC-2.4]; docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.3]; docs/specifications/07-System_Invariants.md [QUEUE.2a], [QUEUE.6], OBS.12a; docs/specifications/00-Quick_Reference.md (Queue Names, Control Messages); docs/specifications/12-Pipeline_Composition_and_UX.md [PL-1.5], [PL-3.2], [PL-4.4], [PL-5.2]
 Superseded by: none
 
@@ -585,9 +585,12 @@ row is D.
   `docs/specifications/00-Quick_Reference.md`, and
   `docs/specifications/12-Pipeline_Composition_and_UX.md` at plan authoring
   time (2026-11-03). Plan type: implementation with spec revision.
-- Promotion baseline identifier: pending (recorded by Task 5 as diff base
-  `b7eed9f9` plus worktree state once the blocks are applied, then the
-  landing commit SHA; strategy B lands spec and code together).
+- Promotion baseline identifier: diff base `0cd077e4` plus worktree state
+  (the blocks were applied to the live specs at `0cd077e4`, which carry plans
+  10, 9, 5 and 2 on top of `b7eed9f9`; every Current-text quote still matched
+  exactly once), then the landing commit SHA, recorded in the Execution log by
+  the theory commit that follows it (strategy B lands spec and code
+  together).
 
 ## Proposed Spec Delta
 
@@ -2255,6 +2258,8 @@ The plan recommends; it does not decide.
    for (a): the plan makes `reply_to` required for STATUS, not optional,
    because a STATUS with no return address would be a request nobody
    answers; that makes a bare STATUS a rejected row (register R13).
+   **Closed on the owner's implement instruction (2026-11-03) with the
+   recommended option: (a), STATUS replies to `reply_to` like PING.**
 2. RECONSIDERATION REQUESTED ([WT-2a.12], an identity invariant). The
    theory clause wording (`## Proposed Spec Delta`, "Theory clause"):
    [WT-2a.12] and the [WT-4] row "Everything is a task", plus the optional
@@ -2274,7 +2279,10 @@ The plan recommends; it does not decide.
    [WT-2] item 1, because a `weft task stop` process holds no task identity
    after this plan. Recommendation: accept the three required edits
    ([WT-2a.12], [WT-2] item 1, [WT-4] row); take the [WT-8] edit for
-   consistency.
+   consistency. **Accepted by the owner (2026-11-03: "I accept the theory
+   edits")**: the three required edits and the optional [WT-8] edit are
+   applied verbatim in a separate "Theory:" commit after the landing
+   commit.
 3. Two diminutions (register R8 and R9, class D), ACCEPTED by the owner
    on 2026-11-03 ("I think we keep it for now in Plan 2 and Plan 3"): the
    owner keeps the 50 ms control-surface cap under series plan 2 (its
@@ -2319,7 +2327,8 @@ The plan recommends; it does not decide.
    still waiting; the reducer then keeps `wait` and one test row, and an
    open budget returns `wait` instead of raising `ValueError`. No such
    caller exists or is planned. Recommendation: delete (class C, register
-   R17).
+   R17). **Closed on the owner's implement instruction (2026-11-03) with the
+   recommended option: delete the budget-open `wait`.**
 
    If the owner picks the alternative (keep the budget-open `wait`), exactly
    these change. Sentences: the OBS.12a Replacement block reads "which has
@@ -2359,7 +2368,9 @@ The plan recommends; it does not decide.
    from the states they do, with the budget expired). This plan retains
    them; deleting them would be a scope expansion beyond the
    acknowledgement concept and is the owner's call for a later plan, not
-   this plan's work. Recommendation: none here.
+   this plan's work. Recommendation: none here. **Closed on the owner's
+   implement instruction (2026-11-03) with the recommended option: recorded
+   only, nothing to implement.**
 
 ## Review Log
 
@@ -2421,6 +2432,8 @@ self-driven fresh-eyes review: done 2026-11-03 (distinct pass after drafting): 1
   failure-path latency diminutions; the budget-open `wait`; the three
   retained test-only reducer transitions).
 - owner ruling applied 2026-11-03: item 3 accepted ("I think we keep it for now in Plan 2 and Plan 3"): the two failure-path latencies R8 and R9 stand as disclosed, with plan 2's 50 ms re-read retained so terminal rows are still seen within 50 ms. Items 1, 2, 4 and 5 remain.
+- owner items closed 2026-11-03: item 1 closed on the owner's implement instruction (2026-11-03) with the recommended option: (a), STATUS replies to `reply_to` like PING; item 4 closed on the owner's implement instruction (2026-11-03) with the recommended option: delete the budget-open `wait`; item 5 closed on the owner's implement instruction (2026-11-03) with the recommended option: recorded only, nothing to implement; item 2 (RECONSIDERATION REQUESTED, [WT-2a.12]) accepted by the owner (2026-11-03: "I accept the theory edits"), including the optional [WT-8] edit.
+- implementation 2026-11-03: Tasks 0, 2, 3, 4, 4a and 5 executed from `0cd077e4`; Tasks 3, 4, 4a and 5 (with the Task 2 tests) land in one commit, and the accepted theory edits in a separate "Theory:" commit after it. Task 1's review is the two closed cross-family rounds above; no further pre-code round was run. Task 6's completed-work cross-family review and the [WT-7] keyed possession probe (which needs the owner's key, including the re-keyed bank item B1) are not run by the implementing agent; they are left to the series coordinator, so the plan stays `promoted`.
 
 ## Execution log
 
@@ -2840,4 +2853,237 @@ blocks 31 problems []
 retired-phrase grep on the six copies: (exit 1, no output)
 ```
 
-Comprehension answers (implementer, before the first edit): pending.
+### Implementer, 2026-11-03 (from `0cd077e4`)
+
+Comprehension answers (Task 0, written before the first edit):
+
+1. `weft task stop TID` learns `cancelled` from the typed terminal envelope
+   on `T{tid}.ctrl_out`, read peek-only through a per-call cursor in
+   `_observe_control_envelopes`, and from the task-state evidence that
+   `_await_control_surface` reads through `mapping_for_tid` and
+   `_task_status`. It deletes nothing anywhere; there is no acknowledgement
+   to read.
+2. A PAUSE to a running `Consumer` sets `_paused = True` and calls
+   `_report_state_change(event="control_pause")`, which writes the event to
+   `weft.log.tasks` and refreshes `weft.state.tasks.<tid>` (newest
+   `projection.event == "control_pause"`). Nothing is written to `ctrl_out`
+   or to any requester queue. A second PAUSE writes nothing.
+3. A STATUS without `reply_to`: `parse_control_request` returns `None` at the
+   envelope-shape check, so the row is passed to `_handle_control_reply` and
+   exact-acknowledged once; no reply is written. A STATUS with `request_id`
+   and `reply_to` gets exactly one reply on `reply_to` (through
+   `_send_control_reply`) and none on `ctrl_out`.
+4. Every task publishes its terminal envelope before it would have written
+   the KILL acknowledgement (E14), and `_observe_control_envelopes` returns
+   at the first terminal snapshot, so the KILL grace window changed the
+   outcome only when an acknowledgement was visible with no terminal
+   envelope (completion publication failure after its bounded retries, or a
+   foreign or pre-upgrade row). The normal path is unchanged.
+
+Task 1: the independent review of the plan and delta is recorded in
+`## Review Log` (cross-family rounds 1 and 2, codex 0.161.0, 2026-11-03,
+closed), and owner decisions 1 to 5 are answered (item 3 by the owner's
+ruling; items 1, 2, 4 and 5 on 2026-11-03, see `## 10. Owner Decisions`).
+No further review round is run before code.
+
+Line citations: plan 2 (`58c1de5b` to `1239e3b1`) shifted lines in
+`weft/core/tasks/interactive.py` (the `_send_control_response` calls are now
+lines 592, 612, 632) and `weft/_constants.py` (`CONTROL_SURFACE_WAIT_INTERVAL`
+line 736, `CONTROL_COMMANDS` line 1804, `CONTROL_CONVERGENCE_STATE_VALUES`
+line 571, `CONTROL_CONVERGENCE_ACTION_VALUES` line 589). Every edit below was
+located by symbol, not by the plan's line numbers.
+
+#### Task 2. RED (tests first, no production edit; tree `0cd077e4` plus the test edits)
+
+All test edits T1 to T24 were applied before any production edit. RED run
+1 (the plan's first RED command, 11 files): 51 failures. Failing assertion
+per test (first `E` line, trimmed):
+
+```text
+T1  test_stop_kill_command_publishes_terminal_and_writes_no_reply[STOP|KILL]: assert 2 == 1 (rows: typed terminal envelope, then {'command': 'KILL', 'status': 'ack', ...})
+T2  test_late_stop_after_terminal_state_writes_nothing: assert ['{"command":...70036113000}'] == []
+T3  test_pause_resume_control_flow: assert ['{"command":... "pause-1"}'] == []
+T4  test_status_command_replies_to_reply_to: ValueError: reply_to is only valid for PING
+T5  test_manager_ping_includes_manager_selection_fields: assert ['{"command":...nager-stop"}'] == []
+T6  test_structured_active_stop_kill_defers_until_finalize[STOP|KILL], test_deferred_stop_finalizes_before_timeout_outcome,
+    test_deferred_kill_finalizes_before_limit_outcome, test_deferred_control_wins_over_error_and_cancelled_outcomes[4 cases],
+    test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome[4 cases], test_consumer_reactor_stop_cancels_active_command_on_main_thread:
+    AssertionError: [{'event': 'control_stop', ... 'status': 'cancelled', ...}, {'command': 'STOP', 'status': 'ack', ...}]
+T7  test_interactive_command_control_unwinds_before_terminal[8 cases]: AssertionError: assert [({'command':...)] == []
+T7b test_interactive_control_commands_report_live_status: ValueError: reply_to is only valid for PING
+T8  test_pipeline_task_stop_propagates_to_waiting_children / _kill_: AssertionError: [{'event': 'control_stop', ...}, {'command': 'STOP', 'status': 'ack', ...}]
+T8b test_pipeline_status_replies_to_reply_to: ValueError: reply_to is only valid for PING
+T9  test_monitor_stop_command: AssertionError: assert [{'command': ...}] == []
+T10 test_independent_idle_stop_may_clear_prior_failed_ack_residue: assert not True
+T12 test_reply_command_requires_and_preserves_reply_route[STATUS]: ValueError: reply_to is only valid for PING
+    test_parse_control_request_rejects_every_noncanonical_shape[{"command":"STATUS"}]: assert ControlRequest(command='STATUS', request_id=None, reply_to=None) is None
+    test_parse_control_request_rejects_every_noncanonical_shape[{"command":"STATUS","request_id":"x"}]: assert ControlRequest(command='STATUS', request_id='x', reply_to=None) is None
+    test_encode_control_message_rejects_noncanonical_values[STATUS-None-None|STATUS-request-None]: Failed: DID NOT RAISE ValueError
+T13 test_control_surface_wait_timeout_caps_at_interval_until_overall_deadline[4 rows]: TypeError: _control_surface_wait_timeout() missing 2 required keyword-only arguments: 'public_signal_deadline' and 'kill_ack_deadline'
+T16 test_observe_control_envelopes_is_peek_only_after_cursor: TypeError: _observe_control_envelopes() got an unexpected keyword argument 'after_timestamp'
+T17 test_control_observer_retains_every_row_within_horizon: TypeError: _observe_control_envelopes() got an unexpected keyword argument 'after_timestamp'
+T18 test_await_control_surface_leaves_ctrl_out_rows_untouched: assert [('{"type": "...)] == [('{"command"...)]  (the three non-completion rows were deleted)
+T19 test_await_control_surface_ignores_pre_upgrade_kill_ack_until_terminal: AssertionError: assert 'running' == 'killed'
+T20 test_active_stop_waits_named_budget_for_terminal_evidence[None]: AssertionError: assert ['STOP'] == ['STOP', 'KILL']
+    test_active_stop_waits_named_budget_for_terminal_evidence[1.5]: assert False (the recorded STOP carries a request_id)
+T20b test_active_cli_quit_sends_stop_and_keeps_terminal_proof[:quit|:exit]: AssertionError: assert '103303fa496d42fd85ba166897d76eab' is None
+4a  test_control_convergence_machine_covers_all_transitions: AssertionError: Uncovered transition IDs: 'accepted-command-waits', 'command-sent-waits-for-evidence', 'runtime-dead-from-accepted', 'terminal-observed-from-accepted'
+```
+
+RED run 2 (the plan's second RED command, `-k "status or idle_clock or
+control_cleanup_worker or ping"`): T22
+`test_status_reply_helper_drives_past_zero_timeout_local_turn` and
+`test_task_monitor_terminal_control_cleanup_worker_does_not_block_control`,
+and T23 `test_manager_control_replies_do_not_reset_idle_clock`, each fail with
+`ValueError: reply_to is only valid for PING` at
+`weft/core/control_messages.py:48`. The three TaskMonitor maintenance callers
+of `_read_status_reply` take the same path.
+
+Baseline-green tests: T11 `test_control_reply_broker_error_is_best_effort`
+passes at baseline; mutation (the `except` in `BaseTask._send_control_reply`
+removed, then restored from a copy) fails with
+`simplebroker._constants.BrokerError: reply queue unavailable` at
+`tests/tasks/test_task_observability.py:713`. T24
+`test_manager_dynamic_control_queues_reuse_task_connection` passes at
+baseline and after (STOP instead of STATUS); no RED needed per the plan.
+T15, T21 and the T25 anchors are unedited. The renamed reducer test
+`test_control_convergence_does_not_accept_wrong_kill_terminal` passes at
+baseline, as the plan expects.
+
+Deviations in Task 2 (test-only):
+- T20: the recorder keeps the parsed requests and asserts each STOP and KILL
+  row has `request_id is None`; the `consumer.taskspec.state.status not in
+  {"cancelled", "killed"}` assertion is kept only for `terminal_after is None`
+  (in the 1.5 case the peer is cancelled by `_publish_stopped_peer`).
+- T22: the cleanup-worker test sends STATUS with `reply_to=ping_reply.name`
+  (the requester queue the test already owns for its PING) and matches by
+  command and `request_id`; it also asserts no STATUS row on `ctrl_out`,
+  which keeps that test's `ctrl_out` handle in use (ruff F841 otherwise).
+  The other `_read_status_reply` callers each pass a fresh
+  `test.task-monitor.<name>-status.ctrl_in` queue, named like the PING
+  callers' requester queues.
+- T7b: the STATUS reply queue is `test.{tid}.status.ctrl_in`, beside the
+  test's existing PING reply queue; the test also asserts no STATUS row on
+  `ctrl_out`.
+
+#### Task 3. GREEN: responders
+
+Edits 1 to 8 applied as written, located by symbol. Additional detail: in
+`parse_control_request` the membership test is
+`isinstance(command, str) and command in CONTROL_REPLY_COMMANDS`, because a
+decoded JSON `command` may be an unhashable list or object, which a
+`frozenset` membership test would raise on; the old `command == CONTROL_PING`
+comparison was safe for any value, and the guard keeps that. The Manager STOP
+docstring is the plan's text, wrapped, with `Spec: [CC-2.4], [MF-3]` added.
+
+Task 3's verify could not run alone: the Task 4a constant edit (the
+`accepted` state removed from `CONTROL_CONVERGENCE_STATE_VALUES`) makes the
+unedited reducer fail at import, and every test imports it through
+`tests/helpers/weft_harness.py`, so Task 4a's GREEN was applied before Task
+3's verify. Then:
+
+```text
+$ ./.venv/bin/python -m pytest tests/core/test_control_messages.py tests/core/test_task_runtime_connections.py tests/tasks -q
+(exit 0, no failures; 4 PostgreSQL-only skips)
+$ ./.venv/bin/python -m pytest tests/core/test_manager.py -q -k idle_clock
+(exit 0)
+$ grep -rn "_send_control_response\|_control_request_id_extra\|_deferred_active_control_request_id" weft tests --include=*.py
+(exit 1, no output)
+```
+
+#### Task 4. GREEN: requesters
+
+Edits applied as written. `_observe_control_envelopes` also returns the
+unchanged cursor when the horizon is not after `after_timestamp`, and a row
+that does not decode as JSON advances the cursor and is skipped. Imports left
+unused in `weft/commands/run.py`, confirmed by `ruff check`: `uuid4`,
+`decode_control_object`, `closing_queue_iterator` (as E15 expected) and also
+`Queue` from `simplebroker` (its only use was the `_matching_stop_ack`
+signature); all four removed. `_is_completion_record` removed from the
+`weft/commands/tasks.py` import; `closing_queue_iterator` stays there.
+
+Mechanical consequence (plan 2's docstring): the
+`weft/_constants.py::CONTROL_SURFACE_WAIT_INTERVAL` docstring said the
+constant is reused as the public-signal and KILL-acknowledgement grace length
+"until series plan 3 removes the acknowledgement-driven windows". It now says
+the control-surface wait has no acknowledgement-driven grace window ([MF-3])
+and that the constant is reused only as the default `poll_interval` of
+`reconcile_submitted_spawn`. Its value (0.05) and the `interval` cap in
+`_control_surface_wait_timeout` are unchanged (owner item 3; plan 2).
+
+```text
+$ ./.venv/bin/python -m pytest tests/commands tests/cli/test_cli_system.py -q
+(exit 0)
+$ grep -rnE '== "ack"' weft --include=*.py
+(exit 1, no output)
+$ grep -rn "_matching_stop_ack\|public_signal\|kill_ack" weft --include=*.py
+(exit 1, no output)
+```
+
+#### Task 4a. Reducer
+
+RED is quoted under Task 2 (the expected `Uncovered transition IDs` message,
+exactly the four IDs the plan predicts). GREEN edits 1 to 9 applied.
+
+```text
+$ grep -rn "ack_seen\|_should_wait\|accepted-command-waits\|command-sent-waits-for-evidence" weft tests --include=*.py
+(exit 1, no output)
+$ grep -n '"accepted"\|"wait"' weft/commands/control_convergence.py
+(exit 1, no output)
+```
+
+`tests/commands` passes (above), including
+`test_control_convergence_machine_covers_all_transitions` with its
+transition, state and action coverage asserts.
+
+#### Task 5. Spec, CHANGELOG, backlinks
+
+All 30 spec Replacement blocks applied verbatim by a scratch script that
+replaces each "Current text" quote (each matched exactly once in the live
+specs at `0cd077e4`) and inserts the two STATUS and no-reply bullets after
+the PING bullet; the six backlink bullets were added directly under the first
+`## Related Plans` heading of each file (the 05 bullet verbatim; the other
+five with the citations the plan names). One CHANGELOG `[Unreleased]`
+`### Changed` bullet, as drafted, with the plan path appended.
+
+```text
+$ bin/check-doc-paths
+check-doc-paths: OK (/Users/van/Developer/weft)
+$ ./.venv/bin/python -m pytest tests/specs/test_spec_hygiene.py tests/specs/test_plan_metadata.py -q
+(exit 0)
+$ grep -c "2026-11-03-control-replies-only-on-request-plan" <the six spec files>
+1 each (six files)
+$ grep -n "non-PONG\|Non-PONG\|public acknowledgement\|...\|control replies for the pipeline" docs/specifications/*.md
+(exit 1, no output)
+```
+
+Theory: the owner accepted the theory edits on 2026-11-03 ("I accept the
+theory edits"). The [WT-2a.12] clause, the [WT-2] item 1 and [WT-4] row
+consistency edits, and the optional [WT-8] cell are applied verbatim in a
+separate "Theory:" commit after the landing commit.
+
+#### Task 6. Gates (before the landing commit, tree `0cd077e4` plus the change)
+
+```text
+§7 focused files (15 files): 1164 passed, 10 skipped in 39.29s
+./.venv/bin/python -m pytest (fast suite): 6378 passed, 47 skipped in 219.63s
+./.venv/bin/python -m pytest -m "" tests/tasks tests/commands tests/cli/test_cli_system.py tests/cli/test_cli_run.py: 2629 passed, 25 skipped in 90.10s
+bin/pytest-pg --fast: 6237 passed, 24 skipped in 283.55s (exit 0)
+mypy (CI target list): Success: no issues found in 484 source files
+ruff check .: All checks passed!
+tests/specs/test_spec_hygiene.py tests/specs/test_plan_metadata.py: exit 0
+bin/check-doc-paths: check-doc-paths: OK (/Users/van/Developer/weft)
+grep -rnE '== "ack"' weft --include=*.py: exit 1, no output
+grep -rn "_send_control_response\|_matching_stop_ack\|public_signal\|kill_ack\|_deferred_active_control_request_id\|_control_request_id_extra" weft --include=*.py: exit 1, no output
+```
+
+`ruff format --check .` reports three files, all pre-existing plan documents
+not touched here (`2026-11-02-reactor-edge-timer-floors-plan.md`,
+`2026-11-02-tid-display-encoding-plan.md`,
+`2026-11-03-family-scheduler-frontier-ring-plan.md`); every Python file this
+plan touched is formatted.
+
+Still open for `completed`: the Task 6 completed-work cross-family review and
+the [WT-7] keyed possession probe (owner key first, including the re-keyed
+bank item B1) and the audit-row refresh of I-12, 4.1-a and 4.1-b, left to
+the series coordinator.

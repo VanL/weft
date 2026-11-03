@@ -2516,7 +2516,7 @@ def _read_control_reply(
 ) -> dict[str, Any]:
     """Round-trip one control request through the production multi-turn loop."""
 
-    if command == CONTROL_PING:
+    if command in (CONTROL_PING, CONTROL_STATUS):
         assert reply_queue is not None
         ctrl_in.write(
             encode_control_message(
@@ -9415,7 +9415,11 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
             )
         )
         ctrl_in.write(
-            encode_control_message(CONTROL_STATUS, request_id="during-status")
+            encode_control_message(
+                CONTROL_STATUS,
+                request_id="during-status",
+                reply_to=ping_reply.name,
+            )
         )
         pong = None
         status = None
@@ -9426,7 +9430,6 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
                 timeout=0.1 if task_timeout is None else min(0.1, task_timeout)
             )
             task.process_once()
-            responses = [json.loads(item) for item in ctrl_out.peek_generator()]
             pong_responses = [json.loads(item) for item in ping_reply.peek_generator()]
             pong = next(
                 (
@@ -9440,7 +9443,7 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
             status = next(
                 (
                     response
-                    for response in responses
+                    for response in pong_responses
                     if response["command"] == CONTROL_STATUS
                     and response.get("request_id") == "during-status"
                 ),
@@ -9451,6 +9454,10 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
         assert pong["message"] == "PONG"
         assert status["status"] == "ok"
         assert status["task_status"] == task.taskspec.state.status
+        assert not any(
+            json.loads(item).get("command") == CONTROL_STATUS
+            for item in ctrl_out.peek_generator()
+        )
         assert pong["control_cleanup_in_flight"] is True
         assert (
             pong[PONG_EXTENSION_KEY]["task_monitor"]["last_cycle"][
@@ -11516,6 +11523,7 @@ def _read_status_reply(
     ctrl_out: Any,
     *,
     request_id: str,
+    reply_queue: Any,
 ) -> dict[str, Any]:
     """Round-trip STATUS through the same multi-turn loop used in production."""
 
@@ -11525,6 +11533,7 @@ def _read_status_reply(
         ctrl_out,
         command=CONTROL_STATUS,
         request_id=request_id,
+        reply_queue=reply_queue,
     )
 
 
@@ -11565,6 +11574,7 @@ def test_status_reply_helper_drives_past_zero_timeout_local_turn(
             ctrl_in,
             ctrl_out,
             request_id="status-after-local-turn",
+            reply_queue=make_queue("test.task-monitor.status-local-turn.ctrl_in"),
         )
 
         assert status["request_id"] == "status-after-local-turn"
@@ -11677,7 +11687,13 @@ def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
         drive_task_monitor_until_idle(task)
         assert probe.stats().total == 0
 
-        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-1")
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-1",
+            reply_queue=make_queue("test.task-monitor.maintenance-status.ctrl_in"),
+        )
         maintenance = status["maintenance"]
         assert isinstance(maintenance["last_run_at_ns"], int)
         assert maintenance["vacuum_ok"] is True
@@ -11703,7 +11719,13 @@ def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
         task.process_once()
         drive_task_monitor_until_idle(task)
         assert probe.stats().total == 2
-        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-2")
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-2",
+            reply_queue=make_queue("test.task-monitor.maintenance-status.ctrl_in"),
+        )
         assert status["maintenance"]["last_run_at_ns"] == first_run_at_ns
 
         current_monotonic["value"] = 1000.0 + 3600.0 + 50.0
@@ -11711,7 +11733,13 @@ def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
         task.process_once()
         drive_task_monitor_until_idle(task)
         assert probe.stats().total == 0
-        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-3")
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-3",
+            reply_queue=make_queue("test.task-monitor.maintenance-status.ctrl_in"),
+        )
         assert status["maintenance"]["last_run_at_ns"] > first_run_at_ns
         assert status["maintenance"]["vacuum_ok"] is True
         assert {
@@ -11756,7 +11784,13 @@ def test_task_monitor_maintenance_opt_out_skips_vacuum(
         drive_task_monitor_until_idle(task)
         assert probe.stats().total == 2
 
-        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-off")
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-off",
+            reply_queue=make_queue("test.task-monitor.maintenance-off-status.ctrl_in"),
+        )
         maintenance = status["maintenance"]
         assert maintenance["last_run_at_ns"] is None
         assert maintenance["vacuum_ok"] is None
@@ -11876,7 +11910,15 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
         assert excluded_old_id in remaining_mapping_ids
         assert excluded_new_id in remaining_mapping_ids
 
-        status = _read_status_reply(task, ctrl_in, ctrl_out, request_id="status-prune")
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-prune",
+            reply_queue=make_queue(
+                "test.task-monitor.maintenance-prune-status.ctrl_in"
+            ),
+        )
         maintenance = status["maintenance"]
         assert maintenance["vacuum_ok"] is True
         assert maintenance["runtime_prune"] == {

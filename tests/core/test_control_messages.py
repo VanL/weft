@@ -17,7 +17,7 @@ pytestmark = pytest.mark.shared
 
 @pytest.mark.parametrize(
     "command",
-    ["STATUS", "STOP", "KILL", "PAUSE", "RESUME"],
+    ["STOP", "KILL", "PAUSE", "RESUME"],
 )
 def test_control_request_round_trip_preserves_each_command(command: str) -> None:
     encoded = encode_control_message(command, request_id="  probe-1  ")
@@ -29,30 +29,31 @@ def test_control_request_round_trip_preserves_each_command(command: str) -> None
     assert parse_control_request(encoded) == ControlRequest(command, "  probe-1  ")
 
 
-def test_ping_control_request_requires_and_preserves_reply_route() -> None:
+@pytest.mark.parametrize("command", ["PING", "STATUS"])
+def test_reply_command_requires_and_preserves_reply_route(command: str) -> None:
     encoded = encode_control_message(
-        "PING",
+        command,
         request_id="  probe-1  ",
         reply_to="  T123.ctrl_in  ",
     )
 
     assert json.loads(encoded) == {
-        "command": "PING",
+        "command": command,
         "request_id": "  probe-1  ",
         "reply_to": "  T123.ctrl_in  ",
     }
     assert parse_control_request(encoded) == ControlRequest(
-        "PING",
+        command,
         "  probe-1  ",
         "  T123.ctrl_in  ",
     )
 
 
-def test_non_ping_control_request_without_request_id_has_only_command_key() -> None:
-    encoded = encode_control_message("STATUS")
+def test_reply_less_control_request_without_request_id_has_only_command_key() -> None:
+    encoded = encode_control_message("STOP")
 
-    assert json.loads(encoded) == {"command": "STATUS"}
-    assert parse_control_request(encoded) == ControlRequest("STATUS")
+    assert json.loads(encoded) == {"command": "STOP"}
+    assert parse_control_request(encoded) == ControlRequest("STOP")
 
 
 @pytest.mark.parametrize(
@@ -88,7 +89,10 @@ def test_non_ping_control_request_without_request_id_has_only_command_key() -> N
         '{"command":"PING","request_id":"x","reply_to":""}',
         '{"command":"PING","request_id":"x","reply_to":"   "}',
         '{"command":"STATUS","reply_to":"T1.ctrl_in"}',
-        '{"command":"STATUS","request_id":"x","reply_to":"T1.ctrl_in"}',
+        '{"command":"STATUS"}',
+        '{"command":"STATUS","request_id":"x"}',
+        '{"command":"STOP","request_id":"x","reply_to":"T1.ctrl_in"}',
+        '{"command":"PAUSE","request_id":"x","reply_to":"T1.ctrl_in"}',
         '{"command":"PING","command":"STOP"}',
         '{"command":"PING","request_id":"a","request_id":"b"}',
         '{"command":"PING","request_id":"x","reply_to":"a","reply_to":"b"}',
@@ -111,7 +115,12 @@ def test_parse_control_request_rejects_every_noncanonical_shape(raw: str) -> Non
         ("PING", "request", ""),
         ("PING", "request", "   "),
         ("STATUS", None, "T1.ctrl_in"),
-        ("STATUS", "request", "T1.ctrl_in"),
+        ("STATUS", None, None),
+        ("STATUS", "request", None),
+        ("STOP", "request", "T1.ctrl_in"),
+        ("KILL", "request", "T1.ctrl_in"),
+        ("PAUSE", "request", "T1.ctrl_in"),
+        ("RESUME", "request", "T1.ctrl_in"),
     ],
 )
 def test_encode_control_message_rejects_noncanonical_values(

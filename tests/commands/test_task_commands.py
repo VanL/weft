@@ -20,7 +20,7 @@ import pytest
 from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._constants import CONTROL_KILL
+from weft._constants import CONTROL_KILL, CONTROL_SURFACE_WAIT_INTERVAL
 from weft._exceptions import (
     CommandUsageError,
     ControlRejected,
@@ -662,33 +662,21 @@ def test_deadline_helpers_share_exact_expiry_boundary(
 
 
 @pytest.mark.parametrize(
-    ("overall_deadline", "public_deadline", "kill_deadline", "expected"),
+    ("overall_deadline", "expected"),
     [
-        (15.0, None, None, 2.0),
-        (15.0, 11.0, None, 2.0),
-        (15.0, 9.0, None, 2.0),
-        (9.0, 11.5, None, 1.5),
-        (9.0, 9.0, None, None),
-        (9.0, None, None, None),
-        (15.0, 11.0, 10.5, 0.5),
-        (15.0, None, 9.0, None),
-        (9.0, 11.5, 10.5, 1.5),
-        (9.0, 9.0, 10.5, None),
-        (9.0, 11.5, 9.0, 1.5),
-        (9.0, None, 9.0, None),
+        (15.0, 2.0),
+        (11.0, 1.0),
+        (10.0, None),
+        (9.0, None),
     ],
 )
-def test_control_surface_wait_timeout_preserves_three_clock_precedence(
+def test_control_surface_wait_timeout_caps_at_interval_until_overall_deadline(
     overall_deadline: float,
-    public_deadline: float | None,
-    kill_deadline: float | None,
     expected: float | None,
 ) -> None:
     assert (
         task_cmd._control_surface_wait_timeout(
             overall_deadline=overall_deadline,
-            public_signal_deadline=public_deadline,
-            kill_ack_deadline=kill_deadline,
             now=10.0,
             interval=2.0,
         )
@@ -1091,13 +1079,6 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
         ...,
     ] = (
         (
-            "wait for first evidence",
-            "command_sent",
-            ControlConvergenceEvidence(command=CONTROL_KILL),
-            "wait",
-            "command_sent",
-        ),
-        (
             "kill terminal after command",
             "command_sent",
             ControlConvergenceEvidence(
@@ -1108,8 +1089,8 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
             "terminal_observed",
         ),
         (
-            "stop terminal after ack",
-            "accepted",
+            "stop terminal after command",
+            "command_sent",
             ControlConvergenceEvidence(
                 command="STOP",
                 terminal_status="cancelled",
@@ -1151,16 +1132,6 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
             "runtime_dead_after_control",
         ),
         (
-            "runtime dead after accepted",
-            "accepted",
-            ControlConvergenceEvidence(
-                command=CONTROL_KILL,
-                runtime_dead_after_control=True,
-            ),
-            "accept_dead_runtime",
-            "runtime_dead_after_control",
-        ),
-        (
             "runtime dead after runner escalation",
             "escalating_runner",
             ControlConvergenceEvidence(
@@ -1184,25 +1155,10 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
             "runtime_dead_after_control",
         ),
         (
-            "ack waits",
-            "command_sent",
-            ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
-            "wait",
-            "accepted",
-        ),
-        (
-            "accepted ack waits",
-            "accepted",
-            ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
-            "wait",
-            "accepted",
-        ),
-        (
             "command wait expires to runner escalation",
-            "accepted",
+            "command_sent",
             ControlConvergenceEvidence(
                 command=CONTROL_KILL,
-                ack_seen=True,
                 observation_budget_expired=True,
             ),
             "escalate_runner",
@@ -1261,11 +1217,7 @@ def test_control_convergence_machine_covers_all_transitions() -> None:
     control_convergence_machine.assert_actions_covered(seen_actions)
 
 
-def test_control_convergence_does_not_accept_kill_ack_or_wrong_terminal() -> None:
-    ack = reduce_control_convergence(
-        "command_sent",
-        ControlConvergenceEvidence(command=CONTROL_KILL, ack_seen=True),
-    )
+def test_control_convergence_does_not_accept_wrong_kill_terminal() -> None:
     wrong_terminal = reduce_control_convergence(
         "command_sent",
         ControlConvergenceEvidence(
@@ -1275,8 +1227,6 @@ def test_control_convergence_does_not_accept_kill_ack_or_wrong_terminal() -> Non
         ),
     )
 
-    assert ack.target == "accepted"
-    assert ack.action == "wait"
     assert wrong_terminal.target == "escalating_runner"
     assert wrong_terminal.action == "escalate_runner"
 
@@ -1521,67 +1471,6 @@ def test_await_control_surface_uses_queue_monitor(
     assert all(observed is ctx for observed in observed_contexts)
 
 
-def test_await_control_surface_public_grace_outlives_expired_kill_ack(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A later public signal keeps the expired-overall tail waiting."""
-
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(time.time_ns())
-    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
-    ctrl_out.write(json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}))
-
-    class _Clock:
-        value = 0.0
-
-        def __call__(self) -> float:
-            return self.value
-
-    clock = _Clock()
-    created_monitors: list[_FakeQueueChangeMonitor] = []
-
-    class _ScriptedMonitor(_FakeQueueChangeMonitor):
-        def wait(self, timeout: float | None) -> bool:
-            self.wait_calls.append(timeout)
-            if len(self.wait_calls) == 1:
-                clock.value = 1.1
-                ctrl_out.write(
-                    json.dumps({"command": "STATUS", "status": "ok", "tid": tid})
-                )
-            else:
-                clock.value = 2.2
-            return False
-
-    def _fake_monitor(
-        queues: Sequence[Queue], *, config: Config | None = None
-    ) -> _ScriptedMonitor:
-        monitor = _ScriptedMonitor(queues, config=config)
-        created_monitors.append(monitor)
-        return monitor
-
-    monkeypatch.setattr(task_cmd, "CONTROL_SURFACE_WAIT_INTERVAL", 1.0)
-    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
-    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
-    )
-    monkeypatch.setattr(task_cmd, "_task_status", lambda *_args, **_kwargs: None)
-
-    try:
-        with monkeypatch.context() as clock_patch:
-            clock_patch.setattr(task_cmd, "time", SimpleNamespace(monotonic=clock))
-            entry, snapshot = task_cmd._await_control_surface(ctx, tid, timeout=0.5)
-    finally:
-        ctrl_out.close()
-
-    assert entry is None
-    assert snapshot is None
-    assert len(created_monitors) == 1
-    assert created_monitors[0].wait_calls == [0.5, 1.0]
-
-
 def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1627,11 +1516,10 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
     assert snapshot.event == "task_started"
 
 
-def test_observe_control_envelopes_keeps_same_drain_observation_times(
+def test_observe_control_envelopes_is_peek_only_after_cursor(
     weft_harness: WeftTestHarness,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Public and KILL clocks retain their last per-envelope sample."""
+    """The observer reads after its cursor, advances it, and deletes nothing."""
 
     tid = str(time.time_ns())
     messages = [
@@ -1639,27 +1527,182 @@ def test_observe_control_envelopes_keeps_same_drain_observation_times(
         json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}),
         json.dumps({"type": "stream", "stream": "stderr", "data": "x"}),
     ]
-    monotonic_samples = iter([10.0, 20.0, 30.0])
     with weft_harness.context.queue(f"T{tid}.ctrl_out") as ctrl_out:
-        for raw in messages:
-            ctrl_out.write(raw)
-        with monkeypatch.context() as clock:
-            clock.setattr(
-                task_cmd,
-                "time",
-                SimpleNamespace(monotonic=lambda: next(monotonic_samples)),
-            )
-            observation = task_cmd._observe_control_envelopes(
-                ctrl_out,
-                tid=tid,
-                taskspec_payload={},
-            )
-        assert ctrl_out.peek_one() is None
+        message_ids = [int(ctrl_out.write(raw)) for raw in messages]
+        observation = task_cmd._observe_control_envelopes(
+            ctrl_out,
+            tid=tid,
+            taskspec_payload={},
+            after_timestamp=None,
+        )
 
-    assert next(monotonic_samples, "exhausted") == "exhausted"
-    assert observation.terminal_snapshot is None
-    assert observation.public_signal_observed_at == 20.0
-    assert observation.kill_ack_observed_at == 30.0
+        assert observation.terminal_snapshot is None
+        assert observation.last_message_id == message_ids[2]
+        assert list(ctrl_out.peek_generator(with_timestamps=True)) == list(
+            zip(messages, message_ids, strict=True)
+        )
+
+        terminal_id = int(
+            ctrl_out.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "source": "task",
+                        "tid": tid,
+                        "status": "killed",
+                        "timestamp": time.time_ns(),
+                    }
+                )
+            )
+        )
+        terminal_observation = task_cmd._observe_control_envelopes(
+            ctrl_out,
+            tid=tid,
+            taskspec_payload={},
+            after_timestamp=observation.last_message_id,
+        )
+
+    assert terminal_observation.terminal_snapshot is not None
+    assert terminal_observation.terminal_snapshot.status == "killed"
+    assert terminal_observation.last_message_id == terminal_id
+
+
+def _running_control_snapshot(tid: str) -> task_cmd.system_cmd.TaskSnapshot:
+    return task_cmd.system_cmd.TaskSnapshot(
+        tid=tid,
+        tid_short=tid_short_form(tid),
+        name="task-func",
+        status="running",
+        event="task_started",
+        activity=None,
+        waiting_on=None,
+        started_at=time.time_ns(),
+        completed_at=None,
+        last_timestamp=time.time_ns(),
+        duration_seconds=None,
+        runner=None,
+        runtime_handle=None,
+        runtime=None,
+        metadata={},
+    )
+
+
+def test_await_control_surface_leaves_ctrl_out_rows_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A control waiter reads the target ctrl_out peek-only [MF-3]."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    for row in (
+        {"command": "STATUS", "status": "ok", "tid": tid},
+        {"command": "STOP", "status": "ack", "tid": tid},
+        {"type": "stream", "stream": "stderr", "data": "x"},
+        {
+            "type": "terminal",
+            "source": "task",
+            "tid": tid,
+            "status": "cancelled",
+            "timestamp": time.time_ns(),
+        },
+    ):
+        ctrl_out.write(json.dumps(row))
+    before = list(ctrl_out.peek_generator(with_timestamps=True))
+
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _FakeQueueChangeMonitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "_task_status",
+        lambda *_args, **_kwargs: _running_control_snapshot(tid),
+    )
+
+    try:
+        _entry, snapshot = task_cmd._await_control_surface(ctx, tid)
+        after = list(ctrl_out.peek_generator(with_timestamps=True))
+    finally:
+        ctrl_out.close()
+
+    assert snapshot is not None
+    assert snapshot.status == "cancelled"
+    assert after == before
+
+
+def test_await_control_surface_ignores_pre_upgrade_kill_ack_until_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pre-upgrade KILL acknowledgement neither ends nor shortens the wait."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+    ctrl_out.write(json.dumps({"command": CONTROL_KILL, "status": "ack", "tid": tid}))
+
+    class _Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = _Clock()
+    created_monitors: list[_FakeQueueChangeMonitor] = []
+
+    class _ScriptedMonitor(_FakeQueueChangeMonitor):
+        def wait(self, timeout: float | None) -> bool:
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) == 1:
+                clock.value += 4 * CONTROL_SURFACE_WAIT_INTERVAL
+            else:
+                ctrl_out.write(
+                    json.dumps(
+                        {
+                            "type": "terminal",
+                            "source": "task",
+                            "tid": tid,
+                            "status": "killed",
+                            "timestamp": time.time_ns(),
+                        }
+                    )
+                )
+            return False
+
+    def _fake_monitor(
+        queues: Sequence[Queue], *, config: Config | None = None
+    ) -> _ScriptedMonitor:
+        monitor = _ScriptedMonitor(queues, config=config)
+        created_monitors.append(monitor)
+        return monitor
+
+    monkeypatch.setattr(task_cmd, "QueueChangeMonitor", _fake_monitor)
+    monkeypatch.setattr(task_cmd, "mapping_for_tid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        task_cmd, "_require_observation_config", lambda _ctx, tid: _observation(tid)
+    )
+    monkeypatch.setattr(
+        task_cmd,
+        "_task_status",
+        lambda *_args, **_kwargs: _running_control_snapshot(tid),
+    )
+
+    try:
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(task_cmd, "time", SimpleNamespace(monotonic=clock))
+            _entry, snapshot = task_cmd._await_control_surface(ctx, tid)
+    finally:
+        ctrl_out.close()
+
+    assert snapshot is not None
+    assert snapshot.status == "killed"
+    assert len(created_monitors) == 1
+    assert len(created_monitors[0].wait_calls) == 2
 
 
 def test_await_control_surface_accepts_terminal_ctrl_out_without_log_replay(

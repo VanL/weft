@@ -24,10 +24,9 @@ from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
 
 import weft.commands.specs as spec_cmd
-from simplebroker import Queue, format_message_id
+from simplebroker import format_message_id
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
@@ -65,7 +64,7 @@ from weft.commands.types import (
 )
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime, task_evidence
-from weft.core.control_messages import decode_control_object, encode_control_message
+from weft.core.control_messages import encode_control_message
 from weft.core.endpoints import validate_endpoint_claim_name
 from weft.core.pipelines import (
     PipelineSpec,
@@ -83,7 +82,7 @@ from weft.core.taskspec import (
     normalize_declared_option_name,
     validate_taskspec_payload,
 )
-from weft.helpers import _register_observation_wakeup, closing_queue_iterator
+from weft.helpers import _register_observation_wakeup
 
 # -----------------------------------------------------------------------------
 # Explicit spec helpers
@@ -483,29 +482,15 @@ class _LiveRunSession:
         resources.close()
 
 
-def _matching_stop_ack(queue: Queue, tid: str, request_id: str) -> bool:
-    """Acknowledge only this keyed STOP, retaining all other control proof [MF-3]."""
-    with closing_queue_iterator(queue.peek_generator(with_timestamps=True)) as rows:
-        for raw, message_id in rows:
-            payload = decode_control_object(raw)
-            if payload is not None and (
-                payload.get("tid") == tid
-                and payload.get("command") == CONTROL_STOP
-                and payload.get("status") == "ack"
-                and payload.get("request_id") == request_id
-            ):
-                queue.delete(message_id=message_id)
-                return True
-    return False
-
-
 @typed_command_errors
 def _stop_interactive_run_session(session: _LiveRunSession) -> None:
-    """Close stdin and observe keyed STOP through its actual deadline [CLI-1.1.1].
+    """Close stdin, send STOP, and wait for terminal evidence through the named budget.
 
-    The stop observer is independent of the output stream's cancellation scope.
-    ACK is progress, not a synthetic terminal task state. KILL follows only
-    expiry of the named STOP completion budget.
+    STOP gets no reply. The stop observer is independent of the output
+    stream's cancellation scope. KILL follows only expiry of the named STOP
+    completion budget.
+
+    Spec: [CLI-1.1.1], [MF-3]
     """
     # Late import avoids the tasks -> system -> run dependency closure.
     from .tasks import _terminal_observation_snapshot
@@ -526,10 +511,7 @@ def _stop_interactive_run_session(session: _LiveRunSession) -> None:
         config = _require_observation_config(ctx, tid)
     names = [task_state_queue_name(tid), config.ctrl_in, config.ctrl_out, config.outbox]
     with result_observation(ctx, names) as (queues, monitor):
-        request_id = uuid4().hex
-        queues[config.ctrl_in].write(
-            encode_control_message(CONTROL_STOP, request_id=request_id)
-        )
+        queues[config.ctrl_in].write(encode_control_message(CONTROL_STOP))
         deadline = time.monotonic() + INTERACTIVE_STOP_COMPLETION_TIMEOUT
         while True:
             with queues[config.ctrl_out].get_connection() as broker:
@@ -540,15 +522,11 @@ def _stop_interactive_run_session(session: _LiveRunSession) -> None:
                     observation_config=config,
                     broker=broker,
                 )
-            if snapshot.terminal or _matching_stop_ack(
-                queues[config.ctrl_out], tid, request_id
-            ):
+            if snapshot.terminal:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                queues[config.ctrl_in].write(
-                    encode_control_message(CONTROL_KILL, request_id=uuid4().hex)
-                )
+                queues[config.ctrl_in].write(encode_control_message(CONTROL_KILL))
                 return
             monitor.wait(remaining)
 

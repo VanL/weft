@@ -897,7 +897,9 @@ class PipelineTask(BaseTask):
         command = request.command
         if command == CONTROL_STATUS:
             self._publish_pipeline_snapshot()
-            self._send_control_response(
+            assert request.reply_to is not None
+            self._send_control_reply(
+                request.reply_to,
                 CONTROL_STATUS,
                 "ok",
                 **self._control_response_extras(request),
@@ -914,12 +916,6 @@ class PipelineTask(BaseTask):
             )
             self._publish_pipeline_snapshot()
             self._delete_pipeline_registry_record()
-            response_extra = (
-                {"request_id": request.request_id}
-                if request.request_id is not None
-                else {}
-            )
-            self._send_control_response("STOP", "ack", **response_extra)
             return True
         if command == CONTROL_KILL:
             self._broadcast_control(CONTROL_KILL)
@@ -931,11 +927,5 @@ class PipelineTask(BaseTask):
             )
             self._publish_pipeline_snapshot()
             self._delete_pipeline_registry_record()
-            response_extra = (
-                {"request_id": request.request_id}
-                if request.request_id is not None
-                else {}
-            )
-            self._send_control_response("KILL", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)

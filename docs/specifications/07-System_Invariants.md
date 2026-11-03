@@ -106,16 +106,17 @@ _Implementation mapping_: `weft/core/taskspec/model.py`,
 
 #### Strict control envelope [QUEUE.2a]
 
-A PING request is exactly `{command, request_id, reply_to}` with `command`
-exactly `PING` and both other values nonblank strings. `reply_to` is the
-requester's own `ctrl_in`: a long-lived task's configured queue or an
-ephemeral requester's `T{tid}.ctrl_in`. The requester is the sole reader. The
-target writes exactly one PONG there and never to its own `ctrl_out`. Other requests are exactly `command` plus optional
-nonblank-string `request_id`, with `command` one of `STATUS`, `STOP`, `KILL`,
-`PAUSE`, or `RESUME`. Rejected rows are passed to reply dispatch, then
-exact-acknowledged once. Every reply to a valid keyed request echoes its
-`request_id`; PONG does not echo `reply_to`, never enters PING request dispatch,
-and never produces another PONG.
+A PING or STATUS request is exactly `{command, request_id, reply_to}` with
+`command` exactly `PING` or `STATUS` and both other values nonblank strings.
+`reply_to` is the requester's own `ctrl_in`: a long-lived task's configured
+queue or an ephemeral requester's `T{tid}.ctrl_in`. The requester is the sole
+reader. The target writes exactly one reply there (a PONG for PING) and never
+to its own `ctrl_out`. Other requests are exactly `command` plus optional
+nonblank-string `request_id`, with `command` one of `STOP`, `KILL`, `PAUSE`,
+or `RESUME`; they get no reply. Rejected rows are passed to reply dispatch,
+then exact-acknowledged once. Every reply to a valid keyed request echoes its
+`request_id`; a reply does not echo `reply_to`, never enters request dispatch,
+and never produces another reply.
 
 _Implementation mapping_: `weft/core/control_messages.py::ControlRequest`,
 `weft/core/control_messages.py::encode_control_message`,
@@ -144,8 +145,8 @@ acknowledgement and shared dispatch; direct codec coverage lives in
   does not apply stop/error reserved policy to that input as part of its
   completion, including
   when STOP/KILL was deferred during execution and the success
-  acknowledgement failed; task termination and control acknowledgement
-  still complete. A later independent control operation with no active row
+  acknowledgement failed; task termination still completes. A later
+  independent control operation with no active row
   may deliberately apply its configured bulk `clear` to remaining backlog;
   residue has no lifetime exemption from that separate operation.
   Monitor reserved cleanup covers
@@ -473,14 +474,16 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   manager selection, a matched keyed PONG may rescue stale-looking canonical
   registry evidence; an absent or unmatched PONG is not proof that takeover is
   safe.
-- **OBS.12a**: task-local control acknowledgements are not lifecycle
-  mutations. A `KILL` ack can shorten the path to fallback control, but it
-  must not be reported as terminal `killed` state unless terminal evidence,
-  controlled host-process death, or an authoritative no-host-PID runner kill
-  proof is also present. Command-layer result classification is selected by
-  the pure reducer in `weft/commands/control_convergence.py`; queue waits,
-  runner fallback, and process termination remain owned by
-  `weft/commands/tasks.py`.
+- **OBS.12a**: the result of a state-changing control command (STOP,
+  KILL, PAUSE, RESUME) is the task's own published transition, never a
+  reply row. `weft task kill` reports `killed` only on
+  terminal `killed` evidence, controlled host-process death, or an
+  authoritative no-host-PID runner kill proof, and no other `ctrl_out` row
+  shortens or ends a control wait. Command-layer result classification of
+  the evidence observed after the wait is selected by the pure reducer in
+  `weft/commands/control_convergence.py`, which has no acknowledgement
+  input and no wait decision; queue waits, runner fallback, and process
+  termination remain owned by `weft/commands/tasks.py`.
 - **OBS.13**: task monitor log files, task monitor checkpoints,
   runtime-prune reports, retention-prune reports/archives, processor results,
   and Monitor-owned collation tables are operational evidence only. They must
@@ -1391,6 +1394,7 @@ doc:
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MANAGER.18].
 
 - [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.

@@ -2883,10 +2883,9 @@ def test_deferred_stop_finalizes_before_timeout_outcome(
     )
 
     responses = [json.loads(message) for message in drain_queue(ctrl_out)]
-    assert any(
-        response.get("command") == "STOP" and response["status"] == "ack"
-        for response in responses
-    )
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert task.taskspec.state.status == "cancelled"
     assert task._deferred_active_control_command is None
     assert reserved.has_pending() is False
@@ -2964,10 +2963,9 @@ def test_deferred_kill_finalizes_before_limit_outcome(
     _drive_consumer_until(task, lambda: task.taskspec.state.status == "killed")
 
     responses = [json.loads(message) for message in drain_queue(ctrl_out)]
-    assert any(
-        response.get("command") == "KILL" and response["status"] == "ack"
-        for response in responses
-    )
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert task.taskspec.state.status == "killed"
     assert task._deferred_active_control_command is None
     assert reserved.has_pending() is False
@@ -3078,11 +3076,9 @@ def test_deferred_control_wins_over_error_and_cancelled_outcomes(
     assert task._deferred_active_control_command is None
 
     ctrl_out_messages = [json.loads(message) for message in drain_queue(ctrl_out)]
-    ack_responses = [
-        message for message in ctrl_out_messages if message.get("command") == command
-    ]
-    assert len(ack_responses) == 1
-    assert ack_responses[0]["status"] == "ack"
+    assert not any(
+        "command" in message and "status" in message for message in ctrl_out_messages
+    ), ctrl_out_messages
 
     events = [json.loads(message) for message in drain_queue(log_queue)]
     terminal_events = [
@@ -3129,9 +3125,9 @@ def test_structured_active_stop_kill_defers_until_finalize(
     task._finalize_deferred_active_control()
 
     responses = [json.loads(message) for message in drain_queue(ctrl_out)]
-    response = next(item for item in responses if item.get("command") == command)
-    assert response["status"] == "ack"
-    assert response["request_id"] == request_id
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert task.taskspec.state.status == expected_status
     assert task._deferred_active_control_command is None
     task.cleanup()
@@ -3169,7 +3165,6 @@ def test_active_consumer_acks_invalid_control_then_defers_later_valid_stop(
 
     assert ctrl_in.peek_one() is None
     assert task._deferred_active_control_command == CONTROL_STOP
-    assert task._deferred_active_control_request_id == "later-stop"
     task.cleanup()
 
 
@@ -3275,11 +3270,9 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
     assert terminal_envelope_list[0]["status"] == expected_status
 
     ctrl_out_messages = [json.loads(message) for message in drain_queue(ctrl_out)]
-    ack_responses = [
-        message for message in ctrl_out_messages if message.get("command") == command
-    ]
-    assert len(ack_responses) == 1
-    assert ack_responses[0]["status"] == "ack"
+    assert not any(
+        "command" in message and "status" in message for message in ctrl_out_messages
+    ), ctrl_out_messages
 
     expected_event = "control_stop" if command == CONTROL_STOP else "control_kill"
     events = [json.loads(msg) for msg in drain_queue(log_queue)]
@@ -3816,10 +3809,9 @@ def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
     )
 
     responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
-    stop_response = next(
-        response for response in responses if response.get("command") == "STOP"
-    )
-    assert stop_response["status"] == "ack"
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert outbox.read_one() is None
     assert reserved.has_pending() is False
 

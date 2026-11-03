@@ -34,7 +34,7 @@ from weft.commands import tasks as task_commands
 from weft.commands.run import _LiveRunSession, _stop_interactive_run_session
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext
-from weft.core.control_messages import parse_control_request
+from weft.core.control_messages import ControlRequest, parse_control_request
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.tasks import Consumer
 from weft.core.tasks.sessions import CommandSession
@@ -233,7 +233,7 @@ class _IdleOutputFaultProbe:
 
 
 @pytest.mark.parametrize("quit_command", [":quit", ":exit"])
-def test_active_cli_quit_sends_keyed_stop_and_keeps_terminal_proof(
+def test_active_cli_quit_sends_stop_and_keeps_terminal_proof(
     monkeypatch: pytest.MonkeyPatch,
     quit_command: str,
 ) -> None:
@@ -267,7 +267,7 @@ def test_active_cli_quit_sends_keyed_stop_and_keeps_terminal_proof(
         assert len(parsed) == 1
         assert parsed[0] is not None
         assert parsed[0].command == "STOP"
-        assert parsed[0].request_id
+        assert parsed[0].request_id is None
         with harness.context.queue(
             f"T{session.tid}.ctrl_out", persistent=False
         ) as reply:
@@ -426,13 +426,14 @@ def test_active_cli_eof_closes_input_and_renders_final_frames_without_stop(
     assert "final stderr\n" in captured.err
 
 
-@pytest.mark.parametrize("ack_after", [None, 1.5])
-def test_active_stop_waits_named_budget_and_accepts_only_own_ack(
-    monkeypatch: pytest.MonkeyPatch, ack_after: float | None
+@pytest.mark.parametrize("terminal_after", [None, 1.5])
+def test_active_stop_waits_named_budget_for_terminal_evidence(
+    monkeypatch: pytest.MonkeyPatch, terminal_after: float | None
 ) -> None:
-    """Production ACKs settle only their request; KILL requires the actual budget."""
+    """Only terminal evidence settles STOP; KILL requires the actual budget."""
     clock = [0.0]
     sent: list[tuple[str, float]] = []
+    requests: list[ControlRequest] = []
     waits: list[float | None] = []
     original_write = Queue.write
     monkeypatch.setattr(
@@ -443,45 +444,55 @@ def test_active_stop_waits_named_budget_and_accepts_only_own_ack(
         _live_session(harness) as session,
         _stop_peer(harness, session.tid) as consumer,
     ):
-        own_key: list[str] = []
+        ack_row: dict[str, object] = {
+            "command": "STOP",
+            "status": "ack",
+            "tid": session.tid,
+        }
 
         def write(queue: Queue, raw: str, **kwargs: Any) -> int:
             message_id = original_write(queue, raw, **kwargs)
             if queue.name == f"T{session.tid}.ctrl_in":
                 request = parse_control_request(raw)
                 assert request is not None
+                requests.append(request)
                 sent.append((request.command, clock[0]))
-                if request.command == "STOP":
-                    assert request.request_id is not None
-                    own_key.append(request.request_id)
-                    # An ordinary response for another request is valid but
-                    # must not settle this STOP or be consumed by its observer.
-                    consumer._send_control_response(
-                        "STOP", "ack", request_id="another-request"
-                    )
             return message_id
 
         def wait(_monitor: QueueChangeMonitor, timeout: float | None) -> bool:
             waits.append(timeout)
             assert timeout is not None
-            clock[0] += timeout if ack_after is None else min(timeout, ack_after)
-            if ack_after is not None:
-                consumer._send_control_response("STOP", "ack", request_id=own_key[0])
+            if len(waits) == 1:
+                # A pre-upgrade task acknowledges after it stops; the new
+                # client must neither settle on that row nor consume it.
+                if requests and requests[0].request_id is not None:
+                    ack_row["request_id"] = requests[0].request_id
+                with harness.context.queue(
+                    f"T{session.tid}.ctrl_out", persistent=False
+                ) as reply:
+                    reply.write(json.dumps(ack_row))
+            if terminal_after is None:
+                clock[0] += timeout
+            else:
+                clock[0] += terminal_after
+                _publish_stopped_peer(harness, consumer)
             return True
 
         monkeypatch.setattr(Queue, "write", write)
         monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
         _stop_interactive_run_session(session)
         assert [command for command, _at in sent] == (
-            ["STOP", "KILL"] if ack_after is None else ["STOP"]
+            ["STOP", "KILL"] if terminal_after is None else ["STOP"]
         )
         assert waits == [INTERACTIVE_STOP_COMPLETION_TIMEOUT]
-        if ack_after is None:
+        if terminal_after is None:
             assert sent[1][1] - sent[0][1] == INTERACTIVE_STOP_COMPLETION_TIMEOUT
+        assert all(request.request_id is None for request in requests)
         with harness.context.queue(f"T{session.tid}.ctrl_out") as replies:
             retained = [json.loads(raw) for raw in replies.peek_generator()]
-        assert [reply["request_id"] for reply in retained] == ["another-request"]
-        assert consumer.taskspec.state.status not in {"cancelled", "killed"}
+        assert ack_row in retained
+        if terminal_after is None:
+            assert consumer.taskspec.state.status not in {"cancelled", "killed"}
 
 
 @pytest.mark.parametrize(

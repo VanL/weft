@@ -24,6 +24,7 @@ from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_KILL,
     CONTROL_PING,
+    CONTROL_STATUS,
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
     PIPELINE_OWNER_METADATA_KEY,
@@ -1634,6 +1635,55 @@ def test_pipeline_task_routes_pong_to_requester_control_queue(tmp_path: Path) ->
     )
 
 
+def test_pipeline_status_replies_to_reply_to(tmp_path: Path) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    compiled = compile_linear_pipeline(
+        load_pipeline_spec_payload(
+            {"name": "pipe", "stages": [{"name": "first", "task": "first"}]}
+        ),
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+    task = PipelineTask(
+        ctx.broker_target, compiled.pipeline_taskspec, config=ctx.broker_config
+    )
+    task.process_once()
+    reply_to = f"T{compiled.pipeline_tid}.status-probe.ctrl_in"
+    replies = ctx.queue(reply_to, persistent=True)
+    ctrl_out = ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
+
+    ctx.queue(compiled.runtime.queues.ctrl_in, persistent=True).write(
+        encode_control_message(
+            CONTROL_STATUS,
+            request_id="pipeline-status",
+            reply_to=reply_to,
+        )
+    )
+    drive_until(
+        replies.peek_one,
+        lambda message: message is not None,
+        step=task.process_once,
+        wait=task.wait_for_activity,
+        timeout=3.0,
+        wait_slice=0.05,
+    )
+
+    responses = _drain_json(replies)
+    assert len(responses) == 1
+    reply = responses[0]
+    assert reply["command"] == CONTROL_STATUS
+    assert reply["status"] == "ok"
+    assert reply["request_id"] == "pipeline-status"
+    assert reply["tid"] == compiled.pipeline_tid
+    assert reply["status_queue"] == compiled.runtime.queues.status
+    assert "reply_to" not in reply
+    assert not any(
+        response.get("command") == CONTROL_STATUS for response in _drain_json(ctrl_out)
+    )
+
+
 def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> None:
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -1662,12 +1712,9 @@ def test_pipeline_task_stop_propagates_to_waiting_children(tmp_path: Path) -> No
     responses = _drain_json(
         ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
     )
-    assert any(
-        response.get("command") == CONTROL_STOP
-        and response.get("status") == "ack"
-        and response.get("request_id") == "pipeline-stop"
-        for response in responses
-    )
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert ctx.queue(
         compiled.runtime.stages[0].ctrl_in_queue, persistent=True
     ).read_one() == encode_control_message(CONTROL_STOP)
@@ -1701,12 +1748,9 @@ def test_pipeline_task_kill_propagates_to_waiting_children(tmp_path: Path) -> No
     responses = _drain_json(
         ctx.queue(compiled.runtime.queues.ctrl_out, persistent=True)
     )
-    assert any(
-        response.get("command") == CONTROL_KILL
-        and response.get("status") == "ack"
-        and response.get("request_id") == "pipeline-kill"
-        for response in responses
-    )
+    assert not any(
+        "command" in response and "status" in response for response in responses
+    ), responses
     assert ctx.queue(
         compiled.runtime.stages[0].ctrl_in_queue, persistent=True
     ).read_one() == encode_control_message(CONTROL_KILL)

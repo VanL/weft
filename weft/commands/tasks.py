@@ -87,7 +87,7 @@ from weft.liveness.models import RuntimeProbeResult
 from weft.liveness.registry import has_runtime_liveness_probe, liveness_provider_key
 
 from ._boundary import typed_command_errors
-from ._result_wait import _is_completion_record, result_observation
+from ._result_wait import result_observation
 from ._task_history import (
     pipeline_status_queue_name,
 )
@@ -1793,11 +1793,10 @@ class _ControlSurfaceResources:
 
 @dataclass(frozen=True, slots=True)
 class _ControlSurfaceObservation:
-    """Facts observed while draining the current ctrl-out queue."""
+    """Facts observed in one peek-only pass over the current ctrl-out range."""
 
     terminal_snapshot: system_cmd.TaskSnapshot | None
-    public_signal_observed_at: float | None
-    kill_ack_observed_at: float | None
+    last_message_id: int | None
 
 
 def _observe_control_envelopes(
@@ -1805,40 +1804,40 @@ def _observe_control_envelopes(
     *,
     tid: str,
     taskspec_payload: dict[str, Any],
+    after_timestamp: int | None,
 ) -> _ControlSurfaceObservation:
-    """Observe a bounded control range while retaining every completion fact.
+    """Peek one bounded control range after a cursor.
 
-    Ordinary control rows are exact-deleted after observation. Completion facts
-    remain readable by result collection and supervision, including facts for
-    other owners sharing this route. Select the first matching typed terminal.
+    Select the first matching typed terminal. Deletes nothing.
 
     Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5].
     """
 
-    public_signal_observed_at: float | None = None
-    kill_ack_observed_at: float | None = None
     with ctrl_queue.get_connection() as broker:
         horizon = broker.latest_pending_timestamp(ctrl_queue.name)
-        if horizon is None:
-            return _ControlSurfaceObservation(None, None, None)
+        if horizon is None or (
+            after_timestamp is not None and horizon <= after_timestamp
+        ):
+            return _ControlSurfaceObservation(None, after_timestamp)
         before = None if horizon == TASK_HISTORY_MAX_MESSAGE_ID else horizon + 1
+        last = after_timestamp
         with closing_queue_iterator(
             cast(
                 Iterable[tuple[str, int]],
                 broker.peek_generator(
-                    ctrl_queue.name, with_timestamps=True, before_timestamp=before
+                    ctrl_queue.name,
+                    with_timestamps=True,
+                    after_timestamp=after_timestamp,
+                    before_timestamp=before,
                 ),
             )
         ) as rows:
             for ctrl_payload, message_id in rows:
-                raw = str(ctrl_payload)
+                last = message_id
                 try:
-                    payload = json.loads(raw)
+                    payload = json.loads(str(ctrl_payload))
                 except json.JSONDecodeError:
-                    payload = None
-                retained = _is_completion_record(payload, raw)
-                if not retained:
-                    broker.delete_message_ids(ctrl_queue.name, [message_id])
+                    continue
                 if not isinstance(payload, dict):
                     continue
                 terminal_snapshot = _snapshot_from_terminal_ctrl_out(
@@ -1847,54 +1846,28 @@ def _observe_control_envelopes(
                     taskspec_payload=taskspec_payload,
                 )
                 if terminal_snapshot is not None:
-                    return _ControlSurfaceObservation(
-                        terminal_snapshot,
-                        public_signal_observed_at,
-                        kill_ack_observed_at,
-                    )
-                if retained:
-                    continue
-                if ("command" in payload and "status" in payload) or (
-                    payload.get("type") == "terminal"
-                    and isinstance(payload.get("status"), str)
-                ):
-                    public_signal_observed_at = time.monotonic()
-                command = str(payload.get("command", "")).strip().upper()
-                status = str(payload.get("status", "")).strip().lower()
-                if command == CONTROL_KILL and status == "ack":
-                    kill_ack_observed_at = time.monotonic()
-    return _ControlSurfaceObservation(
-        None,
-        public_signal_observed_at,
-        kill_ack_observed_at,
-    )
+                    return _ControlSurfaceObservation(terminal_snapshot, message_id)
+    return _ControlSurfaceObservation(None, last)
 
 
 def _control_surface_wait_timeout(
     *,
     overall_deadline: float,
-    public_signal_deadline: float | None,
-    kill_ack_deadline: float | None,
     now: float,
     interval: float,
 ) -> float | None:
-    """Select the next existing control-observation wait budget."""
+    """Select the next control-observation wait slice.
+
+    Returns ``None`` once the overall deadline has passed; otherwise the time
+    left before it, capped at the per-pass ``interval``.
+
+    Spec: docs/specifications/05-Message_Flow_and_State.md [MF-3].
+    """
 
     overall_remaining = overall_deadline - now
     if overall_remaining <= 0:
-        if public_signal_deadline is None:
-            return None
-        public_signal_remaining = public_signal_deadline - now
-        if public_signal_remaining <= 0:
-            return None
-        return min(public_signal_remaining, interval)
-    wait_timeout = min(overall_remaining, interval)
-    if kill_ack_deadline is None:
-        return wait_timeout
-    kill_ack_remaining = kill_ack_deadline - now
-    if kill_ack_remaining <= 0:
         return None
-    return min(wait_timeout, kill_ack_remaining)
+    return min(overall_remaining, interval)
 
 
 @typed_command_errors
@@ -1920,7 +1893,7 @@ def _await_control_surface(
     config = observation_config or _require_observation_config(ctx, tid)
     watched_pipeline_status_queue = config.pipeline_status
     watched_ctrl_out_queue = config.ctrl_out
-    public_signal_deadline: float | None = None
+    ctrl_out_cursor: int | None = None
     with ctx.session():
         resources = _ControlSurfaceResources(
             ctx,
@@ -1929,24 +1902,16 @@ def _await_control_surface(
             pipeline_status_name=watched_pipeline_status_queue,
         )
         try:
-            kill_ack_deadline: float | None = None
             while True:
                 observation = _observe_control_envelopes(
                     resources.ctrl_out_queue,
                     tid=tid,
                     taskspec_payload={},
+                    after_timestamp=ctrl_out_cursor,
                 )
                 if observation.terminal_snapshot is not None:
                     return latest_entry, observation.terminal_snapshot
-                if observation.public_signal_observed_at is not None:
-                    public_signal_deadline = (
-                        observation.public_signal_observed_at
-                        + CONTROL_SURFACE_WAIT_INTERVAL
-                    )
-                if observation.kill_ack_observed_at is not None:
-                    kill_ack_deadline = (
-                        observation.kill_ack_observed_at + CONTROL_SURFACE_WAIT_INTERVAL
-                    )
+                ctrl_out_cursor = observation.last_message_id
 
                 with resources.log_queue.get_connection() as broker:
                     latest_entry = (
@@ -1962,15 +1927,8 @@ def _await_control_surface(
                     latest_snapshot = snapshot
                     if snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
                         return latest_entry, latest_snapshot
-                    if (
-                        kill_ack_deadline is not None
-                        and time.monotonic() >= kill_ack_deadline
-                    ):
-                        return latest_entry, latest_snapshot
                 wait_timeout = _control_surface_wait_timeout(
                     overall_deadline=deadline,
-                    public_signal_deadline=public_signal_deadline,
-                    kill_ack_deadline=kill_ack_deadline,
                     now=time.monotonic(),
                     interval=CONTROL_SURFACE_WAIT_INTERVAL,
                 )

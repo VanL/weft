@@ -6,7 +6,7 @@ queues, inspect processes, write control messages, or call runner plugins.
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.4], [CC-2.5]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
-- docs/specifications/07-System_Invariants.md [STATE.1]-[STATE.6]
+- docs/specifications/07-System_Invariants.md [STATE.1]-[STATE.6], OBS.12a
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from weft.core.state_machines import StateDecision, StateMachine, Transition
 
 ControlConvergenceState = Literal[
     "command_sent",
-    "accepted",
     "terminal_observed",
     "runtime_dead_after_control",
     "escalating_runner",
@@ -32,7 +31,6 @@ ControlConvergenceState = Literal[
     "unknown",
 ]
 ControlConvergenceAction = Literal[
-    "wait",
     "accept_terminal",
     "accept_dead_runtime",
     "escalate_runner",
@@ -55,10 +53,9 @@ control_convergence_actions = cast(
 
 @dataclass(frozen=True, slots=True)
 class ControlConvergenceEvidence:
-    """Evidence snapshot for command-layer STOP/KILL convergence."""
+    """Post-wait evidence snapshot for command-layer STOP/KILL convergence."""
 
     command: str
-    ack_seen: bool = False
     terminal_status: str | None = None
     runtime_dead_after_control: bool | None = None
     runner_fallback_attempted: bool = False
@@ -70,7 +67,13 @@ def reduce_control_convergence(
     current: ControlConvergenceState,
     evidence: ControlConvergenceEvidence,
 ) -> StateDecision[ControlConvergenceState, ControlConvergenceAction]:
-    """Return the deterministic command-control convergence decision."""
+    """Classify post-wait control evidence into the deterministic convergence decision.
+
+    The caller waits first (`weft/commands/tasks.py::_await_control_surface`);
+    the reducer has no acknowledgement input and no wait decision.
+
+    Spec: OBS.12a
+    """
 
     return control_convergence_machine.decide(current, evidence)
 
@@ -91,20 +94,6 @@ def _accepts_dead_runtime(
     return (
         evidence.command == CONTROL_KILL and evidence.runtime_dead_after_control is True
     )
-
-
-def _should_wait(
-    _current: ControlConvergenceState,
-    evidence: ControlConvergenceEvidence,
-) -> bool:
-    return evidence.ack_seen and not evidence.observation_budget_expired
-
-
-def _should_wait_for_evidence(
-    _current: ControlConvergenceState,
-    evidence: ControlConvergenceEvidence,
-) -> bool:
-    return not evidence.ack_seen and not evidence.observation_budget_expired
 
 
 def _should_escalate_runner(
@@ -154,14 +143,6 @@ control_convergence_machine = StateMachine[
             reason="terminal status satisfies the command result",
         ),
         Transition(
-            id="terminal-observed-from-accepted",
-            source="accepted",
-            target="terminal_observed",
-            action="accept_terminal",
-            predicate=_accepts_terminal_status,
-            reason="terminal status satisfies the accepted command",
-        ),
-        Transition(
             id="terminal-observed-from-runner-escalation",
             source="escalating_runner",
             target="terminal_observed",
@@ -186,14 +167,6 @@ control_convergence_machine = StateMachine[
             reason="runtime death proves the control command succeeded",
         ),
         Transition(
-            id="runtime-dead-from-accepted",
-            source="accepted",
-            target="runtime_dead_after_control",
-            action="accept_dead_runtime",
-            predicate=_accepts_dead_runtime,
-            reason="runtime death proves the accepted control command succeeded",
-        ),
-        Transition(
             id="runtime-dead-from-runner-escalation",
             source="escalating_runner",
             target="runtime_dead_after_control",
@@ -210,24 +183,8 @@ control_convergence_machine = StateMachine[
             reason="runtime death appeared after host escalation",
         ),
         Transition(
-            id="command-sent-waits-for-evidence",
-            source="command_sent",
-            target="command_sent",
-            action="wait",
-            predicate=_should_wait_for_evidence,
-            reason="observation budget remains open",
-        ),
-        Transition(
-            id="accepted-command-waits",
-            source=frozenset(("command_sent", "accepted")),
-            target="accepted",
-            action="wait",
-            predicate=_should_wait,
-            reason="control acknowledgement seen within the observation budget",
-        ),
-        Transition(
             id="command-timeout-escalates-runner",
-            source=frozenset(("command_sent", "accepted")),
+            source="command_sent",
             target="escalating_runner",
             action="escalate_runner",
             predicate=_should_escalate_runner,

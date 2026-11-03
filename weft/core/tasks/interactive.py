@@ -127,16 +127,6 @@ class InteractiveTaskMixin(ABC):
     ) -> None:  # pragma: no cover - interface definition
         """Apply reserved-queue cleanup policy."""
 
-    @abstractmethod
-    def _send_control_response(
-        self,
-        command: str,
-        status: str,
-        /,
-        **extra: Any,
-    ) -> None:  # pragma: no cover - interface definition
-        """Publish a control response on the task control channel."""
-
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -571,7 +561,7 @@ class InteractiveTaskMixin(ABC):
             self._interactive_shutdown()
 
     def _interactive_handle_control(self, request: ControlRequest) -> bool:
-        """Publish terminal proof after unwind, then acknowledge keyed control.
+        """Publish terminal proof after unwind; write no reply.
 
         A task with no session owns its terminal publication here. Cleanup
         stays silent so a failed startup cannot publish the envelope twice.
@@ -582,14 +572,10 @@ class InteractiveTaskMixin(ABC):
             return False
 
         command = request.command
-        response_extra = (
-            {"request_id": request.request_id} if request.request_id is not None else {}
-        )
         if (
             command in {CONTROL_STOP, CONTROL_KILL}
             and self.taskspec.state.status in TERMINAL_TASK_STATUSES
         ):
-            self._send_control_response(command, "ack", **response_extra)
             return True
         if command == CONTROL_STOP:
             self.should_stop = True
@@ -609,7 +595,6 @@ class InteractiveTaskMixin(ABC):
                     {"message_id": time.time_ns()},
                 )
                 self._interactive_shutdown(reason="cancelled")
-            self._send_control_response("STOP", "ack", **response_extra)
             return True
         if command == CONTROL_KILL:
             self.should_stop = True
@@ -629,7 +614,6 @@ class InteractiveTaskMixin(ABC):
                     {"message_id": time.time_ns()},
                 )
                 self._interactive_shutdown(reason="killed")
-            self._send_control_response("KILL", "ack", **response_extra)
             return True
         return False
 

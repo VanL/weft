@@ -35,6 +35,7 @@ See also:
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
 
 - [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements task-local completion publication and matching retention.
@@ -709,14 +710,14 @@ the same session helpers in `weft/core/tasks/sessions.py`.
 
 Current required control behavior:
 
-- `ctrl_in` accepts strict structured JSON request envelopes. A PING request is
-  exactly `{command, request_id, reply_to}`. `command` is exactly `PING`;
-  `request_id` and `reply_to` are nonblank strings; and `reply_to` is the
-  requester's own `ctrl_in` queue: the configured queue of a long-lived task,
-  or `T{tid}.ctrl_in` for an ephemeral requester that minted a TID for this
-  probe. In both cases the requester is the sole reader of that queue. Other
-  requests contain exactly the required `command` key and optional
-  nonblank-string `request_id`, with `command` exactly one of `STATUS`, `STOP`,
+- `ctrl_in` accepts strict structured JSON request envelopes. A PING or STATUS
+  request is exactly `{command, request_id, reply_to}`. `command` is exactly
+  `PING` or `STATUS`; `request_id` and `reply_to` are nonblank strings; and
+  `reply_to` is the requester's own `ctrl_in` queue: the configured queue of a
+  long-lived task, or `T{tid}.ctrl_in` for an ephemeral requester that minted
+  a TID for this request. In both cases the requester is the sole reader of
+  that queue. Other requests contain exactly the required `command` key and
+  optional nonblank-string `request_id`, with `command` exactly one of `STOP`,
   `KILL`, `PAUSE`, or `RESUME`. Raw command strings, extra keys, and alternate
   casing are not supported requests
 - every Weft-owned controller uses the shared control-envelope encoder.
@@ -724,15 +725,21 @@ Current required control behavior:
   unsupported envelopes without treating them as commands. After strict
   request parsing, a non-request row is passed to the task's protected reply
   hook and then exact-acknowledged once so it cannot block a later valid
-  request. A PONG never enters PING request dispatch and never produces a
-  response
-- a valid PING writes exactly one PONG to `reply_to`; it never writes that
-  PONG to the responder's `ctrl_out`. The PONG echoes `request_id` and does not
-  echo `reply_to`
-- `ctrl_out` carries other task-local replies and terminal notifications.
-  Readers ignore malformed or unrelated replies as protocol noise; this
-  robustness does not make removed reply formats current contracts
-- `STOP`, `KILL`, `STATUS`, and `PING` round trips exist for live tasks
+  request. A PONG or STATUS reply never enters request dispatch and never
+  produces a response
+- a valid PING writes exactly one PONG, and a valid STATUS exactly one STATUS
+  reply, to `reply_to`; neither is written to the responder's `ctrl_out`.
+  Each echoes `request_id` and does not echo `reply_to`
+- `STOP`, `KILL`, `PAUSE`, and `RESUME` write no reply. The responder makes
+  the transition and publishes it where it already publishes state: the
+  lifecycle event in `weft.log.tasks`, its `weft.state.tasks.<tid>` snapshot,
+  and, for a terminal transition, the typed terminal envelope on `ctrl_out`
+- `ctrl_out` carries terminal notifications and other facts addressed to the
+  task's observers, never a control reply. Readers ignore malformed or
+  unrelated rows as protocol noise; this robustness does not make removed
+  reply formats current contracts
+- `STOP` and `KILL` are accepted by every live task, and `STATUS` and `PING`
+  round trips exist for live tasks
 - `PAUSE` and `RESUME` are supported on task types that opt into live pausing
 - durable `state.status` remains the canonical lifecycle state
 - every task-owned TID mapping carries a boolean `terminal` liveness hint.
@@ -784,9 +791,9 @@ Current required control behavior:
   immediate, deferred, draining, broadcast, or local-only, and whether
   reserved-policy handling is applied by the base class, by the subclass, or is
   intentionally not applicable
-- every reply or acknowledgement to a valid keyed request echoes its
-  `request_id`. Handled STOP/KILL commands must not emit duplicate terminal
-  state events when the task is already terminal
+- every reply to a valid keyed request echoes its `request_id`. Handled
+  STOP/KILL commands must not emit duplicate terminal state events when the
+  task is already terminal
 
 `weft/core/control_messages.py` owns the canonical control-envelope wire
 shape. It does not own task or manager control policy.

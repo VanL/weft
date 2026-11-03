@@ -103,12 +103,6 @@ class Monitor(BaseTask):
                 message_id=context.timestamp,
                 apply_reserved_policy=False,
             )
-            response_extra = (
-                {"request_id": request.request_id}
-                if request.request_id is not None
-                else {}
-            )
-            self._send_control_response("STOP", "ack", **response_extra)
             return True
         return super()._handle_control_command(request, context)
 

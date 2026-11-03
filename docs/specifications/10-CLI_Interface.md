@@ -301,16 +301,14 @@ Current interactive behavior:
 - `--interactive` is queue-mediated line IO, not PTY emulation
 - follow-up input goes through `T{tid}.inbox`
 - stdout goes through `T{tid}.outbox`
-- interactive stderr, status, and terminal control replies go through
+- interactive stderr stream frames and terminal notifications go through
   `T{tid}.ctrl_out`; non-interactive command `stream_output` writes stdout and
   stderr stream frames to `T{tid}.outbox`, with stderr treated as live
   diagnostics rather than result data
 
-After requesting STOP, the interactive client observes matching
-acknowledgement or existing terminal evidence for the named
-`INTERACTIVE_STOP_COMPLETION_TIMEOUT` budget before escalating to KILL.
-Terminal evidence ends the wait promptly; acknowledgement remains after
-task-side runtime unwind.
+After requesting STOP, the interactive client observes terminal evidence for
+the named `INTERACTIVE_STOP_COMPLETION_TIMEOUT` budget before escalating to
+KILL. STOP gets no reply ([MF-3]); terminal evidence ends the wait promptly.
 
 _Implementation mapping_: `weft/commands/run.py::_stop_interactive_run_session`, called
 by `weft/cli/run.py::drive_interactive_session`. The CLI output worker advances
@@ -318,7 +316,7 @@ and closes its own realtime iterator; the session wakes it through the shared
 observation callback when teardown cancels output.
 `weft/cli/run.py::consume_run_session` owns driving, waiting, and session cleanup.
 `tests/commands/test_active_interactive_lifecycle.py` covers the active CLI
-owner, cancellation, EOF, and keyed STOP settlement.
+owner, cancellation, EOF, and STOP settlement on terminal evidence.
 Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
 ### `manager serve` - Run the manager in the foreground [CLI-1.1.2]
@@ -640,11 +638,13 @@ Current task-control surfaces:
 - `weft task kill TID`
 - `weft task ping TID`
 
-`weft task kill` reports a killed count only when the command helper observes
-terminal `killed` evidence, controlled host-process death after a kill action,
-or an authoritative runner kill result for a handle with no host-observable
-PID. A task-local `KILL` acknowledgement is command-acceptance progress, not
-terminal proof.
+`weft task stop` and `weft task kill` send a STOP or KILL that gets no reply
+and wait for the target's terminal evidence for one bounded observation
+budget before any runner or host fallback ([MF-3]). They read the target's
+`ctrl_out` peek-only and delete nothing there. `weft task kill` reports a
+killed count only when the command helper observes terminal `killed`
+evidence, controlled host-process death after a kill action, or an
+authoritative runner kill result for a handle with no host-observable PID.
 
 Current manager-control surfaces:
 
@@ -1093,6 +1093,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CLI-1.1.1], [CLI-1.3]).
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)

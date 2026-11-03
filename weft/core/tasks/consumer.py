@@ -105,7 +105,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._agent_session: AgentSessionProtocol | None = None
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
-        self._deferred_active_control_request_id: str | None = None
         self._activate_pipeline_waiter_if_needed()
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
         self._emit_pipeline_started_event()
@@ -664,11 +663,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
         command = request.command
         if command in {CONTROL_STOP, CONTROL_KILL}:
-            self._defer_active_control(
-                command,
-                timestamp_int,
-                request_id=request.request_id,
-            )
+            self._defer_active_control(command, timestamp_int)
             self._ack_control_message(queue_name, timestamp_int)
             return
 
@@ -680,13 +675,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
         self._handle_control_message(raw_message, timestamp_int, context)
 
-    def _defer_active_control(
-        self,
-        command: str,
-        timestamp: int,
-        *,
-        request_id: str | None = None,
-    ) -> None:
+    def _defer_active_control(self, command: str, timestamp: int) -> None:
         """Defer active STOP/KILL finalization back to the main task thread.
 
         Thread-safety pattern
@@ -701,9 +690,10 @@ class Consumer(BaseTask, InteractiveTaskMixin):
            ``_active_message_timestamp`` after the worker result returns,
            unless successful work already selected its exact acknowledgement
            as the input's disposition.
-        3. Sending the control acknowledgement response before the runner has
-           unwound would create a false ordering: the caller would see an ack
-           before the task is actually done.
+        3. Publishing the terminal transition before the runner has unwound
+           would create a false ordering: an observer would see the task
+           terminal before it is actually done. STOP and KILL write no reply;
+           the published transition is their only outcome ([MF-3]).
 
         Instead, the reactor stores the command and its queue timestamp in
         ``_deferred_active_control_command`` /
@@ -718,14 +708,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         After the runner unwinds (whether due to cancellation, an error, or
         normal completion), the main execution loop calls
         ``_finalize_deferred_active_control``.  That method re-reads the
-        stored command and applies the terminal state transition, reserved
-        policy when required, and acknowledgement response in the correct
-        order on the main thread, where all broker and TaskSpec state is owned.
+        stored command and applies the terminal state transition and reserved
+        policy when required, in the correct order on the main thread, where
+        all broker and TaskSpec state is owned, and writes no reply.
         """
 
         self._deferred_active_control_command = command
         self._deferred_active_control_timestamp = timestamp
-        self._deferred_active_control_request_id = request_id
         self.should_stop = True
         if command == CONTROL_KILL:
             self._kill_requested = True
@@ -739,7 +728,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         unwound.  Reads the command stashed by ``_defer_active_control``,
         applies the appropriate terminal transition (``_handle_stop_request``
         or ``_handle_kill_request``), applies reserved policy only when requested,
-        and sends the control acknowledgement. Successful work disables policy
+        and writes no reply. Successful work disables policy
         because its exact acknowledgement already owns row disposition.
         Clears the deferred state before returning so a second call is a no-op.
 
@@ -749,18 +738,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         command = self._deferred_active_control_command
         timestamp = self._deferred_active_control_timestamp
-        request_id = self._deferred_active_control_request_id
         if command is None:
             return
 
         self._deferred_active_control_command = None
         self._deferred_active_control_timestamp = None
-        self._deferred_active_control_request_id = None
         active_message_timestamp = self._active_message_timestamp
         has_active_reserved_message = (
             apply_reserved_policy and active_message_timestamp is not None
         )
-        response_extra = {"request_id": request_id} if request_id is not None else {}
 
         if command == CONTROL_STOP:
             policy = self._resolve_policy(self.taskspec.spec.reserved_policy_on_stop)
@@ -774,7 +760,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._apply_reserved_policy(
                     policy, message_timestamp=active_message_timestamp
                 )
-            self._send_control_response("STOP", "ack", **response_extra)
             return
 
         if command == CONTROL_KILL:
@@ -789,7 +774,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 self._apply_reserved_policy(
                     policy, message_timestamp=active_message_timestamp
                 )
-            self._send_control_response("KILL", "ack", **response_extra)
 
     def _make_task_runner(
         self,

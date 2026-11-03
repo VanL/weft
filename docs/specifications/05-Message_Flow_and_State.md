@@ -155,8 +155,8 @@ Current rules:
   acknowledgement delete, are left in `T{tid}.reserved` for the explicit
   recovery path below
 - a successful work outcome uses only success acknowledgement for its
-  input; deferred STOP/KILL completes task termination and acknowledges
-  control without applying reserved policy to that completed input,
+  input; deferred STOP/KILL completes task termination without applying
+  reserved policy to that completed input,
   even when its acknowledgement delete failed. A later independent idle
   control operation may apply configured bulk `clear` to remaining backlog
 - a live task may return a reserved row it has not begun executing to
@@ -200,19 +200,24 @@ requester ctrl_in  <---- PONG ----  target task
 
 The control plane is explicit:
 
-- a PING request is exactly `{command, request_id, reply_to}`. `command` is
-  exactly `PING`; `request_id` and `reply_to` are nonblank strings; and
-  `reply_to` is the requester's own `ctrl_in` queue. Other control requests
-  retain the exact `{command}` or `{command, request_id}` envelopes. Raw
-  command strings, extra keys, and alternate casing are not supported.
+- a PING or STATUS request is exactly `{command, request_id, reply_to}`.
+  `command` is exactly `PING` or `STATUS`; `request_id` and `reply_to` are
+  nonblank strings; and `reply_to` is the requester's own `ctrl_in` queue.
+  STOP, KILL, PAUSE, and RESUME requests retain the exact `{command}` or
+  `{command, request_id}` envelopes; these commands write no reply, so their
+  `request_id` is echoed nowhere. Raw command strings, extra keys, and
+  alternate casing are not supported.
 - every Weft-owned controller uses the shared control-envelope encoder.
   `BaseTask` uses the matching parser and rejects malformed, non-object, or
   unsupported envelopes without treating them as commands. A rejected row is
   exact-acknowledged without a `ctrl_out` reply so it cannot block a later
   valid request.
-- `ctrl_out` carries non-PONG task-local replies and terminal notifications.
-  Readers ignore malformed or unrelated replies as protocol noise; this
-  robustness does not make removed reply formats current contracts.
+- `ctrl_out` carries facts addressed to the task's observers: terminal
+  notifications, persistent `work_item_completed` boundaries, and interactive
+  stderr stream frames. No control reply is written to `ctrl_out`. Readers
+  ignore malformed or unrelated rows, including acknowledgement rows written
+  by a task from before this contract, as protocol noise; this robustness
+  does not make removed reply formats current contracts.
 - `weft.log.tasks` remains the runtime lifecycle evidence stream rather than
   the interactive reply channel. It is durable while retained, but it is not
   legal, forensic, or audit-retention evidence.
@@ -228,6 +233,24 @@ The control plane is explicit:
   `timestamp`, `task_status`, `paused`, `should_stop`, `runner`, optional
   `activity`, optional `waiting_on`, and optional best-effort `runtime`
   details from the active runner; it echoes `request_id` and omits `reply_to`
+- `STATUS` writes exactly one JSON STATUS reply to `reply_to`, never to the
+  target's `ctrl_out`. The reply contains `command="STATUS"`, `status="ok"`,
+  `tid`, `timestamp`, and the task's control snapshot fields (`task_status`,
+  `process_title_error`, `paused`, `should_stop`, `runner`, optional
+  `activity`, `waiting_on`, and best-effort `runtime`, and any fields its
+  task type adds); a pipeline
+  adds `status_queue` after refreshing `P{tid}.status`. It echoes
+  `request_id` and omits `reply_to`
+- STOP, KILL, PAUSE, and RESUME write no reply. Each publishes its outcome
+  where the task already publishes state: the lifecycle event in
+  `weft.log.tasks` (`control_stop`, `control_kill`, `control_pause`, or
+  `control_resume`), the task-owned `weft.state.tasks.<tid>` snapshot, and,
+  for STOP and KILL, the typed terminal envelope on `ctrl_out`. A Manager
+  STOP publishes `control_stop` with `draining=true` when its drain begins
+  and its terminal state when the drain completes. A requester observes
+  these facts as any observer does. A STOP or KILL to a task that is already
+  terminal, a PAUSE to a paused task, and a RESUME to a running task change
+  nothing and write nothing
 - a manager PONG contains `role="manager"`, `requests`, `ctrl_in`, `ctrl_out`,
   `outbox`, `weft_context`, `task_status`, and `should_stop`. A matched PONG
   proves manager selection authority only when every field is present with its
@@ -296,7 +319,7 @@ transform and physical-EOF ordering remain unchanged.
 
 Interactive STOP/KILL, external termination signals, and parent loss record
 the terminal state on the owner thread, unwind the session, and publish completion after
-its final stdout/stderr frames. Queued control is acknowledged after this unwind. It does not publish local completion while the session can
+its final stdout/stderr frames. Queued control writes no reply. It does not publish local completion while the session can
 still produce final output. The payload for one publication attempt series is serialized
 once and reused on retry. Terminal runtime mapping publication follows completion
 publication attempts, so a control observer cannot act on a terminal mapping before
@@ -312,12 +335,12 @@ liveness evidence, including after bounded completion-publication failure.
   plus late replies that arrive while the requester still exists, are consumed
   without a state transition. A reply written after an ephemeral requester has
   exited remains under that requester's queue name until the name-derived
-  dead-task sweep retires it. PING/PONG uses no target-`ctrl_out` scan, reply
-  sweep, dynamic watcher membership, or separate polling loop
-- non-PONG keyed control replies remain owned and retired by the prober that
-  issued the `request_id`: an exact matching reply is deleted on match, and the
-  prober may sweep rows bearing its own request ID at timeout or abandonment.
-  Rows keyed to another request and terminal envelopes remain untouched
+  dead-task sweep retires it. PING/PONG and STATUS use no target-`ctrl_out`
+  scan, reply sweep, dynamic watcher membership, or separate polling loop
+- a control requester consumes only the rows on its own reply queue, and a
+  control waiter never deletes rows on a target's `ctrl_out`: terminal
+  envelopes, completion boundaries, stream frames, and unrelated rows there
+  are left to their own readers and cleanup
 - non-interactive command `stream_output` writes stdout and stderr stream frames
   to `T{tid}.outbox`; stderr frames are diagnostics for live/event consumers
   and do not become the public task result
@@ -325,25 +348,26 @@ liveness evidence, including after bounded completion-publication failure.
   as terminal observation proof when task-log terminal proof is missing
 - CLI control waiters may accept a typed terminal `ctrl_out` envelope as
   sufficient stop/kill completion proof for that task without replaying the
-  global task log first; ordinary control acknowledgements remain progress
-  evidence only
+  global task log first. They read `ctrl_out` peek-only through a cursor that
+  starts at the oldest row and advances past each row read, delete nothing
+  there, and return on terminal evidence or at their overall deadline
 - manager-authored terminal envelopes are supervisor observations for child
   wrapper death only; they must be written to the child `ctrl_out` queue, never
   to outbox, and only when task-owned terminal proof is not already visible
 - active STOP/KILL may delete the structured `ctrl_in` message as an internal
-  handoff detail, but public acknowledgement remains the post-unwind
-  `ctrl_out` reply plus the terminal task-log event on the main task thread
+  handoff detail; the public outcome is the terminal task-log event, written
+  on the main task thread after the runtime unwinds, and its typed terminal
+  `ctrl_out` envelope
 - active STOP/KILL deferral applies to the structured JSON control envelope.
-  STOP/KILL envelopes that include `request_id` must echo that value in the
-  eventual post-unwind acknowledgement.
-- every other reply or acknowledgement to a valid keyed control request,
-  including PAUSE and RESUME, also echoes the request's `request_id`.
-- a `KILL` acknowledgement means the task accepted the command; it is progress
-  evidence only. Readers and CLI control helpers must not promote ack-only
-  evidence into terminal lifecycle state. Kill success is proven by terminal
-  `killed` evidence, by observed controlled host PIDs becoming dead after a
-  kill action, or by an authoritative runner control surface when no
-  host-observable PID exists.
+  The deferral carries the command and its queue timestamp; finalization
+  after the unwind writes no reply.
+- every reply to a valid keyed control request (PONG, STATUS) echoes the
+  request's `request_id`.
+- kill success is proven by terminal `killed` evidence, by observed
+  controlled host PIDs becoming dead after a kill action, or by an
+  authoritative runner control surface when no host-observable PID exists.
+  Readers and CLI control helpers infer no lifecycle state from any other
+  row.
 
 _Implementation mapping_: canonical wire encoding and parsing live in
 `weft/core/control_messages.py::encode_control_message`,
@@ -373,11 +397,12 @@ interpretation and CLI convergence live in `weft/core/task_evidence.py` and
 `tests/tasks/test_control_channel.py`, and `tests/tasks/test_task_execution.py`.
 Interactive startup failure and session finalization use
 `weft/core/tasks/base.py::BaseTask._report_state_change`;
-`weft/core/tasks/interactive.py::InteractiveTaskMixin._interactive_handle_control` acknowledges after
-shutdown. Ordering and retry coverage is in
+`weft/core/tasks/interactive.py::InteractiveTaskMixin._interactive_handle_control` publishes terminal
+proof after shutdown and writes no reply. Ordering and retry coverage is in
 `tests/tasks/test_task_interactive.py`; see `2026-08-31-monitor-and-task-correctness-fixes-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
-`weft/commands/tasks.py::_observe_control_envelopes` consumes ordinary replies while
-retaining valid completion facts for every owner of a shared control route.
+`weft/commands/tasks.py::_observe_control_envelopes` reads a control route
+peek-only through a per-call cursor and deletes nothing, so valid completion
+facts stay readable for every owner of a shared control route.
 The wire module owns shape only, not task or manager policy.
 
 Implementation plan backlinks:
@@ -1147,7 +1172,7 @@ completion still surface terminal evidence immediately. Event following remains
 an explicit retained/live raw stream and cannot promise lossless history.
 
 Interactive shutdown uses its accepted configuration and resolved local queues,
-with the existing STOP/ACK, cancellation, deadline, and KILL behavior; it performs
+with the existing STOP, cancellation, deadline, and KILL behavior; it performs
 no direct global-history or Monitor acquisition. Internal service inventory uses
 already acquired registry, projected child identity, internal spawn/reserved
 evidence without independent log replay or new Manager PING. Missing startup
@@ -2093,6 +2118,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
+- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([MF-3]).
 - [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
 - [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs bounded startup feedback under [MA-1.8].

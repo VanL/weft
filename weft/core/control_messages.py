@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from weft._constants import (
     CONTROL_COMMANDS,
-    CONTROL_PING,
+    CONTROL_REPLY_COMMANDS,
 )
 
 
@@ -41,11 +41,11 @@ def _validate_control_request(request: ControlRequest) -> None:
         not isinstance(request.reply_to, str) or not request.reply_to.strip()
     ):
         raise ValueError("reply_to must contain a non-whitespace character")
-    if request.command == CONTROL_PING:
+    if request.command in CONTROL_REPLY_COMMANDS:
         if request.request_id is None or request.reply_to is None:
-            raise ValueError("PING requires request_id and reply_to")
+            raise ValueError("PING and STATUS require request_id and reply_to")
     elif request.reply_to is not None:
-        raise ValueError("reply_to is only valid for PING")
+        raise ValueError("reply_to is only valid for PING and STATUS")
 
 
 def encode_control_message(
@@ -110,7 +110,7 @@ def parse_control_request(raw: str) -> ControlRequest | None:
     if payload is None:
         return None
     command = payload.get("command")
-    if command == CONTROL_PING:
+    if isinstance(command, str) and command in CONTROL_REPLY_COMMANDS:
         if set(payload) != {"command", "request_id", "reply_to"}:
             return None
     elif set(payload) not in ({"command"}, {"command", "request_id"}):

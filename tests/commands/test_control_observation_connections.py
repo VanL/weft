@@ -647,12 +647,12 @@ def test_interactive_stop_observes_local_completion_without_telemetry(
         consumer.cleanup()
 
 
-def test_control_observer_retains_shared_completion_facts_with_bounded_drain(
+def test_control_observer_retains_every_row_within_horizon(
     weft_harness: WeftTestHarness,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Control observation preserves every owner's completion and later arrivals."""
+    """Control observation is peek-only: every row in and past the horizon stays."""
     ctx = weft_harness.context
     route = "test.shared.control-custody"
     specs: list[TaskSpec] = []
@@ -690,10 +690,11 @@ def test_control_observer_retains_shared_completion_facts_with_bounded_drain(
                 "work_item_completed",
                 "work_failed",
             }
-            control.write(json.dumps({"command": "KILL", "status": "ack"}))
-            control.write(
-                json.dumps({"type": "stream", "stream": "stderr", "data": "quiet"})
-            )
+            noise = [
+                json.dumps({"command": "KILL", "status": "ack"}),
+                json.dumps({"type": "stream", "stream": "stderr", "data": "quiet"}),
+            ]
+            noise_rows = [(raw, control.write(raw)) for raw in noise]
             with control.get_connection() as broker:
                 broker_type = type(broker)
             original_latest = broker_type.latest_pending_timestamp
@@ -713,11 +714,13 @@ def test_control_observer_retains_shared_completion_facts_with_bounded_drain(
                 control,
                 tid=tasks[0].tid,
                 taskspec_payload=specs[0].model_dump(mode="json"),
+                after_timestamp=None,
             )
             assert capsys.readouterr() == ("", "")
             assert observation.terminal_snapshot is None
-            assert observation.kill_ack_observed_at is not None
-            assert list(control.peek_generator(with_timestamps=True)) == facts + late
+            assert list(control.peek_generator(with_timestamps=True)) == (
+                facts + noise_rows + late
+            )
             assert len(late) == 1
     finally:
         for task in tasks:
