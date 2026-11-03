@@ -1,6 +1,6 @@
 # Family Scheduler: Frontier Ring and Contracted Ancestry
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8] (one sentence added; mapping bullet added); docs/specifications/07-System_Invariants.md [MANAGER.18] (the same sentence, because its paragraph is a verbatim copy of the [MA-1.8] paragraph), [MANAGER.16] and [OBS.6] (unchanged, constraint); docs/specifications/05-Message_Flow_and_State.md [MF-5] (unchanged, constraint); docs/program-theory.md [ALT-WT-016] (owner-gated wording)
 Superseded by: none
 
@@ -2319,6 +2319,8 @@ test (T12).
   committed. No new cross-family round was run by the implementer (Task 2
   rests on rounds 1 and 2 above; the completed-work review and the [WT-7]
   probe are owed).
+- Cross-family review of the landed implementation (codex 0.161.0, 2026-11-03, range b01b9269..a9562dc6): blocker F1 (P2): the §7 all-tests gate (`pytest -m ""`, slow tests included) had been replaced by the fast suite in the Execution log. Disposition: reproduced; the gate was then run by the session lead in a detached worktree at a9562dc6 (`./.venv/bin/python -m pytest -m "" -q -p no:cacheprovider`): exit 0, no failures (output at the session scratchpad `series/impl/plan5/all-tests-gate.txt`). No production defect found. The reviewer confirmed: the replacement class is byte-identical to Task 4's block and lines 1–229 unchanged; `manager.py` unchanged; `_find` stops only on `_live_children` membership and compaction cannot strand a registered resident's pointer; insertion before `_turn` and the recovery rebuild in `_residents` order match the promoted [MA-1.8] and [MANAGER.18] sentences byte for byte; all five spec Replacement blocks present verbatim and the two theory blocks correctly held; the fourteen tests reproduce the RED/GUARD split (253 passed, 77 failed against the old class; 330 cases pass now) and every one of the 21 named mutations is caught by the named test; the Stop-if on register row 9 was correctly applied and the owner's ruling is on the row's disposition. Two corrections recorded here: (1) the Task 1 harness shuffles build order only for `select`; the payload and `frontiers` arms were built in fixed arm order, so the payload result is not described as build-order randomized, and the frontier-derivation increase (about 96 µs) accounts for most but not provably all of the payload increase (about 124 µs); (2) leaf assumption A1 is exactly "a newly launched task registers as a leaf"; the paraphrase "a child never precedes its parent in `_residents`" is false during handoff, where a later parent adoption is repaired by `recover` → `finish_recovery`, as the plan's rebuild-adjustment note already places it.
+- owner acceptance applied 2026-11-03 ("I accept the theory edits"): the [ALT-WT-016] Replacement promoted into docs/program-theory.md (Owner Decision 1 closed as accepted); Status moved to promoted. Still open for completed: the register row 9 ruling and the [WT-7] possession probe.
 
 ## Execution log
 

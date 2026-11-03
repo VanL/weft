@@ -789,13 +789,21 @@ alternative. An agent must not propose the alternative again unless the
   makes completion-to-next-launch work $O(N)$ in backlog size.
 - Current consequence: Pending requests are indexed incrementally once into
   `weft.state.labels.<root_tid>.pending.<parent_tid>`, carrying immutable
-  `ancestry_tids`. When `<parent_tid>` exits, the Manager updates the bucket's
-  contracted scheduling-parent pointer in $O(1)$ in memory and continues
-  consuming `.pending.<parent_tid>` directly as children are dispatched.
+  `ancestry_tids`. When `<parent_tid>` exits, the Manager links the bucket to
+  its contracted scheduling parent in $O(1)$ and melds the two in-memory
+  pending indexes in $O(\log n)$, moving no token, and continues consuming
+  `.pending.<parent_tid>` directly as children are dispatched. The live
+  frontier contracts through the same contracted-pointer idea: an exit
+  updates its own path and, when the pointer table has grown past twice the
+  registered count, triggers one whole-table compaction charged to the exits
+  that created the dead entries; each pointer lookup costs amortized
+  $O(\log n)$ under path compression alone, and only the Manager checkpoint
+  write remains proportional to the lineage it publishes.
 - Reconsider when: Never for per-dispatch scans or $O(N)$ exit moves. Bounded,
   resumable reconciliation runs amortized across maintenance turns to heal
   cursor holes.
-- Evidence: `2026-10-14-measured-admission-family-scheduling.md`.
+- Evidence: `2026-10-14-measured-admission-family-scheduling.md`;
+  `2026-11-03-family-scheduler-frontier-ring-plan.md` (frontier contraction).
 
 ### [ALT-WT-017] Reduced test concurrency as an acceptance gate
 
