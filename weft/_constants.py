@@ -721,7 +721,24 @@ TASK_PING_TIMEOUT_SECONDS: Final[float] = 10.0
 """Default seconds `weft task ping` waits for a keyed PONG response."""
 
 CONTROL_SURFACE_WAIT_INTERVAL: Final[float] = 0.05
-"""Polling interval while waiting for task terminal state in CLI control flows."""
+"""Per-pass ceiling on the CLI control-surface wait; an absent-event timer.
+
+``weft/commands/tasks.py::_await_control_surface`` waits on queue changes
+(the task-state queue, ``ctrl_out`` and the pipeline status queue), and a
+queue change wakes it sooner; this cap bounds each pass so the observer
+re-reads task status at least every 50 ms. One input it reads has no event
+([WT-7] "Event-driven against absence"): a task that writes its result row
+and dies before publishing its terminal state turns terminal only when its
+process is gone, and the death of a process that is not the observer's child
+produces no queue write (``weft/core/task_evidence.py::known_tid_evidence``
+consults the one-shot outbox only when no live host-pid runtime handle
+remains). The same constant is reused as the public-signal and KILL-ack
+grace length until series plan 3 removes the acknowledgement-driven windows,
+and as the default ``poll_interval`` of
+``weft/commands/_spawn_submission.py::reconcile_submitted_spawn``. A platform process-exit watcher (owner decision 2, option (c), of
+``docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md``) would remove
+the cap.
+"""
 
 QUEUE_CHANGE_MONITOR_WAITER_TIMEOUT_SECONDS: Final[float] = 1.0
 """Bounded wait chunk for multi-queue CLI activity monitors."""

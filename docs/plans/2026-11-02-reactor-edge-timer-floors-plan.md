@@ -1502,3 +1502,16 @@ the aggregate `C901` count in `docs/ruff-suppression-registry.md`
 (regenerated with `bin/ruff_suppression_index.py --write`; `--check` passes),
 plus the pinned group list and counts in `tests/specs/test_ruff_policy.py`
 (195 → 194 groups, 325 → 324 directives, 113 → 112 `C901`).
+
+#### Task 2a. The retained control-surface cap named as an absent-event timer
+
+`CONTROL_SURFACE_WAIT_INTERVAL`'s docstring in `weft/_constants.py` now names
+the absent event (a non-child process death after its result row, which
+`known_tid_evidence` reads with no queue write), says queue changes wake the
+wait sooner, records the reuse as the grace length until series plan 3, and
+names option (c) as the cap's removal path. One addition beyond the plan's
+wording, for accuracy: the docstring also names the constant's third use, the
+default `poll_interval` of `_spawn_submission.reconcile_submitted_spawn` (§9),
+which this plan leaves untouched. No behavior or test change.
+`grep -n "CONTROL_SURFACE_WAIT_INTERVAL" -A12 weft/_constants.py` shows the
+new docstring; `./.venv/bin/ruff check weft/_constants.py` passes.
