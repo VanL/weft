@@ -1343,3 +1343,128 @@ $ grep -n "requires-python" pyproject.toml
 
 Python 3.12 is still supported, so `queue.Queue.shutdown()` (3.13+) is not
 available as the wake source in Task 1. The sentinel is the source.
+
+### Implementation (2026-11-03, from `fbd79c66`)
+
+Executed tasks: 0, 1, 2a, 3, 4, 5. Task 2 is not executed (owner item 2,
+closed as (a)). Plans 10, 9 and 5 landed between `b7eed9f9` and the
+implementation base `fbd79c66`; every production citation below was
+re-verified by symbol before editing. `weft/core/tasks/sessions.py` is still
+the sessions module (series plan 8 moves it later).
+
+#### Task 0. Comprehension answers (before the first edit)
+
+1. After Task 1, a worker blocked in `ServiceWorkerContext.iter_items`'s
+   untimed `input_queue.get()` wakes only on an item. Stop is
+   `ServiceTask._stop_service_worker(name, deadline=...)`, called by
+   `ServiceTask._cleanup_task_resources` (and by
+   `_abort_partial_initialization` and the start-failure unwind in
+   `_start_service_worker`). It sets the group `stop_event` and then puts
+   one `_service_worker_stop` sentinel per worker; `iter_items` returns on
+   the sentinel. A worker can block only on an empty queue, and every
+   registered group has `input_queue_maxsize=0` (unbounded: Manager child
+   launch, the three TaskMonitor groups, the `ServiceTask` lane) or a
+   maxsize equal to its worker count (LivenessMonitor probes: 8 and 8,
+   `weft/core/tasks/liveness_monitor.py` line 136). So the at most
+   `worker_count` sentinels that Task 1's first `put_nowait` attempts
+   deliver all fit while any worker is blocked, and that attempt runs before
+   any deadline check. The deadline bounds only the full-queue
+   put-and-evict retry, and a full queue means no worker is blocked in
+   `get()`.
+2. The process sentinel is level-triggered: once the producer exits it stays
+   ready, so leaving it in the wait set after `producer_exited` is consumed
+   would make every drain wait return at once (a busy loop until the drain
+   deadline). Only the pull-style `cancel_requested` predicate keeps a
+   50 ms clock (`ACTIVE_CONTROL_POLL_INTERVAL`): `AgentSessionProtocol.execute`
+   takes a `Callable[[], bool]` with no waitable, and Consumer always passes
+   one, so this is the named absent event. The only other timed term is the
+   limit-sampling deadline at the monitor's `polling_interval` (1.0 s by
+   default), which is clock work ([RM-5.1], [WT-7]); it bounds the wait while
+   an item is supervised, a sample also runs on any observation pass once the
+   instant is due, and the next instant is armed from a clock reading taken
+   after the sample, so samples are never closer than one interval. Payload
+   readiness, channel EOF and producer exit wake the wait; timeout and drain
+   are deadlines. `_observe_terminal_handoff` never samples a dead producer or
+   after an accepted stop, so an expired sampling instant in that state would
+   never be re-armed and every later wait would be zero-time until drain
+   expiry; the sampling deadline therefore leaves the wait set while the
+   producer is dead or a stop is accepted (D14).
+
+Stop-if checks for Task 1 at `fbd79c66`: `grep -rn "drain=True" weft tests`
+returns nothing; `grep -rn "input_queue" weft/core/manager.py
+weft/core/monitor/task_monitor.py weft/core/tasks/liveness_monitor.py`
+matches only `input_queue_maxsize=` at `weft/core/tasks/liveness_monitor.py:140`;
+`grep -rn "_stop_service_worker" ../engram ../taut --include=*.py | wc -l`
+is 0; every `ServiceWorkerSpec(` registration has maxsize 0 or equal to its
+worker count.
+
+#### Task 0. Baseline measurements at `fbd79c66`
+
+PostgreSQL for every measurement: a disposable `postgres:18` container
+(`docker run -d --rm --name weft-plan2-pg ...`), DSN
+`postgresql://postgres:postgres@127.0.0.1:32798/weft_test`, with
+`BROKER_TEST_BACKEND=postgres`, `WEFT_PG_TEST_DSN` and the
+`BROKER_BACKEND_PASSWORD`/`WEFT_BACKEND_PASSWORD` variables that
+`bin/pytest-pg` sets. Scripts are throwaway, kept outside the repository.
+
+Item 1, idle service tree (D1). Script `idle_tree.py`: prepare a project
+root with `tests.helpers.test_backend.prepare_project_root`, run
+`weft manager start --context <root>`, settle 3 s, take the manager pid from
+`weft manager list --json` (`runtime_handle.id`), add its psutil children and
+every new `weft-`/spawned process that appeared after the start (detached
+service children are not psutil children), then sample
+`num_ctx_switches().voluntary` and `cpu_times()` 30 s apart with no work
+submitted, then `weft manager stop`. The children run under the spawn
+bootstrap command line, so they are listed by pid; the largest consumer is
+the LivenessMonitor (eight idle probe workers).
+
+```text
+SQLite, fbd79c66:
+pid=8369 vcs_delta=2606 cpu_delta_s=0.522 weft-plan2-id-5755757621:manager:running
+pid=8370 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8371 vcs_delta=2829 cpu_delta_s=0.361 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8372 vcs_delta=2674 cpu_delta_s=0.338 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8373 vcs_delta=10554 cpu_delta_s=0.558 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=18663 (622.1/s) cpu_delta_s=1.779
+
+PostgreSQL, fbd79c66:
+pid=8594 vcs_delta=3972 cpu_delta_s=0.452 weft-plan2-id-5775636741:manager:running
+pid=8596 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8597 vcs_delta=3261 cpu_delta_s=0.099 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8598 vcs_delta=3179 cpu_delta_s=0.054 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=8599 vcs_delta=15150 cpu_delta_s=0.269 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=25562 (852.1/s) cpu_delta_s=0.874
+```
+
+Item 2 (D5, D7): not run; deferred with Task 2 (owner item 2 closed as (a)).
+
+Item 3 (D8, D10, D12): the counts the red tests assert, taken by running
+those tests before the implementation edits; recorded under Tasks 3 and 4.
+
+Item 4 (owner item 6, measurement only). Script `quiet_task.py`: an
+in-process `Consumer` for a persistent function task
+(`tests.tasks.sample_targets:echo_payload`) in a prepared project root,
+nothing written to its queues, `run_until_stopped()` on a thread, 2 s settle,
+then a 30 s window, then `stop()`. Delegating counters on the instance's
+`_process_reactor_turn`, on `MultiQueueWatcher._has_pending_messages`, and on
+`simplebroker.watcher.PollingStrategy.wait_for_activity` returns.
+
+```text
+backend=sqlite window=30.0s (after 2 s settle)
+  turns: 0 in window (total incl. startup 2)
+  pending_probes: 0 in window (total incl. startup 1)
+  strategy_returns: 262 in window (total incl. startup 419)
+backend=postgres window=30.0s (after 2 s settle)
+  turns: 1 in window (total incl. startup 2)
+  pending_probes: 19 in window (total incl. startup 20)
+  strategy_returns: 20 in window (total incl. startup 21)
+```
+
+Reading: on SQLite the strategy returns about 9 times per second (its idle
+polling pass) and Weft runs no turn and no pending probe. On PostgreSQL the
+strategy returns about once per 1.5 s (the native idle return), each return
+is followed by one `_has_pending_messages()` broker probe (19 in 30 s), and
+one policy turn ran in the window. The prediction was no policy turns and one
+probe per native idle interval; the probe count matches, and the one turn
+is recorded as measured. The classification of "A quiet task does nothing"
+on PostgreSQL is left to the owner (Owner Decisions item 3).
