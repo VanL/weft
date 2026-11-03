@@ -578,6 +578,11 @@ edit. A wrong answer means stop and re-read.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [TS-0] (Task 2 Step 4) | Linux reference baselines measured on `ubuntu-latest` dispatch runs before the stress tests use the factor; Stop-if a baseline would land as `None` | Baselines committed as `None  # unmeasured`; factor 1.0 on every platform until measured; procedure recorded in the Execution log | The implementing session cannot push or dispatch workflows; the series brief directs landing Steps 1, 2, 3, 5, 6 with `None` baselines. Windows budgets equal the Linux budgets until the owner measures | none |
+| [TS-0] (Task 8) | Harness teardown logs unconfirmed stops and pre-escalation survivors | Not landed; stopped at the Task 8 Gate | The full fast suite emitted the warning from about 20 tests outside the injected-failure tests; the Gate makes that a stop, and the warning is not to be suppressed | none |
+| [TS-0] (Task 3, T3) | Rewrite only with a positive exclusion proof | Retained unchanged, reported | No public subscription surface on the native waiter at this seam | none |
+| none (Task 9) | `WEFT_MANAGER_REUSE_ENABLED` lines byte-identical | Same content, one indent deeper inside the `with` block | The env copy must run inside the harness scope, which the context manager makes a block | none |
+| none (Tasks 3 to 6) | Separate commits per task | One commit for Tasks 3 to 6 | Tasks 3 and 4 share `tests/tasks/test_task_execution.py` hunks and the watcher test imports the shared witness from it; non-interactive staging cannot split them | none |
 
 ## Spec Baseline
 
@@ -1466,6 +1471,8 @@ triggers. Check [ALT-WT-017] and [ALT-WT-018] for reversals.
 - owner ruling applied 2026-11-03 (outside review, "Let's keep it in Python, just fix the logic"): the publish gate's polarity check becomes a truth-table check of the failure condition (the condition is reduced to a formula over the two comparisons and evaluated under all four assignments; it must fail the gate for every assignment but completed-and-successful), with the no-run case checked separately and control (n), the `&&` mutant, added. A verification-instruction correction inside an already reviewed span, applied without a further round.
 - owner ruling applied 2026-11-03 ("Can we just keep it as is?"): the publish gate's two polarity substring assertions stay unchanged; the truth-table check (a JavaScript-to-Python `eval` reduction, a compiler inside a test) is withdrawn, and the behavioral Node run that the probe showed feasible (script executed under Node with `github`, `context` and `core` stubbed; six API cases; the `&&` mutant publishes a completed failure) is declined as a new test-time toolchain requirement. The connective blind spot and the `latest` identifier dependence are named in the Task 1 row; control (n) is recorded as the blind spot, not a control. Probe harness kept at the session scratchpad `series/plan9/harness.js` and summarized in the Execution log.
 
+- implementation 2026-11-03 (owner's implement instruction): group (i) scope note closed on the owner's implement instruction (2026-11-03) with the recommended option: apply the per-location recommendation table to all six locations (applied in Task 1). Tasks 0 to 6, 9 and 10 landed; Task 8 stopped at its Gate (not landed, leads recorded); Task 2 Step 4 pending the owner-run measurement; T3 retained. Status stays `draft` because Task 2's Done-when (baselines and Windows green) and Task 8 are open. No cross-family review of the implementation was run in this session.
+
 ## Execution log
 - 2026-11-03 probe (session lead, before the owner's keep-as-is ruling): the `actions/github-script` body of `release.yml`'s run-check step runs under local Node 24 inside `new Function("github","context","core","process", ...)` with `github.rest.actions.listWorkflowRuns` returning canned `workflow_runs`, `context.repo` fixed, and `core.setFailed` capturing. Results, one lookup call per case with `head_sha` equal to `EXPECTED_SHA`: no runs → fails; feature-branch run only → fails; in progress → fails; completed/failure → fails; completed/success → passes; older failure plus newer success → passes. The `&&` mutant: completed/failure → passes (publishes), in progress → fails. Not adopted; recorded as the known feasible behavioral test if the owner ever wants one.
 
@@ -1931,3 +1938,90 @@ Task 6 (C1), after the ledger above.
   from `Manager._queue_counts_as_wait_activity` fails the third at
   `reserved_names.isdisjoint(probed)` (and leaves the reserved-custody idle
   test green).
+
+Task 7: dropped (cross-family round 1, F4); not executed, number kept.
+
+Task 8 (H2): stopped at its Gate; not landed. The implementation was
+written and its two tests passed (`test_harness_teardown_warns_on_unconfirmed_manager_stop`,
+`test_harness_teardown_warns_on_pids_surviving_before_force_termination`;
+control: both logging calls disabled, both tests fail; the four
+`stop_manager` doubles changed to `(True, None)`). The Gate run, the full
+fast suite with `-rP` so passed tests' captured logs print
+(`6037 passed, 47 skipped`), showed the warning from tests other than the
+two injected-failure tests, which the Gate names as a stop condition:
+- phase `stop_manager`, message `Manager <tid> stop is unconfirmed; no host
+  PID is available for --force`, in about 20 tests across the suite, among
+  them `test_background_residents_recover_without_manager_checkpoint`,
+  `test_cold_chain_contracts_removed_intermediate_snapshot`,
+  `test_dispatch_cleanup_scope_clears_after_exception[explicit_public]`,
+  `test_harness_cleanup_manager_records_include_startup_log_tids`,
+  `test_live_command_success_seals_public_result_before_completion[inherited-output]`,
+  `test_manager_autostart_active_launch_blocks_duplicate_restart`,
+  `test_missing_snapshot_crash_preserves_custody_and_descendant_progress[False]`
+  and `[True]`, `test_monitor_snapshot_and_stop_failures_do_not_replace_primary_outcome`,
+  `test_register_from_json_routes_manager_tids_to_worker_tracking`,
+  `test_reservation_before_checkpoint_crash_requeues_exact_request_once`,
+  `test_reserved_policy_keep_on_error`, `test_run_work_item_executes_payload`,
+  `test_task_monitor_custom_processor_exception_is_a_failed_cycle`,
+  `test_wait_for_completion_timeout_includes_tid_debug_snapshot`
+  (attribution read from xdist `-rP` sections, so approximate);
+- phases `stop_active_managers` and `cleanup`, real PIDs surviving before
+  force termination, in
+  `test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_root`.
+  Reading the phases: the `stop_manager` leads are unconfirmed stops of
+  Manager TIDs the harness knows without a host PID (inline, fake, or
+  already-exited Managers); none is shown to be a live process after
+  teardown, so none is a located leak. The survivor lead is
+  pre-escalation; whether those PIDs outlive `_terminate_registered_pids`
+  is not shown. Per the Gate and [TS-0] the warning is not suppressed or
+  narrowed to pass, and the change does not land; the diff is kept at the
+  session scratchpad (`series/impl/plan9/task8_stopped.patch`) with the
+  attribution table (`series/impl/plan9/task8_gate_attribution.txt`).
+  Open for the owner: whether an unconfirmed stop of a PID-less Manager
+  record is a reportable teardown event at all (if not, the warning needs
+  a narrower trigger defined by the owner, which this plan does not give),
+  and the owner path of the survivor lead in the family-recovery test.
+
+Task 9 (H3): `test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap`
+uses `with WeftTestHarness() as harness:` per iteration; the `_closed` and
+`_tempdir` branches and the swallowed `PermissionError` are gone. The
+`env = os.environ.copy()` and `env["WEFT_MANAGER_REUSE_ENABLED"] = "1"`
+lines are unchanged in content but now one indent deeper, because they must
+run inside the harness scope; see the Deviation Log. The sibling
+`test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_reuse`
+is untouched. Local control (disposable worktree): a `raise
+RuntimeError("forced failure inside the harness body")` in the loop body
+surfaces with the note `Pre-cleanup harness diagnostics: <path>`. The test
+passes (18.05 s on macOS).
+
+Task 10 (H4, H5): `"WEFT_TEST_MODE": "1"` removed from `_patch_environment`
+(no remaining reference in the tree); the three probes in
+`tests/test_harness_registration.py` now use `WEFT_MANAGER_LIFETIME_TIMEOUT`
+(the set value is `str(harness._manager_timeout)` during rollback, and the
+original value after restore). `test_serve_restarts_singleton_services_without_duplicates`
+sets `WEFT_LIVENESS_MONITOR_ENABLED=1`, waits for one live
+`INTERNAL_SERVICE_KEY_LIVENESS_MONITOR` service (three distinct service
+TIDs), and kills and replaces it in the restart loop. Harness-wide
+defaults are unchanged. Control (disposable worktree): dropping the
+`if self._liveness_monitor_enabled:` append in
+`Manager._reconcile_managed_services` fails the test, `Timed out waiting
+for exactly one live service _weft.service.liveness_monitor; live=[];
+all=[]`. Harness suite plus the serve test: `62 passed`; the serve tests
+passed three further runs.
+
+Final gates (after Tasks 9 and 10, on top of `fc0c0f84`; `bin/pytest-worker-count`
+→ 12): fast suite `6035 passed, 47 skipped`; `pytest -m ""`
+`6036 passed, 58 skipped`; `./bin/pytest-pg --all` `5988 passed, 35 skipped`;
+release tests `47 passed`; mypy `Success: no issues found in 483 source
+files`; `ruff check .` `All checks passed!`; `ruff format --check tests`
+`290 files already formatted`; `bin/check-doc-paths` OK; `git diff --check`
+clean; `tests/specs/test_plan_metadata.py` `4 passed`. Earlier
+`./bin/pytest-pg tests/tasks/test_multiqueue_watcher.py`: `87 passed`,
+including both T3 parameterizations. Linux and Windows CI not run from
+this session.
+
+Closeout (Task 11): Status stays `draft` and the index row stays `draft`.
+Open: Task 2 Step 4 (owner-run baseline measurement; Done-when also needs
+the Windows `cli` jobs green with the factor), Task 8 (stopped at its Gate;
+owner decision on the warning's trigger and the survivor lead), T3
+(retained). Flip the plan and its row to `completed` when those close.

@@ -151,7 +151,9 @@ def test_harness_enter_failure_rolls_back_setup(
     def fail_prepared_root_cleanup(path: Path) -> None:
         assert path == root
         assert os.getcwd() == original_cwd
-        assert os.environ["WEFT_TEST_MODE"] == "1"
+        assert os.environ["WEFT_MANAGER_LIFETIME_TIMEOUT"] == str(
+            harness._manager_timeout
+        )
         rollback_calls.append("prepared root")
         raise OSError("secondary prepared-root cleanup failure")
 
@@ -1609,7 +1611,7 @@ def test_inline_cleanup_retains_live_driver_and_allows_retry(
     entered = threading.Event()
     release = threading.Event()
     original_cwd = Path.cwd()
-    original_mode = os.environ.get("WEFT_TEST_MODE")
+    original_lifetime = os.environ.get("WEFT_MANAGER_LIFETIME_TIMEOUT")
     harness.__enter__()
     harness.ensure_foreground_manager()
     manager, thread, _stop = harness._inline_managers[0]
@@ -1635,7 +1637,7 @@ def test_inline_cleanup_retains_live_driver_and_allows_retry(
         assert marker.exists()
         assert harness.context is context
         assert Path.cwd() == original_cwd
-        assert os.environ.get("WEFT_TEST_MODE") == original_mode
+        assert os.environ.get("WEFT_MANAGER_LIFETIME_TIMEOUT") == original_lifetime
         assert not harness._tempdir._finalizer.alive  # type: ignore[attr-defined]  # CPython finalizer must be disarmed while the reactor owns storage.
     finally:
         release.set()

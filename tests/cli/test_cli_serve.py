@@ -19,6 +19,7 @@ from tests.helpers.test_backend import active_test_backend, prepare_cli_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     MANAGER_SERVE_LOG_SCHEMA,
     SERVICE_STATUS_TERMINAL,
@@ -564,7 +565,10 @@ def test_serve_restarts_singleton_services_without_duplicates(
         context_root,
         cwd=workdir,
         env={
+            # Production defaults: both monitor services on. The
+            # LivenessMonitor restarts on the TaskMonitor backoff.
             "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "0.1",
         },
     )
@@ -585,11 +589,19 @@ def test_serve_restarts_singleton_services_without_duplicates(
             service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
             process=process,
         )
-        assert heartbeat["tid"] != task_monitor["tid"]
+        liveness_monitor = _wait_for_single_live_service(
+            context,
+            service_key=INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+            process=process,
+        )
+        assert (
+            len({heartbeat["tid"], task_monitor["tid"], liveness_monitor["tid"]}) == 3
+        )
 
         service_timeout = 45.0
         for service_key, current in (
             (INTERNAL_SERVICE_KEY_TASK_MONITOR, task_monitor),
+            (INTERNAL_SERVICE_KEY_LIVENESS_MONITOR, liveness_monitor),
             (INTERNAL_SERVICE_KEY_HEARTBEAT, heartbeat),
         ):
             old_tid = str(current["tid"])

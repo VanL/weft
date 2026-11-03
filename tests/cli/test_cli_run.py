@@ -3038,12 +3038,10 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
     )
 
     for _ in range(iterations):
-        harness = WeftTestHarness()
-        harness.__enter__()
-        env = os.environ.copy()
-        env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
+        with WeftTestHarness() as harness:
+            env = os.environ.copy()
+            env["WEFT_MANAGER_REUSE_ENABLED"] = "1"
 
-        try:
             _run_parallel_manager_reuse_cycle(
                 root=harness.root,
                 env=env,
@@ -3053,14 +3051,6 @@ def test_parallel_manager_reuse_converges_to_single_manager_under_repeated_boots
                 status_timeout=status_timeout,
                 task_completion_timeout=task_completion_timeout,
             )
-        finally:
-            if not harness._closed:
-                harness.cleanup()
-            else:
-                try:
-                    harness._tempdir.cleanup()
-                except PermissionError:
-                    pass
 
 
 @pytest.mark.sqlite_only

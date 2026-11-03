@@ -822,7 +822,6 @@ class WeftTestHarness:
 
     def _patch_environment(self) -> None:
         overrides = {
-            "WEFT_TEST_MODE": "1",
             "WEFT_MANAGER_REUSE_ENABLED": "0",
             "WEFT_MANAGER_LIFETIME_TIMEOUT": str(self._manager_timeout),
             "WEFT_TASK_MONITOR_ENABLED": "0",
