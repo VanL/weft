@@ -1054,8 +1054,10 @@ confirms it; row 10 is reported with its measured maximum.
   tree's uncommitted changes are other plan drafts and `docs/plans/README.md`
   only, so these files equal `b7eed9f9`, E7). Plan type: implementation with
   spec revision.
-- Promotion baseline identifier: pending (recorded at Task 5 as the landing
-  commit SHA; strategy B lands spec and code together).
+- Promotion baseline identifier: `ab24c416` (the landing commit of Tasks 4
+  and 5, spec and code together under strategy B; 2026-11-03). The
+  [ALT-WT-016] blocks are not part of it (Owner Decision 1 awaits the
+  owner).
 
 ## Proposed Spec Delta
 
