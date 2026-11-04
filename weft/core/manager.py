@@ -123,7 +123,6 @@ from weft._constants import (
     WEFT_FAMILY_PENDING_PREFIX,
     WEFT_FAMILY_PENDING_SCHEMA,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_LIFETIME_TIMEOUT,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -233,7 +232,6 @@ from .tasks.base import (
     TaskControlPolicy,
     TaskWorkerResult,
 )
-from .tasks.heartbeat import HeartbeatRegistrationRow
 from .tasks.multiqueue_watcher import QueueMode, QueueRuntimeConfig
 from .tasks.service import (
     ServiceTask,
@@ -706,11 +704,6 @@ class Manager(ServiceTask):
         self._drain_stop_log_queue: Queue | None = None
         self._drain_stop_log_cursor: int | None = None
         self._drain_stop_log_wake_id: int | None = None
-        # Notification interest in weft.state.heartbeats (canonical manager
-        # only): a strict publication cursor and the flag that carries a new
-        # row to the next turn's convergence pass [MA-1] item 7, [QUEUE.7].
-        self._heartbeat_registrations_cursor: int | None = None
-        self._heartbeat_registration_observed = False
         self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
         self._drain_escalated_children: set[str] = set()
@@ -1934,9 +1927,6 @@ class Manager(ServiceTask):
         queues = super()._activity_wait_queues()
         # System-STOP drain targets wake the reactor on their own snapshots [MA-3].
         queues.extend(self._drain_stop_target_queues())
-        # A first heartbeat registration wakes service convergence [MA-1] item 7.
-        if self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            queues.append(self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE))
         for tid, record in getattr(self, "_startup_feedback", {}).items():
             if tid in self._active_child_launches:
                 continue
@@ -1954,8 +1944,6 @@ class Manager(ServiceTask):
         """
         # System-STOP drain targets: a new snapshot row is a pending turn [MA-3].
         if self._has_pending_drain_stop_observation():
-            return True
-        if self._has_pending_heartbeat_registration():
             return True
         records = getattr(self, "_startup_feedback", {})
         if any(record.publication_pending for record in records.values()):
@@ -1980,72 +1968,6 @@ class Manager(ServiceTask):
         except (BrokerError, OSError, RuntimeError, ValueError):
             logger.debug("Startup publication observation deferred", exc_info=True)
             return False
-        return False
-
-    def _has_pending_heartbeat_registration(self) -> bool:
-        """Advance the strict cursor past a new heartbeat registration row.
-
-        The cursor advances here, as the startup-feedback record's does; the
-        flag, not the cursor, carries the observation to the next turn.
-        Spec: [MA-1] item 7, [QUEUE.7]
-        """
-        if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
-            return False
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                rows = broker.peek_many(
-                    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
-                    limit=1,
-                    order="newest",
-                    with_timestamps=True,
-                    after_timestamp=self._heartbeat_registrations_cursor,
-                )
-        except (BrokerError, OSError, RuntimeError, ValueError):
-            logger.debug("Heartbeat registration observation deferred", exc_info=True)
-            return False
-        if not rows:
-            return False
-        self._heartbeat_registrations_cursor = int(rows[0][1])
-        self._heartbeat_registration_observed = True
-        return True
-
-    def _heartbeat_registrations_present(self) -> bool:
-        """Return whether the heartbeat service is desired.
-
-        Desired while ``weft.state.heartbeats`` holds a row that is unexpired
-        or invalid (an invalid row is the heartbeat's to reject). When every
-        row has expired, delete them by exact message ID in ascending order,
-        stopping at the first failed delete (logged; the next pass reads
-        again), so no row is deleted while an older row remains. The Manager
-        deletes nothing in any other case.
-
-        Spec: [MA-1] item 7, [MF-3.2]
-        """
-        queue = self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
-        expired_ids: list[int] = []
-        try:
-            now_ns = time.time_ns()
-            iterator = queue.peek_generator(with_timestamps=True)
-            with closing_queue_iterator(iterator) as rows:
-                for body, message_id in rows:
-                    try:
-                        row = HeartbeatRegistrationRow.model_validate_json(str(body))
-                    except ValidationError:
-                        return True
-                    if not row.expired(int(message_id), now_ns):
-                        return True
-                    expired_ids.append(int(message_id))
-        except (BrokerError, OSError, RuntimeError):
-            logger.debug("Heartbeat registration read deferred", exc_info=True)
-            return False
-        for message_id in sorted(expired_ids):
-            try:
-                queue.delete(message_id=message_id)
-            except (BrokerError, OSError, RuntimeError):
-                logger.debug(
-                    "Expired heartbeat registration delete deferred", exc_info=True
-                )
-                break
         return False
 
     def _handle_service_worker_event(self, event: ServiceWorkerEvent) -> None:
@@ -7685,11 +7607,9 @@ class Manager(ServiceTask):
             for probe in self._service_probe_pending.values()
         )
         if include_internal and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            # The heartbeat service is desired while weft.state.heartbeats holds a
-            # row that is unexpired or not yet rejected ([MA-1] item 7); no
-            # built-in service registers one ([MF-3.2]).
-            if self._heartbeat_registrations_present():
-                internal_services.append(self._heartbeat_service_spec())
+            # The heartbeat is a standing internal service; the Manager neither
+            # reads nor deletes weft.state.heartbeats ([MA-1] item 7).
+            internal_services.append(self._heartbeat_service_spec())
             if self._task_monitor_enabled:
                 internal_services.append(self._task_monitor_service_spec())
             if self._liveness_monitor_enabled:
@@ -8292,8 +8212,7 @@ class Manager(ServiceTask):
 
         internal_keys: set[str] = set()
         if self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            if self._heartbeat_registrations_present():
-                internal_keys.add(INTERNAL_SERVICE_KEY_HEARTBEAT)
+            internal_keys.add(INTERNAL_SERVICE_KEY_HEARTBEAT)
             if self._task_monitor_enabled:
                 internal_keys.add(INTERNAL_SERVICE_KEY_TASK_MONITOR)
             if self._liveness_monitor_enabled:
@@ -8357,7 +8276,6 @@ class Manager(ServiceTask):
                     or service_key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
                     and self._liveness_monitor_enabled
                     or service_key == INTERNAL_SERVICE_KEY_HEARTBEAT
-                    and self._heartbeat_registrations_present()
                 )
                 and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
             ):
@@ -8920,9 +8838,6 @@ class Manager(ServiceTask):
                     partial(self._reconcile_launch_now, tid),
                     child_tid=tid,
                 )
-        if self._heartbeat_registration_observed:
-            self._heartbeat_registration_observed = False
-            self._run_managed_service_convergence(include_autostart=False, force=True)
         self._retry_stale_child_launches()
         self._drain_control_queue_first()
         if self._draining:

@@ -18,8 +18,6 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from pydantic import ValidationError
-
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
@@ -42,7 +40,6 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_CONTEXT_ENV,
     WEFT_GLOBAL_LOG_QUEUE,
-    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
@@ -71,7 +68,6 @@ from weft.core.service_convergence import (
     reduce_latest_by_service_owner,
 )
 from weft.core.task_state import latest_task_state_rows, list_task_state_tids
-from weft.core.tasks.heartbeat import HeartbeatRegistrationRow
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
@@ -898,9 +894,9 @@ def _collect_internal_spawn_queue_evidence(
 def _service_enabled(ctx: WeftContext, key: str) -> bool:
     """Return whether one internal service is desired.
 
-    Heartbeat mirrors the manager's desire predicate: desired while
-    weft.state.heartbeats holds a row that is unexpired or not yet rejected
-    ([MA-1] item 7); reads only. The monitors follow their config flags.
+    Heartbeat mirrors the manager: it is a standing internal service of the
+    canonical manager, whatever the monitor flags say ([MA-1] item 7). The
+    monitors follow their config flags. Reads no queue.
 
     Spec: [MA-1] item 7
     """
@@ -910,25 +906,7 @@ def _service_enabled(ctx: WeftContext, key: str) -> bool:
     if key == INTERNAL_SERVICE_KEY_TASK_MONITOR:
         return task_monitor_enabled
     if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
-        try:
-            with ctx.broker() as broker:
-                now_ns = time.time_ns()
-                iterator = broker.peek_generator(
-                    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=True
-                )
-                with closing_queue_iterator(iterator) as rows:
-                    for body, message_id in rows:
-                        try:
-                            row = HeartbeatRegistrationRow.model_validate_json(
-                                str(body)
-                            )
-                        except ValidationError:
-                            return True
-                        if not row.expired(int(message_id), now_ns):
-                            return True
-        except (BrokerError, OSError, RuntimeError):
-            return False
-        return False
+        return True
     if key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR:
         return liveness_monitor_enabled
     return False
@@ -991,11 +969,7 @@ def _service_snapshot_from_evidence(
             desired=False,
             enabled=False,
             status="disabled",
-            evidence=(
-                "no-registrations"
-                if key == INTERNAL_SERVICE_KEY_HEARTBEAT
-                else "config-disabled"
-            ),
+            evidence="config-disabled",
             diagnostics=dict(diagnostics) if diagnostics is not None else None,
         )
     if evidence is None:

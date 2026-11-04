@@ -307,6 +307,9 @@ def test_source_to_manager_reservation_handoff_uses_real_reserve_owner(
     """Move at the source-read barrier through Manager's actual reserve path."""
     context = weft_harness.context
     owner = "1776000000000000001"
+    # This test isolates the reserve path: the standing heartbeat (and every
+    # other internal service) is not supervised here [MA-1] item 7.
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
     manager = Manager(
         context.broker_target,
         make_manager_spec(owner, weft_context=str(context.root)),

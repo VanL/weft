@@ -13,21 +13,25 @@
   `extended.task_monitor.heartbeat` block is removed (no compatibility shim),
   and a successful cycle no longer reports a heartbeat registration error in
   `last_cycle.error`.
-- The heartbeat service runs on demand. Registrations are rows on
-  `weft.state.heartbeats` that survive heartbeat and Manager restarts; each
-  carries a registrant-declared lease (`lease_seconds`, from its own interval
-  up to seven days) and expires on its own when the lease ends (a registrant
-  that wants more time resubmits). The Manager runs the service only while an
-  unexpired (or not yet rejected) registration exists, whatever
-  `WEFT_TASK_MONITOR_ENABLED` says, and the service exits on its idle timeout
-  when none remains. `upsert_heartbeat` now requires `registrant_tid` and
+- A heartbeat process always runs under the canonical Manager, as a standing
+  internal service beside TaskMonitor and LivenessMonitor, whatever
+  `WEFT_TASK_MONITOR_ENABLED` says; it idles with no timer when it has nothing
+  to emit (it no longer idle-exits, and its 1.0 s ownership-audit wake is
+  gone; `HEARTBEAT_IDLE_TIMEOUT_SECONDS` and
+  `HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS` are removed). Registrations are
+  rows on `weft.state.heartbeats` that survive heartbeat and Manager restarts;
+  each carries a registrant-declared lease (`lease_seconds`, from its own
+  interval up to seven days) and expires on its own when the lease ends (a
+  registrant that wants more time resubmits). The heartbeat service is the
+  only reader and deleter of that queue; the Manager neither reads nor
+  deletes it. `upsert_heartbeat` now requires `registrant_tid` and
   `lease_seconds` and returns without starting a manager, and
   `ensure_heartbeat_service` is removed (private module, [PY-1]). Rows on the
   heartbeat task's inbox are rejected, and the inbox-path
   `heartbeat_upserted` and `heartbeat_cancelled` lifecycle events are gone;
   an expired registration reports `heartbeat_registration_expired`.
-  `weft system prune` is unchanged. `weft status` reports a heartbeat with no
-  unexpired registration as disabled with evidence `no-registrations`.
+  `weft system prune` is unchanged. `weft status` reports the heartbeat as an
+  enabled internal service and reads no registration table.
 - A system STOP of a Manager (`weft manager stop`, a STOP control, `SIGTERM`,
   `SIGINT`, or parent loss) now stops active user work first, then the
   internal services (heartbeat, TaskMonitor, LivenessMonitor), then the

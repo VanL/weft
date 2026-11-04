@@ -32,8 +32,13 @@ pytestmark = [pytest.mark.shared, pytest.mark.timeout(45)]
 
 
 @pytest.fixture
-def recovery_manager(weft_harness: WeftTestHarness) -> Iterator[Manager]:
+def recovery_manager(
+    weft_harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Manager]:
     """Use the real broker, checkpoint and reservation owners without services."""
+    # This fixture isolates user-work dispatch: the standing heartbeat (and
+    # every other internal service) is not supervised here [MA-1] item 7.
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
     ctx = weft_harness.context
     with ctx.queue("recovery.fixture.ids", persistent=True) as ids:
         tid = str(ids.generate_timestamp())

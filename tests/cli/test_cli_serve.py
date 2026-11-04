@@ -29,7 +29,6 @@ from weft._constants import (
 )
 from weft.context import WeftContext, build_context
 from weft.core.control_probe import send_keyed_ping_probe
-from weft.core.heartbeat import upsert_heartbeat
 from weft.core.service_convergence import (
     manager_service_key,
     project_manager_service_record,
@@ -558,17 +557,6 @@ def test_serve_restarts_singleton_services_without_duplicates(
 ) -> None:
     context_root = workdir
     context = build_context(spec_context=context_root)
-    # The heartbeat service is desired only while a registration row exists
-    # [MA-1] item 7; one unexpired row keeps it supervised for this test.
-    upsert_heartbeat(
-        context,
-        registrant_tid=str(time.time_ns()),
-        heartbeat_id="serve-singleton-probe",
-        interval_seconds=60,
-        lease_seconds=3600,
-        destination_queue="serve.singleton.probe",
-        message="tick",
-    )
 
     process = _popen_cli(
         "manager",

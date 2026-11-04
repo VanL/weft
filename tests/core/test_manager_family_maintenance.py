@@ -77,8 +77,13 @@ pytest_plugins = ["tests.helpers.pytest_pg_runtime"]
 
 
 @pytest.fixture
-def manager(broker_env: BrokerEnv) -> Iterator[Manager]:
+def manager(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Manager]:
     target, queues = broker_env
+    # This fixture isolates user-work dispatch: the standing heartbeat (and
+    # every other internal service) is not supervised here [MA-1] item 7.
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
     tid = str(queues("maintenance-ids").generate_timestamp())
     task = Manager(
         target,
@@ -103,8 +108,12 @@ def manager(broker_env: BrokerEnv) -> Iterator[Manager]:
 @pytest.fixture
 def startup_pg_manager(
     request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[Manager, WeftTestHarness]]:
     """Isolate physical PG capacity before constructing its broker or Manager."""
+    # This fixture isolates user-work dispatch: the standing heartbeat (and
+    # every other internal service) is not supervised here [MA-1] item 7.
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
     if active_test_backend() == "postgres":
         request.getfixturevalue("isolated_postgres_server")
     with WeftTestHarness() as harness:

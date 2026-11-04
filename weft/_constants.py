@@ -1666,12 +1666,6 @@ owner on 2026-11-03; it is not intrinsic to Weft and may be raised or lowered.
 A registrant that wants ticks for longer resubmits before its lease ends
 [MF-3.2]."""
 
-HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
-"""Idle timeout after the last registration before the heartbeat service exits."""
-
-HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS: Final[float] = 1.0
-"""Clock cadence for HeartbeatTask endpoint-ownership reconciliation."""
-
 PIPELINE_RUNTIME_METADATA_KEY: Final[str] = "_weft_pipeline_runtime"
 """Reserved metadata key carrying a precompiled pipeline runtime plan."""
 

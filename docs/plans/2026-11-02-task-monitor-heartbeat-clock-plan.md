@@ -1052,8 +1052,7 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 
 ```text
 registrant -> validated row write to weft.state.heartbeats (upsert replaces, cancel deletes)
-weft.state.heartbeats holds a row that is unexpired or not yet rejected -> manager desires and launches the heartbeat service
-service peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
+the heartbeat service, always running under the canonical Manager, peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
 ```
 
 ### `docs/specifications/05-Message_Flow_and_State.md` [MF-3.2] — replace the rules from "heartbeat registrations are runtime-only" through "`upsert` resets `next_due_at` to `now + interval_seconds`" (lines 454–462; Tasks 6–8)
@@ -1100,11 +1099,12 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
   looks up an endpoint, starts a manager, or waits for the service. Any
   process in the operator trust domain may write the queue; validation checks
   shape, not authority.
-- the canonical manager desires the heartbeat service while the queue holds a
-  row that is unexpired or invalid (an invalid row is the service's to reject)
-  and launches it through the manager-owned internal service path ([MA-1]
-  item 7). A row written while no manager runs waits in the queue; the next
-  manager start launches the service.
+- the canonical manager runs the heartbeat service as a standing internal
+  service through the manager-owned internal service path ([MA-1] item 7),
+  whether or not any row exists; the manager neither reads nor deletes the
+  queue. The heartbeat service is the queue's only reader and deleter. A row
+  written while no manager runs waits in the queue until a heartbeat service
+  runs.
 - the service builds its registration table by peeking the queue and never
   consumes a valid row by reading it: a row is an active leased request,
   and it is consumed only when that request ends, by the registrant's
@@ -1151,9 +1151,10 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
   instant by at most that turn's duration. The same rebuild bounds
   cancellation: a cancel committed before it suppresses the turn's emission,
   and a cancel committed after it may be followed by at most one emission.
-- with an empty table the service exits after its idle timeout
-  (`HEARTBEAT_IDLE_TIMEOUT_SECONDS`); the manager does not restart it while the
-  queue holds no unexpired or invalid row.
+- the service does not exit on an empty table. With an empty table it
+  publishes no deadline and blocks on its watcher (its `ctrl_in` lane and its
+  notification interest in `weft.state.heartbeats`); with rows its only
+  deadlines are the next due emission and the earliest lease expiry.
 ```
 
 ### `docs/specifications/05-Message_Flow_and_State.md` [MF-3.2] — replace the middle of the duplicate-services bullet, from "keyed `PING`/`PONG`; stale non-terminal rows" through "Service status summaries must prefer a separate live singleton owner over a" (lines 479–484; Task 6)
@@ -1336,12 +1337,12 @@ Current text:
 Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```text
-   their own autostart manifests. The built-in heartbeat service is desired
-   while `weft.state.heartbeats` holds a row that is unexpired or not yet
-   rejected ([MF-3.2]), whatever the monitor flags say; otherwise it is
-   neither launched nor restarted. The canonical manager holds a notification interest
-   in that queue, so a first registration starts a service-convergence pass
-   without waiting for the stable audit. The internal `TaskMonitor` is an
+   their own autostart manifests. The canonical manager runs the built-in
+   heartbeat service as a standing internal service, whatever the monitor
+   flags say: started at manager startup, relaunched by ordinary managed-service
+   convergence if it exits, and stopped like the other internal services. The
+   manager neither reads nor deletes `weft.state.heartbeats`; the heartbeat
+   service is its only reader and deleter ([MF-3.2]). The internal `TaskMonitor` is an
    `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
 ```
 
@@ -1367,7 +1368,7 @@ Replacement (`docs/specifications/00-Quick_Reference.md`):
 
 ```text
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
-| `weft.state.heartbeats` | Heartbeat registrations: one row per live registration, keyed by `heartbeat_id`, naming its registrant TID; each row carries its own lease and expires when it ends; the manager runs the heartbeat service while the queue holds a row that is unexpired or not yet rejected ([MF-3.2]) | No (runtime state) |
+| `weft.state.heartbeats` | Heartbeat registrations: one row per live registration, keyed by `heartbeat_id`, naming its registrant TID; each row carries its own lease and expires when it ends; the heartbeat service, a standing internal service of the canonical manager, is its only reader and deleter ([MF-3.2]) | No (runtime state) |
 ```
 
 ### `docs/specifications/07-System_Invariants.md` [QUEUE.7] — replace the sentence "The Manager observes each task-state queue awaiting its startup feedback, with active notification interests bounded by the [MA-1.8] startup window." (lines 181–182; Tasks 7–8)
@@ -1382,13 +1383,12 @@ Replacement (`docs/specifications/07-System_Invariants.md`):
 ```text
   The Manager observes each task-state queue awaiting its startup feedback,
   with active notification interests bounded by the [MA-1.8] startup window.
-  The canonical Manager and the heartbeat service each also hold one standing
-  notification interest in `weft.state.heartbeats` ([MF-3.2]); for the
-  heartbeat service that queue is a fixed support route that it peeks, never
-  a delivery role. The heartbeat service deletes from the queue only rows it
-  rejects, rows a newer row of the same `heartbeat_id` supersedes, and rows
-  whose lease has expired; the canonical Manager deletes only when every row
-  has expired.
+  The heartbeat service also holds one standing notification interest in
+  `weft.state.heartbeats` ([MF-3.2]); that queue is a fixed support route that
+  it peeks, never a delivery role. The heartbeat service is the queue's only
+  reader and deleter: it deletes only rows it rejects, rows a newer row of the
+  same `heartbeat_id` supersedes, and rows whose lease has expired. The
+  Manager holds no interest in, reads, or deletes that queue.
 ```
 
 The [QUEUE.7] `_Implementation mapping_` bullet gains
@@ -1405,7 +1405,7 @@ one, line 36), 03 (line 34), 00 (line 248), and 07 (line 1392):
 Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 
 ```text
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([MF-3.2]).
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MF-3.2]).
 ```
 
 Use the same bullet text in 01 (citing [CC-2.3]), 03 (citing [MA-1] item
@@ -2862,6 +2862,41 @@ F2 default is what the tasks implement; F3 and F4 carry no default.
   instruction (2026-11-03) with the recommended option: as the plan states,
   no first emission is guaranteed; a registrant resubmits whenever it likes;
   there is no renewal protocol.
+- **Owner redirect, 2026-11-03: services are always on. DECIDED.** It
+  supersedes, for the heartbeat, the ruled Manager desire predicate ("a row
+  that is unexpired or invalid"), the Manager's all-expired delete role and
+  its ascending-order barrier, the Manager's notification interest and
+  cursor on `weft.state.heartbeats`, the heartbeat's idle exit, and S1's
+  table read. The owner's statements, verbatim, in order:
+  1. "Why is the manager checking the heartbeat 4x a second? It should only
+     be looking at the heartbeat queues when there is a change there,
+     triggered by the ordinary queue watcher"
+  2. "The heartbeat can peek on its own wakeup. But the manager should only
+     care if there is a change"
+  3. "The manager should not be deleting. That is the heartbeat service's
+     responsibility."
+  4. "The manager's responsibility is starting and stopping things"
+  5. "It sees an upsert and makes sure the service is running"
+  6. "The heartbeat service is the only one that should read from and
+     delete its queues"
+  7. (after the implementer reported that a PEEK lane re-delivers the oldest
+     row on every pass) "I think we do always alive for services. That was
+     what we had before, and I think what this shows is that if what is
+     wanted is a ServiceTask, then we accept that there will be a process"
+  8. (the reason) "This is negative knowledge: trying to make services stop
+     and start ended up creating too much state. The simpler, more robust
+     design is always on services, with care taken that the service idles
+     when not needed."
+  Final rule: the heartbeat is a standing internal service of the canonical
+  Manager like TaskMonitor and LivenessMonitor (started at startup
+  unconditionally, relaunched by ordinary convergence, stopped in plan 4's
+  services phase); the Manager never reads, deletes, or watches
+  `weft.state.heartbeats`; the heartbeat alone owns that table and no longer
+  idle-exits, blocking on its watcher with no timer when the table is
+  empty; `weft status` reads no table. The plan stays `promoted`. The
+  `## Proposed Spec Delta` blocks for the flow line, the Manager bullet, the
+  idle-exit bullet, [MA-1] item 7, the Quick Reference queue row and
+  [QUEUE.7] now carry the redirected text, as landed.
 
 ## Review Log
 
@@ -2877,6 +2912,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 
 - owner closures recorded 2026-11-03 at implementation: F2 closed on the owner's implement instruction (2026-11-03) with the recommended option: (a), the grid anchored at the first cycle start; F3 closed on the owner's implement instruction (2026-11-03) with the recommended option: overlap recorded, the older draft not touched; the F5 first-emission note closed on the owner's implement instruction (2026-11-03) with the recommended option: no first emission is guaranteed, a registrant resubmits whenever it likes, no renewal protocol; F4 accepted by the owner (2026-11-03: "I accept the theory edits").
 - Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range ecf7ad42..db824087): BLOCKED on F1 (both registration decoders caught `JSONDecodeError` only, so an oversized integer in a row raised `ValueError` past the malformed-row disposition and could crash-loop the emitter): accepted and fixed in `1409b4f2`, with the T6 case. F2 (literal planned assertions absent in H1, H3, T8, T9, T10): accepted and applied. The reviewer confirmed all 18 Replacement blocks verbatim, the lease model as ruled, the rebuild continuation and helper split as behavior-preserving, no remaining readers of the removed events, and the heartbeat interest composing with plan 4's drain interests; it corrected the log's predicate-call-rate attribution (a call rate, not a turn rate; no new poll interval). Round 2 pending.
+- owner redirect applied 2026-11-03 (statements 1–8 in `## 9. Owner forks`): services are always on; the Manager's heartbeat predicate, interest, cursor, and delete role, the heartbeat's idle exit and ownership-audit timer, and the status table read are removed. The implementer first reported a fork on the intermediate rule (a body-ignoring PEEK lane re-delivers the oldest row every pass, `MultiQueueWatcher._fetch_next_message` → `peek_one`); the owner resolved it with statement 7. Not yet reviewed cross-family.
 
 ## Execution log
 

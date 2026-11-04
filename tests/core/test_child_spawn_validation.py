@@ -35,8 +35,13 @@ pytestmark = [pytest.mark.shared, pytest.mark.timeout(60)]
 
 
 @pytest.fixture
-def validating_manager(weft_harness: WeftTestHarness) -> Iterator[Manager]:
+def validating_manager(
+    weft_harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Manager]:
     """Run the real reservation/validation/disposition owners without services."""
+    # This fixture isolates user-work dispatch: the standing heartbeat (and
+    # every other internal service) is not supervised here [MA-1] item 7.
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
     context = weft_harness.context
     with context.queue("child-validation-fixture-ids", persistent=True) as ids:
         tid = str(ids.generate_timestamp())

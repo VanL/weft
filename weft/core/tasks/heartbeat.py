@@ -34,10 +34,8 @@ from pydantic import (
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
-    HEARTBEAT_IDLE_TIMEOUT_SECONDS,
     HEARTBEAT_MAX_LEASE_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
-    HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
@@ -175,14 +173,6 @@ class HeartbeatTask(ServiceTask):
         self._registrations_cursor: int | None = None
         self._registrations_rebuild_pending = True
         self._row_ids: dict[str, int] = {}
-        self._idle_timeout_seconds = float(
-            taskspec.metadata.get(
-                "heartbeat_idle_timeout",
-                HEARTBEAT_IDLE_TIMEOUT_SECONDS,
-            )
-        )
-        self._empty_since_monotonic: float | None = time.monotonic()
-        self._next_ownership_audit_at = time.monotonic()
         self._activate_waiter()
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
 
@@ -284,7 +274,6 @@ class HeartbeatTask(ServiceTask):
         if not self._paused and self._emit_due_registrations():
             self._maybe_emit_poll_report()
             return
-        self._maybe_idle_shutdown()
         self._maybe_emit_poll_report()
 
     def _drain_one_control_message(self) -> bool:
@@ -403,13 +392,8 @@ class HeartbeatTask(ServiceTask):
                 (registration.next_due_at, registration.heartbeat_id),
             )
 
-        was_empty = not self._registrations
         self._registrations = registrations
         self._row_ids = row_ids
-        if registrations:
-            self._empty_since_monotonic = None
-        elif not was_empty or self._empty_since_monotonic is None:
-            self._empty_since_monotonic = time.monotonic()
 
     def _peek_registration_rows(
         self,
@@ -695,9 +679,6 @@ class HeartbeatTask(ServiceTask):
 
     def _exit_if_superseded(self) -> bool:
         ownership_state, owner_tid = self._service_ownership()
-        self._next_ownership_audit_at = (
-            time.monotonic() + HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS
-        )
         if ownership_state != "other":
             return False
         self.taskspec.mark_completed(return_code=0)
@@ -709,36 +690,20 @@ class HeartbeatTask(ServiceTask):
         self.should_stop = True
         return True
 
-    def _maybe_idle_shutdown(self) -> bool:
-        if self._registrations:
-            self._empty_since_monotonic = None
-            return False
-        if self._idle_timeout_seconds <= 0:
-            return False
-        if self._empty_since_monotonic is None:
-            self._empty_since_monotonic = time.monotonic()
-            return False
-        idle_for = time.monotonic() - self._empty_since_monotonic
-        if idle_for < self._idle_timeout_seconds:
-            return False
-        self.taskspec.mark_completed(return_code=0)
-        self._report_state_change(
-            event="heartbeat_service_idle_shutdown",
-            idle_for_seconds=idle_for,
-            idle_timeout_seconds=self._idle_timeout_seconds,
-        )
-        self._update_process_title("completed")
-        self.should_stop = True
-        return True
-
     def next_wait_timeout(self) -> float | None:
-        """Return the outer-loop wait timeout for the next heartbeat turn."""
+        """Return the next due emission or lease expiry; ``None`` with no rows.
 
-        if self._has_pending_worker_results():
+        The service is always on and idles when not needed: with an empty
+        table there is no timer, and the task blocks on its watcher (ctrl_in
+        and its notification interest on ``weft.state.heartbeats``).
+
+        Spec: [MF-3.2]
+        """
+
+        if self._has_pending_worker_results() or self._registrations_rebuild_pending:
             return 0.0
         now = time.monotonic()
         next_due = None if self._paused else self._next_due_timeout(now=now)
-        idle_timeout = self._next_idle_timeout(now=now)
         base_timeout = super().next_wait_timeout()
         expiry_timeout: float | None = None
         if self._registrations:
@@ -749,9 +714,7 @@ class HeartbeatTask(ServiceTask):
             for value in (
                 base_timeout,
                 next_due,
-                idle_timeout,
                 expiry_timeout,
-                self._next_ownership_audit_at - now,
             )
             if value is not None
         ]
@@ -768,13 +731,6 @@ class HeartbeatTask(ServiceTask):
                 continue
             return next_due_at - now
         return None
-
-    def _next_idle_timeout(self, *, now: float) -> float | None:
-        if self._registrations or self._idle_timeout_seconds <= 0:
-            return None
-        if self._empty_since_monotonic is None:
-            return self._idle_timeout_seconds
-        return (self._empty_since_monotonic + self._idle_timeout_seconds) - now
 
 
 __all__ = ["HeartbeatRegistrationRow", "HeartbeatTask"]

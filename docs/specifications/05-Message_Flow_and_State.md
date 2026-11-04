@@ -469,8 +469,7 @@ Current heartbeat flow is task-shaped:
 
 ```text
 registrant -> validated row write to weft.state.heartbeats (upsert replaces, cancel deletes)
-weft.state.heartbeats holds a row that is unexpired or not yet rejected -> manager desires and launches the heartbeat service
-service peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
+the heartbeat service, always running under the canonical Manager, peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
 ```
 
 Current rules:
@@ -504,11 +503,12 @@ Current rules:
   looks up an endpoint, starts a manager, or waits for the service. Any
   process in the operator trust domain may write the queue; validation checks
   shape, not authority.
-- the canonical manager desires the heartbeat service while the queue holds a
-  row that is unexpired or invalid (an invalid row is the service's to reject)
-  and launches it through the manager-owned internal service path ([MA-1]
-  item 7). A row written while no manager runs waits in the queue; the next
-  manager start launches the service.
+- the canonical manager runs the heartbeat service as a standing internal
+  service through the manager-owned internal service path ([MA-1] item 7),
+  whether or not any row exists; the manager neither reads nor deletes the
+  queue. The heartbeat service is the queue's only reader and deleter. A row
+  written while no manager runs waits in the queue until a heartbeat service
+  runs.
 - the service builds its registration table by peeking the queue and never
   consumes a valid row by reading it: a row is an active leased request,
   and it is consumed only when that request ends, by the registrant's
@@ -544,9 +544,10 @@ Current rules:
   instant by at most that turn's duration. The same rebuild bounds
   cancellation: a cancel committed before it suppresses the turn's emission,
   and a cancel committed after it may be followed by at most one emission.
-- with an empty table the service exits after its idle timeout
-  (`HEARTBEAT_IDLE_TIMEOUT_SECONDS`); the manager does not restart it while the
-  queue holds no unexpired or invalid row.
+- the service does not exit on an empty table. With an empty table it
+  publishes no deadline and blocks on its watcher (its `ctrl_in` lane and its
+  notification interest in `weft.state.heartbeats`); with rows its only
+  deadlines are the next due emission and the earliest lease expiry.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
@@ -2184,7 +2185,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([MF-3.2]).
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MF-3.2]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([MF-3]).
 - [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
