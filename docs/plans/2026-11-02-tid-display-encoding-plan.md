@@ -1242,7 +1242,6 @@ one commit (strategy B).
              chars.append(TASKSPEC_TID_ENCODING_ALPHABET[digit])
          return "".join(reversed(chars))
 
-
      def decode_tid(text: str) -> str:
          if is_task_tid(text):
              normalize_exact_message_id(text)
@@ -1750,8 +1749,6 @@ one commit (strategy B).
      Task 6 selection-test files; no CI workflow file, owner ruling 4); flip `Status:` and the index row to `completed` in the same
      change; record the commit SHA as the promotion baseline identifier.
 
-- [WT-7] keyed possession probe (2026-11-04). Key, items P2, C4, B3 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P2 "A `weft top` daemon that keeps a live index of task status" (expected: a stateless CLI read model over queues is fine; a daemon with its own index is a second control plane [WT-5], "Observable with standard tools", [WT-2a.2]; a view, never a store); C4 "Keep the old ten-digit TID short form decodable for one release" (expected refusal: [WT-2a.9], [ALT-WT-012]; a bounded forward migration, not a dual decoder); B3 "Audit the family scheduler's retire path" (expected: frontier structures rebuilt on retire instead of the O(1) consume-on-dispatch update [ALT-WT-016]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) a CLI live view over queue facts and process titles, the daemon-held index refused as a second control plane; cited "Observable with standard tools", [WT-5], [WT-7] "Inspection needs Weft-only tooling", [WT-2a.2]. (2) refused; one current contract, no tolerance window, the ten-digit form lossy; all producers and consumers together, bounded forward migration only; cited [ALT-WT-012], [WT-2a.9], [WT-2a.1], [ALT-WT-022]. (3) backlog-dependent retirement work, scanning or moving pending children or tombstone-driven cleanup; cited [ALT-WT-016], [ALT-WT-019], "Consume-to-disappear queues, not relational tables". The audit refresh (I-1) and the completed-work reviews (round 1 and the scoped round 2) are recorded above. The plan closes as `completed`.
-
 ## 6. Testing Plan
 
 - Harnesses: `WeftTestHarness` and `run_cli` for every CLI assertion;
@@ -1929,6 +1926,8 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range af98c73b..c380cef3): no production defect; 17 Replacement blocks verbatim; title arithmetic, AST gate, selection tests and host liveness class C confirmed. BLOCKED on F1 (the slow-suite failure in the Manager-reuse convergence test is not closed by isolated passes): verification kept open; the series lead re-runs under original load after plan 8 lands, with [TS-0] cause-finding if it recurs. F2 (probe tests lack diagnostic-content assertions): accepted and fixed in the commit that adds this entry. Backstitch mappings for [CLI-1.2.3], [OBS.4] and [CC-3.2] added by Replacement; [OBS.5] and [LIVENESS.R5] are invariant bullets that cannot own a mapping in backstitch v1, so their BSC003 warnings remain (Execution log). Round 2 pending.
 - F1 closed (2026-11-03, series lead): the full slow suite (`./.venv/bin/python -m pytest -m "" -q -p no:cacheprovider`, 12 xdist workers, nothing else running, `pgrep -fl weft-` empty before the run) re-run alone at 7e0a823d: exit 0, no FAILED or ERROR line (output at the series scratchpad, impl/plan12/slow-rerun-7e0a823d.txt). Under the recorded protocol this is the pass under original load; the earlier failure stays recorded as a plan 9 trigger-table observation (two Manager-reuse stress tests failed once each today under full-suite load). Scoped round 2 on 7e0a823d pending.
 - Scoped round 2 (codex 0.161.0, 2026-11-03, range df9a2821..7e0a823d): no blocker. F1 closed on the recorded protocol (the pass under original load; the original failure's cause remains unproven and stays with plan 9's trigger table); F2 confirmed fixed; all 19 Replacement blocks verbatim at 7e0a823d; the backstitch limitation and the owner's tooling item recorded accurately. Round closed; Status stays `promoted` pending the [WT-7] probe and the owner-run Linux and Windows span measurements.
+
+- [WT-7] keyed possession probe (2026-11-04). Key, items P2, C4, B3 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P2 "A `weft top` daemon that keeps a live index of task status" (expected: a stateless CLI read model over queues is fine; a daemon with its own index is a second control plane [WT-5], "Observable with standard tools", [WT-2a.2]; a view, never a store); C4 "Keep the old ten-digit TID short form decodable for one release" (expected refusal: [WT-2a.9], [ALT-WT-012]; a bounded forward migration, not a dual decoder); B3 "Audit the family scheduler's retire path" (expected: frontier structures rebuilt on retire instead of the O(1) consume-on-dispatch update [ALT-WT-016]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) a CLI live view over queue facts and process titles, the daemon-held index refused as a second control plane; cited "Observable with standard tools", [WT-5], [WT-7] "Inspection needs Weft-only tooling", [WT-2a.2]. (2) refused; one current contract, no tolerance window, the ten-digit form lossy; all producers and consumers together, bounded forward migration only; cited [ALT-WT-012], [WT-2a.9], [WT-2a.1], [ALT-WT-022]. (3) backlog-dependent retirement work, scanning or moving pending children or tombstone-driven cleanup; cited [ALT-WT-016], [ALT-WT-019], "Consume-to-disappear queues, not relational tables". The audit refresh (I-1) and the completed-work reviews (round 1 and the scoped round 2) are recorded above. The plan closes as `completed`.
 
 ## Execution log
 
@@ -2173,7 +2172,6 @@ TITLE_BUDGET = 71
 _VOCAB = "weft-abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHJKMNPQRSTVWXYZ:"
 PROBE = "".join(_VOCAB[i % len(_VOCAB)] for i in range(PROBE_LENGTH))
 
-
 def _child(conn: Connection) -> None:
     from weft.core import process_title
 
@@ -2199,7 +2197,6 @@ def _child(conn: Connection) -> None:
         conn.send("phase2")
         conn.recv()
 
-
 def _survived(joined: str) -> int:
     best = 0
     for k in range(1, PROBE_LENGTH + 1):
@@ -2208,7 +2205,6 @@ def _survived(joined: str) -> int:
         else:
             break
     return best
-
 
 def _report(pid: int, phase: int) -> int:
     cmdline = psutil.Process(pid).cmdline()
@@ -2227,7 +2223,6 @@ def _report(pid: int, phase: int) -> int:
         print(f"span-below-title-budget phase={phase}", flush=True)
         return 1
     return 0
-
 
 def main() -> int:
     ctx = multiprocessing.get_context("spawn")
@@ -2252,7 +2247,6 @@ def main() -> int:
             proc.kill()
             proc.join(timeout=10)
     return status
-
 
 if __name__ == "__main__":
     sys.exit(main())
