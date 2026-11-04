@@ -18,8 +18,10 @@ from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEYS,
     MANAGER_ADMISSION_RECHECK_SECONDS,
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -34,7 +36,12 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.taskspec import TaskSpec
-from weft.helpers import encode_tid, iter_queue_json_entries, process_create_time
+from weft.helpers import (
+    encode_tid,
+    iter_queue_json_entries,
+    pid_is_live,
+    process_create_time,
+)
 
 pytestmark = [pytest.mark.shared]
 
@@ -264,15 +271,52 @@ def _queue_rows(context: WeftContext, name: str) -> list[tuple[dict[str, Any], i
     return decoded
 
 
-def _internal_service_tids(context: WeftContext) -> set[str]:
-    """Name the live internal services from the service registry rows."""
+def _live_internal_service_pids(context: WeftContext) -> dict[str, int]:
+    """Map each internal service TID whose registered host PID is live."""
 
-    return {
-        payload["owner_tid"]
-        for payload, _timestamp in _queue_rows(context, WEFT_SERVICES_REGISTRY_QUEUE)
-        if payload.get("service_key") in INTERNAL_SERVICE_KEYS
-        and isinstance(payload.get("owner_tid"), str)
-    }
+    pids: dict[str, int] = {}
+    for payload, _timestamp in _queue_rows(context, WEFT_SERVICES_REGISTRY_QUEUE):
+        tid = payload.get("owner_tid")
+        pid = _host_pid_from_handle(payload)
+        if (
+            payload.get("service_key") in INTERNAL_SERVICE_KEYS
+            and isinstance(tid, str)
+            and pid is not None
+            and pid_is_live(pid)
+        ):
+            pids[tid] = pid
+    return pids
+
+
+def _live_heartbeat_owner(context: WeftContext) -> tuple[str, int] | None:
+    """Return the live heartbeat service's TID and host PID, if any."""
+
+    for payload, _timestamp in _queue_rows(context, WEFT_SERVICES_REGISTRY_QUEUE):
+        tid = payload.get("owner_tid")
+        pid = _host_pid_from_handle(payload)
+        if (
+            payload.get("service_key") == INTERNAL_SERVICE_KEY_HEARTBEAT
+            and payload.get("status") == "active"
+            and isinstance(tid, str)
+            and pid is not None
+            and pid_is_live(pid)
+        ):
+            return tid, pid
+    return None
+
+
+def _manager_host_pid(context: WeftContext, manager_tid: str) -> int | None:
+    """Return the host PID the Manager's registry row names, if any."""
+
+    for payload, _timestamp in _queue_rows(context, WEFT_SERVICES_REGISTRY_QUEUE):
+        if payload.get("role") == "manager" and manager_tid in {
+            payload.get("owner_tid"),
+            payload.get("tid"),
+        }:
+            pid = _host_pid_from_handle(payload)
+            if pid is not None:
+                return pid
+    return None
 
 
 def _first_terminal_snapshot(
@@ -290,17 +334,18 @@ def _first_terminal_snapshot(
     )
 
 
-def test_manager_stop_orders_user_work_before_internal_services(
+def test_manager_stop_leaves_internal_services_live(
     weft_harness: WeftTestHarness, tmp_path: Path
 ) -> None:
-    """``weft manager stop`` drains user work, then services, then itself.
+    """``weft manager stop`` drains user work, then itself; services run on.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. The user
-    task ignores SIGTERM and is ready (its handler installed) before STOP,
-    so a simultaneous broadcast could not produce this order by chance.
-    Order is read from task-owned terminal snapshots (broker message IDs):
-    TaskMonitor collates and retires internal-service rows from
-    ``weft.log.tasks``, so the raw log is not a stable oracle for services.
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]; docs/program-theory.md [WT-2a.13] (owner, 2026-11-04). The user
+    task ignores SIGTERM and is ready (its handler installed) before STOP.
+    Order is read from task-owned terminal snapshots (broker message IDs).
+    The services stay live with no terminal snapshot; the harness stops
+    them at cleanup. Named mutation: keeping the services phase of the
+    drain gives each service a ``control_stop`` terminal snapshot.
     """
 
     context_root = weft_harness.root
@@ -338,9 +383,9 @@ def test_manager_stop_orders_user_work_before_internal_services(
     weft_harness.register_tid(user_tid)
 
     deadline = time.monotonic() + 60.0
-    services: set[str] = set()
+    services: dict[str, int] = {}
     while time.monotonic() < deadline:
-        services = _internal_service_tids(context)
+        services = _live_internal_service_pids(context)
         if marker.exists() and marker.read_text(encoding="utf-8").strip() and services:
             break
         time.sleep(0.1)
@@ -361,6 +406,7 @@ def test_manager_stop_orders_user_work_before_internal_services(
     manager_terminal = _first_terminal_snapshot(context, manager_tid)
     assert user_terminal is not None
     assert manager_terminal is not None
+    assert user_terminal[0] < manager_terminal[0]
     drained = [
         timestamp
         for payload, timestamp in _queue_rows(context, WEFT_GLOBAL_LOG_QUEUE)
@@ -368,12 +414,76 @@ def test_manager_stop_orders_user_work_before_internal_services(
         and payload.get("event") == "manager_stop_drained"
     ]
     assert drained
-    for service_tid in services:
-        service_terminal = _first_terminal_snapshot(context, service_tid)
-        assert service_terminal is not None, f"service {service_tid} not terminal"
-        assert service_terminal[1]["projection"]["event"] == "control_stop"
-        assert user_terminal[0] < service_terminal[0] < drained[0]
-        assert service_terminal[0] < manager_terminal[0]
+    assert user_terminal[0] < drained[0]
+    for service_tid, pid in services.items():
+        assert _first_terminal_snapshot(context, service_tid) is None, (
+            f"service {service_tid} stopped with the Manager"
+        )
+        assert pid_is_live(pid), f"service {service_tid} not live after stop"
+
+
+def test_manager_stop_exits_within_drain_window_leaving_heartbeat_live(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """The Manager exits on ``weft manager stop`` while its heartbeat lives.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]. Plan 2026-11-04-context-level-service-singletons Task 3 (f) and
+    section 6b: STOP arrives through the Manager's queue, so the Manager
+    exits through ordinary interpreter shutdown, which on Windows joins
+    every non-daemon child ``multiprocessing`` still tracks. Runs on every
+    platform. Named mutation: leaving the detached service in the
+    ``multiprocessing`` children set makes a Windows Manager wait on the
+    heartbeat, so the stop overruns the drain window; keeping the services
+    phase stops the heartbeat.
+    """
+
+    context_root = weft_harness.root
+    context = weft_harness.context
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    manager_tid, _started = _parse_manager_start_output(out)
+    weft_harness.register_manager_tid(manager_tid)
+
+    heartbeat_tid, heartbeat_pid = _wait_until(
+        lambda: _live_heartbeat_owner(context),
+        timeout=60.0,
+        message="a live heartbeat service",
+    )
+    manager_pid = _wait_until(
+        lambda: _manager_host_pid(context, manager_tid),
+        timeout=60.0,
+        message="the manager host PID",
+    )
+
+    started = time.monotonic()
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        manager_tid,
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    elapsed = time.monotonic() - started
+    assert rc == 0, (rc, out, err)
+    remaining = MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS - elapsed
+    assert remaining > 0, f"manager stop took {elapsed:.1f}s"
+    _wait_until(
+        lambda: not pid_is_live(manager_pid),
+        timeout=remaining,
+        message="the manager process to exit within the drain window",
+    )
+    assert pid_is_live(heartbeat_pid), "heartbeat stopped with the Manager"
+    assert _first_terminal_snapshot(context, heartbeat_tid) is None
 
 
 _LONG_WORK_SPEC: dict[str, Any] = {

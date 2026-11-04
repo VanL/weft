@@ -470,9 +470,11 @@ def _run_parallel_manager_reuse_cycle(  # noqa: C901 approved [TS-3.1] [RUFF-SUP
             submit_results=results,
         )
 
-    # Superseded managers are allowed to stay registered while draining any
-    # children they already launched. Manager convergence is only a stable
-    # invariant after the submitted no-wait work has reached terminal state.
+    # Superseded managers are allowed to stay registered while draining the
+    # user work they already launched; a service they launched never holds
+    # them (services are context-level singletons, [MA-1] item 7). Manager
+    # convergence is only a stable invariant after the submitted no-wait work
+    # has reached terminal state.
     for _rc, out, _err in results:
         tid = out.strip()
         try:

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import queue as thread_queue
+import selectors
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import psutil
 import pytest
@@ -21,6 +24,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_KEYS,
     MANAGER_SERVE_LOG_SCHEMA,
     SERVICE_STATUS_TERMINAL,
     TERMINAL_TASK_STATUSES,
@@ -324,19 +328,84 @@ def _wait_for_single_live_service(
     )
 
 
+_PIPE_SELECT_SECONDS = 0.05
+"""Select slice while the serve process runs; its exit is not selectable."""
+
+
 def _stop_process(
     process: subprocess.Popen[str], *, timeout: float = 10.0
 ) -> tuple[str, str]:
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.terminate()
+    """Wait for the process to exit, escalating, and return what it wrote.
+
+    On POSIX, reading ends at the process's exit, not at pipe EOF: the
+    internal services a serve process launched outlive it ([MA-1] item 7)
+    and keep ``multiprocessing``'s resource tracker alive, and the tracker
+    holds the inherited stdout/stderr write ends until they exit. Windows
+    passes no such handles, so ``communicate`` reaches EOF at exit there.
+    """
+
+    if os.name == "nt":
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            return process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate(timeout=timeout)
+            process.terminate()
+            try:
+                return process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return process.communicate(timeout=timeout)
+    return _read_until_exit(process, timeout=timeout)
+
+
+def _read_until_exit(
+    process: subprocess.Popen[str], *, timeout: float
+) -> tuple[str, str]:
+    """Read both pipes while the process runs, then drain them once it exits."""
+
+    assert process.stdout is not None and process.stderr is not None
+    streams = (process.stdout, process.stderr)
+    fds = tuple(stream.fileno() for stream in streams)
+    chunks: dict[int, list[bytes]] = {fd: [] for fd in fds}
+    escalations = iter((process.terminate, process.kill))
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as selector:
+        for fd in chunks:
+            os.set_blocking(fd, False)
+            selector.register(fd, selectors.EVENT_READ)
+        while True:
+            exited = process.poll() is not None
+            for key, _events in selector.select(
+                timeout=0.0 if exited else _PIPE_SELECT_SECONDS
+            ):
+                if _read_available(key.fd, chunks[key.fd]):
+                    selector.unregister(key.fd)
+            if exited:
+                break
+            if time.monotonic() >= deadline:
+                escalate = next(escalations, None)
+                if escalate is None:
+                    raise subprocess.TimeoutExpired(process.args, timeout)
+                escalate()
+                deadline = time.monotonic() + timeout
+    for stream in streams:
+        stream.close()
+    stdout, stderr = (
+        b"".join(chunks[fd]).decode("utf-8", errors="replace") for fd in fds
+    )
     return stdout, stderr
+
+
+def _read_available(fd: int, chunks: list[bytes]) -> bool:
+    """Append everything readable now from a non-blocking pipe; True at EOF."""
+
+    while True:
+        try:
+            data = os.read(fd, 65536)
+        except BlockingIOError:
+            return False
+        if not data:
+            return True
+        chunks.append(data)
 
 
 def _is_multiprocessing_resource_tracker(child: psutil.Process) -> bool:
@@ -744,6 +813,16 @@ def test_serve_forces_no_idle_timeout(
 def test_serve_sigterm_drains_children_cleanly(
     workdir: Path, weft_harness: WeftTestHarness
 ) -> None:
+    """SIGTERM drains user work, then the Manager; its services run on.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]. SIGTERM coverage of plan
+    2026-11-04-context-level-service-singletons Task 3 (f); the CLI
+    ``weft manager stop`` variant runs on every platform in
+    ``tests/cli/test_cli_manager.py``. The harness stops the services at
+    cleanup.
+    """
+
     context_root = workdir
     context = build_context(spec_context=context_root)
 
@@ -754,6 +833,11 @@ def test_serve_sigterm_drains_children_cleanly(
         record = _wait_for_active_canonical_manager(context, process=process)
         manager_tid = record["tid"]
         weft_harness.register_manager_tid(manager_tid)
+        heartbeat = _wait_for_single_live_service(
+            context,
+            service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            process=process,
+        )
 
         rc, out, err = run_cli(
             "run",
@@ -782,12 +866,31 @@ def test_serve_sigterm_drains_children_cleanly(
         # descendant, but CPython exits it on pipe EOF, which arrives only
         # after the manager and every spawned child have closed the inherited
         # write end, so it is never ordered before the manager's own exit.
-        child_pids = [
+        # Internal services are context-level singletons the drain leaves
+        # running, so their process trees are not user work.
+        service_pids = {
+            pid
+            for service_key in INTERNAL_SERVICE_KEYS
+            for service in _service_records(context, service_key=service_key)
+            if isinstance(pid := service.get("pid"), int) and pid_is_live(pid)
+        }
+        service_trees = set(service_pids)
+        for pid in service_pids:
+            try:
+                service_trees.update(
+                    child.pid for child in psutil.Process(pid).children(recursive=True)
+                )
+            except psutil.Error:
+                continue
+        user_pids = [
             child.pid
             for child in psutil.Process(process.pid).children(recursive=True)
             if not _is_multiprocessing_resource_tracker(child)
+            and child.pid not in service_trees
         ]
-        assert child_pids
+        assert user_pids
+        assert isinstance(heartbeat["pid"], int)
+        assert heartbeat["pid"] in service_pids
         process.terminate()
         stdout, stderr = _stop_process(process)
         assert process.returncode == 0
@@ -799,8 +902,202 @@ def test_serve_sigterm_drains_children_cleanly(
         weft_harness.wait_for_terminal_state(
             tid, timeout=10.0, expected_status="cancelled"
         )
-        assert not [pid for pid in child_pids if pid_is_live(pid)]
+        assert not [pid for pid in user_pids if pid_is_live(pid)]
+        assert all(pid_is_live(pid) for pid in service_pids), (
+            "an internal service stopped with the Manager"
+        )
     finally:
         if process.poll() is None:
             process.terminate()
             _stop_process(process)
+
+
+_SINGLETON_SERVICE_KEYS = (
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+)
+
+
+def _stream_lines(stream: TextIO, lines: thread_queue.Queue[str | None]) -> None:
+    """Copy one text stream into a queue line by line; ``None`` marks EOF."""
+
+    for line in stream:
+        lines.put(line)
+    lines.put(None)
+
+
+def _wait_for_kept_live_decisions(
+    lines: thread_queue.Queue[str | None],
+    *,
+    expected: Mapping[str, str],
+    timeout: float,
+) -> list[dict[str, Any]]:
+    """Read serve-log records until each service key was kept live once.
+
+    ``expected`` maps a service key to the live owner TID the Manager must
+    adopt. Returns every ``managed_service_decision`` record read.
+    """
+
+    pending = dict(expected)
+    decisions: list[dict[str, Any]] = []
+    deadline = time.monotonic() + timeout
+    while pending:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"no keep_live decision for {sorted(pending)}"
+        line = lines.get(timeout=remaining)
+        assert line is not None, f"serve log ended before {sorted(pending)}"
+        for event in _operational_log_events(line):
+            if event.get("event") != "managed_service_decision":
+                continue
+            decisions.append(event)
+            key = event.get("service_key")
+            if (
+                event.get("action") == "keep_live"
+                and isinstance(key, str)
+                and event.get("canonical_live_tid") == pending.get(key)
+            ):
+                pending.pop(key)
+    return decisions
+
+
+def _stop_services_and_wait(
+    owners: Mapping[str, dict[str, Any]],
+    *,
+    workdir: Path,
+    harness: WeftTestHarness,
+    timeout: float = 30.0,
+) -> None:
+    """STOP each service owner through the CLI and wait for its process exit."""
+
+    for owner in owners.values():
+        rc, out, err = run_cli(
+            "task",
+            "stop",
+            str(owner["tid"]),
+            "--context",
+            workdir,
+            cwd=workdir,
+            harness=harness,
+        )
+        assert rc == 0, (rc, out, err)
+    for key, owner in owners.items():
+        pid = owner["pid"]
+        deadline = time.monotonic() + timeout
+        while pid_is_live(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not pid_is_live(pid), f"service {key} did not exit on STOP"
+
+
+def test_serve_adopts_live_services_and_launches_after_they_exit(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+) -> None:
+    """A starting Manager ensures services: it adopts live ones, launches gone ones.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7;
+    docs/program-theory.md [ALT-WT-023] (owner, 2026-11-04). Plan
+    2026-11-04-context-level-service-singletons Task 4. Manager A launches
+    the services and stops; they run on. Manager B, started while they are
+    live, keeps each one live through the existing evidence path and
+    launches nothing. Once the services have exited (STOP stands in for
+    their idle exit: the Manager sees the same terminal evidence), Manager C
+    launches a fresh one for each key.
+    """
+
+    context_root = workdir
+    context = build_context(spec_context=context_root)
+    env = {
+        "WEFT_TASK_MONITOR_ENABLED": "1",
+        "WEFT_LIVENESS_MONITOR_ENABLED": "1",
+        "WEFT_TASK_MONITOR_RESTART_BACKOFF_SECONDS": "0.1",
+    }
+
+    def serve(*extra: str) -> subprocess.Popen[str]:
+        process = _popen_cli(
+            "manager", "serve", *extra, "--context", context_root, cwd=workdir, env=env
+        )
+        weft_harness.register_pid(process.pid, kind="owner")
+        return process
+
+    def stop_manager(tid: str) -> None:
+        rc, out, err = run_cli(
+            "manager",
+            "stop",
+            tid,
+            "--context",
+            context_root,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0, (rc, out, err)
+
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        # Manager A launches the services, then stops; they run on.
+        process_a = serve()
+        processes.append(process_a)
+        manager_a = _wait_for_active_canonical_manager(context, process=process_a)
+        weft_harness.register_manager_tid(manager_a["tid"])
+        owners = {
+            key: _wait_for_single_live_service(
+                context, service_key=key, process=process_a
+            )
+            for key in _SINGLETON_SERVICE_KEYS
+        }
+        for owner in owners.values():
+            weft_harness.register_tid(str(owner["tid"]))
+        stop_manager(manager_a["tid"])
+        _stop_process(process_a)
+        assert process_a.returncode == 0
+        for key, owner in owners.items():
+            assert isinstance(owner["pid"], int) and pid_is_live(owner["pid"]), key
+
+        # Manager B adopts the live services and launches nothing.
+        process_b = serve("--level", "debug")
+        processes.append(process_b)
+        assert process_b.stderr is not None
+        lines: thread_queue.Queue[str | None] = thread_queue.Queue()
+        reader = threading.Thread(
+            target=_stream_lines, args=(process_b.stderr, lines), daemon=True
+        )
+        reader.start()
+        manager_b = _wait_for_active_canonical_manager(context, process=process_b)
+        weft_harness.register_manager_tid(manager_b["tid"])
+        decisions = _wait_for_kept_live_decisions(
+            lines,
+            expected={key: str(owner["tid"]) for key, owner in owners.items()},
+            timeout=60.0,
+        )
+        assert not [event for event in decisions if event.get("action") == "start_now"]
+        stop_manager(manager_b["tid"])
+        process_b.wait(timeout=30.0)
+        assert process_b.returncode == 0
+        reader.join(timeout=30.0)
+        for key, owner in owners.items():
+            live = _live_service_records(context, service_key=key)
+            assert [record["tid"] for record in live] == [owner["tid"]], key
+
+        # The services exit; Manager C launches a fresh one for each key.
+        _stop_services_and_wait(owners, workdir=workdir, harness=weft_harness)
+        process_c = serve()
+        processes.append(process_c)
+        manager_c = _wait_for_active_canonical_manager(context, process=process_c)
+        weft_harness.register_manager_tid(manager_c["tid"])
+        for key, owner in owners.items():
+            fresh = _wait_for_single_live_service(
+                context,
+                service_key=key,
+                process=process_c,
+                previous_tids={str(owner["tid"])},
+                timeout=45.0,
+            )
+            weft_harness.register_tid(str(fresh["tid"]))
+        stop_manager(manager_c["tid"])
+        _stop_process(process_c)
+        assert process_c.returncode == 0
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=30.0)
