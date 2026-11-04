@@ -41,9 +41,9 @@ from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.commands.types import SpecValidationResult
 from weft.context import build_context
 from weft.helpers import (
+    encode_tid,
     resolve_broker_max_message_size,
     resolve_cli_message_content,
-    tid_short_form,
 )
 
 from .run import (
@@ -1616,7 +1616,7 @@ def _task_watch_interrupt_scope() -> Iterator[None]:
 
 @task_app.command("status")
 def task_status(
-    tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
+    tid: Annotated[str, typer.Argument(help="Full or encoded TID")],
     process: Annotated[
         bool,
         typer.Option("--process", help="Include process identifiers"),
@@ -1684,7 +1684,7 @@ def task_status(
 
 @task_app.command("ping")
 def task_ping(
-    tid: Annotated[str, typer.Argument(help="Task ID or short ID")],
+    tid: Annotated[str, typer.Argument(help="Full or encoded TID")],
     timeout: Annotated[
         float,
         typer.Option("--timeout", help="Seconds to wait for a matching PONG"),
@@ -1785,7 +1785,7 @@ def task_kill(
 @task_app.command("tid")
 def task_tid(
     tid: Annotated[
-        str | None, typer.Argument(help="Short or full TID", show_default=False)
+        str | None, typer.Argument(help="Full or encoded TID", show_default=False)
     ] = None,
     pid: Annotated[
         int | None,
@@ -1793,7 +1793,7 @@ def task_tid(
     ] = None,
     reverse: Annotated[
         str | None,
-        typer.Option("--reverse", help="Return short TID for a full TID"),
+        typer.Option("--reverse", help="Return the encoded TID for a full TID"),
     ] = None,
     context_dir: Annotated[
         Path | None,
@@ -1806,7 +1806,7 @@ def task_tid(
         )
     except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
         _command_exit(exc)
-    typer.echo(tid_short_form(result) if reverse is not None else result)
+    typer.echo(encode_tid(result) if reverse is not None else result)
 
 
 @app.command("init")

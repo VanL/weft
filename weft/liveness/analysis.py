@@ -104,7 +104,7 @@ def probe_runtime_liveness(
             reason = "missing_exact_host_identity"
         else:
             observations = [
-                inspect_host_process(pid, create_time, expected_tid=tid)
+                inspect_host_process(pid, create_time)
                 for pid, create_time in identities
             ]
             if any(item.evidence == "live" for item in observations):

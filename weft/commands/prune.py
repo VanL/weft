@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, cast
@@ -30,13 +31,14 @@ from weft._constants import (
     RUNTIME_PRUNE_SCHEMA_VERSION,
     RUNTIME_PRUNE_SUPPORTED_QUEUE_GROUPS,
 )
-from weft._exceptions import CommandExecutionError, CommandUsageError
+from weft._exceptions import CommandExecutionError, CommandUsageError, InvalidTID
 from weft.commands.types import SystemPruneResult
 from weft.context import WeftContext, build_context
 from weft.core.pruning import retention as _retention
 from weft.core.pruning import runtime as _runtime
 
 from ._boundary import typed_command_errors
+from .submission import normalize_tid
 
 
 def run_runtime_prune(
@@ -269,6 +271,15 @@ def _prune_families(
         archive=archive,
     )
 
+    # The --task selectors are canonicalized here, in the capability both
+    # adapters share; an unknown spelling selects no task [OBS.5], [CLI-1.2.3].
+    task_selectors: list[str] = []
+    for selector in task or ():
+        canonical = selector
+        with suppress(InvalidTID):
+            canonical = normalize_tid(selector)
+        task_selectors.append(canonical)
+
     details: dict[str, Any] = {}
     candidates = deleted = failed = 0
     families: tuple[str, ...]
@@ -310,7 +321,7 @@ def _prune_families(
                     family=cast(_retention.RetentionFamily, retention_family),
                     apply=apply,
                     force=force,
-                    task_filters=tuple(task or ()),
+                    task_filters=tuple(task_selectors),
                     class_filters=tuple(retention_class or ()),
                     min_age_seconds=min_age,
                     keep_recent_per_task=keep_recent_per_task,

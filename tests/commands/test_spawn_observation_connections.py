@@ -15,7 +15,7 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands import _spawn_submission as submission
 from weft.core.task_state import task_state_queue_name
-from weft.helpers import closing_queue_iterator, tid_short_form
+from weft.helpers import closing_queue_iterator, encode_tid
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
 
@@ -47,7 +47,7 @@ def test_spawn_observation_reuses_connection_and_sees_external_state(
 
     def publish() -> None:
         with ctx.queue(task_state_queue_name(tid), persistent=True) as writer:
-            writer.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+            writer.write(json.dumps({"full": tid, "short": encode_tid(tid)}))
 
     with ThreadPoolExecutor(max_workers=1) as producer:
 

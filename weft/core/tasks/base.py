@@ -92,10 +92,10 @@ from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    encode_tid,
     process_create_time,
     redact_taskspec_dump,
     terminate_verified_process_tree,
-    tid_short_form,
 )
 
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
@@ -271,7 +271,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         tid = taskspec.tid
         assert tid is not None
         self.tid: str = tid
-        self.tid_short = tid_short_form(self.tid)
+        self.tid_short = encode_tid(self.tid)
         self.should_stop = False
         self._paused = False
         self._resource_monitor: Any | None = None

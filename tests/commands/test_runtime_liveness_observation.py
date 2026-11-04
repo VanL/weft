@@ -26,7 +26,7 @@ from weft.commands import tasks
 from weft.context import WeftContext, build_context
 from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerHandle
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 from weft.liveness import host, registry
 
 pytestmark = [pytest.mark.shared]
@@ -59,7 +59,7 @@ def _publish(
     )
     payload: dict[str, Any] = {
         "full": TID,
-        "short": tid_short_form(TID),
+        "short": encode_tid(TID),
         "terminal": terminal,
         "hostname": socket.gethostname() if hostname is None else hostname,
     }

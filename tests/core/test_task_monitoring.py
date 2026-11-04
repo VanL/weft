@@ -34,7 +34,7 @@ from weft.core.pruning.retention import (
     RetentionPruneConfig,
     run_retention_prune_for_context,
 )
-from weft.helpers import iter_queue_entries
+from weft.helpers import decode_tid, iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -420,6 +420,7 @@ def test_task_monitor_operational_log_emits_config_and_cycle(
         event for event in events if event.get("event") == "task_monitor_cycle"
     )
     assert cycle["manager_tid"] == "1778089999999999000"
+    assert decode_tid(str(cycle["manager_tid_short"])) == cycle["manager_tid"]
     assert cycle["component"] == "task_monitor"
     assert cycle["task_monitor_mode"] == "report_only"
     assert cycle["processor"] is None

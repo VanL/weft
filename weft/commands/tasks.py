@@ -77,9 +77,9 @@ from weft.core.task_state import (
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
+    encode_tid,
     pid_is_live,
     terminate_verified_process_tree,
-    tid_short_form,
 )
 from weft.helpers.message_ids import is_task_tid, normalize_exact_message_id
 from weft.liveness.analysis import probe_runtime_liveness
@@ -102,6 +102,7 @@ from .control_convergence import (
     ControlConvergenceEvidence,
     reduce_control_convergence,
 )
+from .submission import normalize_tid
 
 # The runtime-liveness clock aliases isolate observation tests from broker/harness clocks.
 logger = logging.getLogger(__name__)
@@ -141,29 +142,24 @@ def _read_tid_state_entries(
 def mapping_for_tid(
     ctx: WeftContext, tid: str, *, broker: Any | None = None
 ) -> dict[str, Any] | None:
-    full = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
+    full = resolve_full_tid(tid) or tid.strip().lstrip("T")
     row = read_task_state_snapshot(ctx, full, broker=broker)
     return {**row[1], "timestamp": row[0]} if row is not None else None
 
 
-def resolve_full_tid(
-    ctx: WeftContext, raw: str, *, broker: Any | None = None
-) -> str | None:
-    """Resolve one full or unambiguous derived short TID.
+def resolve_full_tid(raw: str) -> str | None:
+    """Canonicalize one full or encoded TID argument, or return None.
 
-    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
+    Decoding is arithmetic and reads no queue; the one canonicalization
+    function ``normalize_tid`` owns case folding and decoding.
+
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3];
+        docs/specifications/07-System_Invariants.md [OBS.5].
     """
-    candidate = raw.strip().lstrip("T")
-    if not candidate:
+    try:
+        return normalize_tid(raw.strip().lstrip("T"))
+    except InvalidTID:
         return None
-    if is_task_tid(candidate):
-        return candidate
-    matches = system_cmd._read_tid_states(ctx, broker=broker).get(candidate, [])
-    if len(matches) > 1:
-        raise CommandUsageError(
-            f"Ambiguous short TID {candidate}: {', '.join(matches)}"
-        )
-    return matches[0] if matches else None
 
 
 def task_tid(
@@ -174,16 +170,17 @@ def task_tid(
     context: WeftContext | None = None,
     context_path: str | os.PathLike[str] | None = None,
 ) -> str | None:
-    """TID resolution: short-to-full, PID-to-TID, and reverse lookup.
+    """TID resolution: encoded-to-full, PID-to-TID, and reverse encoding.
 
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task tid)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
     if reverse:
         value = reverse.strip().lstrip("T")
-        if is_task_tid(value):
-            return tid_short_form(value)
-        return None
+        try:
+            return encode_tid(value)
+        except ValueError:
+            return None
     if pid is not None:
         entries = list(_read_tid_state_entries(ctx))
         for entry in reversed(entries):
@@ -192,7 +189,7 @@ def task_tid(
                 return full if isinstance(full, str) else None
         return None
     if tid:
-        return resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+        return resolve_full_tid(tid) or tid.strip().lstrip("T")
     return None
 
 
@@ -375,7 +372,7 @@ def task_terminal_snapshot(
 
     ctx = _coerce_context(context=context, context_path=context_path)
     try:
-        full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+        full_tid = resolve_full_tid(tid) or tid.strip().lstrip("T")
     except ValueError:
         full_tid = tid.strip().lstrip("T")
     if not full_tid or not (full_tid.isascii() and full_tid.isdecimal()):
@@ -887,12 +884,13 @@ def _task_status_record(
 ) -> CollectedTaskSnapshot | None:
     """Read known-TID queues and overlay locally acquired terminal proof [MF-5]."""
     ctx = _coerce_context(context=context, context_path=context_path)
-    full_tid = resolve_full_tid(ctx, tid, broker=broker) or tid.strip().lstrip("T")
-    if not is_task_tid(full_tid):
+    full_tid = resolve_full_tid(tid)
+    if full_tid is None:
+        # Not a TID in SimpleBroker's exact range: no known-TID read [OBS.5].
         records = system_cmd._collect_task_snapshot_records(
             ctx,
             include_terminal=include_terminal,
-            tid_filters={full_tid},
+            tid_filters={tid.strip().lstrip("T")},
             broker=broker,
         )
         return records[0] if records else None
@@ -971,7 +969,7 @@ def _known_status_record(
         )
         snapshot = system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name=tid,
             status=observed.custody or "unknown",
             event=classification,
@@ -1120,7 +1118,7 @@ def task_ping(
         if context is not None
         else build_context(spec_context=context_path, create_database=False)
     )
-    full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    full_tid = resolve_full_tid(tid) or tid.strip().lstrip("T")
     config = _require_observation_config(ctx, full_tid)
     ctrl_in_name = config.ctrl_in
     result = send_keyed_ping_probe(
@@ -1210,7 +1208,7 @@ def _task_snapshot_from_live_pong(
     )
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid_short_form(tid),
+        tid_short=encode_tid(tid),
         name=name,
         status=evidence.status,
         event="live_pong",
@@ -1378,7 +1376,7 @@ def watch_task_status(
     """
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    full_tid = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    full_tid = resolve_full_tid(tid) or tid.strip().lstrip("T")
     deadline = _deadline_from_timeout(timeout)
     with ExitStack() as stack:
         names = _terminal_observation_queue_names(full_tid, None)
@@ -1577,7 +1575,7 @@ def _pipeline_task_snapshot(
 
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid_short_form(tid),
+        tid_short=encode_tid(tid),
         name=snapshot_name,
         status=status_text,
         event="pipeline_status",
@@ -1697,7 +1695,7 @@ def _snapshot_from_terminal_ctrl_out(
     error = payload.get("error")
     return system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid_short_form(tid),
+        tid_short=encode_tid(tid),
         name=str(taskspec_payload.get("name") or tid),
         status=status,
         event="ctrl_out_terminal",
@@ -2089,9 +2087,7 @@ def stop_tasks(
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task stop)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
-    resolved_tids = [
-        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
-    ]
+    resolved_tids = [resolve_full_tid(tid) or tid.strip().lstrip("T") for tid in tids]
     return _stop_resolved_tasks(ctx, resolved_tids, {})
 
 
@@ -2186,7 +2182,7 @@ def stop_task(
     """Stop one task or raise a typed exception."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    full = resolve_full_tid(tid) or tid.strip().lstrip("T")
     snapshot = _require_controllable_task(ctx, tid, full)
     if snapshot is not None and snapshot.status in system_cmd.TERMINAL_TASK_STATUSES:
         raise ControlRejected(f"Task {tid} already {snapshot.status}")
@@ -2206,9 +2202,7 @@ def kill_tasks(
     Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3] (task kill)
     """
     ctx = _coerce_context(context=context, context_path=context_path)
-    resolved_tids = [
-        resolve_full_tid(ctx, tid) or tid.strip().lstrip("T") for tid in tids
-    ]
+    resolved_tids = [resolve_full_tid(tid) or tid.strip().lstrip("T") for tid in tids]
     return _kill_resolved_tasks(ctx, resolved_tids, {})
 
 
@@ -2309,7 +2303,7 @@ def kill_task(
     """Kill one task or raise a typed exception."""
 
     ctx = _coerce_context(context=context, context_path=context_path)
-    full = resolve_full_tid(ctx, tid) or tid.strip().lstrip("T")
+    full = resolve_full_tid(tid) or tid.strip().lstrip("T")
     snapshot = _require_controllable_task(ctx, tid, full)
     config = _require_observation_config(ctx, full)
     if _kill_resolved_tasks(ctx, [full], {full: config}) <= 0:
@@ -2351,26 +2345,17 @@ def _process_fields_for_tid(
     }
 
 
-def _command_tid(
-    raw: str,
-    *,
-    context: WeftContext,
-    allow_unknown_full: bool = False,
-) -> str:
-    """Normalize one public command TID or raise its typed failure."""
+def _command_tid(raw: str) -> str:
+    """Canonicalize one public command TID or raise ``InvalidTID``.
 
-    candidate = raw.strip().lstrip("T")
-    if not candidate or not (candidate.isascii() and candidate.isdecimal()):
-        raise InvalidTID(f"Invalid task ID: {raw!r}")
-    if is_task_tid(candidate):
-        if allow_unknown_full:
-            return candidate
-        resolved = resolve_tid(tid=candidate, context=context)
-        return resolved or candidate
-    resolved = resolve_tid(tid=candidate, context=context)
-    if resolved is None or not is_task_tid(resolved):
-        raise TaskNotFound(f"Task {raw} not found")
-    return resolved
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3];
+        docs/specifications/07-System_Invariants.md [OBS.5].
+    """
+
+    try:
+        return normalize_tid(raw.strip().lstrip("T"))
+    except InvalidTID as exc:
+        raise InvalidTID(f"Invalid task ID: {raw!r}") from exc
 
 
 @typed_command_errors
@@ -2411,7 +2396,7 @@ def cmd_task_status(
     """
 
     ctx = _coerce_context(context_path=context)
-    full_tid = _command_tid(tid, context=ctx, allow_unknown_full=True)
+    full_tid = _command_tid(tid)
     if ping:
         internal_snapshot = (_task_status if watch else task_status)(
             full_tid,
@@ -2460,7 +2445,7 @@ def cmd_task_ping(
     """
 
     ctx = _coerce_context(context_path=context)
-    full_tid = _command_tid(tid, context=ctx, allow_unknown_full=True)
+    full_tid = _command_tid(tid)
     payload = task_ping(full_tid, timeout=timeout, context=ctx)
     timed_out = bool(payload.get("timed_out"))
     pong = payload.get("pong")
@@ -2492,7 +2477,7 @@ def _selected_control_tids(
         return tuple(filter_tids_by_pattern(snapshots, pattern or ""))
     if tid is None:
         raise CommandUsageError("Provide a task id or use --all or --pattern")
-    return (_command_tid(tid, context=context, allow_unknown_full=True),)
+    return (_command_tid(tid),)
 
 
 def _task_control_result(
@@ -2520,10 +2505,6 @@ def _task_control_result(
         )
     else:
         selected = tuple(explicit_tids)
-    # Ambiguity is batch-fatal before any control write. Other item errors
-    # retain the normal accepted/failures partition below.
-    for selected_tid in selected:
-        resolve_full_tid(ctx, selected_tid)
     operation = stop_task if command == "stop" else kill_task
     requested: list[str] = []
     accepted: list[str] = []
@@ -2533,7 +2514,7 @@ def _task_control_result(
         requested.append(selected_tid)
         try:
             full_tid = (
-                _command_tid(selected_tid, context=ctx, allow_unknown_full=True)
+                _command_tid(selected_tid)
                 if explicit_tids is not None
                 else selected_tid
             )
@@ -2637,8 +2618,10 @@ def cmd_task_tid(
     ctx = _coerce_context(context_path=context)
     if reverse is not None:
         candidate = reverse.strip().lstrip("T")
-        if not is_task_tid(candidate):
-            raise InvalidTID(f"Invalid full task ID: {reverse!r}")
+        try:
+            encode_tid(candidate)
+        except ValueError as exc:
+            raise InvalidTID(f"Invalid full task ID: {reverse!r}") from exc
         return candidate
     resolved = resolve_tid(tid=tid, pid=pid, context=ctx)
     if resolved is None:

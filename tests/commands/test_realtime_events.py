@@ -23,7 +23,7 @@ from weft.commands import events as events_cmd
 from weft.commands.types import TaskEvent
 from weft.context import WeftContext, build_context
 from weft.core.task_evidence import WRAPPER_LOST_ERROR
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 pytestmark = [pytest.mark.shared]
 
@@ -525,7 +525,7 @@ def test_realtime_refreshes_late_metadata_before_final_output(
             json.dumps(
                 {
                     "full": tid,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "terminal": False,
                     "projection": {
                         "version": 1,

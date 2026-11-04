@@ -31,7 +31,7 @@ from weft._constants import (
 )
 from weft.core.task_evidence import TaskEvidenceSnapshot, parse_task_projection
 from weft.ext import RunnerHandle
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 
 @dataclass(frozen=True)
@@ -190,10 +190,10 @@ def reduce_task_event(
 
     tid = payload.get("tid", "")
     try:
-        short = tid_short_form(tid)
+        short = encode_tid(tid)
     except ValueError:
         return current
-    if tid_filters is not None and tid not in tid_filters and short not in tid_filters:
+    if tid_filters is not None and tid not in tid_filters:
         return current
 
     record = current or FoldedTaskRecord(
@@ -517,7 +517,7 @@ def reduce_task_state_snapshot(
     return CollectedTaskSnapshot(
         snapshot=TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name=_normalized_text(payload.get("name")) or tid,
             status=projection["status"],
             event=projection["event"],

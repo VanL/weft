@@ -623,8 +623,9 @@ as the session lead listed them; each is quoted where it is applied.
    2026-11-03 (ruling 2): "Agree". No [REV-WT-*] record; the note after the
    theory delta stays. Not open.
 6. Owner endorsement of the [ALT-WT-022] text: deferred to closeout
-   (owner, 2026-11-03: "Not now"). Task 8 already obtains it at closeout;
-   it stays open until then.
+   (owner, 2026-11-03: "Not now"); accepted by the owner (2026-11-03: "I
+   accept the theory edits"), which covers the [WT-2a.1] edit and the
+   [ALT-WT-022] entry as drafted. Not open.
 7. The CI step for the span measurement: ruled by the owner on 2026-11-03
    (ruling 4): "This should not be part of CI regularly. This is something
    to test and then document." The step is removed from the plan
@@ -675,6 +676,9 @@ Fresh-eyes findings for the owner (2026-11-02), both resolved:
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [OBS.4] measured span line | span measured on macOS, Linux, and Windows | macOS measured (both phases); Linux and Windows recorded as `pending: owner-run` | the implementer runs only on the development Mac; the series brief directs recording both as owner runs with the procedure | none: the [OBS.4] line already carries the pending entries; the owner replaces them with figures in the stated form |
+| [OBS.5] (D9) | `encode_tid` rejects 19-digit values at or above 2^63 at the validator sites | the same, plus `weft/commands/tasks.py::_task_status_record` now sends any argument that `resolve_full_tid` rejects (including an out-of-range 19-digit value) to the bulk path instead of the known-TID path | the fast suite caught it: `tests/commands/test_submission_observation.py::test_custody_is_not_probed_for_noncanonical_or_out_of_range_identity[9999999999999999999]` failed with `ValueError: invalid message ID` from `encode_tid` building the synthetic `unknown` snapshot's `tid_short` in `_known_status_record`; such a value names no task (SimpleBroker cannot mint it), so it takes the not-a-TID path; the test's contract (`status` is `None` or `unknown`, no custody probe) holds | none |
+| none (process) | one landing commit (strategy B) including `docs/program-theory.md`; `Status:` `promoted` at Task 1 | a landing commit with code, tests, specs, README, CHANGELOG and this plan (`Status: draft`), then a separate `Theory:` commit with the two theory blocks that moves `Status:` and the index row to `promoted` | the series' common rules commit an accepted theory edit alone so it reverts alone; `bin/check-doc-paths` checks every Replacement block of a `promoted` plan, so `promoted` before the theory blocks land would fail it | none |
 
 ## Spec Baseline
 
@@ -683,9 +687,10 @@ Fresh-eyes findings for the owner (2026-11-02), both resolved:
   docs/specifications/10-CLI_Interface.md,
   docs/specifications/14-Python_API_Surfaces.md, and docs/program-theory.md
   at plan authoring time. Plan type: implementation with spec revision.
-- Promotion baseline identifier: pending (recorded by Task 1 as
-  `b7eed9f9` + worktree state and the spec file diff, then as the landing
-  commit SHA).
+- Promotion baseline identifier: `af98c73b` + worktree (Task 1, 2026-11-03;
+  the spec file diff is the landing commit's diff of the four spec files);
+  the landing commit SHA is recorded in the `Theory:` commit's Execution
+  log entry.
 
 ## Proposed Spec Delta
 
@@ -842,6 +847,24 @@ and applies it to the spec in the same step, then reruns
 `./.venv/bin/python bin/check-doc-paths`. "Weft does not probe capacity"
 in [OBS.4] stays true: the measurement is a one-time manual run, not
 runtime behavior.
+
+Added by Task 4 on 2026-11-03 (macOS measured here; Linux and Windows
+cannot be measured from the development Mac and are recorded as pending
+owner runs; procedure in the Execution log):
+
+Replacement (`docs/specifications/07-System_Invariants.md`):
+```markdown
+Rewritable argv span of a spawned task process, measured once by the TID
+display-encoding plan; documentation, not a gate: measured on 2026-11-03:
+darwin (phase 1, initial writer): at least 1024 bytes rewritable (the whole
+1,024-character probe survived, so this is a lower bound); measured on
+2026-11-03: darwin (phase 2, after the padded handoff): 71 bytes rewritable;
+linux: pending: owner-run; win32: pending: owner-run, recorded when run as
+"measured on <date>: win32: readback unavailable on this platform; the title
+budget is not measurable here by this method" if the readback shows the
+unchanged argv. The procedure and the script text are in the plan's Execution
+log.
+```
 
 ### [LIVENESS.R5] — replace the bullet
 
@@ -1851,6 +1874,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - owner rulings applied 2026-11-03 (items 1–6): widen every surface including `WeftClient.task` through one canonicalization function and one decoder, enforced by a structural test (+P); no [REV-WT-*] record; [ALT-WT-022] endorsement deferred to closeout ('Not now'); the CI span step removed, the span is measured once per platform and documented; title corroboration removed from the liveness host (the scoped process identity and the runtime handle remain the evidence; the title is observability only); I, L, O, U stay excluded, not aliased. Cross-family round on these changes pending.
 - Cross-family review round 1 on the six rulings (codex 0.161.0, 2026-11-03): BLOCKED on F1–F3 (the structural test's package-wide heuristics overclaimed; no behavior test for the widened manager and prune surfaces; the client test file missing from the staging list): accepted and applied (bounded per-boundary checks with their limits stated; selection-observing tests for the three surfaces and a mixed-case client row; staging list corrected). F4 (the host fake's `cmdline()` now raises), F5 (a Windows readback of zero is 'unavailable', not 'below budget'), F6 (stale test reference and counts), F7 (the universal boundary claim qualified for the strict `runtime_liveness` and `--reverse` boundaries): accepted and applied. The round confirmed D14's class C (no reachable case where the title decided liveness) and the completeness of the spec inventory. Round 2 (codex 0.161.0, 2026-11-03, scoped to F1–F7): no blocker; all seven closed with live evidence (the bounded checks ignore an unrelated status fold and detect a fold on result.py:42's `raw_tid`; Manager lookups use the supplied TID and pruning uses exact filter membership, so the selection tests observe a discarded normalization; `WeftClient.task` at _client.py:323 stores the normalizer's result; the host catch at host.py:44 lets `AssertionError` escape; 25 importing test files leave 23 after two removals; [PY-2]'s canonical-full-TID requirement at 14:222 is preserved by the strict exceptions). Review loop on the six rulings closed; the plan waits only on the owner's endorsement of the [ALT-WT-022] text at closeout.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): the prune `task` selector normalization lives in the shared prune capability that both the CLI adapter and series plan 11's `client.system.prune` call (`cmd_system_prune` today, `_prune_families` after plan 11), which the structural inventory now locates by its `task_filters=` binding rather than by function name; a client-path selection case added to `test_force_deletes_active_ping_in_selected_scope`, skipped visibly until plan 11 lands; landing-order coupling with plan 11 recorded as hidden coupling 8 and in Task 6. Plan metadata gate and `bin/check-doc-paths` re-run.
+- implementation 2026-11-03 (series plan 12, Anthropic implementer, on `main` at `af98c73b`): Tasks 0–8 executed; owner item 6 closed as accepted by the owner (2026-11-03: "I accept the theory edits"); the theory blocks land in a separate `Theory:` commit after the landing commit (Deviation Log), which moves `Status:` to `promoted`. Three deviations recorded in the Deviation Log (span pending on Linux and Windows; commit split; out-of-range status path). Owed before `completed`: the [WT-7] keyed possession probe (owner-written key, different-family answerer) and the different-family review of the completed work (§10), both with the series lead.
 
 ## Execution log
 
@@ -1986,3 +2010,335 @@ the ruling stands until the Task 4 measurement reports every platform.
 
 Implementation entries (comprehension answers, RED assertions, gate
 results) are appended below by the implementer.
+
+### Implementation, 2026-11-03 (series plan 12, on `main` at `af98c73b`)
+
+Implementer: Anthropic (Claude), dispatched by the series lead. Plan 11
+landed first, so the prune `--task` normalization went directly into
+`weft/commands/prune.py::_prune_families` (hidden coupling 8) and the
+client-path prune case runs live, with no skip.
+
+**Task 0, comprehension answers (recorded before the first edit).**
+
+1. `inspect_host_process(pid, create_time)` returns `("live",
+   "identity_match")` once the scoped `(pid, create_time)` identity matches a
+   non-zombie process. After this change the host takes no `expected_tid`
+   and never reads `cmdline()`, so the old `weft-proj-0123456789:...` title
+   plays no part. No verdict changes: before, the title could only choose
+   between two `live` reasons, and `probe_runtime_liveness` reads only
+   `.evidence`. Re-checked at `af98c73b`: the host callers are
+   `weft/liveness/analysis.py::probe_runtime_liveness` (the only
+   `expected_tid=` caller), `weft/core/manager_runtime.py` (two calls),
+   `weft/core/manager.py` (one call added by plan 4, no `expected_tid`, reads
+   `.evidence`), and `extensions/weft_macos_sandbox/weft_macos_sandbox/plugin.py`
+   (no `expected_tid`). Matches the recorded answer.
+2. No queue name changes; every TID-bearing queue name keeps the 19-digit
+   full TID. The encoding appears only in renderings. `decode_tid` is
+   arithmetic and reads no queue (pinned by
+   `tests/commands/test_tid_mapping_contracts.py::test_encoded_selector_decodes_without_reading_state`,
+   which asserts no `weft.state.tasks.*` queue exists). Matches.
+
+Index row: `docs/plans/README.md` had the `draft` row;
+`./.venv/bin/python -m pytest tests/specs/test_plan_metadata.py` passed.
+Plan 6 touched `weft/core/monitor/task_monitor.py`; `grep -n` at
+`af98c73b` found the import at line 219 and the `manager_tid_short` producer
+at line 4732 (the plan's 225 and 4737), edited in place.
+
+**Task 1, spec promotion (worktree).** Every spec Replacement block was
+applied verbatim by a scratch script that copies each block from this plan
+into its quoted span (07: [OBS.4] opening, [OBS.5], [OBS.6], [OBS.8],
+[LIVENESS.R5], Related Plans; 01: [CC-3.2] sentence and the Related Plans
+list after [CC-3.5]; 10: [CLI-1.2.3] bullet and paragraph, mapping, Related
+Plans; 14: [PY-2] clause, the new `client.task(tid)` paragraph before
+"Custody-only point snapshots", Related Plans). Every quoted span matched
+exactly once. The two theory blocks were held for the separate `Theory:`
+commit (Deviation Log). Promotion baseline: `af98c73b` + worktree; then the
+landing commit SHA (Spec Baseline).
+
+**Task 2, RED.** `./.venv/bin/python -m pytest tests/system/test_tid_encoding.py`
+failed at collection with
+`ImportError: cannot import name 'decode_tid' from 'weft.helpers'`. The
+plan names `encode_tid`; the import line is sorted (`decode_tid,
+encode_tid`), so Python reports the first missing name. Same cause.
+
+**Task 3, GREEN.** `TASKSPEC_TID_ENCODED_LENGTH = 13` and
+`TASKSPEC_TID_ENCODING_ALPHABET` added beside `TASKSPEC_TID_SHORT_LENGTH`;
+`PROCESS_TITLE_NAME_LENGTH = 17` with the stated docstring; the title sum
+uses the new width, so `PROCESS_TITLE_MAX_LENGTH` = 71 and
+`PROCESS_TITLE_HANDOFF_LENGTH` = 72 (asserted by the title property test and
+`test_every_defined_title_status_fits_the_handoff_capacity`). `encode_tid`
+and `decode_tid` follow the reference algorithm. The grep for literal 20-
+character name limits in `tests/` found none. The 33 codec tests passed.
+
+**Task 4, RED then GREEN.** RED run (after the test edits, before the
+producer switch): 9 failed, 427 passed, 3 skipped over the Task 4 files;
+the failures were the producer assertions (`ValueError: not a full or
+encoded task ID` from `decode_tid` on a ten-digit `manager_tid_short` and on
+the default pipeline name), `test_consumer_publishes_and_matches_encoded_title`
+(`AssertionError: weft-weft-har-2891786950:encoded-title:running:waiting`),
+the observability title tests (`'weft-ctxrm-rf-1661318425:...' !=
+'weft-ctxrm-rf-1HS5X1AAWD458:...'`), the `short` row tests (`'3497255500' ==
+'1HS5X1AAVFGWR'`), and the exact-maximum test (`assert 68 == 71`, the real
+formatter still emitting a ten-character TID). GREEN: every listed
+`tid_short_form` call replaced by `encode_tid` (also
+`weft/commands/system.py::_read_tid_states`, deleted in Task 5); the
+reverse branch of `task_tid` catches `ValueError`; `tid_short_form`,
+`TASKSPEC_TID_SHORT_LENGTH` and `tests/system/test_short_tid.py` deleted;
+`weft/liveness/host.py` keeps only the identity checks and returns `("live",
+"identity_match")`; the `expected_tid=tid` argument is gone from
+`weft/liveness/analysis.py`. The 22 fixture files were edited mechanically
+(the plan's 23 counted `tests/tasks/test_task_observability.py`, which got
+its semantic edits separately). The three `"short": tid[-10:]` fixtures
+are unchanged. Stop-if check: no reader resolves by the stored `short`; no
+rename; no mock; no reachable title-only liveness case. Verify command:
+920 passed, 5 skipped; both greps print nothing.
+
+**Rewritable span measurement (one-time; not a test; owner ruling 4).**
+Script text, copied here before the first run so every platform runs the
+same text (kept outside the repository at the session scratchpad
+`series/impl/plan12/span/span_measurement.py`):
+
+```python
+"""One-time rewritable argv span measurement (TID display-encoding plan, Task 4).
+
+Not a test; never committed, collected by pytest, or run in CI. Run from the
+repository root after `. ./.envrc` and `uv sync --all-extras`:
+    ./.venv/bin/python <scratch path>/span_measurement.py
+"""
+
+from __future__ import annotations
+
+import multiprocessing
+import sys
+from multiprocessing.connection import Connection
+
+import psutil
+
+PROBE_LENGTH = 1024
+TITLE_BUDGET = 71
+_VOCAB = "weft-abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHJKMNPQRSTVWXYZ:"
+PROBE = "".join(_VOCAB[i % len(_VOCAB)] for i in range(PROBE_LENGTH))
+
+
+def _child(conn: Connection) -> None:
+    from weft.core import process_title
+
+    owner = process_title._ProcessTitle()
+    owner.set(PROBE)
+    conn.send("phase1")
+    if conn.recv() == "exit":
+        return
+    if sys.platform == "darwin":
+        owner.set("weft-" + "c" * 8 + "-" + "0" * 13 + ":" + "n" * 17 + ":cancelled:" + "d" * 15)
+        owner._deadline = 0
+        owner.tick()
+        owner.set(PROBE)
+        conn.send("phase2")
+        conn.recv()
+
+
+def _survived(joined: str) -> int:
+    best = 0
+    for k in range(1, PROBE_LENGTH + 1):
+        if PROBE[:k] in joined:
+            best = k
+        else:
+            break
+    return best
+
+
+def _report(pid: int, phase: int) -> int:
+    cmdline = psutil.Process(pid).cmdline()
+    joined = " ".join(cmdline)
+    survived = _survived(joined)
+    shown = ">=1024" if survived == PROBE_LENGTH else str(survived)
+    print(
+        f"span-measurement platform={sys.platform} phase={phase} "
+        f"survived={shown} joined={len(joined)}",
+        flush=True,
+    )
+    if sys.platform == "win32":
+        print("span-readback-unavailable platform=win32", flush=True)
+        return 0
+    if survived < TITLE_BUDGET:
+        print(f"span-below-title-budget phase={phase}", flush=True)
+        return 1
+    return 0
+
+
+def main() -> int:
+    ctx = multiprocessing.get_context("spawn")
+    parent, child_conn = ctx.Pipe()
+    proc = ctx.Process(target=_child, args=(child_conn,))
+    proc.start()
+    status = 0
+    try:
+        assert parent.recv() == "phase1"
+        status |= _report(proc.pid, 1)
+        if sys.platform == "darwin":
+            parent.send("continue")
+            assert parent.recv() == "phase2"
+            status |= _report(proc.pid, 2)
+    finally:
+        try:
+            parent.send("exit")
+        except OSError:
+            pass
+        proc.join(timeout=10)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=10)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+macOS run, 2026-11-03, `af98c73b` + worktree, macOS 27.0.1, Python 3.14.9,
+`./.venv/bin/python <scratch path>/span_measurement.py` from the repository
+root after `. ./.envrc`:
+
+```text
+span-measurement platform=darwin phase=1 survived=>=1024 joined=1028
+span-measurement platform=darwin phase=2 survived=71 joined=75
+```
+
+Exit 0. Phase 2 reports 71 survived characters after the handoff padded to
+`PROCESS_TITLE_HANDOFF_LENGTH` (72 with the NUL), the figure the plan
+expected by construction; recorded without reinterpretation. Both phases
+are at or above the 71-character budget.
+
+Linux: pending: owner-run. Procedure: on a Linux machine or container with
+the repository at the landing commit, `. ./.envrc`, `uv sync --all-extras`,
+write the script text above to a scratch path outside the repository, and
+run `./.venv/bin/python <scratch path>/span_measurement.py` from the
+repository root; it runs phase 1 only and prints one `span-measurement`
+line; a `span-below-title-budget` line and exit 1 mean fewer than 71
+characters survived (a finding for the owner, not a gate).
+
+Windows: pending: owner-run. Same steps on a Windows machine with
+`.venv\Scripts\python` in place of `./.venv/bin/python`; phase 1 only; the
+script prints the phase line, then `span-readback-unavailable
+platform=win32`, and exits 0 whatever the readback shows. A readback of zero
+is recorded as "measured on <date>: win32: readback unavailable on this
+platform; the title budget is not measurable here by this method", never as
+below budget. Not through `workflow_dispatch` (ruling 4).
+
+The owner replaces the two pending entries in the [OBS.4] line (and in the
+Replacement block above) with the printed figures in the stated form.
+
+**Task 5.** `_read_tid_states`, `_resolve_tid_filters` and the
+`list_task_state_tids` import left `weft/commands/system.py`;
+`resolve_full_tid(raw)` and `_command_tid(raw)` call
+`normalize_tid(raw.strip().lstrip("T"))`; the 10 call sites dropped their
+`ctx`/`broker` arguments and the four `_command_tid` sites their `context`
+and `allow_unknown_full`; the ambiguity preflight loop is deleted; the
+reducer filter is `tid not in tid_filters`. Stop-if check: no production
+caller of the deleted helpers; no batch-control test other than the deleted
+ambiguity tests changed. Verify: 172 passed, 1 failed, the failure being
+`test_encoded_selector_decodes_without_reading_state` (`assert None ==
+'1760000000987654321'`), green after Task 6 as the plan says.
+
+**Task 6, RED.** Structural test, before the boundary changes:
+
+```text
+AssertionError: weft/commands/result.py::_normalize_tid: no normalize_tid call on 'raw_tid'
+  weft/commands/manager.py::cmd_manager_stop: no normalize_tid call on 'tid'
+  weft/commands/manager.py::cmd_manager_status: no normalize_tid call on 'tid'
+  weft/commands/prune.py::_prune_families: no single loop over the --task selectors
+  decode_tid call sites: []
+```
+
+The two `task` resolvers already passed (a) because Task 5 had rewired
+them through `normalize_tid` in the plan's order; `WeftClient.task` passed
+as expected. CLI equivalence: the four encoded spellings failed (`Task
+1hS5XcGrNgG00 not found`, exit 2); the probes failed on `task tid --reverse
+9999999999999999999` (exit 1 with `ValueError: invalid message ID`
+traceback, hidden coupling 5). Client case table: 4 failed (`InvalidTID:
+invalid task id '1JZKD3PKK0000'`). Manager stop `[encoded]`: `assert None ==
+'{"command": "STOP"}'`. CLI manager status: `(1, '', 'Manager
+1HS5XJYDY3800 not found')`. Prune: `AssertionError: cli` / `assert 0 == 1`.
+Direct `_command_tid` assertions: `InvalidTID: Invalid task ID:
+'1HA9C2Q2XX0Z7'`.
+
+**Task 6, GREEN.** `normalize_tid` strips, removes one `T`, and calls
+`decode_tid`; `result._normalize_tid` tries `normalize_tid` and falls back to
+its digits-only rule; `cmd_manager_stop` (explicit TID) and
+`cmd_manager_status` replace `tid` with `normalize_tid(tid)` and keep the
+not-found path on `InvalidTID`; `_prune_families` maps each `task` selector
+through `normalize_tid` in one loop before `task_filters=`; `cmd_task_tid
+--reverse` raises `InvalidTID` unless `encode_tid` succeeds; the CLI help
+strings say "Full or encoded TID" and "Return the encoded TID for a full
+TID". No import cycle (`tasks.py`, `result.py`, `manager.py` and `prune.py`
+import `normalize_tid` at module top). The direct `_command_tid` assertions
+live in `tests/commands/test_task_commands.py::test_canonical_task_control_records_invalid_explicit_tid_and_continues`.
+Verify command plus the three selection files, `tests/commands/test_task_commands.py`
+and `tests/cli/test_cli_result.py`: 590 passed, 2 skipped.
+
+Hand-checked mutations (each applied alone, the named test run, the file
+restored from a copy):
+
+```text
+CAUGHT: extra decode_tid call in _command_tid (structural b) -> test_tid_arguments_share_one_canonicalizer_and_one_decoder | E       AssertionError: decode_tid call sites: [('weft/commands/submission.py', 99, True), ('weft/commands/tasks.py', 2355, False)] / E       assert not ["decode_tid call sites: [('weft/commands/submission.py', 99, True)
+CAUGHT: raw_tid.upper() in result._normalize_tid (structural a) -> test_tid_arguments_share_one_canonicalizer_and_one_decoder | E       AssertionError: weft/commands/result.py::_normalize_tid: local .upper() on 'raw_tid' / E       assert not ["weft/commands/result.py::_normalize_tid: local .upper() on 'raw_tid'"]
+CAUGHT: cmd_manager_status stops calling normalize_tid (structural a) -> test_tid_arguments_share_one_canonicalizer_and_one_decoder | E       AssertionError: weft/commands/manager.py::cmd_manager_status: no normalize_tid call on 'tid' / E       assert not ["weft/commands/manager.py::cmd_manager_status: no normalize_tid call on 'tid'"]
+CAUGHT: cmd_manager_stop discards normalize_tid result -> test_stop_command_writes_stop_for_active_manager | E       assert None == '{"command": "STOP"}' / E        +  where None = read_one()
+CAUGHT: prune discards normalize_tid result -> test_force_deletes_active_ping_in_selected_scope | E           AssertionError: cli / E           assert 0 == 1
+CAUGHT: _command_tid returns candidate unchanged -> test_canonical_task_control_records_invalid_explicit_tid_and_continues | E           AssertionError: assert '1HA9C2Q2XX0Z7' == '1777000000000000999' / E
+```
+
+Also checked by hand: `cmd_manager_status` discarding `normalize_tid`'s
+result fails `tests/cli/test_cli_manager.py::test_manager_start_and_status`
+with `(1, '', 'Manager 1HS5XJYDY3800 not found')`.
+
+**Task 7.** README: the Encoded TID bullet, the `ps` example, and the
+`Short-ID` sentence as specified; also the ten-digit
+`weft-proj-0001234567:file-watcher:running` example under the services
+section became `weft-proj-1JZKD3PKK0800:file-watcher:running` (not listed
+in Task 7; a stale ten-digit rendering in the same file, so documentation
+sync). CHANGELOG `[Unreleased]` `### Changed` entry as specified, also
+naming the 17-character name limit. The Task 7 grep prints nothing.
+
+**Task 8.** Touched functions carry `Spec:` lines naming [OBS.5] and
+[CLI-1.2.3] (`encode_tid`, `decode_tid`, `normalize_tid`,
+`resolve_full_tid`, `_command_tid`, `result._normalize_tid`); the host
+docstring cites [LIVENESS.R5] and [CC-3.2]; the `task_tid` docstring now
+says "encoded-to-full". The [CLI-1.2.3] and [OBS.5] mapping claims name
+exactly these owners. Gates: run from the landing tree on 2026-11-03:
+focused §7 command (`tests/system/test_tid_encoding.py tests/liveness
+tests/commands/test_tid_mapping_contracts.py tests/cli/test_cli_list_task.py
+tests/core/test_process_title.py tests/tasks/test_task_observability.py`):
+exit 0. Fast suite (`./.venv/bin/python -m pytest -q -p no:cacheprovider`):
+the first run failed one test,
+`tests/commands/test_submission_observation.py::test_custody_is_not_probed_for_noncanonical_or_out_of_range_identity[9999999999999999999]`
+(`ValueError: invalid message ID` from `encode_tid` in
+`_known_status_record`; fixed in `_task_status_record`, Deviation Log
+row "[OBS.5] (D9)"); the rerun exited 0 (6,466 passed, 47 skipped). All
+tests (`./.venv/bin/python -m pytest -m ""`): 6,469 passed, 58 skipped, 1
+failed: `tests/cli/test_cli_run.py::test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap`
+(`phase: manager_convergence_timeout`), a Manager-reuse stress test that
+reads no TID rendering; it passed 3 of 3 runs alone at the same tree, so it
+is recorded as load flakiness under the test-suite-structure plan's
+exposure note, not as a finding of this change. mypy: "Success: no issues
+found in 484 source files". `ruff check .`: "All checks passed!". `ruff
+format --check .`: the same three Markdown code blocks the baseline
+flagged (two plan files' blocks and this plan's reference algorithm), no
+Python file. `bin/check-doc-paths`: "check-doc-paths: OK". `pytest
+tests/specs`: exit 0. Both §7 greps print nothing.
+
+Audit refresh (I-1). The refreshed row, in the column format of the
+theory-versus-code audit table in
+`docs/plans/2026-11-02-program-theory-reconciliation-plan.md`; every other
+row is carried forward by reference to that table, which is not edited:
+
+| Identifier | Claim (one clause) | Contract (spec code) | Evidence in tree | Classification | Plan / fork |
+|---|---|---|---|---|---|
+| I-1 → [WT-2a.1] | Every unit of work has one hybrid-timestamp TID and every rendering of it is lossless | IMMUT.3; OBS.5; [SB-0.2] | `tests/specs/manager_architecture/test_tid_correlation.py::test_spawn_request_timestamp_matches_tid`; `tests/system/test_tid_encoding.py::test_encoding_round_trips_every_tid_in_either_case` (round trip over 0 through 2^63 − 1) and `::test_title_carries_the_complete_encoded_tid_within_budget`; `tests/system/test_tid_encoding.py::test_tid_arguments_share_one_canonicalizer_and_one_decoder`; the §7 grep gate prints nothing (no `tid_short_form`, candidate search, ambiguity error, or title regex remains) | aligned | 12 TID display encoding (this plan) |
+
+[WT-7] keyed possession probe at class-5 completion: owed. It needs an
+owner-written key and a different-family answerer that did not author the
+plan; neither is available to the implementer, so `Status:` stays
+`promoted`, not `completed`, until the probe key and result are in the
+Review Log. The completed-work different-family review (§10) is also owed
+to the series lead.

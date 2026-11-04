@@ -346,6 +346,21 @@ def test_connect_resolves_context_from_path_keyword() -> None:
         assert client.context.root.resolve() == harness.root.resolve()
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    ["1JZKD3PKK0000", "1jzkd3pkk0000", "1jZkD3pKk0000", "T1JZKD3PKK0000"],
+)
+def test_client_task_canonicalizes_the_encoded_tid(
+    tmp_path: Path, spelling: str
+) -> None:
+    """``client.task`` decodes any case of the encoded TID [PY-2], [OBS.5]."""
+
+    if spelling in {"1jzkd3pkk0000", "1jZkD3pKk0000"}:
+        assert spelling != "1JZKD3PKK0000"
+    client = WeftClient(context=build_context(prepare_project_root(tmp_path)))
+    assert client.task(spelling).tid == "1837025672140161024"
+
+
 def test_connect_rejects_ambiguous_context_arguments(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="either spec_context or path"):
         connect(tmp_path, path=tmp_path)

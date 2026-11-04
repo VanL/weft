@@ -39,7 +39,7 @@ from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payl
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.pipeline import PipelineTask
-from weft.helpers import process_create_time, tid_short_form
+from weft.helpers import encode_tid, process_create_time
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(60)]
 
@@ -302,7 +302,7 @@ def test_claimed_outbox_counts_borrow_connection_without_changing_proof(
 def _observation_row(tid: str, *, terminal: bool = False) -> dict[str, Any]:
     return {
         "full": tid,
-        "short": tid_short_form(tid),
+        "short": encode_tid(tid),
         "runtime_handle": None,
         "terminal": terminal,
         "projection": {

@@ -216,7 +216,7 @@ from weft.core.tasks.service import (
     ServiceWorkerSpec,
 )
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import closing_queue_iterator, iter_queue_entries, tid_short_form
+from weft.helpers import closing_queue_iterator, encode_tid, iter_queue_entries
 
 logger = logging.getLogger(__name__)
 
@@ -4729,7 +4729,7 @@ class TaskMonitor(ServiceTask):
                 event=event,
                 component="task_monitor",
                 manager_tid=manager_tid,
-                manager_tid_short=tid_short_form(manager_tid),
+                manager_tid_short=encode_tid(manager_tid),
                 required_level=required_level,
                 severity=severity,
                 weft_context=str(self._monitor_context().root),

@@ -102,7 +102,7 @@ from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import iter_queue_entries, tid_short_form
+from weft.helpers import encode_tid, iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -6582,7 +6582,7 @@ def test_task_monitor_terminal_mapping_holds_completion_but_allows_control_clean
     ctrl_out.write("pong")
     mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
-        json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": True})
+        json.dumps({"full": tid, "short": encode_tid(tid), "terminal": True})
     )
     task = TaskMonitor(
         db_path,
@@ -6743,7 +6743,7 @@ def test_dead_cleanup_counts_live_data_only_families_before_age_and_retention(
     outbox = make_queue(f"T{tid}.outbox")
     outbox.write("result")
     make_queue(task_state_queue_name(tid)).write(
-        json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": False})
+        json.dumps({"full": tid, "short": encode_tid(tid), "terminal": False})
     )
     task = TaskMonitor(
         db_path,
@@ -11921,7 +11921,7 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
     )
     _write_json_row(
         make_queue(task_state_queue_name(live_tid)),
-        {"short": tid_short_form(live_tid), "full": live_tid, "name": "live-owner"},
+        {"short": encode_tid(live_tid), "full": live_tid, "name": "live-owner"},
     )
     spec = make_task_monitor_taskspec("1778089999999961903")
     ctrl_in = make_queue(spec.io.control["ctrl_in"])
@@ -12049,7 +12049,7 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
         json.dumps(
             _tid_state_row(
                 full=tid,
-                short=tid_short_form(tid),
+                short=encode_tid(tid),
                 host_processes=[],
             )
         )
@@ -12148,7 +12148,7 @@ def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
     mappings = make_queue(task_state_queue_name(tid))
     mapping_id = _write_json_row(
         mappings,
-        _tid_state_row(full=tid, short=tid_short_form(tid), host_processes=[]),
+        _tid_state_row(full=tid, short=encode_tid(tid), host_processes=[]),
     )
 
     task = TaskMonitor(
@@ -12319,7 +12319,7 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
 
     mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
-        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+        json.dumps(_docker_style_mapping_row(full=tid, short=encode_tid(tid)))
     )
 
     task = TaskMonitor(
@@ -12432,7 +12432,7 @@ def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
 
     mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
-        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+        json.dumps(_docker_style_mapping_row(full=tid, short=encode_tid(tid)))
     )
 
     task = TaskMonitor(
@@ -12499,7 +12499,7 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
 
     mappings = make_queue(task_state_queue_name(tid))
     mappings.write(
-        json.dumps(_docker_style_mapping_row(full=tid, short=tid_short_form(tid)))
+        json.dumps(_docker_style_mapping_row(full=tid, short=encode_tid(tid)))
     )
 
     task = TaskMonitor(
@@ -13111,7 +13111,7 @@ def test_task_monitor_protection_reads_only_candidate_state(
     other_tid = "1778084345905438992"
     for owner in (tid, other_tid):
         make_queue(f"weft.state.tasks.{owner}").write(
-            json.dumps({"full": owner, "short": tid_short_form(owner)})
+            json.dumps({"full": owner, "short": encode_tid(owner)})
         )
     task = TaskMonitor(db_path, make_task_monitor_taskspec("1778089999999998991"))
     try:
@@ -13178,7 +13178,7 @@ def test_recordless_cleanup_reaches_ready_family_after_held_prefix(
         tid = str(base_tid + offset)
         make_queue(f"T{tid}.ctrl_out").write("pong")
         make_queue(task_state_queue_name(tid)).write(
-            json.dumps({"full": tid, "short": tid_short_form(tid), "terminal": True})
+            json.dumps({"full": tid, "short": encode_tid(tid), "terminal": True})
         )
     ready = make_queue(f"T{base_tid + 5}.ctrl_in")
     ready.write("stop")
@@ -13277,7 +13277,7 @@ def test_snapshot_protection_does_not_starve_later_cleanup(
                     json.dumps(
                         {
                             "full": owner,
-                            "short": tid_short_form(owner),
+                            "short": encode_tid(owner),
                             "terminal": terminal,
                         }
                     )

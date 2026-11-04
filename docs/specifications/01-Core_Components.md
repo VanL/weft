@@ -1049,8 +1049,8 @@ any exact live `(pid, create_time)` pair with zombie rejection is `live`;
 `stale` requires every valid scoped identity definitively dead with none
 unresolved. Empty, malformed, permission-denied, or ambiguous identity is
 `unknown`. For `runner` and `external-supervisor`, the selected extension probe
-is authoritative and host wrappers corroborate only. Process titles
-corroborate and never prove a full TID.
+is authoritative and host wrappers corroborate only. A process title is
+observability only ([OBS.4]) and is never liveness evidence.
 
 Explicit public runtime observation uses raw runtime evidence under
 `RunnerHandle.control.authority`, before terminal-hint retirement policy.
@@ -1311,6 +1311,7 @@ observations, apply effects, and own cleanup.
 
 ## Related Plans
 
+- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) removes process-title corroboration from host-pid liveness evidence under [CC-3.2]; a title is observability only.
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 - [Reactor edge timer floors](../plans/2026-11-02-reactor-edge-timer-floors-plan.md) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).
 

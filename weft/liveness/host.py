@@ -8,11 +8,8 @@ Spec references:
 from __future__ import annotations
 
 import math
-import re
 
 import psutil
-
-from weft.helpers import tid_short_form
 
 from .models import HostProcessObservation
 
@@ -20,10 +17,14 @@ from .models import HostProcessObservation
 def inspect_host_process(
     pid: int,
     create_time: float | None,
-    *,
-    expected_tid: str | None = None,
 ) -> HostProcessObservation:
-    """Observe one scoped ``(pid, create_time)`` identity without controlling it."""
+    """Observe one scoped ``(pid, create_time)`` identity without controlling it.
+
+    The verdict rests on the scoped identity alone, with zombie rejection. The
+    process title is observability only and is never read here.
+
+    Spec: [LIVENESS.R5], [CC-3.2]
+    """
 
     if pid <= 0 or create_time is None or not math.isfinite(create_time):
         return HostProcessObservation("unknown", "missing_exact_identity")
@@ -39,20 +40,4 @@ def inspect_host_process(
         return HostProcessObservation("stale", "process_zombie")
     if not math.isclose(current_create_time, create_time, rel_tol=0.0, abs_tol=0.001):
         return HostProcessObservation("stale", "identity_mismatch")
-    if expected_tid is None:
-        return HostProcessObservation("live", "identity_match")
-    try:
-        cmdline = process.cmdline()
-    except (psutil.AccessDenied, psutil.Error, AttributeError, OSError):
-        cmdline = []
-    title = cmdline[0] if cmdline and isinstance(cmdline[0], str) else ""
-    try:
-        short_tid = re.escape(tid_short_form(expected_tid))
-    except ValueError:
-        return HostProcessObservation("live", "identity_match_title_unconfirmed")
-    if re.match(
-        rf"^weft-[A-Za-z0-9_-]+-{short_tid}:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+",
-        title,
-    ):
-        return HostProcessObservation("live", "identity_match_title_match")
-    return HostProcessObservation("live", "identity_match_title_unconfirmed")
+    return HostProcessObservation("live", "identity_match")

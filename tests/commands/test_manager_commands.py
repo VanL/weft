@@ -45,7 +45,7 @@ from weft.core.service_convergence import (
     project_manager_service_record,
 )
 from weft.core.task_state import task_state_queue_name
-from weft.helpers import iter_queue_json_entries, process_create_time
+from weft.helpers import encode_tid, iter_queue_json_entries, process_create_time
 from weft.liveness.models import HostProcessObservation, RuntimeLiveness
 
 pytestmark = [pytest.mark.shared]
@@ -1717,10 +1717,14 @@ def test_stop_command_rewrites_timeout_message(
     assert message == "Manager 1761000000000000001 did not stop within 0.1s"
 
 
-def test_stop_command_writes_stop_for_active_manager(tmp_path: Path) -> None:
+@pytest.mark.parametrize("spelling", ["full", "encoded"])
+def test_stop_command_writes_stop_for_active_manager(
+    tmp_path: Path, spelling: str
+) -> None:
     context_root = prepare_project_root(tmp_path / "ctx")
     context = build_context(context_root)
     tid = "1761000000000000001"
+    selector = tid if spelling == "full" else encode_tid(tid)
 
     registry_queue = Queue(
         WEFT_SERVICES_REGISTRY_QUEUE,
@@ -1740,7 +1744,7 @@ def test_stop_command_writes_stop_for_active_manager(tmp_path: Path) -> None:
 
     with pytest.raises(WeftError) as caught:
         manager_cmd.cmd_manager_stop(
-            tid=tid, force=False, timeout=0.1, context=context_root
+            tid=selector, force=False, timeout=0.1, context=context_root
         )
     message = str(caught.value)
 

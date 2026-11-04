@@ -21,7 +21,7 @@ from weft.core import task_evidence
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 pytestmark = [pytest.mark.shared]
 
@@ -219,7 +219,7 @@ def _write_current_snapshot(ctx: Any, taskspec: dict[str, Any]) -> None:
             json.dumps(
                 {
                     "full": tid,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "terminal": False,
                     "name": taskspec["name"],
                     "runtime_handle": None,
@@ -247,7 +247,7 @@ def _write_dead_runtime_mapping(ctx: Any, tid: str) -> None:
             json.dumps(
                 {
                     **snapshot,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "full": tid,
                     "runner": "host",
                     "timestamp": time.time_ns(),
@@ -1115,7 +1115,7 @@ def test_terminal_projection_authority_and_broker_observation_time(
             json.dumps(
                 {
                     "full": tid,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "terminal": True,
                     "runtime_handle": None,
                     "observation": config.to_payload(),

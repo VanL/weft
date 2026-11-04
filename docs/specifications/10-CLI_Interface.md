@@ -580,27 +580,36 @@ Current behavior:
   [SB-0.2] string; the nested PONG body, including its Unix-clock `timestamp`,
   is opaque and unchanged, and the Python command result keeps `observed_at`
   as `int | None`
-- `weft task tid` resolves short TIDs from namespace names, PID lookups
-  from newest-valid snapshots, and full-to-short reverse lookups arithmetically.
+- `weft task tid` decodes an encoded TID to its full TID, returns a full TID
+  unchanged, resolves PID lookups from newest-valid snapshots, and encodes a
+  full TID with `--reverse`; decoding and encoding are arithmetic and read no
+  queue.
 
-Short-ID candidates are every nonempty `weft.state.tasks.<tid>` queue with a
-canonical 19-ASCII-decimal suffix, even if its rows are all malformed. Ignore
-malformed suffixes. A short matching more than one candidate is ambiguous:
-resolution fails with the candidate full TIDs; no command silently selects one.
-Every batch control path, including Python `stop_many`/`kill_many`, resolves
-all IDs before writing any control message. Derive shorts from suffixes using
-[OBS.5]; stored `short` remains required payload shape, not resolution authority.
-A full-ID lookup goes directly to that task's state queue. Names alone grant
-neither control authorization nor runtime/lifecycle evidence.
+Every CLI argument that names a task or a Manager by TID, except
+`task tid --reverse` (which takes a full TID and encodes it), accepts the
+canonical 19-ASCII-decimal full TID or the 13-character encoded TID of
+[OBS.5], in any case, with surrounding whitespace and one leading `T`
+removed (the `task` commands also keep their existing removal of repeated
+leading `T`s); both spellings decode to the same TID. On the `task` commands any other
+spelling, including the ten-digit short form of earlier releases, is not a
+TID: the command fails with its invalid- or unknown-TID diagnostic (exit 2)
+without a traceback and writes no control message. `weft result` keeps its
+existing acceptance of other decimal strings. No TID input is ambiguous, so
+there is no candidate search and no ambiguity error. A TID lookup goes directly to that task's state queue.
+Names alone grant neither control authorization nor runtime/lifecycle
+evidence.
 
 Implementation plans: `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`), `2026-08-31-short-tid-derivation-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 
-_Implementation mapping_: `weft/helpers/__init__.py::tid_short_form` owns
-short-form derivation; `weft/core/task_state.py` owns namespace discovery and
-suffix-bound newest-valid snapshot reads; `weft/commands/tasks.py::resolve_full_tid` and
-`weft/commands/system.py::_resolve_tid_filters` reject collisions. Task
-batch controls preflight resolution in `stop_tasks`, `kill_tasks`, and
-`_task_control_result`.
+_Implementation mapping_: `weft/helpers/__init__.py::encode_tid` and
+`weft/helpers/__init__.py::decode_tid` own the two TID spellings;
+`weft/commands/submission.py::normalize_tid` is the one TID canonicalization
+function and the only production caller of `decode_tid`;
+`weft/commands/tasks.py::resolve_full_tid`,
+`weft/commands/tasks.py::_command_tid`, `weft/commands/result.py`, and the
+Manager and prune selector mappings in `weft/commands/manager.py` and
+`weft/commands/prune.py` call it;
+`weft/core/task_state.py` owns suffix-bound newest-valid snapshot reads.
 
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
   or a name-pattern subset. A genuinely unknown TID is rejected before a
@@ -1093,6 +1102,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CLI-1.1.1], [CLI-1.3]).
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
 

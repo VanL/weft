@@ -213,6 +213,8 @@ Bare-TID callers use the task-specific discovery boundary in [MF-5].
 
 Full-TID `client.tasks.status(tid)` and `client.task(tid).snapshot()` (including retained accepted handles), and their command/CLI point-status adapters, expose submission custody under [MF-5] before task-state publication. `client.tasks.terminal_snapshot(tid, timeout=...)` and `Task.terminal_snapshot(timeout=...)` expose the same custody through their existing return types. Their timeout bounds terminal waiting; final observation may require additional backend I/O under [MF-5]. No new submission or observation method is required.
 
+`client.task(tid)` accepts the canonical full TID or the 13-character encoded TID of [OBS.5], in any case, with surrounding whitespace and one leading `T` removed, and canonicalizes it at that boundary through `weft/commands/submission.py::normalize_tid`, the one TID canonicalization function, so the returned `Task` carries the full TID; any other spelling raises `InvalidTID`.
+
 Custody-only point snapshots use status `queued`/`reserved`, event and reconciliation classification `submission_queued`/`submission_reserved`, the TID as fallback name, empty metadata, absent optional runtime/lifecycle fields and `last_timestamp=0`. Custody-only terminal snapshots use the same status, source `spawn_queue`/`manager_reserved`, metadata classification `submission_queued`/`submission_reserved`, `terminal=False`, `observed_at=None`, empty acknowledgement targets and no result/error fields. They expose neither spawn payload nor reserved queue names. These statuses are additive public observation values, not new TaskSpec states. A point query may see an accepted request before bulk inventory sees a task publication.
 
 `client.tasks.runtime_liveness(tid, *, timeout=2.0)` and
@@ -221,10 +223,10 @@ check and return a frozen `RuntimeLivenessSnapshot`, exported from `weft.client`
 and backed by `weft.commands.types`. Both delegate to one typed-error command
 owner, `weft/commands/tasks.py::task_runtime_liveness`. The default uses
 `LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS`, not a new constant. Only an unprefixed canonical 19-character ASCII decimal full TID is accepted;
-whitespace, a leading `T`, short IDs and zero are rejected. Validate spelling
+whitespace, a leading `T`, the encoded TID of [OBS.5] and zero are rejected. Validate spelling
 with `is_task_tid` and range with `normalize_exact_message_id`, requiring a
 positive value; translate failure to `InvalidTID` before any probe, without
-short-TID lookup. Unlike terminal-snapshot normalization, invalid input raises
+decoding another spelling. Unlike terminal-snapshot normalization, invalid input raises
 rather than returning a synthetic missing result. Timeout must be finite and positive (booleans are
 invalid), otherwise raise `CommandUsageError`. Calling this method is the
 explicit opt-in; there is no passive mode, automatic PING, new CLI verb, or new
@@ -581,6 +583,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.
 - [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.

@@ -31,12 +31,13 @@ from typing import Any, cast
 
 import psutil
 
-from simplebroker import DEFAULT_CONFIG, Config, Queue
+from simplebroker import DEFAULT_CONFIG, Config, Queue, format_message_id
 from simplebroker.ext import BrokerError
 from weft._constants import (
     ATOMIC_WRITE_RETRY_ATTEMPTS,
     ATOMIC_WRITE_RETRY_INTERVAL,
-    TASKSPEC_TID_SHORT_LENGTH,
+    TASKSPEC_TID_ENCODED_LENGTH,
+    TASKSPEC_TID_ENCODING_ALPHABET,
     VERIFIED_PROCESS_EXIT_POLL_INTERVAL,
     WEFT_SPAWN_REQUESTS_QUEUE,
     resolve_runtime_config,
@@ -49,7 +50,7 @@ from .container_detection import (
 from .container_detection import (
     detect_container_runtime as detect_container_runtime,
 )
-from .message_ids import is_task_tid
+from .message_ids import is_task_tid, normalize_exact_message_id
 
 # Receiver imports must not read ambient config before JSON restoration.
 _config: Config | None = None
@@ -129,21 +130,61 @@ def pid_matches_create_time(pid: int, create_time: float | None) -> bool:
     return math.isclose(current_create_time, create_time, rel_tol=0.0, abs_tol=0.001)
 
 
-def tid_short_form(tid: str) -> str:
-    """Derive the display short form from a full 19-digit task ID.
+def encode_tid(tid: str) -> str:
+    """Encode a full task ID as its 13-character Crockford base32 spelling.
+
+    The TID is one opaque integer in 0 through 2^63 - 1; the encoding is a
+    bijection on that range, most significant digit first, uppercase, with no
+    checksum. Producers render the encoded TID only through this function.
 
     Raises:
-        ValueError: The input is not a 19-digit decimal task ID.
+        ValueError: The input is not a 19-digit decimal task ID in the exact
+            SimpleBroker message-ID range.
 
     Spec: docs/specifications/07-System_Invariants.md [OBS.5];
         docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
     """
     if not is_task_tid(tid):
         raise ValueError("tid must be a 19-digit decimal task ID")
-    value = int(tid)
-    grain = value >> 12
-    counter = value & 0xFFF
-    return f"{(grain + counter * 2_441_406) % 10**10:0{TASKSPEC_TID_SHORT_LENGTH}d}"
+    value = normalize_exact_message_id(tid)
+    chars = []
+    for _ in range(TASKSPEC_TID_ENCODED_LENGTH):
+        value, digit = divmod(value, 32)
+        chars.append(TASKSPEC_TID_ENCODING_ALPHABET[digit])
+    return "".join(reversed(chars))
+
+
+def decode_tid(text: str) -> str:
+    """Decode a full or encoded task ID to the canonical 19-digit full TID.
+
+    A full TID is returned unchanged after its range check. An encoded TID is
+    accepted in any case; this is the one case-canonicalization point, and in
+    production only ``weft/commands/submission.py::normalize_tid`` calls it.
+    Neither whitespace nor a leading ``T`` is stripped here.
+
+    Raises:
+        ValueError: The input is neither a full TID nor a 13-character encoded
+            TID in the exact SimpleBroker message-ID range.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.5];
+        docs/specifications/10-CLI_Interface.md [CLI-1.2.3].
+    """
+    if is_task_tid(text):
+        normalize_exact_message_id(text)
+        return text
+    if not (
+        isinstance(text, str)
+        and len(text) == TASKSPEC_TID_ENCODED_LENGTH
+        and text.isascii()
+    ):
+        raise ValueError("not a full or encoded task ID")
+    value = 0
+    for char in text.upper():  # canonicalize case at the boundary [OBS.5]
+        digit = TASKSPEC_TID_ENCODING_ALPHABET.find(char)
+        if digit < 0:
+            raise ValueError("not a full or encoded task ID")
+        value = value * 32 + digit
+    return format_message_id(value)
 
 
 def live_host_processes_from_handle(

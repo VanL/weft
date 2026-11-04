@@ -37,7 +37,7 @@ from weft.core.task_evidence import (
 )
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 from ._boundary import typed_command_errors
 from ._resources import command_resource_scope
@@ -144,7 +144,7 @@ def _task_snapshot_event(
     if snapshot is None:
         snapshot = TaskSnapshot(
             tid=normalized_tid,
-            tid_short=tid_short_form(normalized_tid),
+            tid_short=encode_tid(normalized_tid),
             name=normalized_tid,
             status="unknown",
             return_code=None,

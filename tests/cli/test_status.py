@@ -33,7 +33,7 @@ from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec.transport import validate_taskspec_payload
-from weft.helpers import process_create_time, tid_short_form
+from weft.helpers import encode_tid, process_create_time
 
 pytestmark = [pytest.mark.shared]
 
@@ -299,7 +299,7 @@ def test_status_reports_running_task_json(workdir: Path) -> None:
         "event": "work_started",
         "status": "running",
         "tid": tid,
-        "tid_short": tid_short_form(tid),
+        "tid_short": encode_tid(tid),
         "timestamp": started,
         "taskspec": taskspec,
     }
@@ -348,7 +348,7 @@ def test_bulk_status_reports_last_running_projection_for_dead_host(
             "event": "task_started",
             "status": "running",
             "tid": tid,
-            "tid_short": tid_short_form(tid),
+            "tid_short": encode_tid(tid),
             "timestamp": started,
             "taskspec": taskspec,
         },
@@ -358,7 +358,7 @@ def test_bulk_status_reports_last_running_projection_for_dead_host(
         json.dumps(
             {
                 **task_observation_fields(context, tid),
-                "short": tid_short_form(tid),
+                "short": encode_tid(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": _host_runtime_handle(999_999_996),
@@ -406,7 +406,7 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(
             "event": "task_started",
             "status": "running",
             "tid": tid,
-            "tid_short": tid_short_form(tid),
+            "tid_short": encode_tid(tid),
             "timestamp": started,
             "taskspec": taskspec,
         },
@@ -416,7 +416,7 @@ def test_task_status_process_json_reports_dead_pid_stale_liveness(
         json.dumps(
             {
                 **task_observation_fields(context, tid),
-                "short": tid_short_form(tid),
+                "short": encode_tid(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": {
@@ -473,7 +473,7 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
             "activity": "activity-sentinel",
             "waiting_on": "dependency-sentinel",
             "tid": tid,
-            "tid_short": tid_short_form(tid),
+            "tid_short": encode_tid(tid),
             "timestamp": started,
             "taskspec": taskspec,
         },
@@ -483,7 +483,7 @@ def test_task_status_process_plain_preserves_activity_waiting_and_live_pids(
         json.dumps(
             {
                 **task_observation_fields(context, tid),
-                "short": tid_short_form(tid),
+                "short": encode_tid(tid),
                 "full": tid,
                 "runner": "host",
                 "runtime_handle": {

@@ -778,8 +778,8 @@ Every task receives a unique 64-bit SimpleBroker timestamp with nanosecond
 magnitude and the low 12 bits reserved for a logical counter, typically 19 digits:
 
 - **Full TID**: `1837025672140161024` (Unique task ID)
-- **Short TID**: `2595737344` (ten zero-padded digits folded from the physical
-  grain and logical counter per [OBS.5](docs/specifications/07-System_Invariants.md))
+- **Encoded TID**: `1JZKD3PKK0000` (13 Crockford base32 characters; decodes
+  back to the full TID per [OBS.5](docs/specifications/07-System_Invariants.md))
 - Used for correlation across queues and process titles
 - Monotonic within a context, format-compatible with time.time_ns()
 - The spawn-request message ID becomes the task TID for the full lifecycle
@@ -845,8 +845,7 @@ slow refresh work can delay discovery. Unknown results remain in memory for
 five minutes before permitting retirement, still subject to the forty-minute
 minimum row age; validated terminal projections additionally satisfy the
 configured observation minimum. A process restart resets unknown deadlines. Exact deletion keeps
-newer concurrent publications intact. Short-ID resolution uses queue names;
-status and control require valid snapshots and their existing evidence checks. Runtime extensions own their probes through the
+newer concurrent publications intact. Status and control require valid snapshots and their existing evidence checks. Runtime extensions own their probes through the
 process-local liveness registry. Disable this service with
 `WEFT_LIVENESS_MONITOR_ENABLED=0`.
 
@@ -915,8 +914,8 @@ Tasks update their process title for observability:
 
 ```bash
 $ ps aux | grep weft
-weft-proj-2595737344:mytask:running
-weft-proj-2598178750:manager:completed
+weft-proj-1JZKD3PKK0000:mytask:running
+weft-proj-1JZKD3PKK0400:manager:completed
 ```
 
 Format: `weft-{context_short}-{short_tid}:{name}:{status}[:details]`
@@ -1195,7 +1194,7 @@ $ weft run echo "start"
 
 # Verify running
 $ ps aux | grep weft
-weft-proj-0001234567:file-watcher:running
+weft-proj-1JZKD3PKK0800:file-watcher:running
 ```
 
 ### Resource-Constrained Execution

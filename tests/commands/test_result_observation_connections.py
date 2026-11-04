@@ -23,7 +23,7 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_evidence import observation_config_from_taskspec
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 pytestmark = [pytest.mark.shared]
 _TID = "1780000000000000012"
@@ -185,7 +185,7 @@ def test_result_wait_reuses_connections_and_sees_independent_late_write(
                 json.dumps(
                     {
                         "full": _TID,
-                        "short": tid_short_form(_TID),
+                        "short": encode_tid(_TID),
                         "terminal": False,
                         "runtime_handle": None,
                         "observation": wire_config,

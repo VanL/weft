@@ -74,7 +74,7 @@ from weft.core.taskspec import (
     TaskSpec,
 )
 from weft.ext import RunnerHandle
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 PROCESS_SCRIPT = str((Path(__file__).resolve().parent / "process_target.py").resolve())
 _launcher_wait_calls: list[float | None] = []
@@ -2282,7 +2282,7 @@ def test_base_task_rejects_duplicate_queue_roles_before_broker_side_effects(
     assert right_role in message
     assert role_values[left_role if right_role != "reserved" else right_role] in message
     assert db_path.exists() is False
-    tid_short = tid_short_form(tid)
+    tid_short = encode_tid(tid)
     assert not any(tid_short in thread.name for thread in threading.enumerate())
 
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.sample_targets import wait_for_file
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 
 def _submit_task(workdir: Path, harness: WeftTestHarness) -> str:
@@ -68,8 +70,89 @@ def test_task_tid_reverse(workdir: Path, weft_harness: WeftTestHarness) -> None:
 
     rc, out, err = run_cli("task", "tid", "--reverse", tid, cwd=workdir)
     assert rc == 0
-    assert out.strip() == tid_short_form(tid)
+    assert out.strip() == encode_tid(tid)
     assert err == ""
+
+
+def _spell(tid: str, spelling: str) -> str:
+    encoded = encode_tid(tid)
+    if spelling == "full":
+        return tid
+    if spelling == "encoded":
+        return encoded
+    if spelling == "encoded-lower":
+        return encoded.lower()
+    if spelling == "encoded-mixed":
+        return "".join(
+            char.lower() if index % 2 else char for index, char in enumerate(encoded)
+        )
+    assert spelling == "T-encoded"
+    return "T" + encoded
+
+
+@pytest.mark.parametrize(
+    "spelling", ["full", "encoded", "encoded-lower", "encoded-mixed", "T-encoded"]
+)
+def test_encoded_and_full_tid_arguments_name_the_same_task(
+    workdir: Path, weft_harness: WeftTestHarness, spelling: str
+) -> None:
+    """Every accepted spelling names the same task [CLI-1.2.3], [OBS.5]."""
+
+    sentinel = f"sentinel-{spelling}"
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--function",
+        "tests.tasks.sample_targets:echo_payload",
+        "--arg",
+        sentinel,
+        cwd=workdir,
+        harness=weft_harness,
+    )
+    assert rc == 0, err
+    tid = out.strip()
+    weft_harness.register_tid(tid)
+    weft_harness.wait_for_completion(tid)
+    argument = _spell(tid, spelling)
+    if spelling in {"encoded-lower", "encoded-mixed"}:
+        assert argument != encode_tid(tid)
+
+    rc, out, err = run_cli("task", "status", argument, "--json", cwd=workdir)
+    assert rc == 0, err
+    assert json.loads(out)["tid"] == tid
+
+    rc, out, err = run_cli("task", "tid", argument, cwd=workdir)
+    assert rc == 0, err
+    assert out.strip() == tid
+
+    # `weft result` consumes the row, so each task is read exactly once.
+    rc, out, err = run_cli("result", argument, cwd=workdir)
+    assert rc == 0, err
+    assert sentinel in out
+
+
+def test_tid_argument_probes(workdir: Path, weft_harness: WeftTestHarness) -> None:
+    """Rejected TID spellings exit 2 with a diagnostic and no traceback."""
+
+    probes = [
+        ("task", "status", "0123456789"),
+        ("task", "status", "1JZKD3PKK000I"),
+        ("task", "status", "8000000000000"),
+        ("task", "status", ""),
+        ("task", "tid", "--reverse", "9999999999999999999"),
+        ("task", "stop", "0123456789"),
+        ("result", "1JZKD-PKK0000"),
+    ]
+    for args in probes:
+        rc, out, err = run_cli(*args, cwd=workdir, harness=weft_harness)
+        assert rc == 2, (args, rc, out, err)
+        assert "Traceback" not in err, (args, err)
+        assert (out + err).strip(), args
+    queue = weft_harness.context.queue("T0123456789.ctrl_in", persistent=False)
+    try:
+        assert queue.peek_many() == []
+    finally:
+        queue.close()
 
 
 def test_task_ping_outputs_extended_pong_json(

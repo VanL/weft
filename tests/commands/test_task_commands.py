@@ -53,10 +53,10 @@ from weft.core.tasks import Consumer
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
+    encode_tid,
     iter_queue_json_entries,
     pid_is_live,
     process_create_time,
-    tid_short_form,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -559,6 +559,14 @@ def test_canonical_task_control_records_invalid_explicit_tid_and_continues(
     assert result.accepted == (valid_tid,)
     assert result.failures[0].tid == "not-a-tid"
     assert result.failures[0].error_type == "InvalidTID"
+    # The boundary itself canonicalizes every encoded spelling [OBS.5].
+    encoded = encode_tid(valid_tid)
+    mixed = "".join(
+        char.lower() if index % 2 else char for index, char in enumerate(encoded)
+    )
+    for spelling in (encoded, encoded.lower(), mixed, "T" + encoded):
+        assert task_cmd._command_tid(spelling) == valid_tid
+    assert encoded.lower() != encoded and mixed != encoded
 
 
 def test_canonical_task_control_preserves_duplicate_invalid_requests(
@@ -604,7 +612,7 @@ def test_canonical_task_control_pattern_selects_matching_active_tasks(
     assert result.accepted == (tids[0],)
 
 
-def test_canonical_task_tid_returns_full_tid_and_rejects_ambiguous_selection(
+def test_canonical_task_tid_returns_full_tid_and_rejects_multiple_selectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from weft._exceptions import CommandUsageError
@@ -612,9 +620,9 @@ def test_canonical_task_tid_returns_full_tid_and_rejects_ambiguous_selection(
     full_tid = "1777000000000000128"
     monkeypatch.setattr(task_cmd, "resolve_tid", lambda **kwargs: full_tid)
 
-    assert task_cmd.cmd_task_tid(tid="00128") == full_tid
+    assert task_cmd.cmd_task_tid(tid=encode_tid(full_tid)) == full_tid
     with pytest.raises(CommandUsageError, match="exactly one"):
-        task_cmd.cmd_task_tid(tid="00128", pid=12)
+        task_cmd.cmd_task_tid(tid=encode_tid(full_tid), pid=12)
 
 
 class MonitorStoreReadSignal(BaseException):
@@ -772,7 +780,7 @@ def _write_observation(ctx: WeftContext, tid: str, *, pipeline: bool = False) ->
             json.dumps(
                 {
                     "full": tid,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "runtime_handle": None,
                     "observation": config.to_payload(),
                 }
@@ -1412,7 +1420,7 @@ def test_await_control_surface_uses_queue_monitor(
             None,
             task_cmd.system_cmd.TaskSnapshot(
                 tid=tid,
-                tid_short=tid_short_form(tid),
+                tid_short=encode_tid(tid),
                 name="task-func",
                 status="completed",
                 event="work_completed",
@@ -1492,7 +1500,7 @@ def test_await_control_surface_does_not_promote_kill_ack_to_terminal(
         "_task_status",
         lambda *_args, **_kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name="task-func",
             status="running",
             event="task_started",
@@ -1570,7 +1578,7 @@ def test_observe_control_envelopes_is_peek_only_after_cursor(
 def _running_control_snapshot(tid: str) -> task_cmd.system_cmd.TaskSnapshot:
     return task_cmd.system_cmd.TaskSnapshot(
         tid=tid,
-        tid_short=tid_short_form(tid),
+        tid_short=encode_tid(tid),
         name="task-func",
         status="running",
         event="task_started",
@@ -1993,7 +2001,7 @@ def test_kill_tasks_does_not_count_runner_success_while_observed_pid_lives(
         del timeout
         return mapping_payload, task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name="task-func",
             status="running",
             event="task_started",
@@ -2112,7 +2120,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name="docker-task",
             status="cancelled",
             event="control_stop",
@@ -2181,7 +2189,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name="host-task",
             status="running",
             event="work_started",
@@ -2244,7 +2252,7 @@ def test_kill_tasks_does_not_force_terminal_consumer_for_external_runner(
         "task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
-            tid_short=tid_short_form(tid),
+            tid_short=encode_tid(tid),
             name="sandbox-task",
             status="killed",
             event="control_kill",

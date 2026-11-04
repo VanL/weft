@@ -7,15 +7,22 @@ Spec references:
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from simplebroker import format_message_id
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
-from weft._exceptions import ControlRejected, ManagerNotRunning, ManagerStartFailed
+from weft._exceptions import (
+    ControlRejected,
+    InvalidTID,
+    ManagerNotRunning,
+    ManagerStartFailed,
+)
 from weft.commands._boundary import typed_command_errors
 from weft.commands.serve import _serve_manager_context
+from weft.commands.submission import normalize_tid
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -259,6 +266,9 @@ def cmd_manager_stop(
             raise ManagerNotRunning("Active manager record is missing a TID")
         tid = record_tid
     else:
+        # An unknown spelling keeps the existing not-found path [CLI-1.2.3].
+        with suppress(InvalidTID):
+            tid = normalize_tid(tid)
         record = manager_runtime.manager_record(resolved, tid)
 
     stop_manager(resolved, tid, force=force, timeout=timeout, _record=record)
@@ -309,6 +319,9 @@ def cmd_manager_status(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
 
+    # An unknown spelling keeps the existing not-found path [CLI-1.2.3].
+    with suppress(InvalidTID):
+        tid = normalize_tid(tid)
     record = manager_runtime.manager_record(build_context(context), tid)
     if record is None:
         raise ManagerNotRunning(f"Manager {tid} not found")

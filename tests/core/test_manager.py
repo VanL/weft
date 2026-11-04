@@ -122,7 +122,7 @@ from weft.core.taskspec import (
     StateSection,
     TaskSpec,
 )
-from weft.helpers import ContainerRuntimeDetection, process_create_time
+from weft.helpers import ContainerRuntimeDetection, decode_tid, process_create_time
 from weft.liveness.models import HostProcessObservation
 
 AUTOSTART_PIPELINE_PROGRESS_TIMEOUT = 60.0
@@ -1864,6 +1864,7 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
     assert event["schema"] == "weft.manager_serve_log"
     assert event["schema_version"] == 1
     assert event["manager_tid"] == unique_tid
+    assert decode_tid(str(event["manager_tid_short"])) == event["manager_tid"]
     assert event["configured_level"] == "debug"
     assert event["required_level"] == "info"
     assert event["component"] == "manager"

@@ -38,7 +38,7 @@ from weft.core.pruning.retention import (
     _append_records,
     _candidate_record,
 )
-from weft.helpers import iter_queue_entries
+from weft.helpers import encode_tid, iter_queue_entries
 
 pytestmark = [pytest.mark.shared]
 
@@ -886,8 +886,11 @@ def test_force_without_apply_is_rejected(tmp_path: Path) -> None:
 def test_force_deletes_active_ping_in_selected_scope(tmp_path: Path) -> None:
     ctx = _context(tmp_path)
     tid = "1770000000000001007"
+    other = "1770000000000001008"
     _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "running"})
+    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": other, "status": "running"})
     ping_id = _write_raw(ctx, f"T{tid}.ctrl_in", CONTROL_PING)
+    other_ping_id = _write_raw(ctx, f"T{other}.ctrl_in", CONTROL_PING)
 
     result = run_retention_prune(
         RetentionPruneConfig(
@@ -903,6 +906,27 @@ def test_force_deletes_active_ping_in_selected_scope(tmp_path: Path) -> None:
     assert result.deleted == 1
     assert ping_id not in _read_ids(ctx, f"T{tid}.ctrl_in")
     assert result.candidates[0].overridden_protections == ("nonterminal_task",)
+
+    # The encoded selector selects by the canonical full TID through both
+    # adapters of the shared prune capability [OBS.5], [CLI-1.2.3].
+    client = WeftClient(context=ctx)
+    for adapter in ("cli", "client"):
+        selected_ping = _write_raw(ctx, f"T{tid}.ctrl_in", CONTROL_PING)
+        options: dict[str, Any] = {
+            "family": "task-local",
+            "apply": True,
+            "force": True,
+            "min_age": 0,
+            "task": [encode_tid(tid)],
+        }
+        pruned = (
+            cmd_system_prune(context=ctx.root, **options)
+            if adapter == "cli"
+            else client.system.prune(**options)
+        )
+        assert pruned.deleted == 1, adapter
+        assert selected_ping not in _read_ids(ctx, f"T{tid}.ctrl_in"), adapter
+        assert other_ping_id in _read_ids(ctx, f"T{other}.ctrl_in"), adapter
 
 
 def test_client_prune_preserves_resolved_directory_and_broker(

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from weft.helpers import tid_short_form
 from weft.liveness import host
 
 pytestmark = [pytest.mark.shared]
@@ -16,48 +15,19 @@ pytestmark = [pytest.mark.shared]
 def test_host_inspection_accepts_matching_non_zombie_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    process = SimpleNamespace(
-        create_time=lambda: 12.5, status=lambda: psutil.STATUS_SLEEPING
-    )
-    monkeypatch.setattr(host.psutil, "Process", lambda _pid: process)
+    def title_read() -> list[str]:
+        raise AssertionError("title must not be read")
 
-    assert host.inspect_host_process(123, 12.5).evidence == "live"
-
-
-@pytest.mark.parametrize(
-    ("title", "reason"),
-    [
-        (
-            f"weft-project-{tid_short_form('1779000000000000001')}:consumer:running",
-            "identity_match_title_match",
-        ),
-        (
-            "weft-project-0000000001:consumer:running",
-            "identity_match_title_unconfirmed",
-        ),
-        ("python worker.py", "identity_match_title_unconfirmed"),
-    ],
-)
-def test_host_inspection_uses_process_title_only_as_corroboration(
-    monkeypatch: pytest.MonkeyPatch,
-    title: str,
-    reason: str,
-) -> None:
     process = SimpleNamespace(
         create_time=lambda: 12.5,
         status=lambda: psutil.STATUS_SLEEPING,
-        cmdline=lambda: [title],
+        cmdline=title_read,
     )
     monkeypatch.setattr(host.psutil, "Process", lambda _pid: process)
 
-    observation = host.inspect_host_process(
-        123,
-        12.5,
-        expected_tid="1779000000000000001",
-    )
-
+    observation = host.inspect_host_process(123, 12.5)
     assert observation.evidence == "live"
-    assert observation.reason == reason
+    assert observation.reason == "identity_match"
 
 
 @pytest.mark.parametrize(

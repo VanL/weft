@@ -42,7 +42,7 @@ from weft.core.monitor.task_monitor import (
     TaskMonitor,
     make_task_monitor_taskspec,
 )
-from weft.helpers import tid_short_form, write_file_atomically
+from weft.helpers import encode_tid, write_file_atomically
 
 from ._boundary import typed_command_errors
 
@@ -275,7 +275,7 @@ def _reduce_task_log(
     for payload, timestamp in queue_entries:
         tid = payload.get("tid", "")
         try:
-            tid_short_form(tid)
+            encode_tid(tid)
         except ValueError:
             continue
         result.events_scanned += 1
@@ -415,7 +415,7 @@ def _build_summary_record(
         {
             "summary_id": summary_id,
             "tid": reduced.tid,
-            "tid_short": tid_short_form(reduced.tid),
+            "tid_short": encode_tid(reduced.tid),
             "name": task_evidence.task_name_from_taskspec(
                 snapshot.taskspec_payload or reduced.taskspec_payload
             ),

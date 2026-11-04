@@ -9,7 +9,7 @@ from weft._constants import TERMINAL_TASK_STATUSES
 from weft.context import WeftContext
 from weft.core.task_evidence import terminal_status_from_event
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 
 def write_task_observation(ctx: WeftContext, event: dict[str, Any]) -> None:
@@ -67,7 +67,7 @@ def write_task_observation(ctx: WeftContext, event: dict[str, Any]) -> None:
         }
         payload = {
             "full": tid,
-            "short": tid_short_form(tid),
+            "short": encode_tid(tid),
             "name": taskspec.get("name", tid),
             "runner": taskspec.get("spec", {}).get("runner", {}).get("name", "host"),
             "terminal": terminal,

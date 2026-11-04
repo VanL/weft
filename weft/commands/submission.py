@@ -58,7 +58,7 @@ from weft.core.taskspec import (
     validate_taskspec_payload,
 )
 from weft.ext import SpecRunInputRequest
-from weft.helpers.message_ids import normalize_exact_message_id
+from weft.helpers import decode_tid
 
 from ._spawn_submission import reconcile_submitted_spawn
 from .specs import resolve_named_spec, resolve_spec_reference
@@ -80,15 +80,25 @@ def _annotate_accepted_submission_error(exc: Exception, tid: str) -> None:
 
 
 def normalize_tid(raw_tid: str) -> str:
-    """Return the canonical numeric TID or raise `InvalidTID`."""
+    """Return the canonical full TID for a full or encoded TID, or raise `InvalidTID`.
+
+    The one TID canonicalization function [OBS.5], [CLI-1.2.3]; every flexible
+    TID lookup boundary passes through it; the strict `runtime_liveness` and
+    `task tid --reverse` boundaries take a full TID only and do not. It strips
+    surrounding whitespace and one leading ``T`` and is the only production
+    caller of ``weft.helpers.decode_tid``.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.5];
+        docs/specifications/10-CLI_Interface.md [CLI-1.2.3];
+        docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
 
     candidate = raw_tid.strip()
     candidate = candidate.removeprefix("T")
     try:
-        normalize_exact_message_id(candidate)
+        return decode_tid(candidate)
     except ValueError as exc:
         raise InvalidTID(f"invalid task id '{raw_tid}'") from exc
-    return candidate
 
 
 def normalize_taskspec(taskspec: TaskSpec | Mapping[str, Any]) -> TaskSpec:

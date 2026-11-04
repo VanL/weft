@@ -324,8 +324,10 @@ formats titles using shared bounds in `weft/_constants.py`;
 ### Process title format [OBS.4]
 
 Process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details]`
-  Context and task-name segments are limited to 8 and 20 ASCII characters respectively;
-  the short TID follows OBS.5; optional details are limited to 15 ASCII characters. When
+  Context and task-name segments are limited to 8 and 17 ASCII characters respectively;
+  the `tid_short` segment is the complete 13-character encoded TID of OBS.5 and is never
+  truncated; optional details are limited to 15 ASCII characters, so the longest supported
+  title is 71 characters. When
   the native buffer has sufficient capacity, the adapter preserves complete titles
   within the formatter's supported bound across initialization and backend handoff,
   including the longest supported status and details. Native buffer limitations may
@@ -337,23 +339,50 @@ Process titles follow `weft-{context_short}-{tid_short}:{name}:{status}[:details
   registration timing follows [CC-2.4]; delayed GUI visibility does not delay the
   initial Unix title.
 
+Rewritable argv span of a spawned task process, measured once by the TID
+display-encoding plan; documentation, not a gate: measured on 2026-11-03:
+darwin (phase 1, initial writer): at least 1024 bytes rewritable (the whole
+1,024-character probe survived, so this is a lower bound); measured on
+2026-11-03: darwin (phase 2, after the padded handoff): 71 bytes rewritable;
+linux: pending: owner-run; win32: pending: owner-run, recorded when run as
+"measured on <date>: win32: readback unavailable on this platform; the title
+budget is not measurable here by this method" if the readback shows the
+unchanged argv. The procedure and the script text are in the plan's Execution
+log.
+
 _Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py`.
 
-- **OBS.5**: The TID short form is exactly ten decimal characters derived
-  from the hybrid timestamp's components: `grain = tid >> 12` (a count of
-  4,096-nanosecond grains; SimpleBroker clears the low 12 bits of
-  `time.time_ns()` and stores the logical counter there), `counter = tid &
-  0xFFF`, and `short = (grain + counter × 2_441_406) mod 10¹⁰`, zero-padded
-  to ten characters. The multiplier is `⌊10¹⁰ / 4096⌋`, so all 4,096
-  counters within one grain remain distinct. `weft/helpers/__init__.py::tid_short_form`
-  owns the derivation; no producer slices digits from the decimal TID.
-  The form is not unique: a short form matching more than one full TID is
-  an ambiguity error per [CLI-1.2.3]. Stored mapping shorts are display
-  metadata; resolution derives the current form from valid namespace suffixes.
-  Short-ID candidates are all nonempty `weft.state.tasks.<tid>` queues with
-  a canonical 19-ASCII-decimal full-TID suffix, including queues containing
-  only malformed rows. Discovery does not read payloads and proves neither
-  snapshot validity nor process liveness. Malformed suffixes are ignored.
+- **OBS.5**: Every rendering of a TID decodes back to the same TID. A TID
+  has exactly two spellings: the canonical 19-ASCII-decimal full TID of
+  [SB-0.2], used in every queue name, and the encoded TID, used wherever a
+  shorter rendering is displayed. The encoded TID is the TID's integer value
+  in Crockford base32 (alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`), most
+  significant digit first, zero-padded to exactly 13 characters, with no
+  checksum and no separators. TIDs lie in SimpleBroker's exact message-ID
+  range, 0 through 2^63 − 1, so the first character is `0` through `7`; the
+  encoding is a bijection on that range, carries the low 12 counter bits in
+  full, and, being fixed-width, sorts in TID order. Producers emit
+  uppercase. A decoder accepts either case, including mixed case, and
+  rejects any other length, any character outside the alphabet (including
+  `I`, `L`, `O`, `U`, and `-`, in either case), and a first character above
+  `7`. Case is canonicalized at the input boundary by one function,
+  `weft/commands/submission.py::normalize_tid`, which every flexible TID
+  lookup boundary passes through (the `task` command resolvers, `weft
+  result`, the Manager stop and status selectors, the prune `--task`
+  selector, and `WeftClient.task`) and which alone calls the decoder; the
+  strict boundaries, `runtime_liveness` (a canonical full TID only) and
+  `task tid --reverse` (a full TID, which it encodes), are the stated
+  exceptions and accept no encoded TID: it
+  decodes an encoded argument, in any case, to the full TID before any
+  other code sees it, so code past the boundary handles only the full TID
+  and the uppercase encoding. The process-title `tid_short` segment,
+  the task-log `tid_short` field, the runtime-snapshot `short` field, and the
+  operational-log `manager_tid_short` field carry the encoded TID; they are
+  display values, never resolution authority. Weft has no lossy TID form, so
+  no TID input is ambiguous and no command searches retained queues to
+  resolve one. `weft/helpers/__init__.py::encode_tid` and
+  `weft/helpers/__init__.py::decode_tid` own the two directions; no producer
+  formats the encoding itself.
   Implementation plans: `2026-08-31-short-tid-derivation-plan` (retired — source 396c3b85; see `docs/plans/README.md`),
   `2026-08-31-registry-custody-contracts-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 ### Task-owned runtime snapshots [OBS.6]
@@ -378,8 +407,8 @@ Current-state readers select the greatest-message-ID valid row: peek
 newest-first, then paginate before the last observed ID until a valid row
 or exhaustion. No fixed malformed-row ceiling may hide valid evidence.
 Multiple rows, including equivalent snapshots, are ordered history, not
-an invariant violation. Names-only discovery and short-ID resolution read
-no payloads; all runtime evidence consumers require a valid snapshot.
+an invariant violation. Names-only discovery reads no payloads; all
+runtime evidence consumers require a valid snapshot.
 A known-TID read visits only that task's queue. Candidate reads deduplicate
 TIDs, read only those queues, and perform no state I/O for an empty set.
 Noncanonical TIDs encountered in candidate evidence contribute no runtime
@@ -455,7 +484,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
 
 ### Process title vocabulary [OBS.8]
 
-Process titles stay within the allowed character vocabulary
+Process titles stay within the allowed character vocabulary. The `tid_short`
+segment is generated rather than sanitized; its Crockford base32 alphabet lies
+inside that vocabulary.
 
 _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py`.
 
@@ -750,8 +781,9 @@ _Implementation mapping_: `weft/core/tasks/liveness_monitor.py::LivenessMonitor.
 - **LIVENESS.R5**: Evidence authority follows
   `RunnerHandle.control.authority`; host identity requires `(pid, create_time)`
   with zombie rejection; extension probes are authoritative for `runner` and
-  `external-supervisor`; titles corroborate and never prove a full TID. Probes
-  are read-only and registration grants no control authority.
+  `external-supervisor`. A process title is observability only ([OBS.4]) and is
+  never liveness evidence. Probes are read-only and registration grants no
+  control authority.
 - **LIVENESS.R6**: Mapping publication stays edge-triggered and append-only. No
   component adds read-before-write, periodic republish, or automatic requeue
   of salvaged rows. Self-healing rests on the owner's next append and the
@@ -1400,6 +1432,7 @@ doc:
 
 ## Related Plans
 
+- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) replaces the lossy short form with the 13-character encoded TID under [OBS.4], [OBS.5], [OBS.6], and [OBS.8], and removes title corroboration from host liveness under [LIVENESS.R5].
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([QUEUE.7]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([QUEUE.7]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MANAGER.18].

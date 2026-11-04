@@ -20,7 +20,7 @@ from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.task_state import task_state_queue_name
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 pytestmark = [pytest.mark.shared]
 
@@ -65,7 +65,7 @@ def test_terminal_projection_without_routes_cannot_collect_result(
             json.dumps(
                 {
                     "full": tid,
-                    "short": tid_short_form(tid),
+                    "short": encode_tid(tid),
                     "terminal": True,
                     "projection": {
                         "version": 1,
@@ -103,7 +103,7 @@ def _observation_snapshot(
 ) -> dict[str, Any]:
     return {
         "full": tid,
-        "short": tid_short_form(tid),
+        "short": encode_tid(tid),
         "terminal": terminal,
         "runtime_handle": None,
         "projection": {

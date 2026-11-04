@@ -33,7 +33,7 @@ from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.taskspec import TaskSpec
-from weft.helpers import iter_queue_json_entries, process_create_time
+from weft.helpers import encode_tid, iter_queue_json_entries, process_create_time
 
 pytestmark = [pytest.mark.shared]
 
@@ -183,6 +183,21 @@ def test_manager_start_and_status(weft_harness: WeftTestHarness) -> None:
     )
     assert rc == 0, (rc, out, err)
     assert err == ""
+    detail = json.loads(out)
+    assert detail.get("tid") == tid
+    assert detail.get("status") == "active"
+
+    rc, out, err = run_cli(
+        "manager",
+        "status",
+        encode_tid(tid),
+        "--context",
+        context_root,
+        "--json",
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
     detail = json.loads(out)
     assert detail.get("tid") == tid
     assert detail.get("status") == "active"

@@ -31,7 +31,7 @@ from weft.commands._task_snapshot_reducer import (
 from weft.context import build_context
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.ext import RunnerHandle
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 
 pytestmark = [pytest.mark.shared]
 
@@ -78,7 +78,7 @@ def _event(
 def _record(**changes: Any) -> FoldedTaskRecord:
     base = FoldedTaskRecord(
         tid=TID,
-        tid_short=tid_short_form(TID),
+        tid_short=encode_tid(TID),
         name="example",
         status="running",
         event="task_started",
@@ -130,10 +130,6 @@ def test_reduce_task_event_rejects_malformed_and_filtered_rows() -> None:
     assert reduce_task_event(None, _event(tid=1), 1, tid_filters=None) is None
     assert reduce_task_event(None, _event(), 1, tid_filters={"not-this-task"}) is None
     assert reduce_task_event(None, _event(), 1, tid_filters={TID}) is not None
-    assert (
-        reduce_task_event(None, _event(), 1, tid_filters={tid_short_form(TID)})
-        is not None
-    )
 
 
 def test_reduce_task_event_preserves_activity_and_terminal_precedence() -> None:
@@ -555,7 +551,7 @@ def test_collector_preserves_exact_compact_snapshot_contract(
     assert len(records) == 1
     assert records[0].snapshot.to_dict() == {
         "tid": TID,
-        "tid_short": tid_short_form(TID),
+        "tid_short": encode_tid(TID),
         "name": "example",
         "status": "running",
         "event": "task_started",

@@ -55,7 +55,7 @@ from weft.core.service_convergence import (
 )
 from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerHandle
-from weft.helpers import iter_queue_json_entries, reload_config, tid_short_form
+from weft.helpers import encode_tid, iter_queue_json_entries, reload_config
 from weft.liveness import registry
 
 pytestmark = [pytest.mark.shared]
@@ -715,7 +715,7 @@ def test_endpoint_prune_preserves_live_duplicate_claimants(tmp_path: Path) -> No
         "1770000000000000033",
     ):
         _write_json(
-            ctx, task_state_queue_name(tid), {"full": tid, "short": tid_short_form(tid)}
+            ctx, task_state_queue_name(tid), {"full": tid, "short": encode_tid(tid)}
         )
     _write_json(
         ctx,
@@ -949,7 +949,7 @@ def test_runtime_prune_reads_only_candidate_state(
         _write_json(
             ctx,
             task_state_queue_name(owner),
-            {"full": owner, "short": tid_short_form(owner)},
+            {"full": owner, "short": encode_tid(owner)},
         )
     if group == "streaming":
         _write_json(

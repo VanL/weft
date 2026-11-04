@@ -67,14 +67,14 @@ from weft.core.service_convergence import (
     discard_v1_service_registry_rows,
     reduce_latest_by_service_owner,
 )
-from weft.core.task_state import latest_task_state_rows, list_task_state_tids
+from weft.core.task_state import latest_task_state_rows
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
+    encode_tid,
     handle_has_live_host_process,
     iter_queue_json_entries,
     pid_is_live,
-    tid_short_form,
 )
 from weft.helpers.message_ids import is_task_tid
 
@@ -198,17 +198,6 @@ def _collect_manager_records(
     )
 
 
-def _read_tid_states(
-    ctx: WeftContext, *, broker: Any | None = None
-) -> dict[str, list[str]]:
-    """Group retained task-state names by derived short form [CLI-1.2.3]."""
-    mapping: dict[str, list[str]] = {}
-    for full in list_task_state_tids(ctx, broker=broker):
-        short = tid_short_form(full)
-        mapping.setdefault(short, []).append(full)
-    return {short: sorted(fulls) for short, fulls in mapping.items()}
-
-
 def _latest_tid_state_entries(
     ctx: WeftContext, tids: Iterable[str] | None = None, *, broker: Any | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -218,22 +207,6 @@ def _latest_tid_state_entries(
             ctx, tids=tids, broker=broker
         ).items()
     }
-
-
-def _resolve_tid_filters(ctx: WeftContext, raw: str | None) -> set[str] | None:
-    if raw is None:
-        return None
-    candidate = raw.strip().lstrip("T")
-    if not candidate:
-        return None
-    if is_task_tid(candidate):
-        return {candidate}
-    matches = _read_tid_states(ctx).get(candidate, [])
-    if len(matches) > 1:
-        raise CommandUsageError(
-            f"Ambiguous short TID {candidate}: {', '.join(matches)}"
-        )
-    return {matches[0]} if matches else {candidate}
 
 
 def _iter_log_events(
@@ -1179,7 +1152,7 @@ def _public_status_event(
     if not isinstance(tid, str):
         return None
     try:
-        tid_short_form(tid)
+        encode_tid(tid)
     except ValueError:
         return None
     taskspec = payload.get("taskspec")

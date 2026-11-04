@@ -78,7 +78,7 @@ from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
 )
-from weft.helpers import iter_queue_json_entries, process_create_time, tid_short_form
+from weft.helpers import encode_tid, iter_queue_json_entries, process_create_time
 from weft.liveness.models import HostProcessObservation
 
 pytestmark = [pytest.mark.shared]
@@ -3908,6 +3908,6 @@ def test_spawn_state_subscription_observes_first_write(tmp_path: Path) -> None:
         context.queue(state_name, persistent=True) as publisher,
     ):
         assert publisher.peek_many() == []
-        publisher.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+        publisher.write(json.dumps({"full": tid, "short": encode_tid(tid)}))
         assert monitor.wait(5.0)
         assert spawn_submission_cmd._mapping_exists_for_tid(context, tid)

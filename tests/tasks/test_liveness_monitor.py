@@ -30,7 +30,7 @@ from weft.core.tasks.liveness_monitor import (
 )
 from weft.core.tasks.service import ServiceTask, ServiceWorkerEvent
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.helpers import tid_short_form
+from weft.helpers import encode_tid
 from weft.liveness.models import LivenessObservation
 from weft.liveness.policy import UnknownDeadlineState
 
@@ -119,7 +119,7 @@ def _taskspec(tid: str, root: Path) -> TaskSpec:
 def _mapping(tid: str) -> dict[str, object]:
     return {
         "full": tid,
-        "short": tid_short_form(tid),
+        "short": encode_tid(tid),
         "terminal": False,
         "hostname": "test",
         "runtime_handle": {

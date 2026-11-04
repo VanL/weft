@@ -205,7 +205,7 @@ class FormatTask(BaseTask):
     def _handle_work_message(self, *args): pass
 obj = object.__new__(FormatTask)
 obj.taskspec = SimpleNamespace(name="abcdefghijklmnopqrst", spec=SimpleNamespace(weft_context="/tmp/projectx"))
-obj.tid_short = "1234567890"
+obj.tid_short = "1HC272C7PQ001"
 fmt = obj._format_process_title
 owner = process_title._ProcessTitle()
 initial = fmt("init")

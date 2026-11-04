@@ -28,6 +28,7 @@ from weft.core.taskspec import (
     encode_taskspec_transport_payload,
     validate_taskspec_payload,
 )
+from weft.helpers import decode_tid
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -163,6 +164,31 @@ def test_pipeline_compiler_preserves_stage_bundle_provenance(tmp_path: Path) -> 
     decoded = decode_taskspec_transport_payload(stage_payload)
     assert decoded.get_bundle_root() == str(bundle_root.resolve())
     assert TASKSPEC_BUNDLE_ROOT_FIELD not in decoded.model_dump(mode="json")
+
+
+def test_pipeline_default_name_carries_the_complete_encoded_tid(
+    tmp_path: Path,
+) -> None:
+    """An unnamed pipeline's default name is ``pipeline-`` plus its encoded TID [OBS.5]."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    _write_json(ctx.weft_dir / "tasks" / "first.json", _task_payload())
+    pipeline = load_pipeline_spec_payload(
+        {"stages": [{"name": "first", "task": "first"}]}
+    )
+
+    compiled = compile_linear_pipeline(
+        pipeline,
+        context=ctx,
+        task_loader=lambda name: _load_task(root, name),
+    )
+
+    assert compiled.runtime.pipeline_name.startswith("pipeline-")
+    assert (
+        decode_tid(compiled.runtime.pipeline_name.removeprefix("pipeline-"))
+        == compiled.runtime.pipeline_tid
+    )
 
 
 def test_pipeline_compiler_assigns_stable_child_tids_by_stage_and_edge_name(

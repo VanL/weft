@@ -81,8 +81,11 @@ TASKSPEC_VERSION: Final[str] = "1.0"
 TASKSPEC_TID_LENGTH: Final[int] = 19
 """Required length for Task ID (19 digits from time.time_ns())."""
 
-TASKSPEC_TID_SHORT_LENGTH: Final[int] = 10
-"""Width of the zero-padded hybrid timestamp short form [OBS.5]."""
+TASKSPEC_TID_ENCODED_LENGTH: Final[int] = 13
+"""Width of the Crockford base32 encoded TID [OBS.5]."""
+
+TASKSPEC_TID_ENCODING_ALPHABET: Final[str] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+"""Crockford base32 alphabet of the encoded TID, without I, L, O, U [OBS.5]."""
 
 # Spec Section Defaults
 # ---------------------
@@ -915,7 +918,8 @@ DEFAULT_REPORTING_INTERVAL: Final = "transition"
 """Default reporting interval. Either 'poll' or 'transition'."""
 
 PROCESS_TITLE_CONTEXT_LENGTH: Final[int] = 8
-PROCESS_TITLE_NAME_LENGTH: Final[int] = 20
+PROCESS_TITLE_NAME_LENGTH: Final[int] = 17
+"""17 so the 13-character encoded TID fits the 71-character title [OBS.4]."""
 PROCESS_TITLE_DETAILS_LENGTH: Final[int] = 15
 PROCESS_TITLE_ONLY_STATUSES: Final[frozenset[str]] = frozenset(
     ("init", "paused", "draining", "stopping")
@@ -932,7 +936,7 @@ PROCESS_TITLE_MAX_LENGTH: Final[int] = (
     len("weft-")
     + PROCESS_TITLE_CONTEXT_LENGTH
     + 1
-    + TASKSPEC_TID_SHORT_LENGTH
+    + TASKSPEC_TID_ENCODED_LENGTH
     + 1
     + PROCESS_TITLE_NAME_LENGTH
     + 1

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,12 +38,20 @@ from ._result_wait import (
     append_public_value,
 )
 from ._streaming import aggregate_public_outputs, process_outbox_message
+from .submission import normalize_tid
 
 
 def _normalize_tid(raw_tid: str) -> str:
+    """Canonicalize a `weft result` TID, keeping its digits-only fallback.
+
+    Spec: docs/specifications/10-CLI_Interface.md [CLI-1.2.3];
+        docs/specifications/07-System_Invariants.md [OBS.5].
+    """
     candidate = raw_tid.strip()
     if not candidate:
         raise ValueError("empty TID")
+    with suppress(InvalidTID):
+        return normalize_tid(raw_tid)
     candidate = candidate.removeprefix("T")
     if not candidate.isdigit():
         raise ValueError(f"invalid task id '{raw_tid}'")

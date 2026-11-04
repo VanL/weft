@@ -10,6 +10,26 @@
 
 ### Changed
 
+- Every TID rendering is now lossless ([OBS.5]): process titles and the
+  `short`, `tid_short`, and `manager_tid_short` values carry the 13-character
+  Crockford base32 encoded TID (for example `1JZKD3PKK0000`), uppercase,
+  instead of the ten-digit folded short form; thread names, default pipeline
+  names, and `weft task tid --reverse` output use it too. The task-name title
+  segment narrows from 20 to 17 characters so titles stay at 71 characters.
+  CLI TID arguments (`weft task ...`, `weft result`, `weft manager stop` and
+  `status`, `weft system prune --task`) and `WeftClient.task` accept the full
+  or encoded TID in any case, canonicalized at the boundary by
+  `weft.commands.submission.normalize_tid`. The ten-digit short form, the
+  retained-queue candidate search, and the "Ambiguous short TID" error are
+  removed, with no compatibility decoder: a ten-digit argument is no longer a
+  TID. Scripts that match ten-digit shorts in `ps` output or JSON, or that use
+  `pgrep -f`/`pkill -f` patterns on task names of 18 to 20 characters, must
+  switch to the encoded form and the 17-character name. The liveness host no
+  longer reads process titles: `weft.liveness.host.inspect_host_process` drops
+  its `expected_tid` keyword and the `identity_match_title_match` and
+  `identity_match_title_unconfirmed` reasons, and a matched identity reports
+  `identity_match`. A task still running under the previous version keeps its
+  old title until it exits and is reported live as before.
 - TaskMonitor no longer registers with the built-in heartbeat service; its
   cycle deadline is its only clock. Cycles keep the heartbeat-live fixed-rate
   period on a grid anchored at the monitor's first cycle start (rather than at

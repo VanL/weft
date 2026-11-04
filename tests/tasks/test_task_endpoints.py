@@ -38,7 +38,7 @@ from weft.core.task_state import (
 )
 from weft.core.tasks import Consumer, HeartbeatTask
 from weft.core.taskspec import TaskSpec
-from weft.helpers import closing_queue_iterator, iter_queue_json_entries, tid_short_form
+from weft.helpers import closing_queue_iterator, encode_tid, iter_queue_json_entries
 
 
 def _entries(queue: Queue) -> list[dict[str, object]]:
@@ -67,7 +67,7 @@ def _endpoint_record(
 def _mark_endpoint_owner_live(ctx: WeftContext, tid: str) -> None:
     queue = ctx.queue(task_state_queue_name(tid), persistent=False)
     try:
-        queue.write(json.dumps({"full": tid, "short": tid_short_form(tid)}))
+        queue.write(json.dumps({"full": tid, "short": encode_tid(tid)}))
     finally:
         queue.close()
 
