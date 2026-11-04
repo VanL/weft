@@ -271,6 +271,116 @@ def test_undurable_internal_launch_blocks_ordinary_reservation_until_checkpoint(
     assert manager._queue_has_pending(source)
 
 
+@pytest.mark.parametrize("entry", ["reconcile", "reap"])
+def test_failed_evidence_read_leaves_custody_and_dispatch_unchanged(
+    manager: Manager, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A failed snapshot read is logged and changes nothing [MA-1.8].
+
+    Custody is held by not deleting the reservation, so a read failure on
+    the periodic reconcile path or the reap path leaves the resident record,
+    the reserved request, and ordinary dispatch exactly as they were.
+    """
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    ordinary_id = int(source.write(request_body()))
+    manager._classify_family_requests()
+    internal = manager._queue(manager._queue_names["internal_inbox"])
+    internal_id = int(internal.write(request_body()))
+    reserved = manager._queue_names["internal_reserved"]
+    assert internal.move_one(reserved, exact_timestamp=internal_id) is not None
+    spec = manager._build_child_spec(json.loads(request_body()), internal_id)
+    assert spec is not None
+    identity = runtime_identity_for_task(
+        spec, manager._db_path, internal=True, config=manager._manager_context().config
+    )
+    request = _ManagerChildLaunchRequest(
+        spec,
+        Consumer,
+        None,
+        None,
+        None,
+        True,
+        internal.name,
+        reserved,
+        internal_id,
+        identity,
+    )
+    manager._checkpoint_admission_launch(request)
+    manager._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(
+            request, multiprocessing.current_process(), time.time_ns()
+        )
+    )
+    assert not manager._startup_feedback
+    assert str(spec.tid) not in manager._scheduler_undurable
+    assert manager._queue_has_pending(source)
+
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    original_peek_many = broker_type.peek_many
+    state_name = f"weft.state.tasks.{spec.tid}"
+
+    def fail_state_read(self: Any, queue: str, *args: Any, **kwargs: Any) -> Any:
+        if queue == state_name:
+            raise BrokerError("injected task-state read failure")
+        return original_peek_many(self, queue, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "peek_many", fail_state_read)
+        manager._admission_refresh_after = 0.0
+        if entry == "reconcile":
+            manager._refresh_scheduler_evidence()
+        else:
+            manager._record_reaped_admission(str(spec.tid))
+
+    assert manager._queue(reserved).peek_one(exact_timestamp=internal_id) is not None
+    assert source.peek_one(exact_timestamp=ordinary_id) is not None
+    assert manager._queue_has_pending(source)
+
+
+def test_failed_bootstrap_checkpoint_keeps_restored_work_undispatched(
+    manager: Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successor whose first checkpoint did not land dispatches nothing.
+
+    Spec: [MA-1.8]; MANAGER.11 ("Failed publication gates further ordinary
+    dispatch"). The bootstrap restores pending work before it publishes;
+    that work must wait until the publication succeeds and the bootstrap
+    completes.
+    """
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    request_id = int(source.write(request_body()))
+    manager._classify_family_requests()
+    assert manager._family_scheduler.pending(request_id) is not None
+    # Become a successor: forget the in-memory scheduler and bootstrap again.
+    manager._family_scheduler = FamilyScheduler()
+    manager._admission_bootstrapped = False
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    original_write = broker_type.write
+    state_name = f"weft.state.tasks.{manager.tid}"
+
+    def fail_checkpoint(self: Any, queue: str, *args: Any, **kwargs: Any) -> Any:
+        if queue == state_name:
+            raise BrokerError("injected bootstrap checkpoint write failure")
+        return original_write(self, queue, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "write", fail_checkpoint)
+        manager._admission_refresh_after = 0.0
+        manager._refresh_scheduler_evidence()
+        assert not manager._admission_bootstrapped
+        assert manager._family_scheduler.pending(request_id) is not None
+        assert not manager._process_queue_message(source.name, set())
+        assert source.peek_one(exact_timestamp=request_id) is not None
+    manager._admission_refresh_after = 0.0
+    manager._refresh_scheduler_evidence()
+    assert manager._admission_bootstrapped
+    assert manager._queue_has_pending(source)
+
+
 @pytest.mark.parametrize("restore", [True, False])
 def test_valid_source_backed_hint_survives_restore_and_repair(
     manager: Manager, restore: bool

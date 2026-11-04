@@ -10,6 +10,13 @@
 
 ### Changed
 
+- The Manager no longer enters an admission-evidence mode when a task-state
+  snapshot read fails during reconciliation or reap: the failure is logged
+  and nothing else changes, since launch custody is held by the retained
+  reservation and checkpoint, not by a dispatch halt ([MA-1.8]). A failed
+  post-launch checkpoint publication still gates dispatch through the
+  undurable set, and a successor still dispatches nothing until its
+  bootstrap, including its first checkpoint publication, completes.
 - The host runner's session modules moved from `weft.core.tasks` to
   `weft.core.runners`: `weft.core.tasks.sessions` is now
   `weft.core.runners.sessions` (its logger name changes with it) and

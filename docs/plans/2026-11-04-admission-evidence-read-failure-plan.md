@@ -1,6 +1,6 @@
 # Admission Evidence: A Failed Read Changes No Mode
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md MANAGER.11
 Superseded by: none
 
@@ -893,4 +893,75 @@ re-litigated.
 
 ## Execution log
 
-(empty until implementation)
+### Implementer, 2026-11-04 (from `3364b7f8`)
+
+Task 0 answers, written before the first edit:
+
+1. A checkpoint write failing with `BrokerError` sets the flag only through
+   the bootstrap: `_register_tid_state` (`base.py` 2415-2423) returns
+   `False`, `_publish_scheduler_checkpoint` (1543-1553) keeps the dirty
+   flag and the undurable membership, and the post-launch caller
+   `_checkpoint_spawned_admission` never raises; `_bootstrap_scheduler_evidence`
+   alone turns that `False` into `RuntimeError` at line 2606, caught at
+   2576.
+2. After a failed snapshot read for a resident, nothing about custody has
+   changed: the record is still in `_scheduler_residents`, the reserved
+   request is still in its reserved queue (only `_ack_launch_custody`, the
+   child reap at 4661, and the `CLEAR` policy branch at 5866 delete one,
+   none of them reached from a failed read), and the last published
+   checkpoint still names the task.
+3. `_reconcile_launch_now` (6081-6103) catches the same classes plus
+   `DatabaseError`, logs "Launch evidence handoff deferred", and continues
+   with no flag, no reorder, and no timer change.
+
+`grep -n "_admission_evidence_unavailable" weft/core/manager.py` at
+`3364b7f8`: 8 lines, 670, 2515, 2522, 2577, 2581, 5478, 5635, 8598, as the
+plan states.
+
+#### Task 2. RED (tests first, no production edit)
+
+Both tests inserted in `tests/core/test_manager_family_maintenance.py`
+after the undurable test, text as in the plan; `ruff format` and
+`ruff check` clean on the module. Run at `3364b7f8` plus the test edit
+with `-n 0 -k "failed_evidence_read or failed_bootstrap_checkpoint"`:
+`test_failed_evidence_read_leaves_custody_and_dispatch_unchanged[reconcile]`
+FAILED, `[reap]` FAILED, both at
+`assert manager._queue_has_pending(source)`;
+`test_failed_bootstrap_checkpoint_keeps_restored_work_undispatched` PASSED.
+Two failed, one passed, as Task 2 requires.
+
+#### Task 3. GREEN
+
+The six removals and the two `not self._admission_bootstrapped` disjuncts
+applied with anchored replacements; the `_record_reaped_admission`
+docstring replaced and its two comment lines deleted; `ruff format`
+collapsed the wake-timer condition to one line.
+`grep -c "_admission_evidence_unavailable" weft/core/manager.py` prints 0.
+`git diff --stat weft/core/manager.py`: 1 file changed, 7 insertions(+),
+22 deletions(-) (the plan's 6/19 figure predates the docstring edit, which
+adds one line and removes three more). Run with
+`-k "failed_evidence_read or failed_bootstrap_checkpoint or undurable_internal_launch"`:
+four PASSED.
+
+#### Task 4. Spec, CHANGELOG, backlink, status
+
+Both Replacement blocks applied verbatim to
+`docs/specifications/03-Manager_Architecture.md` (the [MA-1.8] sentence at
+line 479 after the backlink insertion at line 36); the CHANGELOG bullet
+added at the top of `## [Unreleased]` `### Changed`; plan `Status:` and
+the index row set to `promoted`. `tests/specs/test_plan_metadata.py` 4
+passed; `bin/check-doc-paths` OK, which now checks both Replacement
+blocks for containment; `ruff check .` clean; `ruff format --check .`
+reports three files, all code fences inside older plan documents
+(`docs/plans/2026-11-02-reactor-edge-timer-floors-plan.md` among them),
+none touched by this change; the two edited Python files are formatted.
+`grep -rln "_admission_evidence_unavailable" weft/ tests/ docs/specifications/ CHANGELOG.md`
+finds nothing.
+
+#### Task 5. Final gates (tree `3364b7f8` plus the whole change, before the landing commit)
+
+- `mypy` over the CI set: "Success: no issues found in 486 source files".
+- Full fast suite, `pytest -q -rA`: 6469 passed, 0 failed, 25 skipped,
+  exit 0 (two runs; the first captured no failures, the second added the
+  counts).
+- The per-task and doc gates are recorded under Tasks 2-4 above.

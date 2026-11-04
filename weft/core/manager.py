@@ -667,7 +667,6 @@ class Manager(ServiceTask):
         self._orphan_reserved: dict[str, tuple[str, int]] = {}
         self._admission_bootstrapped = False
         self._admission_refresh_after = 0.0
-        self._admission_evidence_unavailable = False
         self._admission_observation: dict[str, int] = {}
         self._admission_blocked_lanes: set[AdmissionLane] = set()
         self._admission_retry_after_ns = 0
@@ -2509,22 +2508,14 @@ class Manager(ServiceTask):
         return processes
 
     def _record_reaped_admission(self, tid: str) -> None:
-        """Refresh one exited wrapper; evidence failure retains custody without blocking reap [MA-1.8]."""
-        # While unhealthy, bounded maintenance owns recovery. Later reaps keep
-        # their custody and cannot displace the first failed record from retry.
-        if self._admission_evidence_unavailable or tid not in self._scheduler_residents:
+        """Refresh one exited wrapper's evidence; a failed read changes nothing [MA-1.8]."""
+        if tid not in self._scheduler_residents:
             return
         try:
             latest = read_task_state_snapshot(self._manager_context(), tid)
             if latest is not None:
                 self._adopt_scheduler_evidence(tid, latest[1])
         except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
-            self._admission_evidence_unavailable = True
-            self._scheduler_residents = {
-                tid: self._scheduler_residents[tid],
-                **self._scheduler_residents,
-            }
-            self._admission_refresh_after = 0.0
             logger.debug(
                 "Unable to refresh reaped task admission evidence", exc_info=True
             )
@@ -2574,11 +2565,9 @@ class Manager(ServiceTask):
             if self._scheduler_checkpoint_dirty:
                 self._publish_scheduler_checkpoint()
         except (BrokerError, OSError, RuntimeError, ValueError, TypeError, KeyError):
-            self._admission_evidence_unavailable = True
             logger.debug("Unable to reconcile scheduler evidence", exc_info=True)
         else:
             self._admission_bootstrapped = True
-            self._admission_evidence_unavailable = False
         finally:
             self._admission_refresh_after = (
                 time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
@@ -5474,8 +5463,8 @@ class Manager(ServiceTask):
             return False
         if name == self._queue_names.get("inbox"):
             if (
-                self._startup_dispatch_blocked()
-                or self._admission_evidence_unavailable
+                not self._admission_bootstrapped
+                or self._startup_dispatch_blocked()
                 or self._scheduler_undurable
             ):
                 return self._family_classification_pending
@@ -5631,8 +5620,8 @@ class Manager(ServiceTask):
                 return False
             if queue_name == self._queue_names["inbox"]:
                 if (
-                    self._startup_dispatch_blocked()
-                    or self._admission_evidence_unavailable
+                    not self._admission_bootstrapped
+                    or self._startup_dispatch_blocked()
                     or self._scheduler_undurable
                 ):
                     return False
@@ -8592,11 +8581,7 @@ class Manager(ServiceTask):
             timeouts.append(
                 self._timeout_until_ns(self._admission_retry_after_ns, now_ns=now_ns)
             )
-        if (
-            not self._admission_bootstrapped
-            or self._scheduler_residents
-            or self._admission_evidence_unavailable
-        ):
+        if not self._admission_bootstrapped or self._scheduler_residents:
             timeouts.append(max(0.0, self._admission_refresh_after - time.monotonic()))
         return timeouts
 
