@@ -1156,6 +1156,10 @@ class MultiQueueWatcher(BaseWatcher):
         while not self._stop_event.is_set():
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
+                # A strategy return that landed a hair before the deadline
+                # took no evidence; this pass is the deadline return and
+                # makes the deadline read before handing the turn back.
+                self._activity_hint_action(deadline=deadline)
                 return
 
             try:
@@ -1249,7 +1253,35 @@ class MultiQueueWatcher(BaseWatcher):
                 return "return"
             return "continue"
 
+        return self._readiness_action(
+            deadline=deadline,
+            evidence_read=can_carry_evidence,
+            uses_native_activity=uses_native_activity,
+            transient_fallback=transient_fallback,
+        )
+
+    def _readiness_action(
+        self,
+        *,
+        deadline: float | None,
+        evidence_read: bool,
+        uses_native_activity: bool,
+        transient_fallback: bool,
+    ) -> Literal["return", "continue"]:
+        """Decide the hint-free tail: the owner's deadline and readiness scans.
+
+        The deadline is evaluated after the observation read. When this
+        reading is the first to find the deadline reached, the evidence
+        decision above it ran before the deadline and skipped the read, so
+        the deadline return makes its observation read here before the
+        turn is handed back [QUEUE.7].
+
+        Spec: [CC-2.1], [QUEUE.7]
+        """
         deadline_reached = deadline is not None and time.monotonic() >= deadline
+        if deadline_reached and not evidence_read:
+            self._has_pending_observation()
+            return "return"
         if uses_native_activity and not deadline_reached:
             if self._has_pending_messages():
                 self._mark_pending_messages_prechecked()

@@ -192,6 +192,15 @@
   weft 0.9.120: `weft-django 0.9.55`, `weft-docker 0.9.95`,
   `weft-macos-sandbox 0.6.24`, and `weft-microsandbox 0.5.25`.
 
+### Fixed
+
+- A reactor wait that ends at the owner's deadline now makes its
+  observation read even when the strategy woke a hair before the deadline
+  (the clock crossed the deadline between the evidence decision and the
+  deadline check, or on the loop pass after an early return); before, the
+  heartbeat could miss a registration row written just before a short
+  wait ([QUEUE.7]).
+
 ## [0.9.119] - 2026-10-31
 
 ### Fixed

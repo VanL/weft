@@ -30,6 +30,7 @@ from tests.helpers.test_backend import POSTGRES_TEST_BACKEND, active_test_backen
 from tests.helpers.typing import BrokerEnv
 from tests.tasks.test_task_execution import AcquireEntryWitness
 from weft._constants import QUEUE_PRIORITY_INTERNAL, QUEUE_PRIORITY_NORMAL, load_config
+from weft.core.tasks import multiqueue_watcher as multiqueue_watcher_module
 from weft.core.tasks.multiqueue_watcher import (
     MultiQueueWatcher,
     QueueMessageContext,
@@ -347,6 +348,60 @@ def test_hint_free_persistent_return_reads_no_observation(
 
     assert strategy_calls >= 5, strategy_calls
     assert observation_calls <= 2, (observation_calls, strategy_calls)
+
+
+def test_early_strategy_return_before_the_deadline_still_reads_at_the_deadline(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait that ends at the owner's deadline makes the deadline read.
+
+    Spec: [CC-2.1], [QUEUE.7]. A strategy may wake a hair before the
+    owner's deadline (condition waits round to the clock), so the loop
+    finds the deadline passed on its next pass. That pass is the deadline
+    return and must read the observation, not exit silently. Mutation
+    caught: the `remaining <= 0` exit skipping the evidence check (CI run
+    41917203345, `test_heartbeat` KeyError on macOS).
+    """
+
+    db, make_queue = broker_env
+    observation = make_queue("observation.early")
+    watcher = ObservationWatcher(db, observation)
+    observation_results: list[bool] = []
+    original_observation = watcher._has_pending_observation
+
+    def counted_observation() -> bool:
+        result = original_observation()
+        observation_results.append(result)
+        return result
+
+    clock = [100.0]
+
+    def stepping_monotonic() -> float:
+        # Every reading moves the clock: the strategy return lands just
+        # before the deadline and the next loop pass just after it.
+        clock[0] += 0.04
+        return clock[0]
+
+    def early_return(*, timeout: float | None = None) -> None:
+        del timeout
+        if not observation_results[1:]:
+            observation.write("snapshot")
+
+    monkeypatch.setattr(watcher, "_has_pending_observation", counted_observation)
+    monkeypatch.setattr(
+        multiqueue_watcher_module,
+        "time",
+        SimpleNamespace(monotonic=stepping_monotonic),
+    )
+    _stub_hint_free_strategy(monkeypatch, watcher, early_return)
+    try:
+        watcher.wait_for_activity(timeout=0.1)
+    finally:
+        watcher.stop(join=False)
+        observation.close()
+
+    assert observation_results == [False, True], observation_results
 
 
 def test_notification_publication_on_degraded_fallback_is_found_without_a_hint(
