@@ -5,7 +5,10 @@ import gc
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,13 +24,16 @@ from tests.conftest import _register_from_json, run_cli
 from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
     MANAGER_STARTUP_LOG_DIRNAME,
+    SERVICE_TYPE_MANAGED,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext
 from weft.core import manager_runtime
+from weft.core.service_convergence import build_service_owner_payload
 from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerHandle
 from weft.helpers import pid_is_live
@@ -1929,11 +1935,20 @@ def test_harness_diagnostic_failure_preserves_primary_exception(
     assert not harness.root.exists()
 
 
+HEARTBEAT_LAUNCH_WAIT_SECONDS = 60.0
+"""Bound for the Manager's heartbeat service launch to reach the registry."""
+
+
 @pytest.mark.shared
 def test_owned_cli_manager_is_reaped_when_test_body_fails() -> None:
-    """Register ownership before assertions can bypass the explicit CLI stop."""
+    """A failed body still reaps the CLI Manager and the services it launched.
+
+    Services outlive their Manager ([MA-1] item 7), so the heartbeat exits
+    only through the harness's own service stop at cleanup.
+    """
     harness = WeftTestHarness()
     manager_pid: int | None = None
+    heartbeat_pids: list[int] = []
     with pytest.raises(AssertionError, match="injected test body failure"), harness:
         rc, out, err = run_cli(
             "manager",
@@ -1948,10 +1963,59 @@ def test_owned_cli_manager_is_reaped_when_test_body_fails() -> None:
         assert len(records) == 1
         manager_pid = harness._mapping_host_pids(records[0])[0]
         assert pid_is_live(manager_pid)
+        deadline = time.monotonic() + HEARTBEAT_LAUNCH_WAIT_SECONDS
+        while not heartbeat_pids and time.monotonic() < deadline:
+            heartbeat_pids = [
+                pid
+                for processes in harness._live_internal_service_processes().values()
+                for pid, _create_time in processes
+            ]
+            # The launch lands in the registry from another process; there
+            # is no event to block on here.
+            time.sleep(0.1)
+        assert heartbeat_pids, "heartbeat service never launched"
         raise AssertionError("injected test body failure")
     assert manager_pid is not None
     assert not pid_is_live(manager_pid)
+    assert not any(pid_is_live(pid) for pid in heartbeat_pids)
     assert not harness.root.exists()
+
+
+@pytest.mark.shared
+def test_harness_cleanup_terminates_and_records_an_unstoppable_service() -> None:
+    """A live service record the system stop cannot reach is reaped and recorded.
+
+    The record has no control route, so `stop_system` reports it unreachable;
+    the harness then terminates its scoped host PID and both facts appear in
+    the cleanup diagnostics ([TS-0]; [MA-3] system stop).
+    """
+    harness = WeftTestHarness()
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        with harness:
+            tid = manager_runtime.generate_tid(harness.context)
+            payload = build_service_owner_payload(
+                service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=tid,
+                status="active",
+                name="heartbeat-service",
+                runtime_handle=_host_runtime_handle(sleeper.pid),
+            )
+            queue = harness.context.queue(WEFT_SERVICES_REGISTRY_QUEUE)
+            try:
+                queue.write(json.dumps(payload))
+            finally:
+                queue.close()
+        assert sleeper.wait(timeout=HEARTBEAT_LAUNCH_WAIT_SECONDS) is not None
+        diagnostics = harness.cleanup_diagnostics()
+        assert any("unreachable" in entry and tid in entry for entry in diagnostics)
+        assert f"terminated service {tid} pid {sleeper.pid} after system stop" in (
+            diagnostics
+        )
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=10)
 
 
 @pytest.mark.shared

@@ -30,6 +30,7 @@ __all__ = [
     "SubmittedTaskReceipt",
     "SystemLoadResult",
     "SystemStatusSnapshot",
+    "SystemStopResult",
     "SystemTidyResult",
     "TaskEvent",
     "TaskResult",
@@ -438,6 +439,28 @@ class SystemPruneResult:
     deleted: int
     failed: int
     details: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class SystemStopResult:
+    """Outcome of `weft system stop`: the Manager, then the context's services.
+
+    ``manager_tid`` names the Manager stopped, or ``None`` when none was
+    active. ``stopped`` names every internal service TID confirmed stopped;
+    ``escalated`` is the subset that needed host SIGTERM or a forced reap.
+    ``unreachable`` names live service records with no ``ctrl_in`` route,
+    reported and never signalled. ``service_keys`` maps each named TID to its
+    service key.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    manager_tid: str | None
+    stopped: tuple[str, ...]
+    escalated: tuple[str, ...]
+    unreachable: tuple[str, ...]
+    service_keys: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)

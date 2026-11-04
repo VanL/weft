@@ -3,23 +3,38 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
 from tests.conftest import run_cli
 from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    INTERNAL_SERVICE_KEYS,
+    LIVE_SERVICE_STATUSES,
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
+    SERVICE_TYPE_MANAGED,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.cli.app import app
 from weft.commands import TaskMonitorSummary
 from weft.context import WeftContext, build_context
+from weft.core.manager_runtime import generate_tid
+from weft.core.service_convergence import build_service_owner_payload
 from weft.core.task_state import task_state_queue_name
-from weft.helpers import iter_queue_json_entries
+from weft.helpers import iter_queue_json_entries, pid_is_live, process_create_time
 
 pytestmark = [pytest.mark.shared]
 
@@ -495,6 +510,228 @@ def test_system_prune_rejects_invalid_retention_options(workdir: Path) -> None:
 
     assert rc == 2
     assert "--force is only supported for retention prune families" in err
+
+
+SYSTEM_STOP_TEST_WAIT_SECONDS = 60.0
+"""Bound for services to appear and for stopped processes to be reaped."""
+
+
+def _wait_for(predicate: Callable[[], object], *, message: str) -> object:
+    deadline = time.monotonic() + SYSTEM_STOP_TEST_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        # Process exit and registry rows written by other processes have no
+        # event this test can block on; poll on a short bounded interval.
+        time.sleep(0.1)
+    raise AssertionError(f"Timed out waiting for {message}")
+
+
+def _wait_for_exit(pid: int) -> None:
+    _wait_for(lambda: not pid_is_live(pid), message=f"PID {pid} exit")
+
+
+def _live_service_pids(context: WeftContext) -> dict[str, int]:
+    """Map each internal service key to the PID of its latest live registry row."""
+
+    queue = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False)
+    try:
+        latest: dict[str, tuple[int, dict[str, object]]] = {}
+        for payload, timestamp in iter_queue_json_entries(queue):
+            key = payload.get("service_key")
+            if key in INTERNAL_SERVICE_KEYS and (
+                key not in latest or latest[key][0] < timestamp
+            ):
+                latest[str(key)] = (timestamp, payload)
+    finally:
+        queue.close()
+    pids: dict[str, int] = {}
+    for key, (_timestamp, payload) in latest.items():
+        handle = payload.get("runtime_handle")
+        observations = handle.get("observations") if isinstance(handle, dict) else None
+        host_pids = (
+            observations.get("host_pids") if isinstance(observations, dict) else None
+        )
+        if (
+            payload.get("status") in LIVE_SERVICE_STATUSES
+            and isinstance(host_pids, list)
+            and host_pids
+            and pid_is_live(host_pids[0])
+        ):
+            pids[key] = int(host_pids[0])
+    return pids
+
+
+def _start_manager(harness: WeftTestHarness, **env: str) -> int:
+    """Start a Manager through the CLI and return its PID."""
+
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--context",
+        harness.root,
+        cwd=harness.root,
+        env={**os.environ, **env},
+        harness=harness,
+    )
+    assert rc == 0, (rc, out, err)
+    records = harness._list_active_manager_records()
+    assert len(records) == 1
+    return harness._mapping_host_pids(records[0])[0]
+
+
+@pytest.fixture
+def sleeper() -> Iterator[subprocess.Popen[bytes]]:
+    """A live host process that never reads a control queue."""
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        yield process
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _write_fake_service_record(
+    context: WeftContext,
+    process: subprocess.Popen[bytes],
+    *,
+    ctrl_in: bool,
+) -> str:
+    """Publish a live heartbeat registry row and snapshot for ``process``."""
+
+    tid = generate_tid(context)
+    pid = process.pid
+    payload = build_service_owner_payload(
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        service_type=SERVICE_TYPE_MANAGED,
+        owner_tid=tid,
+        status="active",
+        name="heartbeat-service",
+        queues={"ctrl_in": f"T{tid}.ctrl_in"} if ctrl_in else {},
+        runtime_handle={
+            "runner": "host",
+            "kind": "process",
+            "id": str(pid),
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [pid],
+                "host_processes": [
+                    {"pid": pid, "create_time": process_create_time(pid)}
+                ],
+            },
+            "metadata": {},
+        },
+    )
+    _write_message(context, WEFT_SERVICES_REGISTRY_QUEUE, json.dumps(payload))
+    snapshot = {
+        "full": tid,
+        "short": tid[-10:],
+        "hostname": socket.gethostname(),
+        "terminal": False,
+    }
+    _write_message(context, task_state_queue_name(tid), json.dumps(snapshot))
+    return tid
+
+
+def test_system_stop_stops_manager_then_every_internal_service(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """`weft system stop` leaves no Manager or service process and exits 0.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (system stop).
+    """
+
+    manager_pid = _start_manager(
+        weft_harness,
+        WEFT_TASK_MONITOR_ENABLED="1",
+        WEFT_LIVENESS_MONITOR_ENABLED="1",
+    )
+    services = _wait_for(
+        lambda: (
+            pids if len(pids := _live_service_pids(weft_harness.context)) == 3 else None
+        ),
+        message="three live internal services",
+    )
+    assert isinstance(services, dict)
+
+    rc, out, err = run_cli(
+        "system", "stop", "--context", weft_harness.root, cwd=weft_harness.root
+    )
+
+    assert rc == 0, (rc, out, err)
+    assert "Stopped manager" in out
+    for pid in (manager_pid, *services.values()):
+        _wait_for_exit(pid)
+
+
+def test_system_stop_without_manager_stops_live_services(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """With no Manager, `weft system stop` still stops live services, exit 0.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (system stop).
+    """
+
+    manager_pid = _start_manager(weft_harness)
+    heartbeat_pid = _wait_for(
+        lambda: _live_service_pids(weft_harness.context).get(
+            INTERNAL_SERVICE_KEY_HEARTBEAT
+        ),
+        message="a live heartbeat service",
+    )
+    assert isinstance(heartbeat_pid, int)
+    psutil.Process(manager_pid).kill()
+    _wait_for_exit(manager_pid)
+    assert pid_is_live(heartbeat_pid)
+
+    rc, out, err = run_cli(
+        "system", "stop", "--context", weft_harness.root, cwd=weft_harness.root
+    )
+
+    assert rc == 0, (rc, out, err)
+    assert "Stopped manager" not in out
+    assert f"Stopped service {INTERNAL_SERVICE_KEY_HEARTBEAT}" in out
+    _wait_for_exit(heartbeat_pid)
+
+
+def test_system_stop_reports_unreachable_service_without_signalling_it(
+    workdir: Path, sleeper: subprocess.Popen[bytes]
+) -> None:
+    """A live record with no control route is reported, never guessed.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (system stop).
+    """
+
+    context = build_context(spec_context=workdir)
+    tid = _write_fake_service_record(context, sleeper, ctrl_in=False)
+
+    rc, out, err = run_cli("system", "stop", "--context", workdir, cwd=workdir)
+
+    assert rc == 0, (rc, out, err)
+    assert f"Unreachable service {INTERNAL_SERVICE_KEY_HEARTBEAT} {tid}" in err
+    assert sleeper.poll() is None
+
+
+def test_system_stop_force_escalates_a_service_that_ignores_stop(
+    workdir: Path, sleeper: subprocess.Popen[bytes]
+) -> None:
+    """A same-host host-pid service that ignores STOP is escalated and stops.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (system stop).
+    """
+
+    context = build_context(spec_context=workdir)
+    tid = _write_fake_service_record(context, sleeper, ctrl_in=True)
+
+    rc, out, err = run_cli(
+        "system", "stop", "--force", "--context", workdir, cwd=workdir
+    )
+
+    assert rc == 0, (rc, out, err)
+    assert f"Stopped service {INTERNAL_SERVICE_KEY_HEARTBEAT} {tid} (escalated)" in out
+    assert sleeper.wait(timeout=SYSTEM_STOP_TEST_WAIT_SECONDS) is not None
 
 
 def test_system_dump_exports_messages(workdir: Path) -> None:

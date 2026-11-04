@@ -235,7 +235,16 @@ CLIENT_API_PARITY_EXPECTATIONS = {
     ),
     "system": (
         SystemNamespace,
-        {"builtins", "dump", "load", "prune", "status", "task_monitor", "tidy"},
+        {
+            "builtins",
+            "dump",
+            "load",
+            "prune",
+            "status",
+            "stop",
+            "task_monitor",
+            "tidy",
+        },
     ),
 }
 
@@ -2125,6 +2134,7 @@ def test_client_system_task_monitor_probe_creates_missing_checkpoint_dir(
     ("method_name", "command"),
     [
         ("prune", commands.cmd_system_prune),
+        ("stop", commands.cmd_system_stop),
         ("task_monitor", commands.cmd_system_task_monitor),
     ],
 )
@@ -2149,6 +2159,18 @@ def test_client_system_methods_mirror_command_signatures(
     )
 
 
+def test_client_system_stop_mirrors_cli_on_an_empty_context(tmp_path: Path) -> None:
+    """`client.system.stop` returns the CLI's typed outcome [PY-2], [IP-1]."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path))
+
+    result = client.system.stop(timeout=5.0)
+
+    assert result == commands.cmd_system_stop(timeout=5.0, context=tmp_path)
+    assert result.manager_tid is None
+    assert (result.stopped, result.escalated, result.unreachable) == ((), (), ())
+
+
 def test_client_system_methods_probe_reject_unknown_keyword(tmp_path: Path) -> None:
     """P6: no `**kwargs`, so an unknown keyword is a `TypeError` [PY-2]."""
 
@@ -2158,3 +2180,5 @@ def test_client_system_methods_probe_reject_unknown_keyword(tmp_path: Path) -> N
         client.system.prune(family="task-log", bogus=True)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         client.system.task_monitor(bogus=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        client.system.stop(bogus=True)  # type: ignore[call-arg]

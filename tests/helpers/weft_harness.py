@@ -27,10 +27,13 @@ from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from weft._constants import (
     CONTROL_STOP,
+    INTERNAL_SERVICE_KEYS,
+    LIVE_SERVICE_STATUSES,
     MANAGER_STARTUP_LOG_DIRNAME,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
+    SERVICE_TYPE_MANAGED,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
@@ -40,7 +43,8 @@ from weft._constants import (
 from weft._constants import (
     TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
 )
-from weft._exceptions import CommandExecutionError
+from weft._exceptions import CommandExecutionError, WeftError
+from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
@@ -48,8 +52,10 @@ from weft.core.control_messages import encode_control_message
 from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec, generate_tid
 from weft.core.service_convergence import (
+    collect_service_owner_records,
     manager_service_key,
     project_manager_service_record,
+    reduce_latest_by_service_owner,
 )
 from weft.core.task_state import iter_task_state_rows, list_task_state_tids
 from weft.ext import RunnerHandle
@@ -137,6 +143,7 @@ class WeftTestHarness:
         self._self_pid = os.getpid()
         self._safe_pids = self._compute_safe_pid_set()
         self._completion_wait_stats: list[dict[str, float]] = []
+        self._cleanup_diagnostics: list[str] = []
 
     # ------------------------------------------------------------------
     # Context management
@@ -489,6 +496,7 @@ class WeftTestHarness:
             f"  registered_tids={sorted(self._registered_tids)}",
             f"  registered_manager_tids={sorted(self._registered_manager_tids)}",
             f"  registered_pids={sorted(self._registered_pids)}",
+            f"  cleanup_diagnostics={self._cleanup_diagnostics}",
         ]
 
         frames = sys._current_frames()
@@ -753,6 +761,14 @@ class WeftTestHarness:
         "2026-04-27 Test Sleep Hygiene".
         """
         return list(self._completion_wait_stats)
+
+    def cleanup_diagnostics(self) -> list[str]:
+        """Return what cleanup had to escalate or terminate, so a leak is visible.
+
+        Spec: docs/specifications/08-Testing_Strategy.md [TS-0];
+        docs/specifications/03-Manager_Architecture.md [MA-3] (system stop).
+        """
+        return list(self._cleanup_diagnostics)
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -1211,6 +1227,8 @@ class WeftTestHarness:
                     stop_if_absent=True,
                 )
 
+        self._stop_context_services(timeout=stop_timeout, force=force)
+
         if issued_task_stops or manager_records:
             self._collect_pid_mappings()
             self._wait_for_registered_pids_to_exit()
@@ -1235,6 +1253,7 @@ class WeftTestHarness:
         lingering_task_deadline: float | None = None
         last_live_task_tids: list[str] = []
         last_live_pids: list[int] = []
+        services_stopped = False
 
         while time.time() < deadline:
             self._collect_pid_mappings()
@@ -1245,6 +1264,14 @@ class WeftTestHarness:
                     continue
                 self._send_manager_stop(tid, record=record)
                 issued_worker_stops.add(tid)
+            if not services_stopped:
+                # Services outlive their Manager [MA-1] item 7: stop them
+                # by registry record once, not through the lingering window.
+                self._stop_context_services(
+                    timeout=max(0.0, deadline - time.time()), force=False
+                )
+                services_stopped = True
+                continue
 
             last_live_task_tids = self._live_task_tids_from_mappings()
             last_live_pids = self._live_registered_pids()
@@ -1288,6 +1315,81 @@ class WeftTestHarness:
                 "Cleanup left database files in use while preserve_database=True: "
                 f"{locked_paths}"
             )
+
+    def _stop_context_services(self, *, timeout: float, force: bool) -> None:
+        """Stop the context's services after the Manager, then reap survivors.
+
+        `stop_system` stops any Manager still active and every live internal
+        service by registry record. A service whose latest live registry row
+        still names a live scoped host process afterwards is terminated
+        through the registered-PID path, and every escalation, unreachable
+        record, failure and termination is recorded in the cleanup
+        diagnostics. Services already gone make this a no-op.
+
+        Spec: docs/specifications/08-Testing_Strategy.md [TS-0];
+        docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
+        """
+
+        try:
+            result = system_cmd.stop_system(self.context, timeout=timeout, force=force)
+        except WeftError as exc:
+            self._record_cleanup_diagnostic(f"system stop failed: {exc}")
+        else:
+            if result.escalated:
+                self._record_cleanup_diagnostic(
+                    f"system stop escalated services {list(result.escalated)}"
+                )
+            if result.unreachable:
+                self._record_cleanup_diagnostic(
+                    f"system stop found unreachable services {list(result.unreachable)}"
+                )
+        for tid, processes in sorted(self._live_internal_service_processes().items()):
+            for pid, create_time in processes:
+                self.register_pid(pid, kind="managed", create_time=create_time)
+                self._record_cleanup_diagnostic(
+                    f"terminated service {tid} pid {pid} after system stop"
+                )
+                self._terminate_pid(pid)
+
+    def _live_internal_service_processes(
+        self,
+    ) -> dict[str, list[tuple[int, float | None]]]:
+        """Name live scoped host processes of each live internal service row."""
+
+        queue = Queue(
+            WEFT_SERVICES_REGISTRY_QUEUE,
+            db_path=self.context.broker_target,
+            persistent=False,
+            config=self.context.broker_config,
+        )
+        try:
+            read = collect_service_owner_records(
+                iter_queue_json_entries(queue), service_type=SERVICE_TYPE_MANAGED
+            )
+        finally:
+            queue.close()
+        live: dict[str, list[tuple[int, float | None]]] = {}
+        for record in reduce_latest_by_service_owner(read.records):
+            if (
+                record.service_key not in INTERNAL_SERVICE_KEYS
+                or record.status not in LIVE_SERVICE_STATUSES
+            ):
+                continue
+            processes = [
+                (pid, create_time)
+                for pid, create_time in self._mapping_host_processes(
+                    dict(record.payload)
+                )
+                if not self._should_skip_pid(pid)
+                and self._pid_matches_mapping_identity(pid, create_time)
+            ]
+            if processes:
+                live[record.owner_tid] = processes
+        return live
+
+    def _record_cleanup_diagnostic(self, entry: str) -> None:
+        self._cleanup_diagnostics.append(entry)
+        logger.warning("Harness cleanup at %s: %s", self.root, entry)
 
     def _drain_registry_queue(self) -> None:
         queue = Queue(

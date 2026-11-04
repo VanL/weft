@@ -1,7 +1,8 @@
-"""Status reporting helpers for the Weft CLI.
+"""Status reporting and `weft system stop` capabilities for the Weft CLI.
 
 Spec references:
-- docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.1], system stop
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
 - docs/specifications/01-Core_Components.md [CC-3.2], [CC-3.4]
 - docs/specifications/02-TaskSpec.md [TS-1.3]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
@@ -13,14 +14,18 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    CONTROL_STOP,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
@@ -28,7 +33,12 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_KEYS,
     LIVE_SERVICE_STATUSES,
+    MANAGER_CHILD_STOP_ESCALATION_SECONDS,
+    MANAGER_REGISTRY_POLL_INTERVAL,
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+    MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
     NON_LIVE_RUNTIME_STATES,
     RUNNER_DIAGNOSTICS_FIELD,
     SERVICE_STATUS_STOPPED,
@@ -44,14 +54,22 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft._exceptions import CommandError, CommandExecutionError, CommandUsageError
+from weft._exceptions import (
+    CommandError,
+    CommandExecutionError,
+    CommandUsageError,
+    ControlRejected,
+    ManagerNotRunning,
+)
 from weft.commands.manager import (
     _manager_snapshot,
+    stop_manager,
 )
 from weft.commands.types import (
     CommandStream,
     ServiceSnapshot,
     SystemStatusSnapshot,
+    SystemStopResult,
     TaskEvent,
 )
 from weft.commands.types import (
@@ -59,6 +77,7 @@ from weft.commands.types import (
 )
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime, task_evidence
+from weft.core.control_messages import encode_control_message
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.queue_window import iter_broker_queue_json_entries
 from weft.core.service_convergence import (
@@ -67,16 +86,20 @@ from weft.core.service_convergence import (
     discard_v1_service_registry_rows,
     reduce_latest_by_service_owner,
 )
-from weft.core.task_state import latest_task_state_rows
+from weft.core.task_state import latest_task_state_rows, task_state_queue_name
 from weft.ext import RunnerHandle
 from weft.helpers import (
     closing_queue_iterator,
     encode_tid,
     handle_has_live_host_process,
     iter_queue_json_entries,
+    kill_process_tree,
     pid_is_live,
+    pid_matches_create_time,
+    terminate_process_tree,
 )
 from weft.helpers.message_ids import is_task_tid
+from weft.liveness.host import inspect_host_process
 
 from ._boundary import typed_command_errors
 from ._resources import command_resource_scope
@@ -1381,7 +1404,14 @@ def system_status(
     status: str | None = None,
     include_log_history: bool = False,
 ) -> SystemStatusSnapshot:
-    """Return the top-level broker, manager, and task status view."""
+    """Return the top-level broker, manager, and task status view.
+
+    A service's ``manager_tid`` means "launched by" (provenance, not custody),
+    and may name a Manager that has since exited.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7;
+    docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
+    """
 
     now_ns = time.time_ns()
     service_registry_evidence = tuple(
@@ -1426,10 +1456,317 @@ def system_status(
     )
 
 
+# --- weft system stop [MA-3] -------------------------------------------------
+
+
+@dataclass(slots=True)
+class _ServiceStopTarget:
+    """One live internal service named by its latest registry record [MA-3]."""
+
+    key: str
+    tid: str
+    ctrl_in: str | None
+    identity: tuple[tuple[int, float], ...]
+    """Same-host host-pid ``(pid, create_time)`` pairs eligible for escalation."""
+    term_attempted: bool = False
+    escalated: bool = False
+
+
+def _live_internal_service_records(broker: Any) -> dict[str, ServiceOwnerRecord]:
+    """Return the latest live registry row per internal service owner TID.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
+    """
+
+    read = collect_service_owner_records(
+        iter_broker_queue_json_entries(broker, WEFT_SERVICES_REGISTRY_QUEUE),
+        service_type=SERVICE_TYPE_MANAGED,
+    )
+    return {
+        record.owner_tid: record
+        for record in reduce_latest_by_service_owner(read.records)
+        if record.service_key in INTERNAL_SERVICE_KEYS
+        and record.status in LIVE_SERVICE_STATUSES
+    }
+
+
+def _service_stop_identity(
+    record: ServiceOwnerRecord,
+    snapshot: Mapping[str, Any] | None,
+) -> tuple[tuple[int, float], ...]:
+    """Return a record's escalation identity when it is same-host ``host-pid``.
+
+    Same host is the service's own task snapshot ``hostname``; the identity
+    is the record's runtime handle ``(pid, create_time)`` pairs. A missing
+    snapshot, another host, another authority or an unknown creation time
+    yields no identity, so the service is never signalled (LIVENESS.R5).
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+    docs/specifications/07-System_Invariants.md LIVENESS.R5
+    """
+
+    if snapshot is None or snapshot.get("hostname") != socket.gethostname():
+        return ()
+    handle = _runtime_handle_from_mapping(record.payload)
+    if handle is None or handle.control.get("authority") != "host-pid":
+        return ()
+    return tuple(
+        (pid, created)
+        for pid, created in handle.scoped_host_processes()
+        if created is not None
+    )
+
+
+def _service_stop_settled(
+    target: _ServiceStopTarget,
+    live_records: Mapping[str, ServiceOwnerRecord],
+    snapshots: Mapping[str, tuple[int, Mapping[str, Any]]],
+) -> bool:
+    """Return whether a service left the registry, published terminal, or exited.
+
+    Exit is proven only when every recorded identity observes ``stale``; an
+    ``unknown`` probe keeps the service pending ([WT-2a.13], LIVENESS.R5).
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    if target.tid not in live_records:
+        return True
+    snapshot = snapshots.get(target.tid)
+    if snapshot is not None and snapshot[1].get("terminal") is True:
+        return True
+    return bool(target.identity) and all(
+        inspect_host_process(pid, created).evidence == "stale"
+        for pid, created in target.identity
+    )
+
+
+def _service_stop_live_pids(target: _ServiceStopTarget) -> tuple[int, ...]:
+    """Re-verify a target's identity immediately before signalling it [MA-3]."""
+
+    return tuple(
+        pid
+        for pid, created in target.identity
+        if pid_is_live(pid) and pid_matches_create_time(pid, created)
+    )
+
+
+def _collect_service_stop_targets(
+    context: WeftContext,
+) -> dict[str, _ServiceStopTarget]:
+    """Name every live internal service of the context by registry record.
+
+    A record whose service already settled is not a target. A target with no
+    ``ctrl_in`` route is kept so the caller reports it; no route is guessed.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    with context.broker() as broker:
+        records = _live_internal_service_records(broker)
+        snapshots = latest_task_state_rows(context, records, broker=broker)
+    targets: dict[str, _ServiceStopTarget] = {}
+    for tid, record in records.items():
+        snapshot = snapshots.get(tid)
+        queues = record.payload.get("queues")
+        ctrl_in = queues.get("ctrl_in") if isinstance(queues, Mapping) else None
+        target = _ServiceStopTarget(
+            key=record.service_key,
+            tid=tid,
+            ctrl_in=ctrl_in if isinstance(ctrl_in, str) and ctrl_in else None,
+            identity=_service_stop_identity(
+                record, snapshot[1] if snapshot is not None else None
+            ),
+        )
+        if not _service_stop_settled(target, records, snapshots):
+            targets[tid] = target
+    return targets
+
+
+def _escalate_service_stops(
+    pending: Mapping[str, _ServiceStopTarget], *, reap: bool
+) -> None:
+    """Run one escalation rung over pending targets with a verified identity.
+
+    The SIGTERM rung signals each target once, without a kill follow-up, so
+    the task's deferred terminal transition can run; the reap rung kills.
+    These are the Manager drain's rungs ([MA-3]).
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    for target in pending.values():
+        if not reap and target.term_attempted:
+            continue
+        pids = _service_stop_live_pids(target)
+        for pid in pids:
+            if reap:
+                kill_process_tree(pid)
+            else:
+                terminate_process_tree(pid, timeout=0.2, kill_after=False)
+        target.term_attempted = True
+        target.escalated = target.escalated or bool(pids)
+
+
+def _await_service_stops(
+    context: WeftContext,
+    targets: Mapping[str, _ServiceStopTarget],
+    *,
+    timeout: float,
+) -> dict[str, _ServiceStopTarget]:
+    """Wait for STOPped services to settle, escalating on the drain's clocks.
+
+    Host SIGTERM goes at ``MANAGER_CHILD_STOP_ESCALATION_SECONDS`` and the
+    forced reap at ``MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`` (or ``timeout``
+    when shorter), both measured from the STOP write on the monotonic
+    clock. Returns the targets still pending when ``timeout`` ends.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    started = time.monotonic()
+    deadline = started + timeout
+    escalate_at = started + MANAGER_CHILD_STOP_ESCALATION_SECONDS
+    reap_at = started + min(timeout, MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS)
+    pending = dict(targets)
+    reaped = False
+    with ExitStack() as resources:
+        resources.enter_context(context.session())
+        registry = context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True)
+        resources.callback(registry.close)
+        watched = [registry]
+        for tid in pending:
+            state_queue = context.queue(task_state_queue_name(tid), persistent=False)
+            resources.callback(state_queue.close)
+            watched.append(state_queue)
+        monitor = QueueChangeMonitor(watched, config=context.config)
+        resources.callback(monitor.close)
+        while pending:
+            with registry.get_connection() as broker:
+                records = _live_internal_service_records(broker)
+                snapshots = latest_task_state_rows(context, pending, broker=broker)
+            for tid in [
+                tid
+                for tid, target in pending.items()
+                if _service_stop_settled(target, records, snapshots)
+            ]:
+                del pending[tid]
+            now = time.monotonic()
+            if not pending or (reaped and now >= deadline):
+                break
+            if now >= reap_at and not reaped:
+                _escalate_service_stops(pending, reap=True)
+                reaped = True
+                continue
+            if now >= escalate_at:
+                _escalate_service_stops(pending, reap=False)
+            due = min(
+                deadline if reaped else reap_at,
+                escalate_at if now < escalate_at else deadline,
+            )
+            # Process exit has no broker event; the poll interval bounds how
+            # long an exit without a terminal snapshot goes unobserved.
+            monitor.wait(max(0.0, min(due - now, MANAGER_REGISTRY_POLL_INTERVAL)))
+    return pending
+
+
+def _stop_active_manager(
+    context: WeftContext, *, timeout: float, force: bool
+) -> str | None:
+    """Stop the active Manager through `stop_manager`; ``None`` when none is active.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+    docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    record = manager_runtime.select_active_manager(
+        context,
+        probe_stale=True,
+        probe_cache={},
+    )
+    if record is None:
+        return None
+    tid = record.get("tid")
+    if not isinstance(tid, str) or not tid:
+        raise ManagerNotRunning("Active manager record is missing a TID")
+    stop_manager(context, tid, force=force, timeout=timeout, _record=record)
+    return tid
+
+
+@typed_command_errors
+def stop_system(
+    context: WeftContext,
+    *,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    force: bool = False,
+) -> SystemStopResult:
+    """Stop the Manager, then every live internal service of the context.
+
+    The Manager stops exactly as `weft manager stop` stops it (``force``
+    applies to it as there); no active Manager is nothing to stop. Each
+    live internal service is then sent STOP on its record's ``ctrl_in`` in
+    one exact-name broadcast and waited for within ``timeout``, escalating
+    on the Manager drain's rungs for verified same-host ``host-pid``
+    identities only. A record with no route is reported as unreachable.
+
+    Raises:
+        ControlRejected: The Manager, or a reachable service, did not stop.
+        ManagerNotRunning: The active Manager record has no TID.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+    docs/specifications/10-CLI_Interface.md (system stop);
+    docs/specifications/14-Python_API_Surfaces.md [PY-2]
+    """
+
+    manager_tid = _stop_active_manager(context, timeout=timeout, force=force)
+    targets = _collect_service_stop_targets(context)
+    reachable = {tid: t for tid, t in targets.items() if t.ctrl_in is not None}
+    if reachable:
+        with context.broker() as broker:
+            broker.broadcast(
+                encode_control_message(CONTROL_STOP),
+                queue_names=tuple(
+                    dict.fromkeys(cast(str, t.ctrl_in) for t in reachable.values())
+                ),
+                create_missing=True,
+            )
+        pending = _await_service_stops(context, reachable, timeout=timeout)
+        if pending:
+            raise ControlRejected(
+                f"Internal services did not stop within {timeout:.1f}s: "
+                + ", ".join(sorted(pending))
+            )
+    return SystemStopResult(
+        manager_tid=manager_tid,
+        stopped=tuple(sorted(reachable)),
+        escalated=tuple(sorted(tid for tid, t in reachable.items() if t.escalated)),
+        unreachable=tuple(sorted(set(targets) - set(reachable))),
+        service_keys={tid: target.key for tid, target in targets.items()},
+    )
+
+
+@typed_command_errors
+def cmd_system_stop(
+    *,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    force: bool = False,
+    context: Path | None = None,
+) -> SystemStopResult:
+    """Stop the Manager and the context's internal services; return the outcome.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2];
+    docs/specifications/03-Manager_Architecture.md [MA-3]
+    """
+
+    return stop_system(build_context(context), timeout=timeout, force=force)
+
+
 __all__ = [
     "BrokerStatusSnapshot",
     "TaskSnapshot",
     "cmd_status",
+    "cmd_system_stop",
     "collect_broker_status",
+    "stop_system",
     "system_status",
 ]
