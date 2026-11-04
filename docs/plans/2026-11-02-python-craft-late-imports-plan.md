@@ -1,6 +1,6 @@
 # Python Craft: Late Imports and the Expert-Developer Test (owner decision first)
 
-Status: draft
+Status: promoted
 Source specs: None for behavior — code craft under existing contracts; edits CLAUDE.md §4.2 (a third permitted late-import reason, Task 3), the docs/program-theory.md [WT-3] ownership-table row "Agent runtime and session" (module locator only, Task 13), and path-only `_Implementation mapping_` notes in six spec files (Task 13); new comments cite docs/specifications/10-CLI_Interface.md [CLI-5] and docs/specifications/13-Agent_Runtime.md [AR-7]
 Superseded by: none
 
@@ -1440,8 +1440,8 @@ landed, `git revert` the commit.
   it lists, as of this commit. `CLAUDE.md` lines 347–352 (Task 3) and
   `docs/program-theory.md` line 383 (Task 13) are quoted below as of this
   commit.
-- Promotion baseline identifier: pending (the landing commit SHA; strategy B
-  lands every document edit in the same commit as the code it governs).
+- Promotion baseline identifier: `a7b7368d` (the landing commit; the theory
+  row follows in a separate `Theory:` commit, Deviation Log).
 
 ## Proposed Guidance and Theory Delta
 
@@ -1812,3 +1812,11 @@ commit. No owner item was open; no closure was recorded.
 - **Timing** (three fresh interpreters, `perf_counter` around `import weft.cli.app`): now 149–161 ms / 492 modules; the `c7007f96` copy 132–138 ms / 460 modules (first run 276 ms, cold bytecode, not counted). Increase about 15–25 ms and 32 modules, within the accepted 26–35 ms estimate.
 - **Audit refresh, by reference** (`docs/plans/2026-11-02-program-theory-reconciliation-plan.md`, `### Audit table`; that plan is not edited). Row 4.4-c: its counter-evidence (the `weft/commands/run.py` late imports of `weft/commands/tasks.py` private names) is gone, so the row holds without the "unsettled" note. Rows I-7 and 4.2-d: `weft/core/runtime_identity.py` still binds the connection owner through `simplebroker_pg`, now via `weft/core/deferred.py`; they hold. Row 4.3-c: the cited `AgentSession._terminal_handoff_wait_seconds` now lives in `weft/core/runners/sessions.py`; the verdict does not change. The other rows that name a touched file cite behavior this plan does not change.
 - **Owed before `completed`:** the [WT-7] keyed possession probe (owner-written key, different-family answerer), the different-family review of the completed work, and the +P pre-landing review, all with the series lead.
+- **Theory commit.** The [WT-3] "Agent runtime and session" row now names
+  `weft.core.runners.sessions`, applied verbatim from the Replacement block,
+  accepted by the owner on 2026-11-03 ("I accept the theory edits"), and
+  committed alone after the landing commit `a7b7368d`. `grep -c
+  "weft.core.runners.sessions" docs/program-theory.md` → `1`; `grep -rn
+  "core.tasks.sessions\|core.tasks.agent_session_protocol" docs/specifications
+  docs/ruff-suppression-registry.md docs/program-theory.md` → nothing. Status
+  moves to `promoted`; `completed` waits on the owed probe and reviews above.
