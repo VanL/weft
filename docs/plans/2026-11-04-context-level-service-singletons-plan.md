@@ -1,6 +1,6 @@
 # Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime
 
-Status: promoted
+Status: draft
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-1.6a], [MA-3]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2]; docs/specifications/07-System_Invariants.md [MANAGER.13], [MANAGER.15]
 Superseded by: none
 

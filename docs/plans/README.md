@@ -27,7 +27,7 @@ There are currently 67 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `promoted` | none |
+| [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `draft` | none |
 | [`2026-11-04-manager-drain-and-service-bookkeeping-plan.md`](./2026-11-04-manager-drain-and-service-bookkeeping-plan.md) | Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule | `completed` | none |
 | [`2026-11-04-system-stop-snapshot-targets-plan.md`](./2026-11-04-system-stop-snapshot-targets-plan.md) | System STOP Targets Every Live Task by Snapshot | `completed` | none |
 | [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `completed` | none |
