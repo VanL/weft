@@ -1082,9 +1082,6 @@ TASK_MONITOR_CLEANUP_POLICY_NAMES: Final[tuple[str, ...]] = (
 )
 """The complete set of TaskMonitor top-level cleanup policy names."""
 
-TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT: Final[int] = 1000
-"""Newest manager-authored task_spawned refs retained per manager TID."""
-
 TASK_MONITOR_SALVAGE_MAX_ROW_BYTES: Final[int] = 65_536
 """Maximum body bytes retained for one task-local salvage row."""
 

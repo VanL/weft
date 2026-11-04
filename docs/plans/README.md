@@ -55,7 +55,7 @@ There are currently 67 plan files in this directory.
 | [`2026-10-15-work-conserving-family-scheduling.md`](./2026-10-15-work-conserving-family-scheduling.md) | Work-Conserving Family Scheduling | `completed` | none |
 | [`2026-10-14-agent-theory-delta-wave-plan.md`](./2026-10-14-agent-theory-delta-wave-plan.md) | Agent-Theory Propagation Plan (2026-10-14 delta wave) (exemplar) | `completed` | none |
 | [`2026-10-14-contention-theory-stop-condition.md`](./2026-10-14-contention-theory-stop-condition.md) | Contention failures require theory re-derivation | `draft` | none |
-| [`2026-10-14-task-monitor-ingest-and-retirement-plan.md`](./2026-10-14-task-monitor-ingest-and-retirement-plan.md) | TaskMonitor Ingest and Retirement | `draft` | none |
+| [`2026-10-14-task-monitor-ingest-and-retirement-plan.md`](./2026-10-14-task-monitor-ingest-and-retirement-plan.md) | TaskMonitor Ingest and Retirement | `completed` | none |
 | [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) | Task-Owned Observation and Read Separation | `completed` | none |
 | [`2026-10-14-measured-admission-family-scheduling.md`](./2026-10-14-measured-admission-family-scheduling.md) | Measured admission and bounded family scheduling | `draft` | none |
 | [`2026-10-13-supervisor-terminal-projection.md`](./2026-10-13-supervisor-terminal-projection.md) | Supervisor terminal observations in operational collations | `completed` | none |

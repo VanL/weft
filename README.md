@@ -818,7 +818,19 @@ weft.state.pipelines     # Active pipeline registry (runtime state)
 Queues under `weft.state.*` are runtime-only and excluded from dumps by default.
 `weft.log.tasks` is runtime lifecycle evidence while retained. It is not the
 audit record; use TaskMonitor `jsonl_then_delete` when you want Weft's built-in
-task-lifetime JSONL handoff before cleanup.
+task-lifetime JSONL handoff before family retirement. Under collated ownership,
+both destructive TaskMonitor modes (`delete` and `jsonl_then_delete`) fold valid
+raw `weft.log.tasks` rows into the private Monitor collation store and then
+delete those exact raw rows without waiting for task termination, lifetime-report
+emission, or a full FIFO pass (`WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` still
+governs summary/family/stale-open/reserved/raw-external age policies, not raw-row
+residence after fold). Because folded raw rows may be consumed before external
+summary emission, upgrades and rollbacks must preserve the private Monitor store
+tables and `weft_monitor_deferred_writes` outbox. Manager-authored `task_spawned`
+rows follow the same valid-row fold-and-delete rule under collated ownership;
+the collated exporter no longer retains a newest-1000 launch-hint window or
+emits per-launch `manager_task_spawned_retained_event` reports (operators who
+need raw per-launch event export can select raw-external task-log ownership).
 
 Task status and list use current task-owned snapshots by default. `--all` includes
 retained terminal snapshots; `--log` explicitly adds retained raw history and

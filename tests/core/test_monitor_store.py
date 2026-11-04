@@ -2889,72 +2889,125 @@ def test_monitor_store_deletes_task_messages_and_reconciles_parent(
     )
 
 
-def test_monitor_store_lists_manager_task_spawned_retention_refs(
+def test_monitor_store_partial_chunk_commit_replay_is_idempotent(
     tmp_path: Path,
 ) -> None:
-    ctx = _context(tmp_path)
-    store = open_monitor_store(ctx)
-    store.ensure_schema()
-    manager_tid = "1779000000000100000"
-    other_manager_tid = "1779000000000100001"
-    worker_tid = "1779000000000100002"
-    child_tid = "1779000000000100003"
-    base = 1779000000000200000
+    """Partial chunk commit followed by full batch replay must produce identical state."""
+    clean_ctx = _context(tmp_path / "clean")
+    clean_store = open_monitor_store(clean_ctx)
+    clean_store.ensure_schema()
 
-    updates = [
+    replay_ctx = _context(tmp_path / "replay")
+    replay_store = open_monitor_store(replay_ctx)
+    replay_store.ensure_schema()
+
+    tid = "1779000000000100000"
+    base = 1779000000000200000
+    older_update = replace(
+        _update(tid, base + 1, event="work_started", status="running"),
+        completed_at_ns=base + 50,
+        resources={"peak_memory": 120, "memory_mb": 40, "cpu_percent": 15},
+    )
+    newer_update = replace(
         _update(
-            manager_tid,
-            base - 10,
-            event="task_started",
-            name="manager",
-            role="manager",
+            tid,
+            base + 2,
+            event="work_completed",
+            status="completed",
+            terminal=True,
         ),
-        *(
-            _update(
-                manager_tid,
-                base + index,
-                event="task_spawned",
-                name="manager",
-                role="manager",
-            )
-            for index in range(5)
-        ),
-        *(
-            _update(
-                other_manager_tid,
-                base + 10 + index,
-                event="task_spawned",
-                name="manager",
-                role="manager",
-            )
-            for index in range(4)
-        ),
-        _update(worker_tid, base + 20, event="task_spawned", name="worker"),
-        _update(child_tid, base + 21, event="work_started", name="child"),
-    ]
-    store.record_task_log_updates(
+        completed_at_ns=base + 200,
+        resources={"peak_memory": 90, "memory_mb": 80, "cpu_percent": 5},
+    )
+
+    clean_store.record_task_log_updates(
         WEFT_GLOBAL_LOG_QUEUE,
-        tuple(updates),
+        (older_update, newer_update),
+        checkpoint_message_id=newer_update.message_id,
+    )
+
+    # Simulate multi-chunk commit of (older_update, newer_update), followed by
+    # an interrupted replay that re-applies only older_update (chunk 1) before
+    # completing the full (older_update, newer_update) replay.
+    replay_store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (older_update, newer_update),
         checkpoint_message_id=None,
     )
-
-    refs = store.list_manager_task_spawned_retention_refs(
-        keep_recent=2,
-        limit=10,
+    replay_store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (older_update,),
+        checkpoint_message_id=None,
+    )
+    after_chunk_one = replay_store.get_task(tid)
+    assert after_chunk_one is not None
+    assert after_chunk_one.completed_at_ns == base + 200
+    assert after_chunk_one.resources == {
+        "peak_memory": 120,
+        "memory_mb": 80,
+        "cpu_percent": 5,
+    }
+    replay_store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (older_update, newer_update),
+        checkpoint_message_id=newer_update.message_id,
     )
 
-    assert [(ref.tid, ref.message_id) for ref in refs] == [
-        (manager_tid, base),
-        (manager_tid, base + 1),
-        (manager_tid, base + 2),
-        (other_manager_tid, base + 10),
-        (other_manager_tid, base + 11),
-    ]
+    clean_record = clean_store.get_task(tid)
+    replay_record = replay_store.get_task(tid)
+    assert clean_record is not None
+    assert replay_record is not None
+    assert replay_record.completed_at_ns == clean_record.completed_at_ns == base + 200
+    assert replay_record.resources == clean_record.resources == {
+        "peak_memory": 120,
+        "memory_mb": 80,
+        "cpu_percent": 5,
+    }
+    assert replay_record.last_message_id == clean_record.last_message_id == base + 2
+    assert _monitor_message_ids(
+        replay_ctx,
+        context_key=replay_store.context_key,
+        tid=tid,
+    ) == (base + 1, base + 2)
+
+    # Unseen out-of-order backfilled row (absent from weft_monitor_task_messages)
+    # still folds sparse resource fields when a later row omitted that field.
+    sparse_tid = "1779000000000109999"
+    row_one = replace(
+        _update(sparse_tid, base + 10, event="work_spawning", status="spawning"),
+        resources={"memory_mb": 40, "peak_memory": 40},
+    )
+    row_three = replace(
+        _update(sparse_tid, base + 30, event="work_completed", status="completed"),
+        resources={"cpu_percent": 10},
+    )
+    row_two_backfill = replace(
+        _update(sparse_tid, base + 20, event="work_started", status="running"),
+        resources={"memory_mb": 80, "peak_memory": 80},
+    )
+    replay_store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (row_one, row_three),
+        checkpoint_message_id=row_three.message_id,
+    )
+    replay_store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (row_two_backfill,),
+        checkpoint_message_id=None,
+    )
+    sparse_record = replay_store.get_task(sparse_tid)
+    assert sparse_record is not None
+    assert sparse_record.resources == {
+        "memory_mb": 80,
+        "peak_memory": 80,
+        "cpu_percent": 10,
+    }
 
 
-def test_monitor_store_event_trim_deletes_child_refs_without_closing_manager(
+def test_monitor_store_reconciles_manager_task_spawned_refs_and_resets_on_new_fold_without_closing_manager(
     tmp_path: Path,
 ) -> None:
+    """Open manager refs drain via standard reconciliation and reset raw_deleted_at_ns on new fold."""
     ctx = _context(tmp_path)
     store = open_monitor_store(ctx)
     store.ensure_schema()
@@ -2975,38 +3028,55 @@ def test_monitor_store_event_trim_deletes_child_refs_without_closing_manager(
             name="manager",
             role="manager",
         )
-        for index in range(5)
+        for index in range(3)
     )
     store.record_task_log_updates(
         WEFT_GLOBAL_LOG_QUEUE,
         (lifecycle, *spawned),
-        checkpoint_message_id=None,
+        checkpoint_message_id=spawned[-1].message_id,
     )
 
-    selected = store.list_manager_task_spawned_retention_refs(
-        keep_recent=2,
-        limit=10,
-    )
-    result = store.delete_task_messages_after_event_trim(
-        tuple(ref.message_id for ref in selected),
+    refs = store.list_deletable_task_log_messages(limit=10, require_summary=False)
+    assert [ref.message_id for ref in refs] == [
+        lifecycle.message_id,
+        *(item.message_id for item in spawned),
+    ]
+
+    result = store.delete_task_messages_after_raw_delete(
+        tuple(ref.message_id for ref in refs),
         deleted_at_ns=base + 100,
     )
-    second = store.delete_task_messages_after_event_trim(
-        tuple(ref.message_id for ref in selected),
-        deleted_at_ns=base + 101,
-    )
-
-    assert result.message_rows_deleted == 3
+    assert result.message_rows_deleted == 4
     assert result.affected_tids == 1
-    assert second.message_rows_deleted == 0
-    assert _monitor_message_ids(
-        ctx,
-        context_key=store.context_key,
-        tid=manager_tid,
-    ) == (lifecycle.message_id, spawned[-2].message_id, spawned[-1].message_id)
     record = store.get_task(manager_tid)
     assert record is not None
-    assert record.raw_deleted_at_ns is None
+    assert record.raw_deleted_at_ns == base + 100
+    assert record.disposition_at_ns is None
+    assert record.terminal_seen is False
+
+    later_spawned = _update(
+        manager_tid,
+        base + 50,
+        event="task_spawned",
+        name="manager",
+        role="manager",
+    )
+    store.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE,
+        (later_spawned,),
+        checkpoint_message_id=later_spawned.message_id,
+    )
+    refreshed = store.get_task(manager_tid)
+    assert refreshed is not None
+    assert refreshed.raw_deleted_at_ns is None
+    assert refreshed.disposition_at_ns is None
+    assert [
+        ref.message_id
+        for ref in store.list_deletable_task_log_messages(
+            limit=10,
+            require_summary=False,
+        )
+    ] == [later_spawned.message_id]
 
 
 def test_monitor_store_deletes_messages_and_reconciles_only_affected_tids(

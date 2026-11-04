@@ -20,6 +20,23 @@
   Manager was alive when the stopping Manager started and had since died
   was missed. The first STOP rung is one atomic exact-name broadcast that
   creates a never-controlled task's control queue ([MA-3]).
+- Under collated TaskMonitor ownership, `jsonl_then_delete` now deletes valid raw
+  `weft.log.tasks` rows as soon as their collation update and raw-message
+  reference commit durably, matching `delete` mode instead of retaining folded
+  raw rows until lifetime-report emission; malformed/unrecognized raw rows and
+  inferred runtime cleanup reports still require accepted external or
+  deferred-write handoff before deletion, and lifetime reports still wait for
+  full FIFO high-water and family completeness/disposition gates ([MF-5],
+  [OBS.13.3]). Exact raw-message reference retries now run on every destructive
+  collated cycle independently of FIFO high-water completion, and bounded
+  pre-checkpoint/orphan recovery folds unknown valid rows before exact deletion
+  without waiting for a summary. Manager-authored `task_spawned` rows follow the
+  same valid-row fold-and-delete rule: the separate keep-newest-1000 launch-hint
+  compactor and creation of `manager_task_spawned_retained_event` reports are
+  retired (existing deferred launch-event reports still flush on upgrade; use
+  raw-external task-log ownership if raw per-launch event export is required),
+  and upgrades/rollbacks must preserve the private Monitor store tables and
+  deferred-write outbox ([MF-5], [MF-6], [SB-0.4a]).
 - A task's reactor wait no longer reads its notification-only observation
   queues on every idle strategy return: on persistent SQLite it reads them
   only at wait entry and on returns that carry a local, native or

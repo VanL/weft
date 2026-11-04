@@ -213,7 +213,7 @@ def fetch_dead_task_log_coalesce_group(
                 body_contains=tid,
                 limit=effective_limit,
                 after_timestamp=after_timestamp,
-                include_claimed=True,
+                include_claimed=False,
             )
             if not message_ids:
                 break
@@ -243,7 +243,7 @@ def _task_log_row_for_message_id_including_claimed(
         WEFT_GLOBAL_LOG_QUEUE,
         exact_timestamp=message_id,
         with_timestamps=True,
-        include_claimed=True,
+        include_claimed=False,
     )
     if row is None:
         return None

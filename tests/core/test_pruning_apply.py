@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from simplebroker.ext import BrokerError
 from tests.helpers.test_backend import prepare_project_root
 from weft.context import WeftContext, build_context
 from weft.core.monitor.store import MonitorRawMessageRef
@@ -298,6 +299,101 @@ def test_apply_exact_prune_candidates_reconcile_missing_marks_success(
         (second_id, True, None),
     ]
     assert _read_rows(ctx, queue_name) == []
+
+
+def test_apply_exact_prune_candidates_reconcile_missing_reports_false_when_row_remains_present(
+    tmp_path: Path,
+) -> None:
+    """Short batch delete must report deleted=False when peek_one finds the row still present."""
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    first_id = _write_raw(ctx, queue_name, "first")
+    second_id = _write_raw(ctx, queue_name, "second")
+
+    class _UnderDeletingBrokerProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def delete_message_ids(self, q_name: str, ids: list[int]) -> int:
+            deletable = [mid for mid in ids if mid != second_id]
+            if not deletable:
+                return 0
+            return int(self._inner.delete_message_ids(q_name, deletable))
+
+        def peek_one(self, q_name: str, **kwargs: Any) -> Any:
+            return self._inner.peek_one(q_name, **kwargs)
+
+    with ctx.broker() as real_broker:
+        proxy = _UnderDeletingBrokerProxy(real_broker)
+        applied = apply_exact_prune_candidates(
+            ctx,
+            (
+                _ExactDeleteCandidate(queue=queue_name, message_id=first_id),
+                _ExactDeleteCandidate(queue=queue_name, message_id=second_id),
+            ),
+            apply_result=lambda candidate, deleted, error: (
+                candidate.message_id,
+                deleted,
+                error,
+            ),
+            reconcile_missing=True,
+            broker=proxy,
+        )
+
+    assert applied == [
+        (first_id, True, None),
+        (second_id, False, None),
+    ]
+    assert _read_rows(ctx, queue_name) == [("second", second_id)]
+
+
+def test_apply_exact_prune_candidates_reconcile_missing_reports_error_when_absence_read_raises(
+    tmp_path: Path,
+) -> None:
+    """Short batch delete must report deleted=False with error when peek_one raises."""
+    ctx = _context(tmp_path)
+    queue_name = "test.exact-delete"
+    first_id = _write_raw(ctx, queue_name, "first")
+    second_id = _write_raw(ctx, queue_name, "second")
+
+    class _UncertainBrokerProxy:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def delete_message_ids(self, q_name: str, ids: list[int]) -> int:
+            deletable = [mid for mid in ids if mid != second_id]
+            if not deletable:
+                return 0
+            return int(self._inner.delete_message_ids(q_name, deletable))
+
+        def peek_one(self, q_name: str, **kwargs: Any) -> Any:
+            if kwargs.get("exact_timestamp") == second_id:
+                raise BrokerError("simulated absence-read failure")
+            return self._inner.peek_one(q_name, **kwargs)
+
+    with ctx.broker() as real_broker:
+        proxy = _UncertainBrokerProxy(real_broker)
+        applied = apply_exact_prune_candidates(
+            ctx,
+            (
+                _ExactDeleteCandidate(queue=queue_name, message_id=first_id),
+                _ExactDeleteCandidate(queue=queue_name, message_id=second_id),
+            ),
+            apply_result=lambda candidate, deleted, error: (
+                candidate.message_id,
+                deleted,
+                error,
+            ),
+            reconcile_missing=True,
+            broker=proxy,
+        )
+
+    assert applied[0] == (first_id, True, None)
+    assert applied[1][0] == second_id
+    assert applied[1][1] is False
+    assert applied[1][2] is not None
+    assert "simulated absence-read failure" in applied[1][2]
+    assert _read_rows(ctx, queue_name) == [("second", second_id)]
 
 
 def _decoded_row(

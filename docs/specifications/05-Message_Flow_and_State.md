@@ -823,19 +823,30 @@ Current rules:
   reactor remains the owner of maintenance deadlines, cleanup continuation,
   cumulative logging counters and cached public diagnostics.
 
-  For the built-in `delete` mode under collated ownership, retained
-  `weft.log.tasks` rows are processed in FIFO order:
-  malformed rows are exact-deleted; valid rows are folded into the Monitor
-  table and then exact-deleted in the same bounded pass when running the
-  built-in `delete` mode. Terminal families may be summarized and
-  disposed only after the pass reaches a complete FIFO high-water; open
-  families continue to use `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus
-  stale-open policy before summary/disposition. Runtime-state pruning runs
-  in the monitor's maintenance pass
-  (`weft.state.tasks.<tid>` is owned by LivenessMonitor); the Monitor
-  collation store is the supervised task-log deletion authority. The manager
-  owns only child supervision; it does not scan
-  lifecycle queues.
+  For the built-in destructive modes (`delete` and `jsonl_then_delete`) under
+  collated ownership, retained `weft.log.tasks` rows are processed in FIFO
+  order: Under collated ownership, both destructive modes may delete an exact
+  valid raw task-log row after its collation update and raw-message reference
+  commit durably. This applies to nonterminal rows and does not await a
+  lifetime report. In `jsonl_then_delete`, malformed/unrecognized raw rows and
+  inferred runtime cleanup reports still require accepted external emission or
+  durable deferred-report handoff before destructive cleanup. Deferred report
+  bodies survive independently of raw rows and collation-family retirement. Raw
+  external ownership retains emit-before-delete semantics. Terminal families
+  may be summarized and disposed only after the pass reaches a complete FIFO
+  high-water; open families continue to use
+  `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` plus stale-open policy before
+  summary/disposition. `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` retains its
+  existing terminal-family summary eligibility where applicable, family
+  retirement, reserved, stale-open, and raw-external age policy uses. It is not
+  a minimum residence time for valid raw rows already folded under collated
+  ownership. Standard terminal output/completion and newest task-state
+  retention use `WEFT_TASK_OBSERVATION_RETENTION_SECONDS`. Neither clock
+  guarantees a complete historical inventory, a storage-size cap, or an exact
+  expiry. Runtime-state pruning runs in the monitor's maintenance pass
+  (`weft.state.tasks.<tid>` is owned by LivenessMonitor); the Monitor collation
+  store is the supervised task-log deletion authority. The manager owns only
+  child supervision; it does not scan lifecycle queues.
 - under collated ownership, each retained FIFO pass reduces valid
   task-log rows through `weft/core/monitor/collation.py`, upserts one summary
   row per TID, and records each incorporated raw message ID in
@@ -844,37 +855,42 @@ Current rules:
   references: after exact broker deletion succeeds, or after retry observes the
   raw broker row is already absent, the Monitor physically deletes those child
   rows and reconciles the parent `raw_deleted_at_ns` when no child refs remain.
-  A private manager launch-event compaction subphase may also delete exact old
-  manager-authored `task_spawned` raw rows and their Monitor child refs after
-  preserving the newest launch hints per manager TID. That subphase reports
-  under `task_log.retention`, uses exact message IDs from
-  `weft_monitor_task_messages`, and intentionally does not reconcile the
-  manager parent `raw_deleted_at_ns` because the manager service family may
-  still be open.
-  Bounded retry sweeps use the same rule for already-ingested child refs from
-  older cycles. For the `delete` mode, terminal summary emission is not a
-  prerequisite for deleting a raw row that has already been folded into the
-  Monitor store. For `jsonl_then_delete`, valid raw task-log rows are folded
-  into the Monitor store first and exact-deleted only after the owning family
-  has accepted a lifetime-report handoff. In this mode,
-  `summary_emitted_at_ns` records accepted report handoff, either external
-  JSONL write success or durable deferred write success; it is not public
-  lifecycle truth.
-  A bounded orphan-recovery pass may search for and exact-delete raw task-log
-  rows for terminal/disposed families whose child refs are already absent but
-  whose raw broker rows remain from an interrupted current cleanup cycle.
+  Exact raw-message retry work runs in bounded batches independently of FIFO
+  high-water completion. References are removed only after verified deletion
+  or confirmed absence; errors preserve retry evidence. Forward checkpoints
+  advance after a successful selected pass, with non-destructive ingest-only
+  advancement retained in `report_only`. A checkpoint does not prove that
+  imported/backfilled earlier rows were folded. Bounded pre-checkpoint/orphan
+  recovery folds unknown valid rows before deletion. Summary creation retains
+  full FIFO high-water gating and existing retention/completeness rules. Parent
+  retirement retains all cleanup, disposition, summary, and no-reference proofs.
+  Manager-authored `task_spawned` rows are optional retained telemetry hints,
+  not child lifecycle or launch-custody authority. Under collated ownership they
+  follow the same durable-fold-before-exact-delete rule as other valid raw rows.
+  No newest-launch-hint set or per-launch lifetime report is retained by the
+  collated exporter. Existing deferred reports of this kind remain deliverable.
+  Operational service reads use current task/service/custody evidence; explicit
+  raw-history reads can enrich a view only while launch hints remain. Absence
+  of a launch hint never establishes absence, failure, or permission to replay
+  a spawn request. Raw external ownership continues its existing raw export.
+  In `jsonl_then_delete` mode, `summary_emitted_at_ns` records accepted
+  family report handoff, either external JSONL write success or durable
+  deferred write success; it is not public lifecycle truth and is not set
+  merely to make raw-row deletion eligible.
+  A bounded orphan-recovery pass may search for, fold, and exact-delete raw
+  task-log rows for terminal/disposed families whose child refs are already
+  absent but whose raw broker rows remain from an interrupted cleanup cycle.
   Orphan recovery is retryable on probe/delete errors. A successful probe that
   finds no raw broker rows records `orphan_raw_recovery_checked_at_ns` on the
   parent collation row so the same family is not selected again until new raw
   task-log evidence resets the recovery marker.
   A separate bounded pre-checkpoint recovery pass may scan visible
   `weft.log.tasks` rows older than the forward Monitor checkpoint. It selects
-  only rows missing from `weft_monitor_task_messages`, skips active TIDs and
-  rows younger than the retention floor, folds valid rows back into the
-  Monitor store without moving the checkpoint, and lets the ordinary
-  summary/report/delete path own any later exact deletion. Malformed or
-  unrecognized pre-checkpoint rows may be exact-deleted only through the same
-  durable-before-delete rule used by the selected monitor mode.
+  only rows missing from `weft_monitor_task_messages`, skips active TIDs,
+  folds valid rows into the Monitor store without moving the checkpoint, and
+  deletes those folded valid rows in the same bounded recovery pass. Malformed
+  or unrecognized pre-checkpoint rows may be exact-deleted only through the
+  same durable-before-delete rule used by the selected monitor mode.
   Version 5 child rows marked with `deleted_at_ns` are physically removed by
   the version 5 to 6 schema migration, not by a normal-cycle compatibility
   lane. Replaying the same raw row after a delete failure is idempotent. A
@@ -1453,17 +1469,22 @@ accept another spawn message in the same turn.
 Internal service observability has two publication phases. A successful manager
 launch first appears as a manager-authored `task_spawned` row with `child_tid`,
 `child_taskspec`, and optionally `child_pid`; the child later emits its own
-task-log rows and TID mapping. Ops status may report heartbeat or TaskMonitor
-as launched from the manager row before child-local lifecycle rows exist.
-Child-local terminal evidence and TID-mapping/runtime evidence override the
-manager launch hint when they are present. An empty `weft.spawn.internal` queue
-means only that no unclaimed internal spawn request is waiting there; it is not
-evidence that the internal service is absent.
-While retained, manager `task_spawned` rows are durable launch hints, not child
-lifecycle truth. The TaskMonitor may compact high-volume historical manager
-launch hints by deleting exact older `task_spawned` rows after preserving the
-newest launch hints per manager TID and leaving child task-log rows and TID
-mappings under their normal owners.
+task-log rows and TID mapping. Operational service reads use current
+task/service/custody evidence; explicit raw-history reads can enrich a view
+only while launch hints remain. Child-local terminal evidence and
+TID-mapping/runtime evidence override the manager launch hint when they are
+present. An empty `weft.spawn.internal` queue means only that no unclaimed
+internal spawn request is waiting there; it is not evidence that the internal
+service is absent.
+Manager-authored `task_spawned` rows are optional retained telemetry hints,
+not child lifecycle or launch-custody authority. Under collated ownership they
+follow the same durable-fold-before-exact-delete rule as other valid raw rows.
+No newest-launch-hint set or per-launch lifetime report is retained by the
+collated exporter. Existing deferred reports of this kind remain deliverable.
+Operational service reads use current task/service/custody evidence; explicit
+raw-history reads can enrich a view only while launch hints remain. Absence
+of a launch hint never establishes absence, failure, or permission to replay
+a spawn request. Raw external ownership continues its existing raw export.
 
 Current submission-reconciliation rules:
 
@@ -2316,3 +2337,4 @@ Implementation plan: [Public submission custody observation](../plans/2026-10-16
 - [Manager Polling Latency](../plans/2026-09-17-manager-polling-latency-plan.md)
 
 Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+- [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md) unifies valid-row fold-before-exact-delete ingestion across collated destructive modes, separates exact raw-reference retry from FIFO high-water summary completion, and retires the separate manager `task_spawned` compactor under [MF-5] and [MF-6].

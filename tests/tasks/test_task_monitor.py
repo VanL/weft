@@ -68,6 +68,7 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     load_config,
 )
+from weft.commands._spawn_submission import reconcile_submitted_spawn
 from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.heartbeat import upsert_heartbeat
@@ -98,6 +99,7 @@ from weft.core.service_convergence import (
     build_service_owner_payload,
     manager_service_key,
 )
+from weft.core.spawn_requests import observe_spawn_request_custody
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.liveness_monitor import LivenessMonitor
@@ -5298,7 +5300,8 @@ def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
             record = store.get_task(payload["tid"])
             assert record is not None
             assert record.summary_emitted_at_ns is None
-            assert record.raw_deleted_at_ns is None
+            assert record.disposition_at_ns is None
+            assert record.raw_deleted_at_ns is not None
     finally:
         task.stop()
 
@@ -5307,7 +5310,7 @@ def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
         for message in log_queue.peek_generator()
         if json.loads(message).get("tid") == payload["tid"]
     ]
-    assert target_rows == [payload]
+    assert target_rows == []
     assert task._last_processor_success is False
     assert any("deferred table unavailable" in error for error in task._last_errors)
 
@@ -9194,22 +9197,23 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
         task.stop()
 
 
-def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_family(
+@pytest.mark.parametrize("mode", ["delete", "jsonl_then_delete"])
+def test_task_monitor_drains_all_manager_task_spawned_rows_without_closing_manager_family(
     broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
 ) -> None:
+    """All folded manager task_spawned rows drain without keeping a recent window or emitting trim reports."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod,
-        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
-        2,
-    )
+    external_path = tmp_path / f"manager-task-spawned-{mode}.jsonl"
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 20,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": mode,
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -9233,53 +9237,51 @@ def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_fa
                 manager_tid=manager_tid,
                 child_prefix="17780843459054388",
             )
+            all_seeded_ids = (
+                seeded["lifecycle_id"],
+                *seeded["spawned_ids"],
+                seeded["child_row_id"],
+            )
 
-            retired = worker._trim_manager_task_spawned_task_log_rows(
-                store,
+            worker._run_monitor_store_cycle(
                 now_ns=time.time_ns(),
+                task_log_owner="collated_store",
             )
 
-            spawned_ids = seeded["spawned_ids"]
-            old_spawned_ids = set(spawned_ids[:-2])
-            newest_spawned_ids = set(spawned_ids[-2:])
             remaining_raw_ids = _task_log_message_ids(log_queue)
-            assert retired.message_rows_deleted == 3
-            assert old_spawned_ids.isdisjoint(remaining_raw_ids)
-            assert newest_spawned_ids <= remaining_raw_ids
-            assert seeded["lifecycle_id"] in remaining_raw_ids
-            assert seeded["child_row_id"] in remaining_raw_ids
-            assert set(store.missing_task_message_ids(tuple(old_spawned_ids))) == (
-                old_spawned_ids
+            assert set(all_seeded_ids).isdisjoint(remaining_raw_ids)
+            assert set(store.missing_task_message_ids(all_seeded_ids)) == set(
+                all_seeded_ids
             )
-            assert store.missing_task_message_ids(tuple(newest_spawned_ids)) == ()
-            assert store.missing_task_message_ids((seeded["lifecycle_id"],)) == ()
-            assert store.missing_task_message_ids((seeded["child_row_id"],)) == ()
             record = store.get_task(manager_tid)
             assert record is not None
-            assert record.raw_deleted_at_ns is None
+            assert record.raw_deleted_at_ns is not None
             assert record.disposition_at_ns is None
+            assert record.terminal_seen is False
             assert list(manager_ctrl_in.peek_generator()) == ["control-row"]
-            progress = worker._last_policy_progress[-1]
-            assert progress.reason_counts is not None
-            assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
-            assert progress.reason_counts["manager_task_spawned_refs_deleted"] == 3
-            assert {progress.policy} <= set(TASK_MONITOR_CLEANUP_POLICY_NAMES)
     finally:
         task.stop()
 
+    if external_path.exists():
+        records = [
+            json.loads(line)
+            for line in external_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert [
+            record
+            for record in records
+            if record.get("report_kind") == "manager_task_spawned_retained_event"
+        ] == []
 
-def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim(
+
+def test_task_monitor_flushes_preexisting_deferred_manager_task_spawned_report_on_upgrade(
     broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod,
-        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
-        2,
-    )
-    external_path = tmp_path / "manager-task-spawned.jsonl"
+    """Pre-existing deferred manager_task_spawned_retained_event records flush cleanly on upgrade."""
+    db_path, _make_queue = broker_env
+    external_path = tmp_path / "manager-task-spawned-upgrade.jsonl"
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9292,7 +9294,17 @@ def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim
         }
     )
     manager_tid = "1778084345905438810"
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    legacy_message_id = 1778084345905438811
+    legacy_report = {
+        "schema_version": 2,
+        "report_id": f"manager_task_spawned_retained_event:{WEFT_GLOBAL_LOG_QUEUE}:{legacy_message_id}",
+        "record_type": "task_lifetime_report",
+        "report_kind": "manager_task_spawned_retained_event",
+        "source_policy": TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
+        "completeness": "raw_row",
+        "subject": {"tid": manager_tid},
+        "observations": {"event": "task_spawned", "manager_tid": manager_tid},
+    }
 
     task = TaskMonitor(
         db_path,
@@ -9303,146 +9315,43 @@ def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim
         with _maintenance_for(task) as worker:
             store = worker._ensure_monitor_store()
             assert store is not None
-            seeded = _seed_manager_task_spawned_retention_fixture(
-                store,
-                log_queue,
-                manager_tid=manager_tid,
-                child_prefix="17780843459054389",
+            store.upsert_deferred_write(
+                report=legacy_report,
+                external_error="previous sink unavailable",
+                now_ns=time.time_ns(),
             )
+            assert len(store.list_pending_deferred_writes(limit=10)) == 1
 
             worker._run_monitor_store_cycle(
                 now_ns=time.time_ns(),
                 task_log_owner="collated_store",
             )
 
-            spawned_ids = seeded["spawned_ids"]
-            old_spawned_ids = set(spawned_ids[:-2])
-            newest_spawned_ids = set(spawned_ids[-2:])
-            remaining_raw_ids = _task_log_message_ids(log_queue)
-            assert old_spawned_ids.isdisjoint(remaining_raw_ids)
-            assert newest_spawned_ids <= remaining_raw_ids
-            assert seeded["lifecycle_id"] in remaining_raw_ids
-            assert seeded["child_row_id"] in remaining_raw_ids
-            record = store.get_task(manager_tid)
-            assert record is not None
-            assert record.raw_deleted_at_ns is None
+            assert len(store.list_pending_deferred_writes(limit=10)) == 0
     finally:
         task.stop()
 
     records = [
         json.loads(line)
         for line in external_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
-    manager_reports = [
-        record
-        for record in records
-        if record["report_kind"] == "manager_task_spawned_retained_event"
-    ]
-    assert len(manager_reports) == 3
-    for report in manager_reports:
-        assert report["record_type"] == "task_lifetime_report"
-        assert report["source_policy"] == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
-        assert report["completeness"] == "raw_row"
-        assert report["lifetime"]["close_reason"] == ("manager_task_spawned_retention")
-        assert report["subject"]["tid"] == manager_tid
-        assert report["observations"]["event"] == "task_spawned"
-        assert report["observations"]["manager_tid"] == manager_tid
-        assert "child_tid" in report["observations"]
-        assert "payload_size_bytes" in report["observations"]
-        assert "child_taskspec" not in report["observations"]
+    assert len(records) == 1
+    assert records[0]["report_kind"] == "manager_task_spawned_retained_event"
+    assert records[0]["subject"]["tid"] == manager_tid
 
 
-def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
+def test_submission_and_custody_after_manager_task_spawned_rows_consumed(
     broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
+    """Consuming manager task_spawned log hints preserves spawn custody and child task-state observation."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod,
-        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
-        2,
-    )
-    external_path = tmp_path / "external-target"
-    external_path.mkdir()
-
-    def fail_deferred_write(self: MonitorStore, **_kwargs: object) -> None:
-        raise RuntimeError("deferred table unavailable")
-
-    monkeypatch.setattr(MonitorStore, "upsert_deferred_write", fail_deferred_write)
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
             "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
-            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
-            "WEFT_TASK_MONITOR_LOG_SINK": "none",
-        }
-    )
-    manager_tid = "1778084345905438820"
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec("1778089999999961820"),
-        config=config,
-    )
-    try:
-        with _maintenance_for(task) as worker:
-            store = worker._ensure_monitor_store()
-            assert store is not None
-            seeded = _seed_manager_task_spawned_retention_fixture(
-                store,
-                log_queue,
-                manager_tid=manager_tid,
-                child_prefix="17780843459054390",
-            )
-
-            retired = worker._trim_manager_task_spawned_task_log_rows(
-                store,
-                now_ns=time.time_ns(),
-            )
-
-            spawned_ids = seeded["spawned_ids"]
-            old_spawned_ids = set(spawned_ids[:-2])
-            remaining_raw_ids = _task_log_message_ids(log_queue)
-            assert retired.message_rows_deleted == 0
-            assert old_spawned_ids <= remaining_raw_ids
-            assert store.missing_task_message_ids(tuple(old_spawned_ids)) == ()
-            progress = worker._last_policy_progress[-1]
-            assert progress.reason_counts is not None
-            assert progress.policy == TASK_MONITOR_POLICY_TASK_LOG_RETENTION
-            assert progress.blocked_reason is not None
-            assert "deferred table unavailable" in progress.blocked_reason
-            record = store.get_task(manager_tid)
-            assert record is not None
-            assert record.raw_deleted_at_ns is None
-    finally:
-        task.stop()
-
-
-def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
-    broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod,
-        "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
-        2,
-    )
-    external_path = tmp_path / "manager-task-spawned-missing.jsonl"
-    config = load_config(
-        {
-            "WEFT_TASK_MONITOR_ENABLED": "1",
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
-            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
-            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 20,
+            "WEFT_TASK_MONITOR_MODE": "delete",
             "WEFT_TASK_MONITOR_LOG_SINK": "none",
         }
     )
@@ -9464,41 +9373,65 @@ def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
                 manager_tid=manager_tid,
                 child_prefix="17780843459054391",
             )
-            spawned_ids = seeded["spawned_ids"]
-            assert log_queue.delete(message_id=spawned_ids[0]) is True
+            child_without_own_row = seeded["child_tids"][1]
+            child_with_collated_row = seeded["child_tids"][0]
 
-            retired = worker._trim_manager_task_spawned_task_log_rows(
-                store,
+            ctx = worker._monitor_context()
+            # Before monitor drains weft.log.tasks, reconcile_submitted_spawn sees task_spawned.
+            before_drain = reconcile_submitted_spawn(
+                ctx,
+                child_without_own_row,
+                timeout=0.0,
+            )
+            assert before_drain.outcome == "spawned"
+
+            # Drain weft.log.tasks through collated store cycle.
+            worker._run_monitor_store_cycle(
                 now_ns=time.time_ns(),
+                task_log_owner="collated_store",
+            )
+            assert set(seeded["spawned_ids"]).isdisjoint(
+                _task_log_message_ids(log_queue)
             )
 
-            old_spawned_ids = set(spawned_ids[:-2])
-            remaining_raw_ids = _task_log_message_ids(log_queue)
-            assert retired.message_rows_deleted == 3
-            assert old_spawned_ids.isdisjoint(remaining_raw_ids)
-            assert set(store.missing_task_message_ids(tuple(old_spawned_ids))) == (
-                old_spawned_ids
+            # After task_spawned hint is consumed and no spawn request remains in queues:
+            # custody is absent (proven_absent=True) and reconciliation returns unknown (never rejected).
+            custody = observe_spawn_request_custody(
+                ctx,
+                child_without_own_row,
+                reserved_routes=(),
             )
-            progress = worker._last_policy_progress[-1]
-            assert progress.reason_counts is not None
-            assert progress.reason_counts["manager_task_spawned_already_missing"] == 1
-            assert progress.reason_counts["manager_task_spawned_reported"] == 2
-            record = store.get_task(manager_tid)
-            assert record is not None
-            assert record.raw_deleted_at_ns is None
+            assert custody.state == "absent"
+            assert custody.reserved_queue is None
+            after_drain = reconcile_submitted_spawn(
+                ctx,
+                child_without_own_row,
+                timeout=0.0,
+            )
+            assert after_drain.outcome == "unknown"
+
+            # Once child publishes its own state snapshot, reconciliation reports spawned immediately.
+            state_queue = make_queue(task_state_queue_name(child_with_collated_row))
+            state_queue.write(
+                json.dumps(
+                    {
+                        "full": child_with_collated_row,
+                        "short": child_with_collated_row[-10:],
+                        "tid": child_with_collated_row,
+                        "name": "child",
+                        "status": "running",
+                        "event": "work_started",
+                    }
+                )
+            )
+            from_state_snapshot = reconcile_submitted_spawn(
+                ctx,
+                child_with_collated_row,
+                timeout=0.0,
+            )
+            assert from_state_snapshot.outcome == "spawned"
     finally:
         task.stop()
-
-    records = [
-        json.loads(line)
-        for line in external_path.read_text(encoding="utf-8").splitlines()
-    ]
-    manager_reports = [
-        record
-        for record in records
-        if record["report_kind"] == "manager_task_spawned_retained_event"
-    ]
-    assert len(manager_reports) == 2
 
 
 def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
@@ -10351,10 +10284,15 @@ def _assert_raw_deleted_oracle(
             )
             continue
         if record.raw_deleted_at_ns is not None:
-            assert not present, (
+            seen_by_ingest = [
+                message_id
+                for message_id in present
+                if checkpoint is not None and message_id <= checkpoint
+            ]
+            assert not seen_by_ingest, (
                 f"{cycle}: family {tid} is marked raw_deleted_at_ns="
-                f"{record.raw_deleted_at_ns} while raw broker rows "
-                f"{present} still exist"
+                f"{record.raw_deleted_at_ns} while already-ingested raw broker rows "
+                f"{seen_by_ingest} (checkpoint {checkpoint}) still exist"
             )
     for ref in _live_monitor_store_refs(store):
         if ref.tid not in tids:
@@ -10487,6 +10425,28 @@ def _seeded_refs_remaining(store: MonitorStore, tids: tuple[str, ...]) -> bool:
     return any(ref.tid in seeded for ref in _live_monitor_store_refs(store))
 
 
+def _seeded_lifecycle_pending(
+    store: MonitorStore,
+    log_queue: Any,
+    tids: tuple[str, ...],
+) -> bool:
+    """Return whether any seeded terminal family still has pending raw, ref, or summary/disposition work."""
+
+    if _seeded_rows_remaining(log_queue, tids) or _seeded_refs_remaining(store, tids):
+        return True
+    for tid in tids:
+        record = store.get_task(tid)
+        if record is None:
+            continue
+        if (
+            record.summary_emitted_at_ns is None
+            or record.disposition_at_ns is None
+            or record.task_control_deleted_at_ns is None
+        ):
+            return True
+    return False
+
+
 def _external_report_tids(external_path: Any) -> list[str]:
     """Return subject tids of task lifetime reports in the JSONL sink."""
 
@@ -10579,9 +10539,7 @@ def test_task_monitor_jsonl_backlog_lifecycle_keeps_raw_deleted_invariant(
                     cycle=f"cycle {index + 1}",
                 )
                 high_water_flags.append(ingest.completed_fifo_high_water)
-                if not _seeded_rows_remaining(
-                    log_queue, tids
-                ) and not _seeded_refs_remaining(store, tids):
+                if not _seeded_lifecycle_pending(store, log_queue, tids):
                     break
             # 12 seeded rows against a 4-row window: at least the first two
             # cycles are catch-up (scan limit reached) before the first
@@ -10666,9 +10624,7 @@ def test_task_monitor_jsonl_backlog_lifecycle_survives_monitor_restart(
                     now_ns=base_now + 1 + index,
                     cycle=f"incarnation 2 cycle {index + 1}",
                 )
-                if not _seeded_rows_remaining(
-                    log_queue, tids
-                ) and not _seeded_refs_remaining(store, tids):
+                if not _seeded_lifecycle_pending(store, log_queue, tids):
                     break
             _assert_jsonl_lifecycle_converged(store, log_queue, external_path, tids)
     finally:
@@ -10737,9 +10693,7 @@ def test_task_monitor_jsonl_lifecycle_handles_families_older_than_retention(
                         # the report is exported (the jsonl audit promise).
                         assert broker_rows.get(tid, set()) == set()
                         assert tid in _external_report_tids(external_path)
-                if not _seeded_rows_remaining(
-                    log_queue, tids
-                ) and not _seeded_refs_remaining(store, tids):
+                if not _seeded_lifecycle_pending(store, log_queue, tids):
                     break
             _assert_jsonl_lifecycle_converged(store, log_queue, external_path, tids)
             assert retired_seen, (
@@ -10920,9 +10874,9 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
                             )
                         )
                         late_rows_written += 1
-                elif not _seeded_rows_remaining(
-                    log_queue, tuple(all_tids)
-                ) and not _seeded_refs_remaining(store, tuple(all_tids)):
+                elif not _seeded_lifecycle_pending(
+                    store, log_queue, tuple(all_tids)
+                ):
                     break
             assert late_rows_written > 0, (
                 "the interleave never produced a marked family to write late "
@@ -11236,9 +11190,10 @@ def test_task_monitor_never_marks_family_with_uningested_rows(
 
     Family X's rows sit entirely beyond the first ingest window, so after
     the first (catch-up) cycle X has no collation record, no refs, and its
-    raw rows survive. Nothing may mark X (or anyone) raw-deleted in that
-    state. The backlog then converges with the raw-deleted oracle asserted
-    at every cycle boundary.
+    raw rows survive. Ingested families within the window fold and drain
+    their seen raw rows immediately while X remains untouched until its
+    window is reached. The backlog then converges with the raw-deleted
+    oracle asserted at every cycle boundary.
 
     Spec: [MF-5], [OBS.17]
     """
@@ -11276,19 +11231,12 @@ def test_task_monitor_never_marks_family_with_uningested_rows(
             )
             assert ingest.completed_fifo_high_water is False
             # X was never ingested: no collation record, no refs, raw rows
-            # intact, and in particular no raw-deleted mark anywhere.
+            # intact, and in particular no raw-deleted mark for X.
             assert store.get_task(uningested_tid) is None
             assert sorted(_broker_rows_by_tid(log_queue)[uningested_tid]) != []
             assert not any(
                 ref.tid == uningested_tid for ref in _live_monitor_store_refs(store)
             )
-            for tid in filler_tids:
-                record = store.get_task(tid)
-                assert record is not None
-                assert record.raw_deleted_at_ns is None, (
-                    "no family may be marked raw-deleted on a catch-up cycle "
-                    "while its raw rows survive"
-                )
 
             for index in range(12):
                 _run_oracle_checked_store_cycle(
@@ -11299,9 +11247,7 @@ def test_task_monitor_never_marks_family_with_uningested_rows(
                     now_ns=base_now + 1 + index,
                     cycle=f"cycle {index + 2}",
                 )
-                if not _seeded_rows_remaining(
-                    log_queue, all_tids
-                ) and not _seeded_refs_remaining(store, all_tids):
+                if not _seeded_lifecycle_pending(store, log_queue, all_tids):
                     break
             _assert_jsonl_lifecycle_converged(store, log_queue, external_path, all_tids)
     finally:
@@ -11313,14 +11259,14 @@ def test_task_monitor_non_high_water_cycle_marks_nothing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A4(c): a cycle that does not complete high-water marks no family.
+    """A4(c): a non-high-water cycle drains folded raw rows but emits no summaries.
 
     With a backlog wider than the scan window, the first cycle stops at
-    the scan limit (``completed_fifo_high_water`` False). That cycle must
-    emit no summaries, delete no monitor-store-proven rows, and mark no
-    family raw-deleted, even though some families are already fully
-    ingested and terminal. The oracle must hold at every cycle boundary
-    through convergence.
+    the scan limit (``completed_fifo_high_water`` False). Under unified
+    valid-row ingest, that cycle folds and deletes the scanned window's
+    valid raw rows and reconciles their store refs while emitting no
+    summaries and disposing no families until FIFO high-water completes.
+    The oracle must hold at every cycle boundary through convergence.
 
     Spec: [MF-5], [OBS.13], [OBS.17]
     """
@@ -11352,16 +11298,10 @@ def test_task_monitor_non_high_water_cycle_marks_nothing(
                 cycle="cycle 1",
             )
             assert ingest.completed_fifo_high_water is False
+            assert ingest.raw_deleted > 0
             assert worker._collation_state.last_collation_summaries_emitted == 0
-            assert worker._collation_state.last_monitor_store_message_rows_deleted == 0
+            assert worker._collation_state.last_control_families_disposed == 0
             assert _external_report_tids(external_path) == []
-            for tid in tids:
-                record = store.get_task(tid)
-                if record is not None:
-                    assert record.raw_deleted_at_ns is None, (
-                        f"family {tid} marked raw-deleted by a non-high-water "
-                        "cycle while its raw rows survive"
-                    )
 
             for index in range(12):
                 _run_oracle_checked_store_cycle(
@@ -11372,9 +11312,7 @@ def test_task_monitor_non_high_water_cycle_marks_nothing(
                     now_ns=base_now + 1 + index,
                     cycle=f"cycle {index + 2}",
                 )
-                if not _seeded_rows_remaining(
-                    log_queue, tids
-                ) and not _seeded_refs_remaining(store, tids):
+                if not _seeded_lifecycle_pending(store, log_queue, tids):
                     break
             _assert_jsonl_lifecycle_converged(store, log_queue, external_path, tids)
     finally:
@@ -11388,11 +11326,10 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
 ) -> None:
     """A4: ingest-path malformed-row deletion cannot mark live families.
 
-    The ingest pass deletes malformed rows (after their raw-row lifetime
-    report) even on catch-up cycles, and its store reconcile call
-    (``delete_task_messages_after_raw_delete``) runs only for verifiably
-    deleted VALID rows. A malformed row deleted alongside family X's
-    valid, undeleted rows must therefore never mark X raw-deleted.
+    When a malformed row is deleted alongside a family whose valid raw
+    rows fail deletion on that pass, ``delete_task_messages_after_raw_delete``
+    reconciles only verifiably deleted valid rows and must never mark a
+    family whose valid raw rows survive.
 
     Spec: [MF-5], [OBS.13], [OBS.17]
     """
@@ -11405,12 +11342,10 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
     family_tid = str(base_tid)
     filler_tid = str(base_tid + 1)
     tids = (family_tid, filler_tid)
-    # Window 1 (scan limit 4): X's two valid rows, the malformed row, and
-    # the filler family's first row. The cycle stays below high-water, so
-    # the only deletion that can happen is the malformed-row one.
     _seed_terminal_family_backlog(log_queue, (family_tid,))
     log_queue.write(json.dumps({"event": "task_activity", "status": "running"}))
     _seed_terminal_family_backlog(log_queue, (filler_tid,))
+    family_row_ids = set(_broker_rows_by_tid(log_queue)[family_tid])
     attributed = {
         message_id
         for ids in _broker_rows_by_tid(log_queue).values()
@@ -11430,14 +11365,49 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
             store = worker._ensure_monitor_store()
             assert store is not None
             base_now = time.time_ns()
-            ingest = _run_oracle_checked_store_cycle(
-                worker,
-                store,
-                log_queue,
-                tids,
-                now_ns=base_now,
-                cycle="cycle 1",
+            original_apply = task_monitor_mod.apply_exact_prune_candidates
+
+            def block_family_valid_deletes(
+                ctx: Any,
+                candidates: Any,
+                *,
+                apply_result: Any,
+                **kwargs: Any,
+            ) -> list[Any]:
+                candidate_list = list(candidates)
+                allowed = [
+                    c for c in candidate_list if c.message_id not in family_row_ids
+                ]
+                applied_by_id: dict[int, Any] = {}
+                if allowed:
+                    for item in original_apply(
+                        ctx,
+                        allowed,
+                        apply_result=lambda c, deleted, error: (
+                            c.message_id,
+                            apply_result(c, deleted, error),
+                        ),
+                        **kwargs,
+                    ):
+                        applied_by_id[item[0]] = item[1]
+                return [
+                    applied_by_id.get(
+                        c.message_id,
+                        apply_result(c, False, None),
+                    )
+                    for c in candidate_list
+                ]
+
+            monkeypatch.setattr(
+                task_monitor_mod,
+                "apply_exact_prune_candidates",
+                block_family_valid_deletes,
             )
+            worker._run_monitor_store_cycle(
+                now_ns=base_now,
+                task_log_owner="collated_store",
+            )
+            ingest = worker._store_state.last_retained_task_log_ingest
             assert ingest.completed_fifo_high_water is False
             assert ingest.malformed_deleted == 1
             assert malformed_id not in _all_live_message_ids(log_queue)
@@ -11454,6 +11424,11 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
             ]
             assert len(family_refs) == 2
 
+            monkeypatch.setattr(
+                task_monitor_mod,
+                "apply_exact_prune_candidates",
+                original_apply,
+            )
             for index in range(12):
                 _run_oracle_checked_store_cycle(
                     worker,
@@ -11463,9 +11438,7 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
                     now_ns=base_now + 1 + index,
                     cycle=f"cycle {index + 2}",
                 )
-                if not _seeded_rows_remaining(
-                    log_queue, tids
-                ) and not _seeded_refs_remaining(store, tids):
+                if not _seeded_lifecycle_pending(store, log_queue, tids):
                     break
             _assert_jsonl_lifecycle_converged(store, log_queue, external_path, tids)
     finally:
@@ -11479,20 +11452,15 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
     tmp_path: Path,
     disposed: bool,
 ) -> None:
-    """A5(3): orphan-path audit pin — summary/JSONL before raw deletion.
+    """A5(3): orphan recovery folds and drains raw rows while parent retirement respects summary.
 
-    A marked, terminal, unsummarized family with NO refs and live raw rows
-    is the orphan-recovery selection's domain; its eligibility
-    OR-condition admits terminal-but-unsummarized families, so without the
-    summary gate the pre-fix orphan slice deleted their raw rows with no
-    JSONL export ever happening. With the gate: in the undisposed shape
-    the summary stage exports the family first and orphan recovery deletes
-    the rows on a later pass of the lifecycle; in the disposed shape (no
-    summary owner exists) the rows are held indefinitely.
-
-    The damage shape itself is constructed through the real vacuous
-    mechanism: deleting the family's refs while its raw rows survive marks
-    the family via the store reconcile.
+    Under unified valid-row fold-before-delete, orphan recovery folds any
+    surviving raw rows into ``weft_monitor_tasks`` before deleting them,
+    without waiting for summary emission. When ``disposed=False``, the
+    summary stage exports the collated summary and the family converges;
+    when ``disposed=True`` (without a summary), orphan raw rows still
+    fold and drain into the collated parent row, while the unsummarized
+    parent row in ``weft_monitor_tasks`` is preserved (not retired).
 
     Spec: [MF-5], [OBS.13], [OBS.17]
     """
@@ -11515,8 +11483,6 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
             assert store is not None
             marked_at_ns = _ingest_live_rows_without_deletion(store, log_queue, (tid,))
             family_ids = sorted(_broker_rows_by_tid(log_queue)[tid])
-            # Destroy the refs while the raw rows survive: the reconcile step
-            # marks the family raw-deleted — the vacuous-marking mechanism.
             store.delete_task_messages_after_raw_delete(
                 family_ids,
                 deleted_at_ns=marked_at_ns,
@@ -11537,24 +11503,543 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
 
             for index in range(4):
                 _run_quiet_store_cycle(worker, cycle=f"cycle {index + 1}")
-                if not _broker_rows_by_tid(log_queue).get(tid):
-                    assert tid in _external_report_tids(external_path), (
-                        f"cycle {index + 1}: orphan raw rows deleted before the "
-                        "family's summary/JSONL export"
-                    )
 
             rows_remaining = sorted(_broker_rows_by_tid(log_queue).get(tid, set()))
+            assert rows_remaining == []
             if disposed:
-                assert rows_remaining == family_ids
                 assert tid not in _external_report_tids(external_path)
+                record = store.get_task(tid)
+                assert record is not None
+                assert record.summary_emitted_at_ns is None
+                assert record.orphan_raw_recovery_checked_at_ns is not None
             else:
-                assert rows_remaining == []
                 assert _external_report_tids(external_path).count(tid) == 1
                 record = store.get_task(tid)
                 if record is not None:
                     assert record.summary_emitted_at_ns is not None
                     assert record.orphan_raw_recovery_checked_at_ns is not None
                 _assert_raw_deleted_oracle(store, log_queue, (tid,), cycle="converged")
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_drains_live_task_raw_rows_before_summary(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+) -> None:
+    """Slice 1 RED: live task valid raw rows drain after fold in jsonl_then_delete before summary.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tid = str(time.time_ns())
+    for sequence, event, status in (
+        (1, "work_spawning", "spawning"),
+        (2, "work_started", "running"),
+    ):
+        log_queue.write(
+            json.dumps(
+                {
+                    "event": event,
+                    "status": status,
+                    "tid": tid,
+                    "sequence": sequence,
+                    "taskspec": {"state": {"started_at": int(tid)}},
+                }
+            )
+        )
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(tid) + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(),
+                task_log_owner="collated_store",
+            )
+            ingest = worker._store_state.last_retained_task_log_ingest
+            assert ingest.completed_fifo_high_water is True
+            assert _broker_rows_by_tid(log_queue).get(tid, set()) == set()
+            assert not _seeded_refs_remaining(store, (tid,))
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.terminal_seen is False
+            assert record.raw_deleted_at_ns is not None
+            assert record.summary_emitted_at_ns is None
+            assert record.disposition_at_ns is None
+            assert _external_report_tids(external_path) == []
+    finally:
+        task.stop()
+
+
+def test_task_monitor_jsonl_then_delete_retries_raw_refs_during_partial_fifo_pass(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+) -> None:
+    """Slice 1 RED: pending exact raw refs retry even when FIFO pass stops before high-water.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / "task-lifetime.jsonl"
+    config = _jsonl_lifecycle_config(external_path)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    base_tid = time.time_ns()
+    retry_tid = str(base_tid)
+    backlog_tids = tuple(str(base_tid + offset) for offset in range(1, 4))
+    _seed_terminal_family_backlog(log_queue, (retry_tid,))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(base_tid + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            # Simulate a prior cycle that folded retry_tid and advanced the
+            # checkpoint past retry_tid's raw rows before exact deletion ran.
+            _ingest_live_rows_without_deletion(store, log_queue, (retry_tid,))
+            retry_ids = sorted(_broker_rows_by_tid(log_queue)[retry_tid])
+            assert len(retry_ids) == 2
+            # Now seed a fresh backlog wider than the scan window (limit=4)
+            # after the checkpoint so the next cycle stops before high-water.
+            _seed_terminal_family_backlog(log_queue, backlog_tids)
+
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(),
+                task_log_owner="collated_store",
+            )
+            ingest = worker._store_state.last_retained_task_log_ingest
+            assert ingest.completed_fifo_high_water is False
+            assert worker._collation_state.last_collation_summaries_emitted == 0
+            assert worker._collation_state.last_monitor_store_message_rows_deleted >= 2
+            assert _broker_rows_by_tid(log_queue).get(retry_tid, set()) == set()
+            assert not _seeded_refs_remaining(store, (retry_tid,))
+            retry_record = store.get_task(retry_tid)
+            assert retry_record is not None
+            assert retry_record.raw_deleted_at_ns is not None
+            assert retry_record.summary_emitted_at_ns is None
+            assert _external_report_tids(external_path) == []
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    "crash_boundary",
+    [
+        "after_fold_before_raw_delete",
+        "after_raw_delete_before_reconcile",
+        "after_reconcile_before_checkpoint",
+    ],
+)
+def test_task_monitor_ingest_crash_restart_boundaries_preserve_collation_and_retire_once(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    crash_boundary: str,
+) -> None:
+    """Crash/restart at each sidecar-vs-broker boundary converges idempotently.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / f"crash-{crash_boundary}.jsonl"
+    config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tid = str(time.time_ns())
+    _seed_terminal_family_backlog(log_queue, (tid,))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(tid) + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            if crash_boundary == "after_fold_before_raw_delete":
+                original_delete = worker._delete_exact_task_log_rows
+                monkeypatch.setattr(
+                    worker,
+                    "_delete_exact_task_log_rows",
+                    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("simulated crash before raw delete")
+                    ),
+                )
+                with pytest.raises(RuntimeError, match="simulated crash before raw delete"):
+                    worker._ingest_retained_task_log_rows(
+                        store=store,
+                        now_ns=time.time_ns(),
+                        apply=True,
+                    )
+                monkeypatch.setattr(worker, "_delete_exact_task_log_rows", original_delete)
+            elif crash_boundary == "after_raw_delete_before_reconcile":
+                original_reconcile = store.delete_task_messages_after_raw_delete
+                monkeypatch.setattr(
+                    store,
+                    "delete_task_messages_after_raw_delete",
+                    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("simulated crash before ref reconcile")
+                    ),
+                )
+                worker._ingest_retained_task_log_rows(
+                    store=store,
+                    now_ns=time.time_ns(),
+                    apply=True,
+                )
+                assert _broker_rows_by_tid(log_queue).get(tid, set()) == set()
+                assert _seeded_refs_remaining(store, (tid,))
+                monkeypatch.setattr(
+                    store,
+                    "delete_task_messages_after_raw_delete",
+                    original_reconcile,
+                )
+            else:
+                original_checkpoint = store.set_checkpoint
+                monkeypatch.setattr(
+                    store,
+                    "set_checkpoint",
+                    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("simulated crash before checkpoint")
+                    ),
+                )
+                worker._ingest_retained_task_log_rows(
+                    store=store,
+                    now_ns=time.time_ns(),
+                    apply=True,
+                )
+                assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) is None
+                monkeypatch.setattr(store, "set_checkpoint", original_checkpoint)
+
+            base_now = time.time_ns()
+            for index in range(6):
+                _run_oracle_checked_store_cycle(
+                    worker,
+                    store,
+                    log_queue,
+                    (tid,),
+                    now_ns=base_now + index,
+                    cycle=f"recovery cycle {index + 1}",
+                )
+                if not _seeded_lifecycle_pending(store, log_queue, (tid,)):
+                    break
+            _assert_jsonl_lifecycle_converged(store, log_queue, external_path, (tid,))
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("failure_mode", ["under_delete", "uncertain_read"])
+def test_task_monitor_store_delete_preserves_refs_and_records_error_on_under_delete_or_uncertain_read(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    """Under-delete or uncertain read in _delete_monitor_store_task_log_rows keeps child refs and records error.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / f"store-delete-{failure_mode}.jsonl"
+    config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tid = str(time.time_ns())
+    _seed_terminal_family_backlog(log_queue, (tid,))
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(tid) + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            _ingest_live_rows_without_deletion(store, log_queue, (tid,))
+            seeded_ids = sorted(_broker_rows_by_tid(log_queue)[tid])
+            assert len(seeded_ids) == 2
+
+            def fake_apply(
+                _ctx: Any,
+                candidates: Any,
+                *,
+                apply_result: Any,
+                **_kwargs: Any,
+            ) -> list[Any]:
+                error = None if failure_mode == "under_delete" else "simulated broker read error"
+                return [apply_result(c, False, error) for c in candidates]
+
+            monkeypatch.setattr(
+                task_monitor_mod,
+                "apply_exact_prune_candidates",
+                fake_apply,
+            )
+            retired = worker._delete_monitor_store_task_log_rows(store)
+            assert retired.message_rows_deleted == 0
+            assert sorted(
+                ref.message_id for ref in _live_monitor_store_refs(store) if ref.tid == tid
+            ) == seeded_ids
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.raw_deleted_at_ns is None
+            assert worker._store_state.last_collation_store_error is not None
+            if failure_mode == "under_delete":
+                assert "was not deleted by exact broker delete" in (
+                    worker._store_state.last_collation_store_error
+                )
+            else:
+                assert "simulated broker read error" in (
+                    worker._store_state.last_collation_store_error
+                )
+    finally:
+        task.stop()
+
+
+def test_task_monitor_malformed_report_sink_and_store_failure_preserves_row_and_blocks_checkpoint(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When malformed report sink and deferred store both fail, valid rows drain but malformed row and checkpoint hold.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    # Directory path causes JSONL file sink write to fail
+    external_dir = tmp_path / "unwritable-sink-dir"
+    external_dir.mkdir()
+    config = _jsonl_lifecycle_config(external_dir, batch_size=8, scan_limit=8)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    tid = str(time.time_ns())
+    _seed_terminal_family_backlog(log_queue, (tid,))
+    valid_ids = set(_broker_rows_by_tid(log_queue)[tid])
+    log_queue.write("{malformed-json-row")
+    all_ids = _all_live_message_ids(log_queue)
+    malformed_ids = all_ids - valid_ids
+    assert len(malformed_ids) == 1
+    malformed_id = next(iter(malformed_ids))
+
+    def fail_deferred_write(self: MonitorStore, **_kwargs: object) -> None:
+        raise RuntimeError("deferred table unavailable")
+
+    monkeypatch.setattr(MonitorStore, "upsert_deferred_write", fail_deferred_write)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(tid) + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            ingest = worker._ingest_retained_task_log_rows(
+                store=store,
+                now_ns=time.time_ns(),
+                apply=True,
+            )
+            assert ingest.stop_reason == "lifetime_report_error"
+            assert ingest.raw_delete_errors != ()
+            # Valid rows before the malformed row were folded and deleted;
+            # the malformed row remains in weft.log.tasks and checkpoint does not advance.
+            remaining_ids = _all_live_message_ids(log_queue)
+            assert valid_ids.isdisjoint(remaining_ids)
+            assert malformed_id in remaining_ids
+            assert store.get_checkpoint(WEFT_GLOBAL_LOG_QUEUE) is None
+            record = store.get_task(tid)
+            assert record is not None
+            assert record.terminal_seen is True
+            assert record.raw_deleted_at_ns is not None
+    finally:
+        task.stop()
+
+
+def test_task_monitor_claimed_task_log_row_excluded_from_ingest_and_orphan_recovery(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+) -> None:
+    """Claimed rows in weft.log.tasks are never folded or deleted by ingest or orphan recovery.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / "claimed-row.jsonl"
+    config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    reserved_queue = make_queue(f"{WEFT_GLOBAL_LOG_QUEUE}.claimed_test")
+    tid = str(time.time_ns())
+    _seed_terminal_family_backlog(log_queue, (tid,))
+    seeded_ids = sorted(_broker_rows_by_tid(log_queue)[tid])
+    assert len(seeded_ids) == 2
+
+    # Claim/move the first row out of weft.log.tasks so its row in weft.log.tasks is claimed/moved.
+    moved = log_queue.move_one(
+        reserved_queue.name,
+        exact_timestamp=seeded_ids[0],
+        with_timestamps=True,
+    )
+    assert moved is not None
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(tid) + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns(),
+                task_log_owner="collated_store",
+            )
+            # Only the unclaimed second row was folded and deleted; the moved/claimed row in reserved_queue is untouched.
+            assert [
+                int(mid) for _body, mid in iter_queue_entries(reserved_queue)
+            ] == [seeded_ids[0]]
+            assert store.missing_task_message_ids((seeded_ids[0],)) == (seeded_ids[0],)
+
+            # Force orphan recovery on tid and verify reserved_queue row is still untouched.
+            recovery = worker._recover_orphan_task_log_rows(
+                store,
+                now_ns=time.time_ns(),
+            )
+            assert recovery.errors == ()
+            assert [
+                int(mid) for _body, mid in iter_queue_entries(reserved_queue)
+            ] == [seeded_ids[0]]
+    finally:
+        task.stop()
+
+
+def test_task_monitor_pre_checkpoint_recovery_folds_and_deletes_young_backfilled_rows(
+    broker_env: BrokerEnv,
+    tmp_path: Path,
+) -> None:
+    """Below-cursor backfilled valid rows fold and delete without age-gating even under 48h retention.
+
+    Spec: [MF-5]
+    """
+
+    db_path, make_queue = broker_env
+    external_path = tmp_path / "pre-checkpoint-young.jsonl"
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
+            "WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT": 20,
+            "WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS": 172800,
+            "WEFT_LOG_TASKS_EXTERNAL_PATH": str(external_path),
+            "WEFT_LOG_TASKS_EXTERNAL_MODE": "collated",
+            "WEFT_TASK_MONITOR_MODE": "jsonl_then_delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    base_tid = time.time_ns()
+    summarized_tid = str(base_tid)
+    backfilled_tid = str(base_tid + 1)
+
+    # Write young rows (valid + malformed) to weft.log.tasks that sit below the checkpoint without store refs.
+    _seed_terminal_family_backlog(log_queue, (summarized_tid, backfilled_tid))
+    summarized_ids = sorted(_broker_rows_by_tid(log_queue)[summarized_tid])
+    backfilled_ids = sorted(_broker_rows_by_tid(log_queue)[backfilled_tid])
+    log_queue.write("{malformed-below-checkpoint")
+    all_ids = _all_live_message_ids(log_queue)
+    malformed_ids = all_ids - set(summarized_ids) - set(backfilled_ids)
+    assert len(malformed_ids) == 1
+    malformed_id = next(iter(malformed_ids))
+    head_id = max(*summarized_ids, *backfilled_ids, malformed_id)
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(base_tid + 100)),
+        config=config,
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            # Fold only the first row of summarized_tid, mark it summarized, and reconcile its ref,
+            # leaving summarized_ids[1], both backfilled_ids, and malformed_id as young below-cursor rows with no refs.
+            first_payload = {
+                "event": "work_spawning",
+                "status": "spawning",
+                "tid": summarized_tid,
+                "sequence": 1,
+            }
+            first_update = update_from_task_log_payload(
+                first_payload,
+                queue_name=WEFT_GLOBAL_LOG_QUEUE,
+                message_id=summarized_ids[0],
+            )
+            assert first_update is not None
+            store.record_task_log_updates(
+                WEFT_GLOBAL_LOG_QUEUE,
+                (first_update,),
+                checkpoint_message_id=head_id + 10_000,
+            )
+            assert log_queue.delete(message_id=summarized_ids[0]) is True
+            store.delete_task_messages_after_raw_delete(
+                (summarized_ids[0],),
+                deleted_at_ns=head_id + 1,
+            )
+            store.mark_summary_emitted(summarized_tid, head_id + 2)
+
+            recovery = worker._recover_pre_checkpoint_task_log_rows(
+                store,
+                now_ns=time.time_ns(),
+            )
+            assert recovery.skipped_too_young == 1
+            assert recovery.malformed_deleted == 0
+            assert recovery.valid_ingested == 3
+            assert recovery.raw_deleted == 3
+            assert _broker_rows_by_tid(log_queue).get(summarized_tid, set()) == set()
+            assert _broker_rows_by_tid(log_queue).get(backfilled_tid, set()) == set()
+            assert {
+                mid for mid in _all_live_message_ids(log_queue) if mid <= head_id
+            } == {malformed_id}
+            assert not _seeded_refs_remaining(store, (summarized_tid, backfilled_tid))
+
+            summarized_record = store.get_task(summarized_tid)
+            assert summarized_record is not None
+            assert summarized_record.terminal_seen is True
+            assert summarized_record.raw_deleted_at_ns is not None
+            assert summarized_record.summary_emitted_at_ns == head_id + 2
+
+            backfilled_record = store.get_task(backfilled_tid)
+            assert backfilled_record is not None
+            assert backfilled_record.terminal_seen is True
+            assert backfilled_record.raw_deleted_at_ns is not None
+
+            # Once the retention window elapses, the pre-checkpoint malformed row is reported and deleted.
+            aged_recovery = worker._recover_pre_checkpoint_task_log_rows(
+                store,
+                now_ns=malformed_id + 172801 * 1_000_000_000,
+            )
+            assert aged_recovery.skipped_too_young == 0
+            assert aged_recovery.malformed_deleted == 1
+            assert {
+                mid for mid in _all_live_message_ids(log_queue) if mid <= head_id
+            } == set()
     finally:
         task.stop()
 
@@ -13067,9 +13552,7 @@ def test_task_monitor_store_ownership_characterization(
                 if destructive
                 else 0,
                 "deleted_counter": (
-                    initial_rows
-                    if collated_ready and mode == "delete"
-                    else int(external == "raw")
+                    initial_rows if collated_ready else int(external == "raw")
                 )
                 if destructive
                 else 0,

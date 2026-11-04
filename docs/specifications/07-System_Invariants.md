@@ -546,18 +546,31 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     prove both that Monitor tables and reports are derived evidence only and
     that cleanup effects are exact, policy-selected, and retryable after
     partial failure.
-  - **OBS.13.3**: With the built-in `delete` mode, retained
-    `weft.log.tasks` cleanup may delete exact cleanup rows selected by explicit
-    supported paths only: malformed rows are deleted, valid retained rows are
-    folded into Monitor-owned tables, and then those exact raw rows are
-    deleted. `weft_monitor_task_messages` is a temporary pending-reference
-    table for exact raw-message deletion and retry, not a shadow queue ledger.
-    After exact raw broker deletion succeeds, or retry observes the raw row is
-    already absent, the Monitor deletes the child refs and reconciles the
-    parent family. The manager `task_spawned` event-trim helper is the narrow
-    exception: it may delete selected launch-event child refs while leaving the
-    open manager parent family without `raw_deleted_at_ns`. Raw deletion is
-    gated by successful Monitor collation, not by terminal summary emission.
+  - **OBS.13.3**: Under collated ownership, both destructive modes (`delete`
+    and `jsonl_then_delete`) may delete an exact valid raw task-log row after
+    its collation update and raw-message reference commit durably. This applies
+    to nonterminal rows and does not await a lifetime report. In
+    `jsonl_then_delete`, malformed/unrecognized raw rows and inferred runtime
+    cleanup reports still require accepted external emission or durable
+    deferred-report handoff before destructive cleanup. Deferred report bodies
+    survive independently of raw rows and collation-family retirement. Raw
+    external ownership retains emit-before-delete semantics.
+    `weft_monitor_task_messages` is a temporary pending-reference table for
+    exact raw-message deletion and retry, not a shadow queue ledger. Exact
+    raw-message retry work runs in bounded batches independently of FIFO
+    high-water completion. References are removed only after verified deletion
+    or confirmed absence; errors preserve retry evidence. Forward checkpoints
+    advance after a successful selected pass, with non-destructive ingest-only
+    advancement retained in `report_only`. A checkpoint does not prove that
+    imported/backfilled earlier rows were folded. Bounded pre-checkpoint/orphan
+    recovery folds unknown valid rows before deletion. Summary creation retains
+    full FIFO high-water gating and existing retention/completeness rules.
+    Parent retirement retains all cleanup, disposition, summary, and
+    no-reference proofs. Manager-authored `task_spawned` rows follow the same
+    valid-row rule under collated ownership; no separate newest-launch-hint
+    set or per-launch lifetime report is retained by the collated exporter,
+    while existing deferred launch-event reports remain deliverable.
+    Implementation plan: [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md).
   - **OBS.13.4**: Family disposition and parent retirement are explicit,
     retryable table state. Parents may be physically retired only after raw
     deletion, summary emission, disposition, task-local control cleanup, any
@@ -681,9 +694,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     TaskMonitor policy namespace. Each policy run must remain bounded, report
     base/waypoint/blocked status, and avoid spinning when only future-eligible
     or blocked work remains. Private cleanup phases belong in reason counts or
-    cached details, not new policy identities. Manager `task_spawned` row
-    trimming is reported through `task_log.retention` reason counts and does
-    not add a sixth policy identity.
+    cached details, not new policy identities.
   - **OBS.13.13**: Exact retained terminal ctrl_out observations may update
     operational collation status and provenance under [MF-5], including for
     disposed families. They never create task-owned lifecycle evidence or
@@ -1551,3 +1562,4 @@ doc:
 Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) removes the unused dead-TID raw-log coalescing chain and its SQL/store accessors. Live orphan recovery and store-cycle ingestion remain owned by `weft/core/monitor/task_monitor.py::TaskMonitor`; dead-TID cleanup does not coalesce task logs.
 
 Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+- [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md) unifies valid-row fold-before-exact-delete ingestion across collated destructive modes, separates exact raw-reference retry from FIFO high-water summary completion, and retires the separate manager `task_spawned` compactor under [OBS.13] and [OBS.17].

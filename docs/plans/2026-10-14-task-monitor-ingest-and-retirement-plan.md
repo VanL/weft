@@ -1,14 +1,14 @@
 # TaskMonitor Ingest and Retirement
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]; docs/specifications/07-System_Invariants.md [OBS.13], [OBS.17]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4a]
 Superseded by: none
 
 Class: 5. This changes durable telemetry handoff and destructive cleanup policy.
-Plan type: implementation with spec revision. Planning only; no implementation
-or spec promotion is authorized by the request that produced this revision.
+Plan type: implementation with spec revision.
 Promotion strategy: A, requirement text first, then synchronized implementation
 mappings and code backlinks in each owning slice.
+Promotion Baseline Identifier: `a1bc1b45a2fb91c9503131bf4fc8d00cc4c00fb5` (pre-edit HEAD before Slice 1 spec promotion).
 
 ## 1. Goal and prerequisite
 
@@ -18,7 +18,7 @@ emission, or catching up to the global log head. Retain the existing recovery
 proofs and keep report finalization separate from raw ingestion.
 
 The [read-separation plan](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md)
-is a hard release prerequisite: ordinary status, result, control, and client
+is a hard release prerequisite (now `completed`): ordinary status, result, control, and client
 reads must work without raw logs or Monitor tables before enabling this policy.
 Its public observation contract stands on its own; it can ship without this
 plan. Do not implement both as one unreviewable rewrite.
@@ -38,15 +38,17 @@ or task-owned terminal authority depends on this tradeoff.
 
 ## 2. Baseline, sources, and actual owners
 
-Baseline Git `9b7ada69a21474346b44700d31157819819e62a6`, with these October 14
-working-tree inputs (concurrent family-scheduling work must be preserved):
+Implementation baseline Git `a1bc1b45a2fb91c9503131bf4fc8d00cc4c00fb5` (reconciled from the October 14 planning baseline `9b7ada69a21474346b44700d31157819819e62a6` after prerequisite [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) landed):
 
 | File | SHA-256 |
 |---|---|
-| `weft/core/monitor/task_monitor.py` | `de561ea079c8c870ade9e5a3efb683583c80c7bd2c51184ddce1bc2780de04b4` |
-| `weft/core/monitor/store.py` | `8116a45d4706c5ce5e2b41e3729e8524f90836cd5aa8b36bfaa5057bd080ed75` |
-| `docs/specifications/05-Message_Flow_and_State.md` | `aa0612b5c66679a090ec744ee150a1e94a4395625fec28d6c4b93f4525ad7c7e` |
-| `docs/specifications/07-System_Invariants.md` | `89efe72c64842f6bab4d00913e4cf494c8dd1fef9057d15fb6de9d0729d0587a` |
+| `weft/core/monitor/task_monitor.py` | `56c920d39ec72936fad9d209a6a7d6921d5a47e81be2e3c04da31c52df161832` |
+| `weft/core/monitor/store.py` | `185e33facf66c45cdb346cd97fb966631339711cc26ce808dd18c2d2c6fd9283` |
+| `weft/core/monitor/sql.py` | `3c5dcad1e33a9ea8a106d2b2844a5e236835afba0b03595ad2f109a3fda5e130` |
+| `weft/_constants.py` | `08fac07f71b40d623f5a288a0363fe3274102043762ec16bddbe77c24320b0bf` |
+| `docs/specifications/05-Message_Flow_and_State.md` | `4651f59b8e0c77bfb4cc4bbbdcd09fc37083447705f9073aa760e7d98e0433ea` |
+| `docs/specifications/07-System_Invariants.md` | `f94fccf2dbcd36a31ef8b1ba2722a8d65ce4e568256e366e26c98f498af8bcca` |
+| `docs/specifications/04-SimpleBroker_Integration.md` | `370a805203ee7f53f8713b8a8a517d037bc5afcfbef21df4c419ff3b0d156012` |
 
 Reconcile current hashes/diffs before implementation; record a spec-promotion
 baseline before code. Read the source specs, program theory, engineering
@@ -407,6 +409,36 @@ reviewer completed both passes.
 Independent review evidence and reviewed design hashes are recorded in the
 read plan §8. Both plans passed accepted-fix verification; plan metadata tests
 passed (4 tests), local document links resolved, and `git diff --check` passed.
-This is an implementable proposal, not runtime verification, spec approval, or
-authorization to execute the future slices. No implementation deviation has
-occurred because no implementation was requested.
+
+## Revision Log
+
+- 2026-10-14: Initial plan authored and reviewed alongside [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+- 2026-11-04: Reconciled baseline SHA (`a1bc1b45a2fb91c9503131bf4fc8d00cc4c00fb5`) and file SHA-256 hashes after prerequisite read-separation plan completion; promoted status to `promoted` and began slice-by-slice implementation.
+- 2026-11-04: Completed implementation, verification, and Tier-1 cross-family review (`codex`, 2 rounds, `PASS`); closed status as `completed`.
+
+## Deviation Log
+
+- None.
+
+## 8. Implementation execution log
+
+- Baseline backstitch summary (`a1bc1b45a2fb91c9503131bf4fc8d00cc4c00fb5`): `spec_sections=381, code_refs=2032, spec_mappings=1360, invariants=0, errors=33, warnings=1237, infos=748`.
+- Prerequisite check: [`2026-10-14-task-monitor-read-separation-and-simplification-plan.md`](./2026-10-14-task-monitor-read-separation-and-simplification-plan.md) is `completed` in `docs/plans/README.md`.
+- Slice 1–4 implementation completed across `docs/specifications/04-SimpleBroker_Integration.md`, `docs/specifications/05-Message_Flow_and_State.md`, `docs/specifications/07-System_Invariants.md`, `README.md`, `CHANGELOG.md`, `weft/_constants.py`, `weft/core/pruning/apply.py`, `weft/core/monitor/policies/dead_task.py`, `weft/core/monitor/sql.py`, `weft/core/monitor/store.py`, `weft/core/monitor/task_monitor.py`, `tests/core/test_pruning_apply.py`, `tests/core/test_monitor_store.py`, and `tests/tasks/test_task_monitor.py`.
+- Verification commands and results:
+  - `./.venv/bin/python -m pytest tests/core/test_pruning_apply.py tests/core/test_monitor_store.py tests/tasks/test_task_monitor.py -q` -> passed.
+  - `./.venv/bin/python -m pytest tests/core/test_task_monitoring.py tests/commands/test_task_monitor.py tests/core/monitor/test_lifetime_report.py tests/commands/test_status.py tests/commands/test_task_commands.py tests/commands/test_result.py tests/commands/test_run.py tests/specs/test_plan_metadata.py -q` -> passed.
+  - `./.venv/bin/python -m pytest extensions/weft_docker/tests extensions/weft_macos_sandbox/tests extensions/weft_microsandbox/tests integrations/weft_django/tests -q` -> passed.
+  - `./bin/pytest-pg tests/core/test_pruning_apply.py tests/core/test_monitor_store.py tests/tasks/test_task_monitor.py` -> `396 passed, 1 skipped`.
+  - `./.venv/bin/python -m mypy weft extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox integrations/weft_django` -> `Success: no issues found in 219 source files`.
+  - `./.venv/bin/python -m ruff check weft tests extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox integrations/weft_django` -> `All checks passed!`.
+  - `./.venv/bin/python bin/ruff_suppression_index.py --check` -> exit 0.
+  - `./bin/check-doc-paths` -> `check-doc-paths: OK`.
+  - `uvx backstitch check` comparison against baseline on touched files -> `0 new issues, 3 resolved issues`.
+- Tier-1 independent cross-family implementation review (`codex`, read-only OS sandbox, thread `01a1a824-01bf-7ce1-ab0f-62bbba5032ec`):
+  - Round 1 findings and dispositions:
+    - `F1` (`[P2]`, `weft/core/monitor/store.py`): Family-wide `latest_update` resource filter discarded unseen out-of-order backfilled resource values when a newer row omitted that sparse field. **Disposition**: Accepted and fixed by reverting the family-wide resource filter in `_merge_resources` and deduplicating already-committed `(tid, message_id)` refs via `access.task_message_refs_for_message_ids(...)` inside `MonitorStore.record_task_log_updates`.
+    - `F2` (`[P2]`, `weft/core/monitor/task_monitor.py`): Removing `is_old_enough` in `_recover_pre_checkpoint_task_log_rows` also removed retention age protection for pre-checkpoint malformed/unfoldable rows. **Disposition**: Accepted and fixed by retaining `if update is None and not is_old_enough(...): skipped_too_young += 1; continue` while exempting valid foldable rows (`update is not None`), and testing both classifications in `test_task_monitor_pre_checkpoint_recovery_folds_and_deletes_young_backfilled_rows`.
+    - `F3` (`[P3]`, `tests/core/test_monitor_store.py`): `test_monitor_store_partial_chunk_commit_replay_is_idempotent` replayed `newer_update` last, masking intermediate overwrites. **Disposition**: Accepted and fixed by asserting state immediately after replaying `(older_update,)` alone and adding the sparse-field out-of-order backfill test case.
+  - Round 2 verification (`codex exec resume 01a1a824-01bf-7ce1-ab0f-62bbba5032ec`): verified F1, F2, and F3 fixes with zero new defects (`Verdict: PASS`).
+

@@ -532,7 +532,10 @@ These tables are Monitor-owned and versioned. They are derived from
 replace SimpleBroker queue semantics. The child message table is a temporary
 pending-reference table, not a queue clone: once the corresponding raw broker
 row is deleted or reconciled as already absent, the Monitor physically deletes
-the child row. Reserved-queue cleanup proof for terminal non-completed families
+the child row. Exact raw-message reference retry runs in bounded batches
+independently of FIFO high-water completion, and `weft_monitor_deferred_writes`
+is a durable export outbox whose accepted report bodies survive raw-row and
+collation-family retirement ([MF-5], [OBS.13.3]; see [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md)). Reserved-queue cleanup proof for terminal non-completed families
 is also stored on the collation row as
 `reserved_cleanup_checked_at_ns`; it is set after the standard reserved queue is
 deleted or proved already absent, and left unset on probe/delete errors. The
@@ -907,3 +910,4 @@ connection-pooling designs are tracked in the companion doc:
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
 Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md) removes public Monitor-store lookup under [SB-0.4a]; private collation ownership remains unchanged.
+- [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md) preserves the four schema-6 Monitor tables and deferred-write outbox across unified valid-row raw ingestion and reference retry under [SB-0.4a].
