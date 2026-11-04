@@ -9078,6 +9078,17 @@ def test_manager_stop_releases_target_on_terminal_log_event(
     try:
         assert tid in manager._drain_stop_targets
         assert manager._drain_stop_targets[tid].identity == ()
+        manager._drain_stop_target_queues()
+        log_handle = manager._drain_stop_log_queue
+        assert log_handle is not None
+        closed: list[bool] = []
+        original_close = log_handle.close
+
+        def record_close() -> None:
+            closed.append(True)
+            original_close()
+
+        log_handle.close = record_close  # type: ignore[method-assign]
         assert manager._has_pending_drain_stop_observation() is False
 
         log_queue.write(
@@ -9095,7 +9106,108 @@ def test_manager_stop_releases_target_on_terminal_log_event(
         manager._settle_drain_stop_targets()
 
         assert tid not in manager._drain_stop_targets
+        assert closed == [True]
         assert manager._drain_stop_log_queue is None
+    finally:
+        manager._clear_drain_stop_targets()
+        manager._scheduler_residents.clear()
+        _remove_drain_snapshots(make_queue, [tid])
+
+
+def _terminal_envelope(tid: str) -> str:
+    return json.dumps(
+        {
+            "tid": tid,
+            "event": "control_stop",
+            "status": "cancelled",
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "source": "task",
+        }
+    )
+
+
+def test_manager_stop_releases_target_on_terminal_event_before_collection(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """Terminal proof published before the drain began still releases a target.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. The task's
+    terminal broadcast succeeded and its snapshot append failed, so its
+    retained snapshot is non-terminal and it has no host identity. Named
+    mutation: starting the settlement cursor at the newest log row skips
+    the earlier envelope and holds the target until window expiry.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns() + 4096)
+    make_queue(task_state_queue_name(tid)).write(
+        json.dumps(_drain_snapshot_payload(tid))
+    )
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(_terminal_envelope(tid))
+    log_queue.write(json.dumps({"tid": "1" * 19, "event": "unrelated"}))
+    manager._scheduler_residents[tid] = {}
+    manager._drain_stop_targets = manager._collect_drain_stop_targets()
+    try:
+        assert tid in manager._drain_stop_targets
+        assert manager._drain_stop_targets[tid].identity == ()
+
+        manager._settle_drain_stop_targets()
+
+        assert tid not in manager._drain_stop_targets
+    finally:
+        manager._clear_drain_stop_targets()
+        manager._scheduler_residents.clear()
+        _remove_drain_snapshots(make_queue, [tid])
+
+
+def test_manager_stop_keeps_terminal_proof_across_a_failed_log_page(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A log page-read failure neither loses nor skips observed terminal proof.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. Named
+    mutation: advancing ``_drain_stop_log_cursor`` inside the loop moves it
+    past the terminal row before the failure, so the healthy retry never
+    sees it.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns() + 4096)
+    make_queue(task_state_queue_name(tid)).write(
+        json.dumps(_drain_snapshot_payload(tid))
+    )
+    manager._scheduler_residents[tid] = {}
+    manager._drain_stop_targets = manager._collect_drain_stop_targets()
+    terminal_id = make_queue(WEFT_GLOBAL_LOG_QUEUE).write(_terminal_envelope(tid))
+    cursor_before = manager._drain_stop_log_cursor
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_cls = type(broker)
+    original_peek_generator = broker_cls.peek_generator
+
+    def failing_peek_generator(
+        self: Any, queue: str, *args: Any, **kwargs: Any
+    ) -> Iterator[Any]:
+        if queue != WEFT_GLOBAL_LOG_QUEUE:
+            yield from original_peek_generator(self, queue, *args, **kwargs)
+            return
+        yield (_terminal_envelope(tid), terminal_id)
+        raise BrokerError("log page read failed")
+
+    try:
+        assert tid in manager._drain_stop_targets
+        with monkeypatch.context() as patcher:
+            patcher.setattr(broker_cls, "peek_generator", failing_peek_generator)
+            manager._settle_drain_stop_targets()
+
+        assert tid in manager._drain_stop_targets
+        assert manager._drain_stop_log_cursor == cursor_before
+        assert cursor_before is not None and cursor_before < terminal_id
+
+        manager._settle_drain_stop_targets()
+
+        assert tid not in manager._drain_stop_targets
     finally:
         manager._clear_drain_stop_targets()
         manager._scheduler_residents.clear()

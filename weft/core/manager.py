@@ -4958,8 +4958,8 @@ class Manager(ServiceTask):
 
         try:
             with self._get_connected_queue().get_connection() as broker:
-                # Fix the terminal-event cursor before the snapshot read, so a
-                # terminal event published after that read is never skipped.
+                # The wake cursor starts at the newest log row: rows already
+                # present are read by the first settlement in this same turn.
                 newest = broker.peek_many(
                     WEFT_GLOBAL_LOG_QUEUE,
                     limit=1,
@@ -4967,8 +4967,7 @@ class Manager(ServiceTask):
                     with_timestamps=True,
                     include_claimed=True,
                 )
-                self._drain_stop_log_cursor = int(newest[0][1]) if newest else None
-                self._drain_stop_log_wake_id = self._drain_stop_log_cursor
+                self._drain_stop_log_wake_id = int(newest[0][1]) if newest else None
                 snapshots = latest_task_state_rows(
                     self._manager_context(), broker=broker
                 )
@@ -5018,6 +5017,17 @@ class Manager(ServiceTask):
                 ),
                 publication_id=stamp,
             )
+        # Settled cursor: just before the oldest retained non-terminal
+        # snapshot among the targets. A task's terminal envelope cannot
+        # precede its own non-terminal snapshot ([WT-2a.3]), so this includes
+        # terminal proof published before collection whose snapshot append
+        # failed, and nothing older is needed.
+        stamps = [
+            target.publication_id
+            for target in targets.values()
+            if target.publication_id is not None
+        ]
+        self._drain_stop_log_cursor = min(stamps) - 1 if stamps else None
         if unresolved:
             logger.warning(
                 "Manager %s system STOP cannot resolve a control route for %s; "
@@ -5121,16 +5131,17 @@ class Manager(ServiceTask):
         """
 
         terminal: set[str] = set()
+        cursor = self._drain_stop_log_cursor
         with closing_queue_iterator(
             broker.peek_generator(
                 WEFT_GLOBAL_LOG_QUEUE,
                 with_timestamps=True,
-                after_timestamp=self._drain_stop_log_cursor,
+                after_timestamp=cursor,
                 include_claimed=True,
             )
         ) as rows:
             for body, timestamp in cast(Iterator[tuple[str, int]], rows):
-                self._drain_stop_log_cursor = int(timestamp)
+                cursor = int(timestamp)
                 try:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
@@ -5141,6 +5152,9 @@ class Manager(ServiceTask):
                     and payload.get("type") == TERMINAL_ENVELOPE_TYPE
                 ):
                     terminal.add(payload["tid"])
+        # Commit the cursor only after a complete traversal: a page-read
+        # failure must not skip proof it did not deliver.
+        self._drain_stop_log_cursor = cursor
         return terminal
 
     def _release_drain_stop_target(self, tid: str) -> None:

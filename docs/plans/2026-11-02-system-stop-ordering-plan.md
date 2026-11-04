@@ -2033,3 +2033,41 @@ Completed-work review round 1 fixes (2026-11-03, from `e266a85a`):
   47 skipped); mypy `Success: no issues found in 484 source files`; ruff
   `All checks passed!`; `bin/check-doc-paths` OK; plan metadata test
   passed. The slow suite is left to the series coordinator.
+
+Scoped round 2 fixes (2026-11-03, from `d53929c9`):
+
+- F2 residual: `Manager._collect_drain_stop_targets` sets
+  `_drain_stop_log_cursor` to one less than the oldest retained snapshot
+  message ID among the selected targets (`after_timestamp` is exclusive).
+  A task's terminal envelope cannot precede its own non-terminal snapshot
+  ([WT-2a.3]), so this includes terminal proof published before
+  collection. The wake cursor `_drain_stop_log_wake_id` still starts at the
+  newest log row: rows already present need no wake, because the first
+  settlement runs in the same turn that begins the drain
+  (`_process_manager_reactor_turn` calls `_continue_shutdown_drain` right
+  after the STOP is handled). Regression
+  `test_manager_stop_releases_target_on_terminal_event_before_collection`;
+  RED against `d53929c9`: `assert tid not in manager._drain_stop_targets`
+  failed (the target stayed). Named mutation: starting the settlement
+  cursor at the newest log row.
+- F6: `Manager._drain_stop_terminal_events` iterates with a local cursor
+  and commits it to `_drain_stop_log_cursor` only after a complete
+  traversal. Regression
+  `test_manager_stop_keeps_terminal_proof_across_a_failed_log_page` (the
+  broker's `peek_generator` yields one terminal row for the target, then
+  raises `BrokerError`; the target stays, the cursor is unchanged, and a
+  healthy second settlement releases it); RED against `d53929c9`:
+  `assert manager._drain_stop_log_cursor == cursor_before` failed
+  (`1793755509963071488 == 1793755509960404992`). Named mutation:
+  advancing the cursor inside the loop.
+- F7: `test_manager_stop_releases_target_on_terminal_log_event` now
+  registers the interests (`_drain_stop_target_queues`), asserts the log
+  handle exists, spies on its `close`, and asserts it closed and the
+  attribute is `None` after the last target leaves. With the production
+  closure disabled it fails `assert [] == [True]`.
+- [MA-3] mapping: the `_drain_stop_terminal_events` entry states the
+  cursor's start and commit rule and names the two new tests.
+- Gates before the round 2 fix commit: fast suite exit 0 (6,388 passed,
+  47 skipped); mypy clean on 484 files; ruff clean; `ruff format --check .`
+  reports only three pre-existing plan documents this plan does not touch;
+  `bin/check-doc-paths` OK; plan metadata test passed.

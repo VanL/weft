@@ -958,7 +958,8 @@ _Implementation mapping_:
   `Manager._settle_drain_stop_targets` (release on task-owned terminal proof
   or verified exit; an unknown identity probe keeps the target),
   `Manager._drain_stop_terminal_events` (the targets' terminal envelopes in
-  `weft.log.tasks`, peeked past a cursor),
+  `weft.log.tasks`, peeked past a cursor that starts just before the oldest
+  target's retained snapshot and advances only after a complete read),
   `Manager._release_drain_stop_targets_at_expiry` (forced reap of eligible
   targets under phase 1's one forced-reap deadline, report and release of
   the rest),
@@ -968,6 +969,8 @@ _Implementation mapping_:
   `tests/core/test_manager.py::test_manager_stop_skips_terminal_and_internal_adopted_snapshots`,
   `tests/core/test_manager.py::test_manager_stop_keeps_target_whose_identity_probe_fails`,
   `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_log_event`,
+  `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_event_before_collection`,
+  `tests/core/test_manager.py::test_manager_stop_keeps_terminal_proof_across_a_failed_log_page`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager`,
   `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`.
