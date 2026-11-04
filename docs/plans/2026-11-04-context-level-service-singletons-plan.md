@@ -1,6 +1,6 @@
 # Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-1.6a], [MA-3]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2]; docs/specifications/07-System_Invariants.md [MANAGER.13], [MANAGER.15]
 Superseded by: none
 
@@ -297,7 +297,8 @@ Status and harness:
 | A5 | Under a long-lived idle Manager, the heartbeat (no registrations) and TaskMonitor (no substantive cycle result) exit after 300 s and are relaunched by the Manager's ensure on its next reconcile. Whether LivenessMonitor joins that cycle depends on §10.4: with every mapping counting as work it never idles while the Manager and the other services hold mappings. | New churn | **Owner decision §10.1** |
 | A6 | `weft status` service `manager_tid` now means "launched by", and may name a Manager that has since exited. | Meaning narrowed, shape unchanged | Documented in [MA-1] item 7 |
 | A7 | The test harness stops a context's services itself at cleanup, on both cleanup paths. | Test-only | Task 5 |
-| A8 | A service launch whose result lands during Manager cleanup is committed detached instead of killed. User-work late launches are still reaped. | Defect removed (round-1 F1) | Task 3 |
+| A8 | A service launch whose result lands during Manager cleanup before the deadline is committed detached (and registered) instead of killed; a result after the deadline is reaped for either role. | Defect removed (round-1 F1, ruling 10.5) | Task 3 |
+| A9 | On POSIX, a foreground `weft manager serve` process's stdout and stderr still reach EOF at its exit although its services run on: the Manager starts `multiprocessing`'s resource tracker with stdio detached before its first launch (`weft/core/launcher.py::start_resource_tracker_detached`). Found by slice S2 (the tracker inherited the pipes and outlived the Manager with the services). | Would have been a regression; prevented | Lead fix, Task 3 (f) oracle `test_serve_pipes_reach_eof_at_exit_while_its_services_live` |
 
 ### 4b. Rollout, rollback, one-way doors
 
@@ -327,19 +328,22 @@ after TaskMonitor exit."
 Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```text
-   Internal services are context-level singletons. The canonical manager
-   ensures the built-in heartbeat service exists, whatever the monitor
-   flags say: launched at manager startup if no live owner exists,
-   relaunched by ordinary managed-service convergence if it exits, and
-   never stopped, signalled or terminated by any manager stop,
-   supersession, leadership yield, idle exit, late-launch reap or final
-   cleanup. The same holds for TaskMonitor and LivenessMonitor when their
-   flags make them desired. A manager terminates a service on exactly two
-   paths: SIGUSR1 terminates its whole child table, and duplicate
-   convergence sends KILL to a non-canonical duplicate owner. Each service
-   defines its own work and ends itself after `SERVICE_IDLE_EXIT_SECONDS`
-   without work ([MF-3.2]); checking for work is not work. An explicit
-   STOP on a service's `ctrl_in` stops it as for any task.
+   their own autostart manifests. Internal services are context-level singletons. The canonical manager
+   ensures the built-in heartbeat service exists, whatever the monitor flags
+   say: launched at manager startup if no live owner exists, relaunched by
+   ordinary managed-service convergence if it exits, and never stopped,
+   signalled or terminated by any manager stop, supersession, leadership yield,
+   idle exit, late-launch reap or final cleanup. The same holds for TaskMonitor
+   and LivenessMonitor when their flags make them desired. A manager terminates
+   a service on exactly three paths: SIGUSR1 terminates its whole child table,
+   duplicate convergence sends KILL to a non-canonical duplicate owner, and a
+   launch whose result lands after the manager's cleanup deadline is reaped
+   ([IMPL.10]). Each service defines its own work and ends itself after
+   `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
+   manager in the context ([MF-3.2]); checking for work is not work. An
+   explicit STOP on a service's `ctrl_in` stops it as for any task. `weft
+   system stop` stops the manager and then the context's internal services by
+   registry record; it is the one command that empties a context. The
 ```
 
 ```text
@@ -504,8 +508,9 @@ Replacement (`docs/program-theory.md`):
   reducer, and services are context-level singletons converged by the
   same procedure that picks the canonical Manager. A service idles when
   not needed, with no timer and no poll beyond one idle clock, and ends
-  itself after five minutes without work as it defines work; it runs on,
-  Manager or no Manager, while it has work (owner, 2026-11-04).
+  itself after five minutes without work as it defines work, once no live
+  Manager remains; it runs on, Manager or no Manager, while it has work
+  (owner, 2026-11-04).
 ```
 
 **Theory [WT-2a.13]** (`docs/program-theory.md`), `RECONSIDERATION
@@ -518,10 +523,10 @@ services, then itself (owner, 2026-11-02)."
 Replacement (`docs/program-theory.md`):
 
 ```text
-  A system STOP is different: it is the Manager's responsibility to stop,
-  suspend, or kill active tasks, then itself (owner, 2026-11-02); internal
-  services are context-level singletons with lifetimes of their own and
-  outlive any Manager stop while they have work (owner, 2026-11-04).
+  different: it is the Manager's responsibility to stop, suspend, or kill
+  active tasks, then itself (owner, 2026-11-02); internal services are
+  context-level singletons with lifetimes of their own and outlive any
+  Manager stop while they have work (owner, 2026-11-04).
 ```
 
 Audit table: the Service registry row's owner column gains "services own
@@ -1051,7 +1056,103 @@ into §1 and Task 3. **Ruled by the owner, 2026-11-04: agree.**
   stop`) added at the owner's direction; A1 updated; LivenessMonitor and
   TaskMonitor cooperation stated in Task 2. Task 7 is new scope after
   the review rounds and is covered by the implementation review.
+- 2026-11-04: implemented (three slices plus lead fixes); theory accepted
+  by the owner ("Accept theory text") and landed; A9 added; promoted.
 
 ## Execution log
 
-(Empty until implementation.)
+### Lead, 2026-11-04 (series lead; three implementer slices in worktrees, merged on main)
+
+Start: `0923b35d`. Slices: `plan17/s1` (services, Tasks 1-2), `plan17/s2`
+(Manager, Tasks 3-4), `plan17/s3` (system stop and harness, Tasks 5, 7),
+`plan17/docs` (spec, theory, CHANGELOG, plan-4 resync). Merged in that
+order as `ffb83156`, `2d3c94ac`, `da2934e5`, `5a036801`; no conflicts.
+Quick gates on the merge: ruff, ruff format, mypy (487 files), tests/specs
+and tests/architecture green; check-doc-paths OK.
+
+Comprehension (lead): Q1 the superseded drain waited on `_child_processes`
+because every child used to exit on its own; the 2026-11-03 always-on
+heartbeat made that wait unbounded when the superseded Manager had launched
+it. Q2 after this plan: SIGUSR1, duplicate convergence, the after-deadline
+launch reap. Q3 `_has_work()` in `_settle_idle_clock`, last in every turn;
+one field `_idle_since_monotonic_ns`; an empty cycle leaves it because
+checking is not work. Q4 `stop_system` from the harness on both cleanup
+paths. Q5 the POSIX-only hard exit leaves Windows to join live non-daemon
+children; the detach discards the `Process` from that set; Task 3 (f)
+through `weft manager stop` proves it.
+
+S1 (`3b032323`, `5bbc5c38`): `SERVICE_IDLE_EXIT_SECONDS = 300.0`;
+`ServiceTask._process_reactor_turn` is the template (`_service_reactor_turn`
+then `_settle_idle_clock`); order: terminal guard, `_has_work` clears,
+`_live_manager_present` restarts the window (a cleared clock would leave an
+idle service with no timer to notice the last Manager leaving; one registry
+read per 300 s per idle service), `_work_undetermined` leaves it, else
+start or expire (`service_idle_exit`). `_live_manager_present` reduces the
+registry with `collect_service_owner_records` and
+`reduce_latest_by_service_owner`, active rows only, host-pid identity
+verified, external rows while unexpired; a read error counts as present
+([WT-2a.13]). Heartbeat work: rows, rebuild pending, pending results.
+LivenessMonitor work: a counting row (not `manager`, not an internal service
+role, key or runtime class) or a counting in-flight probe. TaskMonitor work:
+`_last_cycle_found_work` (applied cycle diagnostics: ingest, recovery,
+families retired, `retained_work_pending`; processor results; a deferred
+flush transition; runtime-cleanup effects and futures), `_deferred_task_log_pending`,
+`_last_catchup_pending`; `_work_undetermined` while a builtin cycle,
+custom processor or cleanup slice is in flight. `retained_work_pending` is
+computed in `MaintenanceWorker` from open families (new store read
+`MonitorStore.list_task_collations`, paged, stops at the first counting
+family; a terminal family counts until retired), control cleanup pending,
+reserved skipped not ready, deferred writes, scan candidates not yet safe,
+runtime prune candidates. Oracles replaced: `test_heartbeat_empty_table_idle_exits_and_a_row_never_does`,
+`test_heartbeat_empty_table_publishes_only_the_idle_clock`; the disabled
+TaskMonitor test keeps its no-scan guard. Tests: test_service_task 28,
+test_heartbeat 45, test_liveness_monitor 65, test_task_monitor 264 (+2 PG
+skips), test_maintenance_worker 29, test_monitor_store 139 (+3 PG skips).
+
+S2 (`a333071f`): non-stopping drain ends on `_user_work_children()`;
+phase 2 and `_drain_services_phase` removed; `_detach_launched_services`
+(child table and sentinel adapter, `multiprocessing.process._children.discard`,
+no envelope) from `_finish_graceful_shutdown` and `_cleanup_task_resources`,
+which then terminates user work only; the worker reaps a launch only after
+the cleanup deadline or the stop request. RED evidence recorded per test in
+the S2 report (base code swapped in; eleven assertions named). Tests:
+test_manager 306 (3 PG skips), test_cli_manager 16, test_cli_serve 9,
+test_cli_run 71 (both convergence oracles). Renamed:
+`test_manager_stop_drains_user_work_then_manager_leaving_services`,
+`test_manager_stop_leaves_internal_services_live` (spec mapping updated by
+the lead). Task 4 lives in test_cli_serve
+(`test_serve_adopts_live_services_and_launches_after_they_exit`: keep_live
+decisions for all three keys, then fresh launches after the services stop).
+
+S3 (`85c159e6`, `7beb68e1`): `weft/commands/system.py::stop_system`
+(reuses `stop_manager`; targets the latest live row per internal key; one
+exact-name STOP broadcast; settled on a non-live row, a terminal snapshot,
+or every same-host identity stale; SIGTERM rung after
+`MANAGER_CHILD_STOP_ESCALATION_SECONDS`, kill at
+`min(timeout, MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS)`, both only for
+verified same-host identities; unreachable records reported; pending at
+timeout raises `ControlRejected`), `SystemStopResult`, CLI `weft system
+stop [--timeout] [--force]`, `client.system.stop`. Escalation does not
+depend on `--force` (the drain's rungs never did; `--force` governs the
+Manager stop), accepted by the lead. Harness: `_stop_context_services` on
+both cleanup paths before `_drain_registry_queue`, survivors through
+`_terminate_pid`, recorded in `cleanup_diagnostics()`;
+`test_owned_cli_manager_is_reaped_when_test_body_fails` records the
+heartbeat PID. Tests: test_harness_registration 62, test_cli_system 28,
+test_client 119, test_import_boundaries 57, test_system_public_contract 7,
+test_django_fixture_cleanup 6, test_cli_manager 15, test_ruff_policy 44.
+
+Lead fixes on the merge (same landing): (1) S2's open question 1, the
+window between the worker's deadline check and the reactor's last drain
+pass: `_drain_active_child_launches_for_cleanup` makes one final
+non-blocking `_drain_worker_results()` after its loop, so a result published
+before the deadline is committed (a service detached and registered); test
+`test_manager_cleanup_final_pass_commits_result_published_before_the_deadline`
+(waits for the worker's `result` event, then drains with a passed
+deadline; red without the final pass). The residual window is the few
+instructions between the worker's check and its publish. (2) S2's open
+question 2, A9: `start_resource_tracker_detached` called from
+`serve_manager_foreground`; `_stop_process` in test_cli_serve restored to
+`communicate`; test `test_serve_pipes_reach_eof_at_exit_while_its_services_live`.
+(3) Spec 03 test names updated for S2's renames; spec 09 [IP-1] mapping for
+`client.system.stop`.

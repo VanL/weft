@@ -969,7 +969,7 @@ _Implementation mapping_:
   `Manager._manager_drain_timeouts` (active-phase clocks only). Error-path
   order — `Manager._cleanup_task_resources` (user work, then everything still
   tracked, under one deadline). Tests:
-  `tests/core/test_manager.py::test_manager_stop_orders_user_work_then_services_then_manager`,
+  `tests/core/test_manager.py::test_manager_stop_drains_user_work_then_manager_leaving_services`,
   `tests/core/test_manager.py::test_manager_sentinel_failure_during_shutdown_still_reaps_children`,
   `tests/core/test_manager.py::test_manager_stop_does_not_hold_past_window_for_stuck_launch`.
 - System STOP coverage beyond the child table (Reading B) — `weft/core/manager.py` ::
@@ -998,7 +998,7 @@ _Implementation mapping_:
   `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_event_before_collection`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager`,
-  `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`.
+  `tests/cli/test_cli_manager.py::test_manager_stop_leaves_internal_services_live`.
 - CLI management — `weft/commands/manager.py` :: `cmd_manager_start`,
   `cmd_manager_stop`, `cmd_manager_list`, `cmd_manager_status`; these structured
   commands are thin wrappers over the shared lifecycle helper.
