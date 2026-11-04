@@ -470,8 +470,9 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```markdown
 `SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP.
-That drain is a system stop: the Manager stops active user work first, then
-its internal services, then itself.
+That drain is a system stop: the Manager stops active user work, then
+itself. Internal services are context-level singletons and are not drain
+members ([MA-1] item 7).
 
 1. User work. The Manager takes no new intake (a draining Manager launches
    no reserved child) and broadcasts STOP to every tracked child that is not
@@ -482,7 +483,7 @@ its internal services, then itself.
    does not exit after STOP, the Manager sends host SIGTERM after the named
    escalation delay. If the phase's bounded drain window expires, the
    Manager forcefully reaps the remaining user-work process trees. Internal
-   services keep running, unsignalled, throughout this phase.
+   services keep running, unsignalled, throughout the drain and after it.
    Phase 1 lasts until no user-work child remains and no child launch that
    was in flight when the drain began is still unsettled, or until its
    window expires. A launch still unsettled at that expiry is logged and
@@ -509,33 +510,31 @@ its internal services, then itself.
    exited. A system STOP stops the tasks live when it runs; another live
    Manager that is not itself stopped may still restart a service it keeps
    desired or launch new work.
-2. Internal services. Once phase 1 ends, the Manager broadcasts STOP to its
-   internal services, with the same escalation delay and one fresh drain
-   window of the same length, and forcefully reaps any service process tree
-   that remains when that window expires. The drain does not return to
-   phase 1.
-3. The Manager. Once the tracked child table is empty, apart from any
-   child committed by a launch released at the phase-1 window expiry, the
-   Manager publishes its drained terminal event and exits. That event is
-   the last lifecycle event the Manager publishes for the stop, with one
-   bounded exception: a child committed by a launch released at the
-   phase-1 window expiry is terminated by the Manager's final cleanup,
-   which runs after the drained event, so that child's own lifecycle
-   events may follow the Manager's drained event. No other child's event
-   does.
+2. The Manager. Once no tracked user-work child remains, apart from any
+   child committed by a launch released at the window expiry, the Manager
+   detaches any service it launched (the process keeps running; the Manager
+   only stops tracking it), publishes its drained terminal event and exits.
+   That event is the last lifecycle event the Manager publishes for the stop,
+   with two bounded exceptions: a child committed by a launch released at the
+   window expiry is terminated by the Manager's final cleanup, which runs after
+   the drained event, so that child's own lifecycle events may follow it; and a
+   detached internal service publishes its own lifecycle events on its own
+   clock, before or after the Manager's. No other child's event does.
 
-A phase with no members completes at once. Services are not restarted
-during the drain. The Manager applies its own `reserved_policy_on_stop` when
+A phase with no members completes at once. A draining Manager starts no
+service; a service that exits during the drain is relaunched by whichever
+live Manager keeps it desired. The Manager applies its own `reserved_policy_on_stop` when
 the drain begins; each task applies its own policy when it handles STOP. A
 fatal child sentinel observer error is preserved as the cleanup failure, but
 it cannot skip the termination and reap sequence: cleanup on that path
-attempts user-work termination before internal-service termination under
-one absolute cleanup deadline, then raises the original failure. Manager
+attempts user-work termination under one absolute cleanup deadline,
+detaches any internal service it launched, then raises the original
+failure. Manager
 supersession, leadership yield, idle exit, and crash are not system stops
 and never signal running user work.
 `SIGUSR1` retains immediate kill semantics, with no phases. Caller-facing
-manager stop defaults must be materially longer than the sum of the two
-phase windows, because a Manager may use both drain budgets before
+manager stop defaults must be materially longer than the drain window plus
+its forced-reap deadline, because a Manager may use that whole budget before
 publishing its stopped registry record, and slower broker backends can add
 observable registry propagation and scheduler delay under release-load
 parallelism.
@@ -1598,6 +1597,7 @@ Difference register (current versus planned STOP drain):
 
 ## Revision Log
 
+- 2026-11-04 (plan 17 promotion): the two `docs/specifications/03-Manager_Architecture.md` Replacement blocks above were re-synced to the text `docs/plans/2026-11-04-context-level-service-singletons-plan.md` promoted over them. That plan removes the drain's internal-services phase: internal services are context-level singletons no Manager stops. This plan's phase-1 text, snapshot targets and mapping stand; its phase-2 text is superseded, and the sentences now in the spec are plan 17's. Status stays `promoted` pending the series' green CI run.
 | Date | Change | Reason |
 |------|--------|--------|
 | 2026-11-03 | Task 1 promotion: Candidate B relabelled `Replacement`; its text appended as the last sentences of item 1 inside the ordering Replacement block, so both blocks are verbatim substrings of [MA-3]. | The owner ruled Reading B and sub-question (a); `## Proposed Spec Delta` says the chosen candidate is inserted as the last sentence of item 1. |
