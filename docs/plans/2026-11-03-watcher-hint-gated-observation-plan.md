@@ -70,29 +70,26 @@ This section comes first because the owner's instruction for this fix is
   tests are that proof.
 - [WT-7] "Event-driven against absence" (line 1003): each recurring check must
   answer "which event cannot arrive, and why?" The unconditional per-return
-    read has no answer on persistent SQLite while the data-version detector
-  and its callback work (every foreign commit then arrives as a hint); when
-  either fails, the plan keeps the read (Task 2), because that is exactly
-  the case in which the event cannot arrive. On PostgreSQL the native-waiter return
+    read has no answer on persistent SQLite: every foreign commit arrives as a
+  data-version hint. The detector and its callback fail only on a database
+  that is no longer readable, on which the observation read would fail too,
+  so their failure is not a quiet state the read could serve (`## Owner
+  Decisions` item 2). On PostgreSQL the native-waiter return
   does have an answer (an exact delete sends no notification, and a
   notification is not durable for a broken listener connection), which is why
   this plan keeps it there (`## Owner Decisions`, item 1).
 - [WT-4] 4.4 "No capability diminution" (line 467) and "Measure; do not bake
   in inefficiency" (line 465): the difference register below, the
-  measurements on both backends in Tasks 0 and 6, and the retry flag of
-  Task 3 (which keeps a failed observation read from waiting longer than it
-  does today).
+  measurements on both backends in Tasks 0 and 6.
 
 ### Statements the change must not violate
 
 - [ALT-WT-010] "A new scheduler, event bus, index, or cache subsystem"
   (lines 696–709): "A cache that becomes startup truth is a second lifecycle
   database." The gate stores no evidence. It decides only whether to read; when
-  it opens, the overrider reads the queue exactly as today. The two flags this
-  plan adds (`_observation_recheck_pending`, Task 3, and the reporting
-  strategy's `_data_version_uncertain`, Task 2) record that a read or a
-  detector check failed, never what a queue holds, and each can only cause a
-  read.
+  it opens, the overrider reads the queue exactly as today. The plan adds no
+  field, flag or cache: the gate is computed from the hints SimpleBroker
+  already exposes and from the owner's deadline.
 - [QUEUE.7] (`docs/specifications/07-System_Invariants.md`, section at line 163; interest sentences at lines 179–195):
   notification interests stay reactor-owned and never become delivery routes;
   "Registration precedes the initial read"; "All observation reads remain on
@@ -112,6 +109,32 @@ This section comes first because the owner's instruction for this fix is
   reimplements none of them.
 - [WT-2a.2] "Queues are the only durable truth": the queue is still read for
   every decision the overriders make.
+
+### Theory check of the withdrawn remedies
+
+The round-1 remedies (`## Owner Decisions` item 2) were not only unneeded;
+they were against the theory, and this plan's 2026-11-03 revision was wrong
+to present them as consistent with it:
+
+- [WT-4] 4.4 "No over-armoring" (line 464): "Engineer for real execution
+  and failure boundaries, not impossible or adversary-invented states.
+  Best-effort paths try, catch, and log diagnostics." The retry flag, the
+  detector-uncertainty flag and the flag-first callback engineered for a
+  read failure that does not occur on a readable database, and the
+  overriders' existing try-catch-log is the whole prescribed response.
+- [WT-2a.8] "SimpleBroker owns queue mechanics" (lines 315–319): "a
+  queue-level need is met in SimpleBroker, never reimplemented in Weft."
+  A Weft `PollingStrategy` subclass wrapping SimpleBroker's data-version
+  provider to judge the detector's health is Weft reimplementing a
+  queue-level mechanism, whatever seam it used.
+- [ALT-WT-010] (lines 696–709): "In-memory state stays a hint." Two new
+  fields that outlive a turn to record that a read or a detector check
+  failed are state kept to steer later turns, the shape plan 6's negative
+  knowledge refuses ("trying to make services stop and start ended up
+  creating too much state", `docs/lessons.md` 2026-11-03).
+
+The 2026-11-04 revision removes all of it; what remains (the gate alone) is
+a pure application of the statements above.
 
 ### Theory amendment
 
@@ -142,12 +165,12 @@ readiness scan already uses on persistent SQLite: the check runs on a return
 that carries a hint, on a deadline return, on every native-waiter return, and
 on every return of the degraded and nonpersistent fallbacks, and it is skipped
 on a healthy, hint-free, pre-deadline persistent SQLite return. The wait-entry
-check stays. Two failure paths keep today's per-return check instead of
-trusting a hint that cannot arrive: a data-version detector that reports
-nothing (Task 2, a reporting strategy subclass) and a change callback whose
-inherited cache refresh fails (Task 2, the hint is set first). A small retry
-flag (Task 3) repeats a check whose own read failed, so a broker failure is
-retried at today's cadence instead of waiting for the next hint.
+check stays. The plan carries no failure-path machinery: on a reasonable
+SQLite neither `PRAGMA data_version`, nor the change callback's
+`refresh_last_ts()`, nor an observation read fails while the database stays
+readable, and when such a read does fail the correct response is to do
+nothing (owner ruling, 2026-11-04, `## Owner Decisions` item 2). A hint-free
+return is therefore trusted as "nothing changed".
 
 ## Source Documents
 
@@ -349,9 +372,8 @@ measure properly.
 
 | Backend and path | How the publication arrives | Hint on the next strategy return? | Design |
 |---|---|---|---|
-| Persistent SQLite, another thread or process commits, detector and callback working | The data-version counter changes on the drive thread's connection; the strategy sees it at its first check (watcher.py 1416–1423) or between 20 ms chunks (1466–1473) and runs the callback, which sets `_data_version_activity_pending` (multiqueue_watcher.py 977–981) | Yes, except when the commit lands in the final chunk of a pass: that return carries no hint, and the next strategy call's first check (1416–1423) returns at once with it | Observation runs on the hinted return: at most one extra strategy return, with no added sleep. This bound holds only while the detector answers and the callback sets the hint; the next two rows cover their failures. Stop-if in Task 6 |
-| Persistent SQLite, the change callback's inherited `refresh_last_ts()` fails | The baseline has already advanced (watcher.py 1674) and the exception is swallowed (1697–1701); today Weft's flag is set only after the refresh (977–981), so the change yields no hint | No, today; and no later return carries it either (the reviewer reproduced four hint-free returns after one failure) | Fixed in Task 2: `_on_data_version_change` sets the flag **before** the inherited refresh, so a refresh failure never consumes the hint. The same return observes (and, as a side effect, its readiness scan runs; register row 15). Guard R5 |
-| Persistent SQLite, the detector reports nothing (an SQLite PRAGMA failure, suppressed to `None` by `maintenance.py` 144–149; or a provider exception, counted by the strategy) | `_check_data_version` returns `False` (1662–1664 or 1679–1688); nothing reaches Weft, and for `None` no failure is counted | No, for as long as the detector fails | Fixed in Task 2: Weft's reporting strategy subclass records every `None` or exception from the provider, and the next `_activity_hint_action` treats it as uncertainty and runs the observation check, as on every return today. Readiness keeps plan 2's behavior (a pre-existing dependency, carried by the SimpleBroker item in Owner Decisions item 3). Guard R6 |
+| Persistent SQLite, another thread or process commits, detector and callback working | The data-version counter changes on the drive thread's connection; the strategy sees it at its first check (watcher.py 1416–1423) or between 20 ms chunks (1466–1473) and runs the callback, which sets `_data_version_activity_pending` (multiqueue_watcher.py 977–981) | Yes, except when the commit lands in the final chunk of a pass: that return carries no hint, and the next strategy call's first check (1416–1423) returns at once with it | Observation runs on the hinted return: at most one extra strategy return, with no added sleep. Stop-if in Task 6 |
+| Persistent SQLite, the detector's `PRAGMA data_version` or the callback's inherited `refresh_last_ts()` raises | Only on a database that is no longer readable: a closed or stopping connection (`StopException`, a closed handle), a poisoned broker, a runner whose transaction state is unusable, an I/O error or a corrupt image. Probed 2026-11-04: in WAL mode (which SimpleBroker forces, `_backends/sqlite/runtime.py` 121) the PRAGMA answers under an exclusive foreign writer and after the file is unlinked; `refresh_last_ts()` is a meta-table `SELECT` over the same connection path. On such a database the observation read fails too | No, and no read could succeed either | Not a reachable quiet state; no machinery, do nothing (Owner Decisions item 2). SimpleBroker's own tenth consecutive provider failure raises `RuntimeError` out of the wait (watcher.py 1680–1686) |
 | Persistent SQLite, commit before the strategy's first check | The first check sets the baseline and runs the callback (watcher.py 1666–1671), so `_data_version_activity_pending` is set | Yes (the first return after start is always hinted) | Observation runs |
 | Persistent SQLite, commit before the wait | Seen by the wait-entry check (1149) | Not needed | Kept: wait-entry check |
 | Persistent SQLite, the drive thread's own write (same connection) | No data-version change. Such writes happen only in turns (the drive thread is in a turn or in the wait), and every turn is followed by a wait (base.py 1250–1252) | No | Found by the next wait-entry check (1149). Today the same. Manual waits (`MultiQueueWatcher.wait_for_activity`, tests calling `task.wait_for_activity(...)`) take the same entry check |
@@ -364,16 +386,15 @@ measure properly.
 | PostgreSQL native waiter, listener failure | `_error` stored and raised from `wait_any` (305, 428–429); the wait marks itself degraded (1167) and polls | No hints (PostgreSQL has no data version, plugin.py 841–843) | Unchanged: degraded fallback checks every return; the next wait re-creates the waiter (917) and its entry check reads |
 | PostgreSQL native waiter, a listener connection broken without an error | Notifications stop arriving | No | Unchanged: the native idle return keeps its checks (Owner Decisions item 1) |
 | Any backend, waiter creation failed (`_native_activity_degraded` set at 942, 951) | Polling with or without a data version | Not reliably | Unchanged: degraded fallback checks every return |
-| Any backend, a caller-injected `polling_strategy` that is not Weft's reporting subclass (in the repository: tests only, `tests/tasks/test_multiqueue_watcher.py` 1195 and 1484, `tests/helpers/multiqueue_sigint_probe.py` 123) | Weft cannot see that strategy's detector | Unknown | The gate stays open on every return, as today (Task 2) |
-| Any backend, the observation read itself fails (the overrider catches and returns `False`) | The evidence is still in the queue | Not repeated | Task 3: the overrider asks for a recheck; the next return re-runs the check |
+| Any backend, a caller-injected `polling_strategy` (in the repository: tests only, `tests/tasks/test_multiqueue_watcher.py` 1195 and 1484, `tests/helpers/multiqueue_sigint_probe.py` 123) | `BaseWatcher._start_strategy` passes the same change callback to any strategy that has `start` (watcher.py 540–544), so the hint path is the default strategy's | Same as the default strategy | Same gate |
+| Any backend, the observation read itself raises (the overrider catches, logs and returns `False`) | The same failure class as the detector row: the database is not readable | Not repeated by this plan | Do nothing (Owner Decisions item 2): the overriders' `except` blocks are unchanged, and the next hinted, deadline or wait-entry return reads |
 
 Conclusion: on every path the design either reads on the return that carries
 the evidence, reads on the next wait entry, or keeps today's per-return check
-whenever the evidence channel is uncertain (detector silent or failing,
-callback failing, read failing, injected strategy, degraded or nonpersistent
+where the backend has no durable change detector (degraded or nonpersistent
 fallback, native-waiter safety recheck). The only new latency is the
-final-chunk case on persistent SQLite with a working detector and callback:
-one extra strategy return, which follows immediately.
+final-chunk case on persistent SQLite: one extra strategy return, which
+follows immediately.
 
 ### Who is affected: every override and contributor
 
@@ -386,9 +407,9 @@ Search: `grep -rn "def _has_pending_observation\|def _activity_wait_queues" weft
 | `MultiQueueWatcher._has_pending_observation` (base) | `weft/core/tasks/multiqueue_watcher.py` 881 | Nothing (`False`) | Nothing | Everything |
 | `MultiQueueWatcher._activity_wait_queues` (base) | 876 | Delivery queues that count as wait activity | Nothing | Waiter registration |
 | `Manager._activity_wait_queues` | `weft/core/manager.py` 1925 | Adds `Manager._drain_stop_target_queues()` (5196: each target's `weft.state.tasks.<tid>` and `weft.log.tasks`) and each startup-feedback record's task-state queue, skipping TIDs in `_active_child_launches` (1930–1931) | Nothing | Registration, unchanged |
-| `Manager._has_pending_observation` | `weft/core/manager.py` 1938 | First `_has_pending_drain_stop_observation()` (5211: `peek_many` newest on `weft.log.tasks` with `include_claimed=True`, then each target's state queue); then a `publication_pending` short-circuit (1949); then `peek_many` newest per interested `_ManagerStartupFeedback` (343) record | The read on every hint-free SQLite strategy return while startup feedback or drain targets exist (bounded windows) | Reads on hinted, deadline, native, degraded and wait-entry returns. Child publications come from child processes (data-version hints on SQLite, notifications on PostgreSQL). The Manager's own `weft.log.tasks` rows are not target evidence. Deferred reads are retried by Task 3; the [MA-1.8] absence recheck (spec 03 line 478, `MANAGER_ADMISSION_RECHECK_SECONDS` = 1.0, `weft/_constants.py` 823) and the drain clocks remain as deadlines |
+| `Manager._has_pending_observation` | `weft/core/manager.py` 1938 | First `_has_pending_drain_stop_observation()` (5211: `peek_many` newest on `weft.log.tasks` with `include_claimed=True`, then each target's state queue); then a `publication_pending` short-circuit (1949); then `peek_many` newest per interested `_ManagerStartupFeedback` (343) record | The read on every hint-free SQLite strategy return while startup feedback or drain targets exist (bounded windows) | Reads on hinted, deadline, native, degraded and wait-entry returns. Child publications come from child processes (data-version hints on SQLite, notifications on PostgreSQL). The Manager's own `weft.log.tasks` rows are not target evidence. The [MA-1.8] absence recheck (spec 03 line 478, `MANAGER_ADMISSION_RECHECK_SECONDS` = 1.0, `weft/_constants.py` 823) and the drain clocks remain as deadlines |
 | `HeartbeatTask._activity_wait_queues` | `weft/core/tasks/heartbeat.py` 189 | Adds `weft.state.heartbeats` | Nothing | Registration |
-| `HeartbeatTask._has_pending_observation` | `weft/core/tasks/heartbeat.py` 199 | `_registrations_rebuild_pending` short-circuit (210–211), then `has_pending(after_timestamp=cursor)`, and with rows a `peek_generator` of every row ID (212–223) | The permanent read on every hint-free SQLite return (the defect) | Upserts and cancels by other processes arrive as hints on SQLite; on PostgreSQL every native return keeps its check; the pre-emission rebuild (548) and the lease-expiry deadline (`next_wait_timeout`, 693) are unchanged; deferred reads retried by Task 3 |
+| `HeartbeatTask._has_pending_observation` | `weft/core/tasks/heartbeat.py` 199 | `_registrations_rebuild_pending` short-circuit (210–211), then `has_pending(after_timestamp=cursor)`, and with rows a `peek_generator` of every row ID (212–223) | The permanent read on every hint-free SQLite return (the defect) | Upserts and cancels by other processes arrive as hints on SQLite; on PostgreSQL every native return keeps its check; the pre-emission rebuild (548) and the lease-expiry deadline (`next_wait_timeout`, 693) are unchanged |
 | `ObservationWatcher` (test double) | `tests/tasks/test_multiqueue_watcher.py` 119–150 | `latest_pending_timestamp` on one queue | Its old test's direct `_activity_hint_action` call with no strategy return (181) no longer reads | Replaced by guards G1–G3 (Task 2) |
 
 No other class in `weft/` overrides either method (`Consumer` and `Manager`
@@ -400,42 +421,27 @@ unchanged). Taut's copy of `MultiQueueWatcher` (`../taut`, [WT-2a.6]) has no
 ### Files to modify
 
 - `weft/core/tasks/multiqueue_watcher.py`: `_activity_hint_action` (the
-  gate), `_wait_for_activity_body` (clear the recheck flag before the
-  wait-entry check; docstring), `_on_data_version_change` (flag before the
-  inherited refresh), `__init__` (one flag, near 231–233), one new method
-  `_defer_pending_observation`, one `_create_strategy` override and one
-  module-private `PollingStrategy` subclass that reports detector
-  uncertainty (Task 2), docstrings.
-- `weft/core/manager.py`: one line in each of the two `except` blocks at
-  1968–1970 (`_has_pending_observation`) and 5246–5248
-  (`_has_pending_drain_stop_observation`). Only under Owner Decisions item 2
-  (a), the default.
-- `weft/core/tasks/heartbeat.py`: one line in the `except` block at 224–226.
-  Only under item 2 (a).
+  gate) and two docstrings (`_activity_hint_action`,
+  `_wait_for_activity_body`). No new field, method, class or import.
 - `tests/tasks/test_multiqueue_watcher.py`, `tests/tasks/test_heartbeat.py`,
-  `tests/core/test_manager.py` (the read-method list moves to the helper),
-  new `tests/helpers/broker_reads.py`; `tests/core/test_manager.py` also
-  gains R8 and R9 (Task 3).
+  `tests/core/test_manager.py` (the read-method list moves to the helper;
+  no assertion change), new `tests/helpers/broker_reads.py`.
 - `docs/specifications/01-Core_Components.md` ([CC-2.1] paragraph,
   implementation mapping, `## Related Plans` at line 1312).
 - `CHANGELOG.md` (`## [Unreleased]` / `### Changed`).
 - `docs/plans/README.md` (Status Index row) and this plan.
 
-This is the one departure from the scope the series lead set ("touches
+This matches the scope the series lead set ("touches
 `weft/core/tasks/multiqueue_watcher.py` and tests only, no Manager or
-heartbeat changes"): Task 3's three one-line `except`-block additions. They
-exist only to avoid a diminution under broker read failure (difference
-register rows 9 and 10). If the owner or series lead declines them (Owner
-Decisions item 2 (b)), Task 3 is dropped and those rows are recorded as
-accepted diminutions.
+heartbeat changes"). `weft/core/manager.py` and `weft/core/tasks/heartbeat.py`
+are read for the overrider analysis and not edited.
 
 ### Read first
 
 - `weft/core/tasks/multiqueue_watcher.py` lines 857–1000 and 1133–1340.
 - `weft/core/tasks/base.py` lines 1214–1270 and 1508–1564.
 - `.venv/lib/python3.14/site-packages/simplebroker/watcher.py` lines
-  380–490 (construction and `_create_strategy`), 496–556, 1359–1702;
-  `simplebroker/_backends/sqlite/maintenance.py` 141–149.
+  496–556 and 1359–1702.
 - `weft/core/manager.py` lines 1914–1975 and 5196–5250;
   `weft/core/tasks/heartbeat.py` lines 182–230, 530–560, 693–725.
 - `tests/tasks/test_multiqueue_watcher.py` lines 60–200 (`FakeWaiter`,
@@ -472,9 +478,7 @@ accepted diminutions.
    `_data_version_activity_pending` (multiqueue_watcher.py 977–981). A commit
    in the final chunk produces one hint-free return; the next strategy call
    returns at once with the hint. Worst case: one extra return, no extra
-   sleep, and only while the detector answers and the callback sets the
-   hint; a silent detector or a failed refresh is handled by the Task 2
-   fixes, not by this bound.
+   sleep.
 2. The Manager writes a lifecycle row to `weft.log.tasks` on its own drive
    thread during a drain. Does a hint arrive, and does it matter? Expected:
    no hint (same connection). It does not matter: the write happens in a
@@ -492,31 +496,30 @@ accepted diminutions.
    PostgreSQL listener drops notifications for unregistered queues,
    runner.py 297) or before the call; and the drive thread's own writes from
    the preceding turn.
-5. Why must the recheck flag be cleared before calling
-   `_has_pending_observation()`, not after? Expected: a failing overrider
-   sets it inside the call; clearing after would erase that request.
-6. Why must `_on_data_version_change` set `_data_version_activity_pending`
-   before calling `super()._on_data_version_change(queue)`? Expected:
-   SimpleBroker advances its baseline before the callback (watcher.py 1674)
-   and swallows a callback exception (1697–1701); if the inherited
-   `refresh_last_ts()` raises first, the change is consumed and no later
-   return carries it.
+5. The data-version provider, the change callback's `refresh_last_ts()`, or
+   an overrider's observation read raises. Why does the gate not keep or
+   repeat the read? Expected: on a reasonable SQLite those calls fail only
+   on a database that is no longer readable (WAL mode; probed 2026-11-04),
+   on which the observation read fails as well, so there is nothing a
+   repeated read could recover; the owner ruled that when those reads fail
+   the correct response is to do nothing (Owner Decisions item 2). The
+   overriders' `except` blocks (manager.py 1968–1970, 5246–5248;
+   heartbeat.py 224–226) already log and return `False`, and stay as they
+   are.
 
 ## Design
 
 ### Task 2: the gate
 
 In `_activity_hint_action`, after the four consume lines (1196–1199),
-consume the detector-uncertainty hint, compute the gate's facts, and return
-`"continue"` before any broker read when nothing on this return can carry
-evidence:
+compute the gate's facts and return `"continue"` before any broker read when
+nothing on this return can carry evidence:
 
 ```python
         local_hint = self._strategy.consume_local_activity_hint()
         native_hint = self._strategy.consume_native_activity_hint()
         data_version_hint = self._data_version_activity_pending
         self._data_version_activity_pending = False
-        detector_uncertain = self._consume_data_version_uncertainty()
         uses_native_activity = self._strategy.uses_native_activity()
         # (the six comment lines at 1223-1228 move here verbatim)
         transient_fallback = not self._persistent and not uses_native_activity
@@ -529,16 +532,13 @@ evidence:
             local_hint
             or native_hint
             or data_version_hint
-            or detector_uncertain
             or (deadline is not None and time.monotonic() >= deadline)
             or uses_native_activity
             or self._native_activity_degraded
             or transient_fallback
-            or self._observation_recheck_pending
         ):
             return "continue"
 
-        self._observation_recheck_pending = False
         if self._has_pending_observation():
             return "return"
 ```
@@ -553,157 +553,39 @@ The rest of the method (1204–1237) stays as it is, with two rules:
 - `uses_native_activity` and `transient_fallback` replace their recomputed
   forms at 1216 and 1229–1231; neither can change during the read.
 
-Readiness is unchanged on every path except one improvement: the existing
-tail already skips the scan on a healthy hint-free persistent SQLite return
-(it falls through to 1237), a return opened only by `detector_uncertain` or
-the recheck flag also falls through to 1237 after the observation check,
-and a return whose change callback failed now carries its data-version hint
-into the tail (register row 15).
+Readiness is unchanged on every path: the existing tail already skips the
+scan on a healthy hint-free persistent SQLite return (it falls through to
+1237), and the gate returns before it on exactly that return.
 
-### Task 2: the hint survives a failed cache refresh
+### Task 2: what the gate deliberately does not do
 
-`_on_data_version_change` (977–981) sets the flag first:
+`_on_data_version_change` (977–981), the overriders' `except` blocks and
+the strategy are untouched. The cross-family round 1 asked for three pieces
+of failure handling (a flag-first callback, a strategy subclass reporting
+detector silence, and a retry flag for a failed observation read); the
+owner withdrew all three on 2026-11-04 (`## Owner Decisions` item 2): those
+reads fail only on a database that is no longer readable, and the correct
+response then is to do nothing.
 
-```python
-    def _on_data_version_change(self, queue: Queue) -> None:
-        """Record one SQLite backend hint, then synchronize inherited caches.
+### Task 2 (withdrawn): detector uncertainty, reported through the strategy's public start seam
 
-        The hint is set before the inherited ``refresh_last_ts()`` so a
-        refresh failure, which SimpleBroker swallows after advancing its
-        baseline, never consumes the change [CC-2.1].
-        """
-
-        self._data_version_activity_pending = True
-        super()._on_data_version_change(queue)
-```
-
-### Task 2: detector uncertainty, reported through the strategy's public start seam
-
-Weft does not supply the data-version getter (SimpleBroker builds it inside
-`BaseWatcher._start_strategy`, watcher.py 512–532) and Weft does not read
-SimpleBroker's private strategy fields. What Weft can observe is the provider
-SimpleBroker passes to the public `PollingStrategy.start(data_version_provider,
-*, on_data_version_change, activity_waiter)` (watcher.py 1576–1593). So:
-
-- A module-private subclass in `weft/core/tasks/multiqueue_watcher.py`:
-
-  ```python
-  class _DataVersionReportingStrategy(PollingStrategy):
-      """Polling strategy that reports when its data-version detector is silent.
-
-      SimpleBroker treats a ``None`` version as "unchanged" and an SQLite
-      PRAGMA failure arrives as ``None``. Weft treats either as uncertainty:
-      the owner's next hint check runs the observation read, as every return
-      did before the observation gate [CC-2.1].
-      """
-
-      def __init__(self, *args: Any, **kwargs: Any) -> None:
-          super().__init__(*args, **kwargs)
-          self._data_version_uncertain = False
-
-      def start(
-          self,
-          data_version_provider: Callable[[], int | None] | None = None,
-          *,
-          on_data_version_change: Callable[[], None] | None = None,
-          activity_waiter: ActivityWaiter | None = None,
-      ) -> None:
-          provider = data_version_provider
-          if provider is not None:
-
-              def reporting_provider() -> int | None:
-                  try:
-                      version = provider()
-                  except Exception:
-                      self._data_version_uncertain = True
-                      raise
-                  if version is None:
-                      self._data_version_uncertain = True
-                  return version
-
-              provider = reporting_provider
-          super().start(
-              provider,
-              on_data_version_change=on_data_version_change,
-              activity_waiter=activity_waiter,
-          )
-
-      def consume_data_version_uncertainty(self) -> bool:
-          """Return and clear whether the detector failed or reported nothing."""
-          uncertain = self._data_version_uncertain
-          self._data_version_uncertain = False
-          return uncertain
-  ```
-
-  The exception is re-raised unchanged, so SimpleBroker's failure count and
-  its tenth-failure `RuntimeError` are unchanged.
-- `MultiQueueWatcher._create_strategy(self, *, config=None)` overrides
-  SimpleBroker's documented hook (watcher.py 450–490) and returns
-  `_DataVersionReportingStrategy` built with the same five arguments from
-  the same configuration keys (`self._config` when `config` is `None`, else
-  `resolve_config(config=config)`, as watcher.py 481–490 does). That copies
-  SimpleBroker's four-key construction. It runs inside
-  `BaseWatcher.__init__` (watcher.py 425), before `MultiQueueWatcher.__init__`
-  sets its own fields, so it must read only `self._config` and
-  `self._stop_event` (both set at 403 and 391). The alternative (reading or patching
-  the strategy's private `_data_version_provider`) crosses the layer
-  boundary ([WT-2a.8]). `resolve_config` is public in `simplebroker`
-  (in `simplebroker.__all__`; `weft/context.py` line 63 already imports it) and
-  `ActivityWaiter` is public in `simplebroker.ext`; both join the existing
-  import blocks at `weft/core/tasks/multiqueue_watcher.py` lines 29–41.
-- `MultiQueueWatcher._consume_data_version_uncertainty(self) -> bool`:
-  returns `self._strategy.consume_data_version_uncertainty()` when the
-  strategy is a `_DataVersionReportingStrategy`; returns `True` for any
-  other (caller-injected) strategy, whose detector Weft cannot see, so such
-  a watcher keeps today's per-return check.
-- On PostgreSQL the provider returns `None` (plugin.py 841–843), but the
-  strategy calls it only without a native waiter (watcher.py 1416–1419,
-  1466–1471), that is, on the degraded fallback, which already checks every
-  return. On nonpersistent SQLite the provider returns integers.
-- This is an interim adapter, not a Weft polling cap: it adds no wake, no
-  timer and no read of its own, and it reads only on returns the strategy
-  makes anyway. It is removed when SimpleBroker exposes detector health
-  (Owner Decisions item 3), in a Weft change after that release, with no
-  compatibility code.
+Withdrawn on 2026-11-04 (`## Owner Decisions` item 2). The round-1 design
+(a module-private `PollingStrategy` subclass installed through
+`_create_strategy`, wrapping the provider SimpleBroker passes to the public
+`start()` seam, and a `_consume_data_version_uncertainty` query) is kept in
+this plan's history at `711be8c7` and is not implemented.
 
 ### Task 2: the wait entry
 
-`_wait_for_activity_body` keeps lines 1145–1150 and adds one line before the
-check: `self._observation_recheck_pending = False`. The comment at 1147–1148
-gains "Later checks run only on returns that can carry evidence."
+`_wait_for_activity_body` keeps lines 1145–1150 unchanged. The comment at
+1147–1148 gains "Later checks run only on returns that can carry evidence."
 
-### Task 3: the recheck flag (Owner Decisions item 2 (a), the default)
+### Task 3 (withdrawn): the recheck flag
 
-- `MultiQueueWatcher.__init__`: `self._observation_recheck_pending = False`
-  beside `_data_version_activity_pending` (231).
-- New method:
-
-  ```python
-  def _defer_pending_observation(self) -> None:
-      """Repeat the observation check on the next strategy return [QUEUE.7].
-
-      An overrider calls this when its observation read failed and it
-      returned ``False``. The flag causes one more read on the next return;
-      it records no evidence and does not wake the strategy, so a lasting
-      failure is retried once per strategy pass, as before this gate.
-
-      Spec: [CC-2.1]
-      """
-      self._observation_recheck_pending = True
-  ```
-
-- One added line in each overrider's `except` block, after the existing
-  `logger.debug(...)`: `self._defer_pending_observation()` in
-  `weft/core/manager.py` `_has_pending_observation` (1968–1970),
-  `_has_pending_drain_stop_observation` (5246–5248), and
-  `weft/core/tasks/heartbeat.py` `_has_pending_observation` (224–226). No
-  other edit to those files; their docstrings are unchanged.
-
-Why no spin: neither flag is a wake. Each only keeps the gate open on the
-next return the strategy produces on its own schedule, so a persistent
-failure (of the detector or of the read) reads once per pass (about 0.1 s on
-SQLite), exactly today's behavior while failing, and zero extra reads once
-it recovers.
+Withdrawn on 2026-11-04 (`## Owner Decisions` item 2). The round-1 design
+(an `_observation_recheck_pending` flag, a `_defer_pending_observation()`
+method, and one added line in each of the three overrider `except` blocks)
+is kept in this plan's history at `711be8c7` and is not implemented.
 
 ## Invariants and Constraints
 
@@ -720,8 +602,8 @@ it recovers.
 - No timer, no `next_wait_timeout()` change, no new thread, no sleep.
 - One arbiter per reactor ([WT-2a.6], [IMPL.10]): drive ownership and the
   manual-wait exclusion (`wait_for_activity`, 1239–1270) are untouched.
-- No Manager or heartbeat behavior change beyond the three one-line
-  `except`-block additions (item 2 (a)).
+- No Manager or heartbeat change: `weft/core/manager.py` and
+  `weft/core/tasks/heartbeat.py` are not edited.
 - TID, state transitions, reserved policy, `spec`/`io` immutability,
   process titles: not touched.
 
@@ -740,13 +622,13 @@ it recovers.
   first return hint-free; the wait-entry check still covers publications
   before the wait, and the next foreign commit after the baseline still
   changes the counter. Task 2 guard G2 would catch a regression in hinting.
-- The gate trusts a hint-free persistent SQLite return only while the
-  strategy is Weft's `_DataVersionReportingStrategy`. A future change that
-  injects another strategy, or a SimpleBroker change to how `start()`
-  receives its provider, falls back to today's per-return check (safe) or
-  breaks R6 (detected).
-- `_on_data_version_change` ordering: the flag before the inherited refresh.
-  A future edit that moves it back reopens F1 of round 1; R5 detects it.
+- The gate trusts a hint-free persistent SQLite return because
+  SimpleBroker's strategy checks `PRAGMA data_version` on every pass and
+  runs the change callback on every foreign commit. A future SimpleBroker
+  change that stops calling the callback, or that polls the PRAGMA less
+  often than once per pass, lengthens the time to observation; G2's
+  strategy-return count detects the first and Task 6's latency stop-if the
+  second.
 - Tests that call `_activity_hint_action(deadline=None)` directly with no
   strategy return encoded the unconditional call. Only one exists
   (`tests/tasks/test_multiqueue_watcher.py` 181); Task 2 replaces it.
@@ -765,7 +647,7 @@ it recovers.
 
 - Observation reads are best-effort: an overrider catches broker failures
   and returns `False` (manager.py 1968–1970, 5246–5248; heartbeat.py
-  224–226). With Task 3 it also requests a recheck. Unchanged otherwise.
+  224–226). Unchanged: a failed read does nothing (Owner Decisions item 2).
 - Readiness scan failures raise (1311–1320) and reach the task's error
   handling. Unchanged.
 - Waiter failures degrade to polling (1160–1169). Unchanged.
@@ -775,11 +657,11 @@ it recovers.
 - No new execution path; no new queue, field, constant or config key.
 - No drive-by refactor (the three reused locals in `_activity_hint_action`
   are the only restructuring).
-- No mock of the broker in the contract tests (R2, R4, R5, R8, R9, G1, G2
-  use real queues and the real strategy; R1, R3, R7 and G3 stub the strategy
-  only to force a return shape; R6 replaces only the detector's answer).
-- No Weft polling cap and no Weft-side detector query: detector uncertainty
-  is read from the provider SimpleBroker already calls.
+- No mock of the broker in the contract tests (R2, G1, G2 use real queues
+  and the real strategy; R1, R7 and G3 stub the strategy only to force a
+  return shape).
+- No failure-path machinery: no retry flag, no strategy subclass, no
+  detector query, no reordered callback (Owner Decisions item 2).
 - Cross-family plan review before implementation; completed-work review
   before `completed`.
 
@@ -792,23 +674,20 @@ D diminution (must be fixed in plan or escalated).
 |---|---|---|---|---|---|
 | 1 | Resident heartbeat, empty table, persistent SQLite: reads of `weft.state.heartbeats` over a quiet 30 s window | 230 (plan 6) | 0 after the wait-entry check | C (removed cost; the owner's rule "idles when not needed") | R2 `[0]`; Task 6 measurement |
 | 2 | Same with 1 and 10 rows | 458 with 1 row; 10 rows not measured | 0 | C | R2 `[1]`, `[10]`; Task 6 |
-| 3 | Manager reads during the [MA-1.8] startup window and a system-STOP drain, persistent SQLite, between publications | One read (or more) per strategy return | Reads only on hinted, deadline, uncertain and wait-entry returns | C | Task 4 anchors; R1 |
-| 4 | Time from a foreign commit to its observation, persistent SQLite, detector and callback working | The first strategy return after the commit | The first hinted return: the same return, or the next one when the commit lands in a pass's final 20 ms chunk; that next return follows with no sleep | N within one strategy return (Stop-if in Task 6); the bound is stated only for a working detector and callback (rows 14 and 15) | G2; Task 6 latency measurement |
+| 3 | Manager reads during the [MA-1.8] startup window and a system-STOP drain, persistent SQLite, between publications | One read (or more) per strategy return | Reads only on hinted, deadline and wait-entry returns | C | Task 4 anchors; R1 |
+| 4 | Time from a foreign commit to its observation, persistent SQLite, detector and callback working | The first strategy return after the commit | The first hinted return: the same return, or the next one when the commit lands in a pass's final 20 ms chunk; that next return follows with no sleep | N within one strategy return (Stop-if in Task 6) | G2; Task 6 latency measurement |
 | 5 | Owner's own write, then the next wait | Found by the wait-entry check | Same | N | G1 |
 | 6 | PostgreSQL native-waiter returns (notification or slow safety recheck): observation and readiness | Both run | Both run | N (Owner Decisions item 1) | Task 6 PostgreSQL measurement |
 | 7 | Degraded and nonpersistent fallbacks | Both run on every return | Same | N | G2 `[nonpersistent]`, G3 |
 | 8 | Deadline return, including one crossed during a slow observation read | Observation runs; no readiness scan on an unhinted return | Same (the tail's deadline is computed after the read) | N | R1; R7 |
-| 9 | A failed observation read, persistent SQLite, quiet database, heartbeat with an empty table | Retried on the next strategy return (about 0.1 s) | With Task 3: same. Without Task 3: not retried until the next foreign commit anywhere in the database or the next wait entry; unbounded in a quiet system | N with Task 3; D without | R4 |
-| 10 | A failed observation read, Manager startup feedback or drain target, or heartbeat with rows | Retried on the next return | With Task 3: same. Without: retried at the next hint, the [MA-1.8] absence recheck (1.0 s), the drain clocks, or the next due emission's pre-emission rebuild | N with Task 3; D without (bounded) | R8 (startup feedback), R9 (drain target), R4 (heartbeat; the same `except` line serves rows or no rows); R3 (the watcher rule) |
+| 9 | A failed observation read, persistent SQLite (any overrider) | Retried on the next strategy return (about 0.1 s) | Not retried; the next hinted, deadline or wait-entry return reads | A: the owner ruled (2026-11-04) that on a reasonable SQLite an observation read fails only on a database that is no longer readable, where no retry succeeds, and that the correct response is to do nothing (Owner Decisions item 2) | — |
+| 10 | A failed `PRAGMA data_version` or `refresh_last_ts()` on a foreign commit, persistent SQLite | Observation runs on every return regardless of the detector | The hint is lost with the failure; the next hinted, deadline or wait-entry return reads | A: the same ruling; both calls fail only on a database that is no longer readable (probed 2026-11-04) | — |
 | 11 | Readiness scans everywhere else | Plan 2's rule | Same | N | existing readiness tests (Task 4 list) |
 | 12 | Idle voluntary context switches, idle manager tree | Plan 2's after-numbers: 10,088 (SQLite) and 20,347 (PostgreSQL) over 30 s at `da2e3b92`; re-measured in Task 0 with the heartbeat now resident | Expected lower on SQLite (fewer broker calls per pass), equal on PostgreSQL. The strategy's own SQLite wake cadence (about 8.7 returns a second) is unchanged | C | Task 0 and Task 6 measurements |
 | 13 | Observation semantics: which queues, which reads, which thread | — | Unchanged | N | — |
-| 14 | Persistent SQLite, the data-version detector silent or failing (an SQLite PRAGMA failure arrives as `None`; a provider exception) | Observation runs on every return (independent of the detector) | Observation runs on every return while the detector is silent (the reporting subclass marks each silent check); zero extra once it answers | N | R6 |
-| 15 | Persistent SQLite, the change callback's inherited `refresh_last_ts()` fails once | Observation runs on that return and later ones (unconditional); the readiness scan loses that change's hint (pre-existing: the flag was set after the refresh) | Observation and readiness both run on that return (the flag is set before the refresh) | N for observation; C for readiness (a pre-existing loss repaired) | R5 |
-| 16 | A caller-injected `polling_strategy` that is not the reporting subclass | Observation on every return | Same (Weft cannot see that detector) | N | Task 2 unit check in R6 (an injected plain `PollingStrategy` keeps one observation call per return) |
+| 14 | A caller-injected `polling_strategy` | Observation on every return | The same gate as the default strategy (the change callback reaches any strategy with `start`, watcher.py 540–544) | C | G2 runs with the default strategy; the sigint probe (`tests/helpers/multiqueue_sigint_probe.py`) still passes |
 
-No D row remains under Owner Decisions item 2 (a). Rows 9 and 10 become D if
-the owner chooses (b).
+No D row remains. Rows 9 and 10 are owner-decided (A).
 
 ## Deviation Log
 
@@ -872,16 +751,14 @@ is registered, so a publication committed before the wait is found without a
 strategy return. After that, a check runs on a strategy return that carries a
 local, native or data-version hint; on a return at the owner's deadline; on
 every native-waiter return, including the strategy's slow safety recheck; on
-every return of the degraded and nonpersistent polling fallbacks, which have
-no durable change detector; on a return after the data-version detector
-failed or reported no version, which is uncertainty, not "unchanged"; on
-every return of a strategy whose detector the watcher cannot observe; and on
-the next return after an observation read failed and asked to be repeated.
-The data-version hint is recorded before any cache refresh that follows a
-change, so a refresh failure cannot consume it. A healthy persistent SQLite
-return with none of these reads nothing: an unchanged `data_version` means no
-other connection committed since the last check, and the owner's own writes
-are made in turns and found by the next wait-entry check. The readiness scan
+and on every return of the degraded and nonpersistent polling fallbacks,
+which have no durable change detector. A persistent SQLite return with none
+of these reads nothing: an unchanged `data_version` means no other connection
+committed since the last check, and the owner's own writes are made in turns
+and found by the next wait-entry check. A failed detector check, cache
+refresh or observation read is not retried and opens no later check: on a
+readable database those reads do not fail, and on one that is not readable
+nothing is done. The readiness scan
 keeps its rule: it runs on returns with a local, native or data-version hint
 (before any deadline test), on native-waiter returns before the deadline and
 on fallback returns, and not on a hint-free return at or past the owner's
@@ -903,22 +780,11 @@ Replacement:
 
 ```text
 `_apply_topology_mutation_on_owner()`. `_activity_hint_action()` owns the
-return gate for observation and readiness checks; `_create_strategy()` and
-the module-private `_DataVersionReportingStrategy` report data-version
-detector uncertainty to it; and `_defer_pending_observation()` is how an
-overrider of `_has_pending_observation()` asks for one repeated check after a
-failed read.
+return gate for observation and readiness checks.
 Firing coverage is in
 `tests/tasks/test_multiqueue_watcher.py`; BaseTask ownership preservation is in
 `tests/tasks/test_task_execution.py`. Displaced waiter close uses the
 ```
-
-Under Owner Decisions item 2 (b), drop the clause "; and
-`_defer_pending_observation()` ... failed read" from this block (ending it
-"report data-version detector uncertainty to it.") and, from the [CC-2.1]
-block, the clause "; and on the next return after an observation read failed
-and asked to be repeated", and change "; on every return of a strategy" to
-"; and on every return of a strategy".
 
 ### `docs/specifications/01-Core_Components.md` `## Related Plans` (the section at line 1312) — append after the "Reactor edge timer floors" bullet
 
@@ -929,8 +795,8 @@ and asked to be repeated", and change "; on every return of a strategy" to
 ## Slice Order
 
 1. Task 0 (reading, comprehension, baseline measurements; no edit).
-2. Task 1 RED, Task 2 GREEN and guards, Task 3 RED then GREEN, Task 4
-   anchors, Task 5 spec and documentation: one landing commit (strategy B).
+2. Task 1 RED, Task 2 GREEN and guards, Task 4 anchors, Task 5 spec and
+   documentation: one landing commit (strategy B). Task 3 is withdrawn.
 3. Task 6 after-measurements, gates, closure (a second commit for the plan's
    log and status only).
 
@@ -966,49 +832,44 @@ and asked to be repeated", and change "; on every return of a strategy" to
    Recommendation: (a). The defect the reviewer found is a read attached to
    a return that cannot carry evidence; on PostgreSQL the hint-free return is
    SimpleBroker's evidence-recovery recheck, which is not that.
-2. **Retrying a failed observation read (recommendation: (a), the plan's
-   default; departs from the series lead's file scope).**
-   - (a) Task 3: the recheck flag, with one added line in each of the three
-     overrider `except` blocks. No diminution (register rows 9 and 10 N).
-   - (b) Watcher only: drop Task 3. Register rows 9 (unbounded in a quiet
-     system for an empty-table heartbeat) and 10 (bounded) become accepted
-     diminutions, to be written into this plan's register as owner-accepted.
-   Recommendation: (a): it is the smallest change that keeps the owner's
-   no-diminution rule, and it adds no wake and no stored evidence. The
-   cross-family round 1 confirmed it is not an [ALT-WT-010] cache (it stores
-   a retry obligation, not queue evidence).
-3. **SimpleBroker upstream item: report data-version detector health (filed
-   for SimpleBroker; not a Weft decision and not gating this plan).** The
-   owner's standing rule: a SimpleBroker plan or release is never gated on a
-   Weft plan or branch; sequencing lives in the Weft plan. This plan's Task 2
-   interim (the reporting subclass and the flag-first callback) stands on its
-   own with the installed SimpleBroker 8.7.2 and needs nothing upstream.
-   Item text, for the SimpleBroker repository:
-
-   > **PollingStrategy: distinguish "no change" from "detector unavailable",
-   > and do not let a callback failure consume a change.** Today
-   > `simplebroker/_backends/sqlite/maintenance.py::get_data_version`
-   > (lines 141–149) suppresses every exception and returns `None`;
-   > `PollingStrategy._check_data_version` (`simplebroker/watcher.py`
-   > 1662–1664) returns `False` for `None` without counting a failure, so an
-   > SQLite PRAGMA failure is indistinguishable from an unchanged database and
-   > never reaches `_MAX_PRAGMA_FAILURES`; `_pragma_failures` is never reset
-   > after a success; and on a change the baseline advances (1674) before
-   > `_run_data_change_callback` runs, which swallows a callback exception
-   > (1697–1701), so a failed cache refresh consumes the change. Proposed:
-   > (1) a provider that has returned a version and then returns `None` or
-   > raises marks the pass uncertain, exposed through a public strategy
-   > query (for example `PollingStrategy.consume_detector_uncertain_hint()`,
-   > in the style of `consume_native_activity_hint`), and counts toward the
-   > failure limit; a provider that has never returned a version (the
-   > PostgreSQL plugin's `None`) stays "no detector"; (2) a change whose
-   > callback raised is reported as uncertain rather than consumed, or the
-   > baseline advances only after the callback succeeds; (3) the failure
-   > counter resets on success. Owner of the change: SimpleBroker. Weft
-   > consumes it, when released, in its own later plan that deletes Weft's
-   > interim reporting subclass, with no compatibility code.
-
-   Recommendation: file it as written. No Weft task waits on it.
+2. **Failure of the underlying reads: ruled, closed (owner, 2026-11-04).**
+   The cross-family round 1 asked the plan to keep or repeat the observation
+   check when the data-version provider raises or returns `None` (F2), when
+   the change callback's inherited `refresh_last_ts()` raises (F1), or when
+   an overrider's own observation read raises (the round-0 Task 3 retry
+   flag). The owner asked under what circumstance `PRAGMA data_version`
+   fails. Answer, from the installed SimpleBroker 8.7.2 and a direct probe:
+   the statement itself does not fail on an open connection in WAL mode
+   (it answered under an exclusive foreign writer and after the file was
+   unlinked); every "PRAGMA failure" SimpleBroker can see is the plumbing
+   around it (`StopException` once the stop event is set, a closed handle,
+   a poisoned broker, an unusable runner transaction state, a fork-safety
+   check that spawn never trips) or a database that is no longer readable
+   (I/O error, corrupt image, a dropped mount). `refresh_last_ts()` is a
+   meta-table `SELECT` over the same connection path and fails in the same
+   class. An overrider's observation read fails in the same class. In every
+   case the read that a retry would perform fails too.
+   Owner rulings, verbatim: "Neither" (to the fork between a SimpleBroker
+   release and a Weft-side strategy subclass); "Refesh last ts is also not
+   going to fail on a reasonable sqlite"; "If those underlying reads fail,
+   do nothing is the correct response"; "And the proposal is against the
+   theory also" (see `## Theory`, "Theory check of the withdrawn remedies":
+   [WT-4] 4.4 no over-armoring, [WT-2a.8], [ALT-WT-010]).
+   Consequences, applied in this revision: no flag-first callback, no
+   strategy subclass, no `_create_strategy` override, no detector query, no
+   retry flag, no `_defer_pending_observation`, no edit to
+   `weft/core/manager.py` or `weft/core/tasks/heartbeat.py`; tests R3, R4,
+   R5, R6, R8 and R9 withdrawn; register rows 9 and 10 recorded as A; the
+   SimpleBroker upstream item withdrawn (item 3). The overriders' existing
+   `except` blocks, which log and return `False`, are the "do nothing".
+3. **SimpleBroker upstream item: withdrawn (2026-11-04).** The round-1
+   proposal (report detector unavailability as uncertainty, keep a change
+   whose callback raised, reset the failure counter on success) described
+   SimpleBroker behaviors that are not defects in operation: a suppressed
+   PRAGMA error or a swallowed callback error occurs only on a database
+   that is no longer readable, where every following read fails as well.
+   Nothing is filed. The owner's standing rule (a SimpleBroker plan or
+   release is never gated on a Weft plan or branch) is unaffected.
 
 ## Tasks
 
@@ -1124,20 +985,16 @@ next.
 - Stop if: R2 fails for another reason (a turn in the window, a read in a
   turn): find the reader before proceeding.
 
-### Task 2. GREEN: the gate, the two detector-failure fixes, and the guards
+### Task 2. GREEN: the gate and the guards
 
 - Files: `weft/core/tasks/multiqueue_watcher.py`; `tests/tasks/test_multiqueue_watcher.py`.
-- Implement every `## Design` subsection headed "Task 2" (the recheck flag
-  referenced in the gate is added in Task 3; until then, write the gate
-  without the `_observation_recheck_pending` term and without the clearing
-  lines). Update the `_activity_hint_action` docstring to the gate rule with
+- Implement the `## Design` subsections "Task 2: the gate" and "Task 2: the
+  wait entry". Update the `_activity_hint_action` docstring to the gate rule with
   `Spec: [CC-2.1], [QUEUE.7]`, and add one sentence to the
   `_wait_for_activity_body` docstring (1134–1140): "The observation check
   runs at entry and then only on returns that can carry evidence."
-- Write the guards below first and run them against the gate alone (the gate
-  with the flag-first callback, the reporting subclass and the fresh tail
-  deadline each reverted by hand) to record each named failure; then apply
-  the full Task 2 code.
+- Write the guards below first; after the gate lands, apply each named
+  mutation by hand, run its test and record the failure line.
 - Replace `test_notification_only_publication_returns_owner_without_delivery`
   (154–193) with G1 and G2. Its two cases are superseded: the `True` case
   becomes G1 with a stronger assertion; the `False` case called
@@ -1203,44 +1060,6 @@ next.
     exactly once and the row was observed. Mutation: dropping
     `_native_activity_degraded` from the gate makes the stub run until the
     deadline.
-  - **R5** `test_change_callback_refresh_failure_does_not_consume_the_hint`
-    (SQLite only; skip on PostgreSQL, where the strategy does not call the
-    data-version provider while a native waiter exists): `ObservationWatcher`,
-    persistent. Run one `wait_for_activity(timeout=0.05)` to take the
-    baseline. Then monkeypatch the watcher's data-version queue
-    (`watcher._get_queue_for_data_version()`, the queue SimpleBroker passes
-    to the callback, watcher.py 443–448 and 534–535) so its
-    `refresh_last_ts` raises `RuntimeError("injected refresh failure")` on
-    its next call only. A writer thread, armed on the first strategy entry
-    as in G2, writes the observation row. Call
-    `watcher.wait_for_activity(timeout=20.0)`. Assert the row was observed
-    and elapsed < 10.0 s, and that the patched refresh raised exactly once
-    (SimpleBroker logs it with `logger.exception`; the test tolerates that
-    record). Mutation: setting `_data_version_activity_pending` after
-    `super()._on_data_version_change(queue)` (today's order) makes the wait
-    end only at the 20 s deadline.
-  - **R6** `test_silent_data_version_detector_keeps_the_observation_check`
-    parametrized `strategy` in `["reporting", "injected"]` (SQLite only, same
-    skip reason as R5). `reporting`: a default `ObservationWatcher`.
-    `injected`: an `ObservationWatcher` constructed with
-        a plain SimpleBroker `PollingStrategy(stop_event=stop)` passed as
-    `polling_strategy`, with the same `stop` event passed as `stop_event`
-    (`ObservationWatcher` gains `stop_event` and `polling_strategy`
-    keywords passed through to `MultiQueueWatcher.__init__`). Run one short wait to take
-    the baseline. Then monkeypatch the broker class's `get_data_version`
-    (found from a live connection's MRO, as `count_queue_calls` does;
-    `simplebroker/db.py` 3960) to return `None` for the rest of the test,
-    the effect of an SQLite PRAGMA failure after `maintenance.py` 144–149.
-    A writer thread, armed on the first strategy entry, writes the
-    observation row. Call `watcher.wait_for_activity(timeout=20.0)`. Assert
-    the row was observed and elapsed < 10.0 s. For `injected`, also count
-    observation calls over a separate quiet `wait_for_activity(timeout=0.3)`
-    with the detector restored and assert one call per strategy return
-    (register row 16). Mutations: dropping `detector_uncertain` from the
-    gate fails `reporting` (the detector never answers, so no hint ever
-    arrives before the deadline); returning `False` instead of `True` from
-    `_consume_data_version_uncertainty` for a non-reporting strategy fails
-    `injected`.
   - **R7** `test_slow_observation_crossing_the_deadline_skips_readiness`
     (shared): an `ObservationWatcher` whose `_has_pending_observation`
     returns `False` at once on its first call (wait entry) and on its second
@@ -1252,7 +1071,7 @@ next.
     tail found the deadline passed and returned). Mutation: reusing a
     deadline computed before the observation read in the tail makes the
     native branch (1216) scan readiness.
-- Verify: R1 and R2 pass; G1–G3 and R5–R7 pass;
+- Verify: R1 and R2 pass; G1–G3 and R7 pass;
   `./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py -q`
   and the same under `./bin/pytest-pg tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py`.
   Apply each named mutation by hand, run its test, record the failure line,
@@ -1260,76 +1079,16 @@ next.
 - Stop if: any existing test in these two files fails. A failure means some
   observation source reaches the wait without a hint, which falsifies the
   hint analysis: record it and stop; do not widen the gate by guesswork.
-  Also stop if the `_create_strategy` override cannot reproduce SimpleBroker's
-  construction from public names: report it rather than reading private
-  strategy fields.
 
-### Task 3. RED then GREEN: repeat a failed observation read (Owner Decisions item 2 (a))
+### Task 3. Withdrawn
 
-- Files: `weft/core/tasks/multiqueue_watcher.py`; `weft/core/manager.py`
-  (two lines); `weft/core/tasks/heartbeat.py` (one line);
-  `tests/tasks/test_multiqueue_watcher.py`; `tests/tasks/test_heartbeat.py`;
-  `tests/core/test_manager.py`.
-- **R3** `tests/tasks/test_multiqueue_watcher.py::test_deferred_observation_read_is_repeated_on_the_next_return`
-  (shared): a subclass of `ObservationWatcher` whose `_has_pending_observation`
-  fails on its first call after wait entry (calls
-  `self._defer_pending_observation()` if the method exists, otherwise just
-  returns `False`) and succeeds afterwards. Strategy stubbed as in R1, but
-  the first stub call sets `watcher._data_version_activity_pending = True`
-  after writing the row from a helper thread (a hinted return whose read
-  fails); later calls return hint-free. Assert the row is observed and the
-  strategy was called exactly twice. RED after Task 2 (the second return is
-  hint-free and skipped; the stub runs to the deadline). Mutation: the gate
-  ignoring `_observation_recheck_pending`. R3 proves the watcher rule only;
-  R4, R8 and R9 prove each overrider's added line.
-- **R4** `tests/tasks/test_heartbeat.py::test_resident_heartbeat_retries_a_deferred_registration_read`
-  (skip on PostgreSQL, same reason as R2): an empty-table resident heartbeat
-  as in R2; after the settle, patch the broker class's
-  `has_pending_messages` (found as in `count_queue_calls`) to raise
-  `BrokerError("injected")` once for `weft.state.heartbeats`, then upsert
-  from the test thread; require the row in `task._registrations` within
-  5.0 s, with no other write. RED after Task 2 (no further hint arrives).
-  Mutation: removing the heartbeat's `self._defer_pending_observation()` line.
-- **R8** `tests/core/test_manager.py::test_manager_retries_a_deferred_startup_feedback_read`
-  (skip on PostgreSQL: native-waiter returns retry anyway, so it is not RED
-  there): `manager_setup`; pick a TID (`str(time.time_ns() + 4096)`, as
-  9168 does) not in `manager._active_child_launches`; set
-  `manager._startup_feedback[tid] = _ManagerStartupFeedback()` (manager.py
-  343; the pattern of `tests/core/test_admission_recovery.py` 177–192), so
-  `Manager._activity_wait_queues` (1925) adds its task-state queue. Run one
-  `manager.wait_for_activity(timeout=0.05)` (baseline and registration).
-  Patch the broker class's `peek_many` to raise `BrokerError("injected")`
-  once when its first argument is `task_state_queue_name(tid)`. A writer
-  thread, armed on the first strategy entry, writes one snapshot row to that
-  queue. Call `manager.wait_for_activity(timeout=20.0)`. Assert
-  `manager._startup_feedback[tid].publication_pending is True`, its
-  `publication_id` equals the written ID, the patched read raised once, and
-  elapsed < 10.0 s. `finally`: `manager._clear_startup_notification_interest(tid)`
-  and `manager._startup_feedback.pop(tid, None)`. Mutation: removing the
-  `self._defer_pending_observation()` line at manager.py 1968–1970 makes
-  the wait end only at the 20 s deadline (where the deadline check reads
-  successfully).
-- **R9** `tests/core/test_manager.py::test_manager_retries_a_deferred_drain_target_read`
-  (skip on PostgreSQL, same reason): the drain-target setup of
-  `test_manager_stop_releases_target_on_terminal_log_event` (9154–9212:
-  a target snapshot row, `manager._scheduler_residents[tid] = {}`,
-  `manager._drain_stop_targets = manager._collect_drain_stop_targets()`),
-  then one `manager.wait_for_activity(timeout=0.05)`. Patch the broker
-  class's `peek_many` to raise `BrokerError("injected")` once when its first
-  argument is `WEFT_GLOBAL_LOG_QUEUE`. A writer thread, armed on the first
-  strategy entry, writes the target's terminal envelope (`_terminal_envelope(tid)`,
-  9215) to `weft.log.tasks`. Call `manager.wait_for_activity(timeout=20.0)`.
-  Assert `manager._drain_stop_log_wake_id` equals the written ID, the
-  patched read raised once, and elapsed < 10.0 s; then
-  `manager._settle_drain_stop_targets()` releases the target. `finally`: the
-  cleanup of 9209–9212. Mutation: removing the line at manager.py 5246–5248.
-- GREEN: `## Design` "Task 3". Then add the `_observation_recheck_pending`
-  term and the two clearing lines to the Task 2 code.
-- Verify: R3, R4, R8, R9 pass; R1, R2, R5–R7, G1–G3 still pass; mutations
-  recorded as in Task 2.
-- Stop if: the heartbeat or Manager needs more than the one added line each,
-  or R8 or R9 needs a Manager-side test seam. If item 2 is ruled (b), skip
-  this task and record rows 9 and 10 as D, owner-accepted.
+The retry flag for a failed observation read, its `_defer_pending_observation`
+method, the three overrider `except`-block lines, and tests R3, R4, R8 and R9
+were withdrawn on the owner's ruling of 2026-11-04 (`## Owner Decisions`
+item 2): "If those underlying reads fail, do nothing is the correct
+response". `weft/core/manager.py` and `weft/core/tasks/heartbeat.py` are not
+edited. The task number is kept so round-1 findings F5 and the register
+still resolve.
 
 ### Task 4. Guards: the Manager's observations still fire (no edit)
 
@@ -1362,23 +1121,16 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
 
 ### Task 5. Spec, docstrings, CHANGELOG (same commit as Tasks 1–4)
 
-- Apply the three `## Proposed Spec Delta` blocks verbatim (the item 2 (b)
-  variant if ruled).
+- Apply the three `## Proposed Spec Delta` blocks verbatim.
 - `CHANGELOG.md` `## [Unreleased]` / `### Changed`, one bullet: "A task's
   reactor wait no longer reads its notification-only observation queues on
   every idle strategy return: on persistent SQLite it reads them only at wait
   entry and on returns that carry a local, native or data-version hint or
   reach a deadline, so the always-on heartbeat service with nothing to do
   makes no broker reads. PostgreSQL native-waiter returns and the degraded
-  and nonpersistent fallbacks keep their checks, and so does any return after
-  the SQLite data-version detector failed or reported nothing. A failed
-  observation read is repeated on the next strategy return, and a failed
-  cache refresh after a data-version change no longer drops that change's
-  wake."
-- Docstrings: `_activity_hint_action`, `_wait_for_activity_body`,
-  `_on_data_version_change`, `_create_strategy`,
-  `_consume_data_version_uncertainty`, `_DataVersionReportingStrategy` and
-  `_defer_pending_observation` carry `Spec:` lines ([CC-2.1], [QUEUE.7]).
+  and nonpersistent fallbacks keep their checks."
+- Docstrings: `_activity_hint_action` and `_wait_for_activity_body` carry
+  `Spec:` lines ([CC-2.1], [QUEUE.7]).
   The module docstring of `weft/core/tasks/multiqueue_watcher.py` already
   cites [CC-2.1]; check and leave it.
 - `docs/plans/README.md`: this plan's row (`draft` → `promoted` at the landing
@@ -1416,14 +1168,14 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
      (`### Audit table`, line 5409) forward by reference, and re-audit the
      rows whose claims this plan touches, recording each row's evidence and
      classification in this plan's `## Review Log`: I-2 → [WT-2a.2] (line
-     5430: queues stay the only truth; the two new flags hold no evidence);
+     5430: queues stay the only truth; no new field holds evidence);
      I-6 → [WT-2a.6] (5434: one arbiter; no new wait or thread); 4.3-a "One
      reactor, one arbiter, a closed set of inputs" (5456: no new input, no
-     cap; the reporting subclass adds no wake); 4.3-b "A quiet task does
+     cap, no new wake); 4.3-b "A quiet task does
      nothing" (5457: now also zero observation reads on persistent SQLite,
      with R2 as evidence); 4.4-e "Measure; do not bake in inefficiency"
      (5466: Task 6 numbers on both backends); 4.4-g "No capability
-     diminution" (5468: this plan's register, rows 1–16). Every other row is
+     diminution" (5468: this plan's register, rows 1–14). Every other row is
      carried forward unchanged by reference.
   3. The cross-family completed-work review.
   4. The index row and `Status:` flipped to `completed` in the same change.
@@ -1432,24 +1184,19 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
 
 - Harness: real broker queues through `broker_env` (`tests/conftest.py`
   369–390) and `WeftTestHarness`; a real `HeartbeatTask` driven by
-    `run_until_stopped` on a thread for R2 and R4; a real `Manager` from
-  `manager_setup` for R8 and R9; real child processes in the Task 4 Manager
-  anchors.
+  `run_until_stopped` on a thread for R2; real child processes in the Task 4
+  Manager anchors.
 - Backends: `tests/tasks/test_multiqueue_watcher.py`,
   `tests/tasks/test_heartbeat.py` and `tests/core/test_manager.py` run on
-  both backends; R2, R4, R8 and R9 skip on PostgreSQL by design (item 1
-  (a): native-waiter returns retry anyway), and R5 and R6 skip there because
-  the strategy does not call the data-version provider while a native
-  waiter exists; G1–G3, R1, R3 and R7 run on both.
+  both backends; R2 skips on PostgreSQL by design (item 1 (a): native-waiter
+  returns keep their check); G1–G3, R1 and R7 run on both.
 - Do not mock: queues, the broker connection, the heartbeat's table build,
-  child processes. The strategy is stubbed only in R1, R3, R7 and G3 to
-  force a return shape that a real strategy produces nondeterministically (a
+  child processes. The strategy is stubbed only in R1, R7 and G3 to force a
+  return shape that a real strategy produces nondeterministically (a
   hint-free return, a degraded return, a native-waiter return with no
-  hint); every other test uses the real strategy. Faults are injected at
-  the narrowest real boundary: R4, R8, R9 make one broker read raise; R5
-  makes one `refresh_last_ts()` raise; R6 makes the broker's
-  `get_data_version` answer `None`, which is what SimpleBroker's SQLite
-  helper returns on a PRAGMA failure.
+  hint); every other test uses the real strategy. No fault is injected:
+  the owner ruled the read-failure paths out of scope (Owner Decisions
+  item 2).
 - Counting boundary: R2 counts at the broker class (the class that defines
   `peek_many` in a live connection's MRO), as plan 6's Manager test does:
   every call, in the counting process, of a `BrokerCore` method that reads
@@ -1462,9 +1209,8 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
 - Windows: no OS-specific behavior; the suites run on Linux, macOS and
   Windows in CI as usual.
 - Tempting to skip: the nonpersistent and degraded paths (G2 `[False]`,
-  G3), the detector and callback faults (R5, R6), the slow read at the
-  deadline (R7) and the failure retries (R3, R4, R8, R9). They are where a
-  gate written too tightly would lose evidence or delay the owner.
+  G3) and the slow read at the deadline (R7). They are where a gate written
+  too tightly would lose evidence or delay the owner.
 
 ## Verification
 
@@ -1508,12 +1254,10 @@ data migration exists. The [CC-2.1] text and the code revert together.
   every row ID when its table is non-empty) and the Manager's startup window
   and drain clocks.
 - `weft/core/queue_wait.py` (the command-side waiter) and Taut's watcher copy.
-- The SimpleBroker change (Owner Decisions item 3): filed for SimpleBroker,
-  never gated on Weft; Weft's interim stays until a later Weft plan
-  consumes the release.
-- The readiness scan's pre-existing dependency on the data-version
-  detector (a silent detector also delays readiness on persistent SQLite
-  today); covered by the same SimpleBroker item, not changed here.
+- Any handling of a database that is no longer readable (a failed
+  `PRAGMA data_version`, `refresh_last_ts()` or observation read): the
+  owner ruled "do nothing" (Owner Decisions item 2); SimpleBroker's own
+  tenth-failure `RuntimeError` remains the exit.
 - Plan 6's closure.
 
 ## Revision Log
@@ -1521,10 +1265,11 @@ data migration exists. The [CC-2.1] text and the code revert together.
 | Date | Change | Reason |
 |------|--------|--------|
 | 2026-11-03 | Round 1 (codex 0.161.0, 2026-11-03): F1–F8 accepted and applied; see Review Log | Cross-family plan review round 1 |
+| 2026-11-04 | Owner ruling on the underlying reads: F1's flag-first callback, F2's reporting strategy subclass and the round-0 retry flag (Task 3) withdrawn; the SimpleBroker upstream item withdrawn; R3–R6, R8, R9 removed; register rows 9, 10, 14 rewritten and 15, 16 removed; [CC-2.1] delta shortened; Manager and heartbeat files out of the edit set | "Neither"; "Refesh last ts is also not going to fail on a reasonable sqlite"; "If those underlying reads fail, do nothing is the correct response" (Owner Decisions item 2) |
 
 ## Review Log
 
-Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in this revision; scoped round 2 pending.
+Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner withdrew the F1 and F2 remedies and the Task 3 retry flag (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 pending on this revision.
 
 - Cross-family round 1 (codex 0.161.0, 2026-11-03, plan text at `b85b798b`):
   BLOCKED on F1 (P1: SimpleBroker advances its data-version baseline before
