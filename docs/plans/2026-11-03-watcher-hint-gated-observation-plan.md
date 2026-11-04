@@ -672,18 +672,18 @@ D diminution (must be fixed in plan or escalated).
 
 | # | Observable | Before (`6054aea1`) | After | Class | Proof |
 |---|---|---|---|---|---|
-| 1 | Resident heartbeat, empty table, persistent SQLite: reads of `weft.state.heartbeats` over a quiet 30 s window | 230 (plan 6) | 0 after the wait-entry check | C (removed cost; the owner's rule "idles when not needed") | R2 `[0]`; Task 6 measurement |
-| 2 | Same with 1 and 10 rows | 458 with 1 row; 10 rows not measured | 0 | C | R2 `[1]`, `[10]`; Task 6 |
+| 1 | Resident heartbeat, empty table, persistent SQLite: reads of `weft.state.heartbeats` over a quiet 30 s window | 230 (plan 6) | 0 after the wait-entry check; measured 0 (30 s, `956acab1`; before 248) | C (removed cost; the owner's rule "idles when not needed") | R2 `[0]`; Task 6 measurement |
+| 2 | Same with 1 and 10 rows | 458 with 1 row; 10 rows not measured | 0; measured 0 with 1 row and 0 with 10 rows (30 s; before 500 and 496) | C | R2 `[1]`, `[10]`; Task 6 |
 | 3 | Manager reads during the [MA-1.8] startup window and a system-STOP drain, persistent SQLite, between publications | One read (or more) per strategy return | Reads only on hinted, deadline and wait-entry returns | C | Task 4 anchors; R1 |
-| 4 | Time from a foreign commit to its observation, persistent SQLite, detector and callback working | The first strategy return after the commit | The first hinted return: the same return, or the next one when the commit lands in a pass's final 20 ms chunk; that next return follows with no sleep | N within one strategy return (Stop-if in Task 6) | G2; Task 6 latency measurement |
+| 4 | Time from a foreign commit to its observation, persistent SQLite, detector and callback working | The first strategy return after the commit | The first hinted return: the same return, or the next one when the commit lands in a pass's final 20 ms chunk; that next return follows with no sleep; measured median 0.0098 s, max 0.0228 s, at most 2 returns (before 0.0135 s, 0.0239 s, 2) | N within one strategy return (Stop-if in Task 6) | G2; Task 6 latency measurement |
 | 5 | Owner's own write, then the next wait | Found by the wait-entry check | Same | N | G1 |
-| 6 | PostgreSQL native-waiter returns (notification or slow safety recheck): observation and readiness | Both run | Both run | N (Owner Decisions item 1) | Task 6 PostgreSQL measurement |
+| 6 | PostgreSQL native-waiter returns (notification or slow safety recheck): observation and readiness | Both run | Both run; measured 19 / 18 / 19 observations per 30 s with 0 / 1 / 10 rows, as before; quiet Consumer 20 readiness probes (before 19) | N (Owner Decisions item 1) | Task 6 PostgreSQL measurement |
 | 7 | Degraded and nonpersistent fallbacks | Both run on every return | Same | N | G2 `[nonpersistent]`, G3 |
 | 8 | Deadline return, including one crossed during a slow observation read | Observation runs; no readiness scan on an unhinted return | Same (the tail's deadline is computed after the read) | N | R1; R7 |
 | 9 | A failed observation read, persistent SQLite (any overrider) | Retried on the next strategy return (about 0.1 s) | Not retried; the next hinted, deadline or wait-entry return reads | A: the owner ruled (2026-11-04) that on a reasonable SQLite an observation read fails only on a database that is no longer readable, where no retry succeeds, and that the correct response is to do nothing (Owner Decisions item 2) | — |
 | 10 | A failed `PRAGMA data_version` or `refresh_last_ts()` on a foreign commit, persistent SQLite | Observation runs on every return regardless of the detector | The hint is lost with the failure; the next hinted, deadline or wait-entry return reads | A: the same ruling; both calls fail only on a database that is no longer readable (probed 2026-11-04) | — |
 | 11 | Readiness scans everywhere else | Plan 2's rule | Same | N | existing readiness tests (Task 4 list) |
-| 12 | Idle voluntary context switches, idle manager tree | Plan 2's after-numbers: 10,088 (SQLite) and 20,347 (PostgreSQL) over 30 s at `da2e3b92`; re-measured in Task 0 with the heartbeat now resident | Expected lower on SQLite (fewer broker calls per pass), equal on PostgreSQL. The strategy's own SQLite wake cadence (about 8.7 returns a second) is unchanged | C | Task 0 and Task 6 measurements |
+| 12 | Idle voluntary context switches, idle manager tree | Plan 2's after-numbers: 10,088 (SQLite) and 20,347 (PostgreSQL) over 30 s at `da2e3b92`; re-measured in Task 0 with the heartbeat now resident | Expected lower on SQLite (fewer broker calls per pass), equal on PostgreSQL. The strategy's own SQLite wake cadence (about 8.7 returns a second) is unchanged. Measured at `956acab1`: SQLite 12,423 (before 11,981 at `1049f452`, no measurable reduction); PostgreSQL 18,392 (before 20,862) | C | Task 0 and Task 6 measurements |
 | 13 | Observation semantics: which queues, which reads, which thread | — | Unchanged | N | — |
 | 14 | A caller-injected `polling_strategy` | Observation on every return | The same gate as the default strategy (the change callback reaches any strategy with `start`, watcher.py 540–544; the three repository injections inherit `PollingStrategy.wait_for_activity`) | C | G2 runs with the default strategy; the sigint probe (`tests/helpers/multiqueue_sigint_probe.py`) still passes |
 
@@ -1280,6 +1280,53 @@ data migration exists. The [CC-2.1] text and the code revert together.
 | 2026-11-04 | `734a89c9` | [CC-2.1] delta, `## Out of Scope`, hint table, register row 14, Tasks 0, 1, 4, Testing Plan, Review Log | Round-2 F9–F11 and four observations applied; wording and one removed test target; no design change. | No. |
 
 ## Review Log
+
+- Closure (2026-11-04, implementer). Status stays `promoted`: closure to
+  `completed` awaits the owner's [WT-7] keyed possession probe (closure item
+  1; the owner writes the key first; not performed and not self-graded
+  here). Closure item 4 (index row and `Status:` to `completed`) waits on
+  it. [WT-7] is now `## Tensions and falsifiers [WT-7]` at
+  `docs/program-theory.md` line 993 (the plan's "lines 966–977" predates
+  the file's growth); no theory edit was made.
+- Cross-family completed-work review (closure item 3; codex-cli 0.161.0,
+  `codex exec -s read-only`, reasoning effort high, 2026-11-04; unit =
+  commit `956acab1` at baseline `1049f452`): verdict `no blocker`, no
+  in-scope findings. The reviewer confirmed the declared gate-form
+  deviation by an in-memory comparison of 768 branch combinations plus the
+  deadline-crossing case (no observation or readiness read on a return
+  that cannot carry evidence), reproduced the C901 count, found the three
+  [CC-2.1] blocks verbatim once each, registration still preceding the
+  entry read, and the Manager and heartbeat files unchanged; broker-backed
+  tests were not rerun in its read-only sandbox. Observations (not
+  actionable): the one unexplained passing run of the transient-fallback
+  mutant before its recorded failures; the pre-existing PostgreSQL
+  admission failure is outside the change.
+- Theory-versus-code audit table refresh (closure item 2, 2026-11-04): the
+  table in `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+  `### Audit table` (line 5409) is carried forward by reference; every row
+  not listed here is unchanged. Re-audited rows touched by this plan:
+  - I-2 → [WT-2a.2] (line 5430), queues are the only durable truth:
+    aligned. The gate adds no field, flag or cache; it decides from hints
+    consumed on the same return and the owner's deadline, and every read
+    it allows goes to the queue (`_activity_hint_action`,
+    `weft/core/tasks/multiqueue_watcher.py`).
+  - I-6 → [WT-2a.6] (line 5434), one arbiter: aligned. No new wait, thread
+    or timer; `PollingStrategy.wait_for_activity` remains the only block.
+  - 4.3-a "One reactor, one arbiter, a closed set of inputs" (line 5456):
+    aligned for this plan's claim. No new input, no cap, no new wake;
+    observation reads now follow the closed set's evidence (G1–G3, R7).
+    The row's other evidence (timer floors) is unchanged by reference.
+  - 4.3-b "A quiet task does nothing" (line 5457): aligned, strengthened.
+    A quiet persistent SQLite task now also performs zero observation
+    reads (R2: 0 reads of `weft.state.heartbeats` in 5 s with 0, 1, 10
+    rows; Task 6: 0 in 30 s against 248 / 500 / 496 before). On PostgreSQL
+    the native idle recheck keeps its read (Owner Decisions item 1).
+  - 4.4-e "Measure; do not bake in inefficiency" (line 5466): aligned;
+    evidence added: Task 0 and Task 6 measurements on SQLite and
+    PostgreSQL in this plan's Execution log.
+  - 4.4-g "No capability diminution" (line 5468): aligned; evidence added:
+    this plan's difference register rows 1–14 (no D row; rows 9 and 10 A
+    by owner ruling) with the After column measured.
 
 Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner ruled on the underlying reads, and the author declined the F1 and F2 remedies and the Task 3 retry flag under that ruling (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 done; see the entry below.
 
@@ -1892,3 +1939,160 @@ echo DONE >> $OUT
   (the `heartbeat_probe.py` block above is ruff-formatted, otherwise
   identical to the script run); `./bin/check-doc-paths` OK;
   `tests/specs/test_plan_metadata.py` passed.
+
+### Task 6 after-measurements, gates, closure (2026-11-04)
+
+After-measurements at the landing commit `956acab1`, same scripts and runner
+(`run_all.sh after`), same PostgreSQL container:
+
+```text
+=== sqlite item1 idle_tree
+pid=59484 vcs_delta=2810 cpu_delta_s=0.593 weft-plan2-id-1HS76SZZHZC00:manager:running
+pid=59485 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59486 vcs_delta=2818 cpu_delta_s=0.379 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59487 vcs_delta=2868 cpu_delta_s=0.380 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59488 vcs_delta=3927 cpu_delta_s=0.457 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=12423 (414.1/s) cpu_delta_s=1.809
+=== sqlite item2 rows=0
+backend=sqlite mode=reads rows=0 window=30.0s alive=True
+  reads: 0
+  whole: 0
+  returns: 252
+  observations: 0
+  turns: 0
+=== sqlite item2 rows=1
+backend=sqlite mode=reads rows=1 window=30.0s alive=True
+  reads: 0
+  whole: 0
+  returns: 251
+  observations: 0
+  turns: 0
+=== sqlite item2 rows=10
+backend=sqlite mode=reads rows=10 window=30.0s alive=True
+  reads: 0
+  whole: 0
+  returns: 250
+  observations: 0
+  turns: 0
+=== sqlite item3 latency
+backend=sqlite mode=latency samples=20
+  latency_s median=0.0098 max=0.0228
+  strategy_returns median=1.0 max=2
+  latencies=[0.0058, 0.0193, 0.0046, 0.0092, 0.0056, 0.008, 0.0228, 0.0172, 0.0069, 0.0196, 0.0218, 0.008, 0.0081, 0.0184, 0.0105, 0.0183, 0.0176, 0.0159, 0.0011, 0.0071]
+  returns=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 0, 1]
+=== sqlite item4 quiet_task
+backend=sqlite window=30.0s (after 2 s settle)
+  turns: 1 in window (total incl. startup 2)
+  pending_probes: 0 in window (total incl. startup 1)
+  strategy_returns: 259 in window (total incl. startup 416)
+=== postgres item1 idle_tree
+pid=59902 vcs_delta=4294 cpu_delta_s=0.682 weft-plan2-id-1HS76ZS3BHM00:manager:running
+pid=59905 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59906 vcs_delta=2487 cpu_delta_s=0.092 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59907 vcs_delta=2965 cpu_delta_s=0.083 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=59908 vcs_delta=8646 cpu_delta_s=0.133 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=18392 (613.1/s) cpu_delta_s=0.990
+=== postgres item2 rows=0
+backend=postgres mode=reads rows=0 window=30.0s alive=True
+  reads: 19
+  whole: 0
+  returns: 19
+  observations: 19
+  turns: 0
+=== postgres item2 rows=1
+backend=postgres mode=reads rows=1 window=30.0s alive=True
+  reads: 36
+  whole: 0
+  returns: 18
+  observations: 18
+  turns: 0
+=== postgres item2 rows=10
+backend=postgres mode=reads rows=10 window=30.0s alive=True
+  reads: 38
+  whole: 0
+  returns: 19
+  observations: 19
+  turns: 0
+=== postgres item3 latency
+backend=postgres mode=latency samples=20
+  latency_s median=0.0046 max=0.0070
+  strategy_returns median=0.0 max=0
+  latencies=[0.0034, 0.0047, 0.0045, 0.0046, 0.0057, 0.0069, 0.0036, 0.0057, 0.0034, 0.0058, 0.007, 0.0023, 0.0046, 0.0068, 0.0034, 0.0045, 0.0035, 0.0036, 0.0048, 0.0033]
+  returns=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+=== postgres item4 quiet_task
+backend=postgres window=30.0s (after 2 s settle)
+  turns: 0 in window (total incl. startup 2)
+  pending_probes: 20 in window (total incl. startup 21)
+  strategy_returns: 20 in window (total incl. startup 22)
+```
+
+Before/after, SQLite (`1049f452` → `956acab1`):
+
+| Measurement | Before | After |
+|---|---|---|
+| Idle tree voluntary context switches, 30 s (total) | 11,981 | 12,423 |
+| Idle tree CPU seconds, 30 s (total) | 1.454 | 1.809 |
+| Heartbeat registrations reads, 30 s, 0 / 1 / 10 rows | 248 / 500 / 496 | 0 / 0 / 0 |
+| Heartbeat `_has_pending_observation` calls, 30 s, 0 / 1 / 10 rows | 248 / 250 / 248 | 0 / 0 / 0 |
+| Heartbeat strategy returns, 30 s, 0 / 1 / 10 rows | 248 / 250 / 248 | 252 / 251 / 250 |
+| Heartbeat turns in window | 0 / 0 / 0 | 0 / 0 / 0 |
+| Upsert-to-observation latency, median / max (s) | 0.0135 / 0.0239 | 0.0098 / 0.0228 |
+| Strategy returns between upsert and observation, median / max | 1 / 2 | 1 / 2 |
+| Quiet Consumer readiness probes / strategy returns in window | 0 / 258 | 0 / 259 |
+
+Before/after, PostgreSQL:
+
+| Measurement | Before | After |
+|---|---|---|
+| Idle tree voluntary context switches, 30 s (total) | 20,862 | 18,392 |
+| Idle tree CPU seconds, 30 s (total) | 1.007 | 0.990 |
+| Heartbeat registrations reads, 30 s, 0 / 1 / 10 rows | 19 / 36 / 38 | 19 / 36 / 38 |
+| Heartbeat `_has_pending_observation` calls, 30 s | 19 / 18 / 19 | 19 / 18 / 19 |
+| Heartbeat strategy returns, 30 s | 19 / 18 / 19 | 19 / 18 / 19 |
+| Upsert-to-observation latency, median / max (s) | 0.0046 / 0.0069 | 0.0046 / 0.0070 |
+| Strategy returns between upsert and observation | 0 / 0 | 0 / 0 |
+| Quiet Consumer readiness probes / strategy returns in window | 19 / 19 | 20 / 20 |
+
+Notes: the SQLite idle tree shows no measurable reduction (12,423 against
+11,981, within run-to-run noise; register row 12 expected "lower"): the
+strategy's own wake cadence (about 8.4 returns a second per reactor)
+dominates the switch count, and the heartbeat's removed reads are a small
+part of it. The quiet Consumer's "turns: 1 in window" after (0 before) is
+its one-time startup turn landing after the 2 s settle; the total
+including startup is 2 in both runs.
+
+Stop-if verdict: not fired. SQLite: maximum strategy returns between a write
+and its observation 2 after against 2 before (not more than one above);
+median latency 0.0098 s against 0.0135 s (not above by a pass). PostgreSQL:
+reads, returns, observations and latency equal within noise (one quiet
+Consumer probe more in 30 s, 20 against 19, is the native idle jitter).
+
+Full gates (`run`, each from the current state at `956acab1`; the
+repository's `addopts` was overridden only to drop `-q` so the summary line
+prints, keeping `-n logical --maxprocesses 12 --dist load`):
+
+- `pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py`: 130 passed, 2 skipped.
+- `./bin/pytest-pg tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py`: 129 passed, 3 skipped.
+- `pytest -m "" tests/core/test_manager.py tests/core/test_manager_family_maintenance.py tests/core/test_admission_recovery.py tests/cli/test_cli_manager.py`: 340 passed, 3 skipped.
+- `pytest tests/specs`: 165 passed.
+- `pytest` (fast): 6476 passed, 47 skipped.
+- `pytest -m ""`: 6480 passed, 58 skipped.
+- `./bin/pytest-pg --fast`: 1 failed, 5175 passed, 27 skipped; the failure
+  is `tests/system/test_measured_admission_pg.py::test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage`,
+  the pre-existing failure recorded under Task 4 (it fails identically with
+  the baseline watcher).
+- mypy: "Success: no issues found in 487 source files"; `ruff check .`:
+  "All checks passed!"; `ruff format --check .`: "655 files already
+  formatted"; `./bin/check-doc-paths`: OK.
+- CI on Linux, macOS and Windows: not run (nothing is pushed).
+
+Plan 6 cross-reference: one line appended to the Execution log of
+`docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md` (Status
+`promoted`, still open) naming this plan and `956acab1` as the fix for its
+scoped round 2 F1.
+
+Closure items (see `## Review Log`): item 2 (audit refresh) and item 3
+(cross-family completed-work review, `no blocker`) done; item 1 (the [WT-7]
+keyed possession probe) is the owner's and is not performed; item 4 (flip
+to `completed`) waits on item 1, so `Status:` and the index row stay
+`promoted`.

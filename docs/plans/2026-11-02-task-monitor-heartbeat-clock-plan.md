@@ -3691,3 +3691,13 @@ Scoped round 2 (2026-11-03).
   rows are still deleted first in ascending order, which guards a build
   interrupted by process death (an OS boundary, kept), and a build that
   cannot read the queue still does nothing with the flag cleared.
+
+- Scoped round 2 F1 fix (2026-11-04): plan 13,
+  `docs/plans/2026-11-03-watcher-hint-gated-observation-plan.md`, landing
+  commit `956acab1` ("Gate the reactor wait's observation read on
+  evidence"): the resident heartbeat on persistent SQLite now makes 0 reads
+  of `weft.state.heartbeats` over a quiet window (counted at the broker
+  boundary by `tests/tasks/test_heartbeat.py::test_resident_heartbeat_reads_no_registrations_while_quiet`;
+  30 s measurement 0 / 0 / 0 with 0 / 1 / 10 rows against 248 / 500 / 496
+  before). On PostgreSQL the native idle recheck keeps its read (plan 13
+  Owner Decisions item 1).
