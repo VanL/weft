@@ -49,6 +49,7 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     PONG_EXTENSION_KEY,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
+    SERVICE_IDLE_EXIT_SECONDS,
     SERVICE_STATUS_ACTIVE,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
@@ -2956,7 +2957,15 @@ def test_task_monitor_disabled_has_no_private_timer_and_still_wakes(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A disabled monitor never scans; its only deadline is the idle clock.
+
+    The idle clock is the ``ServiceTask`` rule (owner, 2026-11-04): a disabled
+    monitor has no work, so its one timer is the idle remainder, and a wake
+    that finds no work does not move it.
+    """
+
     db_path, make_queue = broker_env
+    monkeypatch.setattr(service_task_mod, "_service_monotonic_ns", lambda: 10**12)
     monkeypatch.setattr(
         task_monitor_mod,
         "build_task_monitor_cycle_snapshot",
@@ -2978,15 +2987,15 @@ def test_task_monitor_disabled_has_no_private_timer_and_still_wakes(
     try:
         task.process_once()
 
-        assert task.next_wait_timeout() is None
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
 
         make_queue(task.taskspec.io.inputs["inbox"]).write(
             json.dumps({"type": "task_monitor_wakeup"})
         )
-        assert task.next_wait_timeout() is None
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
         task.wait_for_activity(timeout=0.5)
         task.process_once()
-        assert task.next_wait_timeout() is None
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
     finally:
         task.stop()
 
@@ -9559,7 +9568,13 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
         assert task._external_task_log_sink is owner_sink
         assert task._stop_event is owner_stop_event
         assert task._task_lifecycle is owner_lifecycle_after_drive
-        assert task._queue_cache == owner_queue_cache
+        # The reactor's own idle rule reads the declared services-registry
+        # support route; the worker still adds nothing to the owner cache.
+        assert {
+            name: queue
+            for name, queue in task._queue_cache.items()
+            if name != WEFT_SERVICES_REGISTRY_QUEUE
+        } == owner_queue_cache
 
         release.set()
         drive_task_monitor_until_idle(task)
@@ -9567,7 +9582,13 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
         assert task._external_task_log_sink is owner_sink
         assert task._stop_event is owner_stop_event
         assert task._task_lifecycle is owner_lifecycle_after_drive
-        assert task._queue_cache == owner_queue_cache
+        # The reactor's own idle rule reads the declared services-registry
+        # support route; the worker still adds nothing to the owner cache.
+        assert {
+            name: queue
+            for name, queue in task._queue_cache.items()
+            if name != WEFT_SERVICES_REGISTRY_QUEUE
+        } == owner_queue_cache
     finally:
         release.set()
         task.stop()
@@ -13893,5 +13914,377 @@ def test_cleanup_rechecks_completion_published_after_selection(
                 )
             assert ctrl_in.stats().total == 0
             assert ctrl_out.stats().total == 1
+    finally:
+        task.stop()
+
+
+# --- Idle rule: TaskMonitor defines its work (plan 2026-11-04 Task 2) ---
+
+_MONITOR_IDLE_WINDOW_NS = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+
+
+def _one_count(field_name: str) -> dict[str, Any]:
+    """Return constructor kwargs setting one count field to 1."""
+
+    return {field_name: 1}
+
+
+def _idle_monitor_config(**overrides: Any) -> Mapping[str, Any]:
+    """Return an enabled, destructive-mode monitor config for idle-rule tests."""
+
+    return load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            **overrides,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "input_name", ["none", "cycle_found_work", "deferred_pending", "catchup_pending"]
+)
+def test_task_monitor_has_work_reads_each_named_input(
+    broker_env: BrokerEnv,
+    input_name: str,
+) -> None:
+    """Work is the applied cycle's flag, the deferred backlog, or catch-up."""
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999701"),
+        config=_idle_monitor_config(),
+    )
+    try:
+        task._last_cycle_found_work = input_name == "cycle_found_work"
+        task._deferred_task_log_pending = 1 if input_name == "deferred_pending" else 0
+        task._last_catchup_pending = input_name == "catchup_pending"
+        assert task._has_work() is (input_name != "none")
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    ("label", "diagnostics", "expected"),
+    [
+        ("omitted", None, False),
+        ("empty", task_monitor_mod._MaintenanceDiagnostics(), False),
+        (
+            "retained_work_pending",
+            task_monitor_mod._MaintenanceDiagnostics(retained_work_pending=True),
+            True,
+        ),
+        *(
+            (
+                f"ingest_{field_name}",
+                task_monitor_mod._MaintenanceDiagnostics(
+                    store=task_monitor_mod._MaintenanceStoreDiagnostics(
+                        last_retained_task_log_ingest=(
+                            task_monitor_mod._RetainedTaskLogIngestResult(
+                                **_one_count(field_name)
+                            )
+                        )
+                    )
+                ),
+                True,
+            )
+            for field_name in ("valid_ingested", "raw_deleted", "malformed_deleted")
+        ),
+        (
+            "recovery_valid_ingested",
+            task_monitor_mod._MaintenanceDiagnostics(
+                store=task_monitor_mod._MaintenanceStoreDiagnostics(
+                    last_pre_checkpoint_task_log_recovery=(
+                        task_monitor_mod._PreCheckpointTaskLogRecoveryResult(
+                            valid_ingested=1
+                        )
+                    )
+                )
+            ),
+            True,
+        ),
+        (
+            "families_retired",
+            task_monitor_mod._MaintenanceDiagnostics(
+                collation=task_monitor_mod._MaintenanceCollationDiagnostics(
+                    last_monitor_store_families_retired=1
+                )
+            ),
+            True,
+        ),
+    ],
+)
+def test_task_monitor_cycle_diagnostics_work_inputs(
+    label: str,
+    diagnostics: task_monitor_mod._MaintenanceDiagnostics | None,
+    expected: bool,
+) -> None:
+    """Each recorded cycle count is work; an omitted or empty group is not."""
+
+    del label
+    assert TaskMonitor._diagnostics_show_work(diagnostics) is expected
+
+
+def test_task_monitor_processor_and_cleanup_results_work_inputs() -> None:
+    """Rows handled by a processor, or cleanup effects and futures, are work."""
+
+    assert not TaskMonitor._processor_result_shows_work(
+        TaskMonitorProcessorResult(success=True)
+    )
+    for field_name in ("processed", "deleted", "reported"):
+        assert TaskMonitor._processor_result_shows_work(
+            TaskMonitorProcessorResult(success=True, **_one_count(field_name))
+        )
+    assert not TaskMonitor._control_cleanup_shows_work(
+        task_monitor_mod._TaskControlCleanupResult()
+    )
+    assert TaskMonitor._control_cleanup_shows_work(
+        task_monitor_mod._TaskControlCleanupResult(pending=True)
+    )
+    for field_name in (
+        "reserved_skipped_not_ready",
+        "dead_tids_pending",
+        "dead_tids_deferred_retention",
+        "dead_tids_skipped_too_young",
+        "families_disposed",
+        "families_retired",
+        "queues_deleted",
+        "reserved_queues_deleted",
+        "dead_tid_queues_deleted",
+    ):
+        assert TaskMonitor._control_cleanup_shows_work(
+            task_monitor_mod._TaskControlCleanupResult(**_one_count(field_name))
+        ), field_name
+
+
+@pytest.mark.parametrize(
+    "input_name",
+    [
+        "none",
+        "open_family",
+        "control_cleanup_pending",
+        "reserved_not_ready",
+        "deferred_pending",
+        "scan_not_safe",
+        "prune_not_deleted",
+    ],
+)
+def test_maintenance_worker_retained_work_pending_inputs(
+    broker_env: BrokerEnv,
+    input_name: str,
+) -> None:
+    """The worker's ``retained_work_pending`` reads each named input."""
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999702"),
+        config=_idle_monitor_config(),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            worker._open_families_present = input_name == "open_family"
+            worker._collation_state = replace(
+                worker._collation_state,
+                last_control_cleanup_pending=input_name == "control_cleanup_pending",
+            )
+            worker._cleanup_state = replace(
+                worker._cleanup_state,
+                last_reserved_skipped_not_ready=int(input_name == "reserved_not_ready"),
+            )
+            worker._deferred_task_log_pending = int(input_name == "deferred_pending")
+            worker._scan_state = replace(
+                worker._scan_state,
+                last_candidates_seen=int(input_name == "scan_not_safe"),
+            )
+            worker._maintenance_state = replace(
+                worker._maintenance_state,
+                last_maintenance_runtime_prune_candidates=int(
+                    input_name == "prune_not_deleted"
+                ),
+            )
+            diagnostics = worker.capture_diagnostics()
+        assert diagnostics.retained_work_pending is (input_name != "none")
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    ("family", "counts"),
+    [
+        ("none", False),
+        ("running_service", False),
+        ("running_user", True),
+        ("terminal_service", True),
+    ],
+)
+def test_maintenance_worker_open_family_presence_check(
+    broker_env: BrokerEnv,
+    family: str,
+    counts: bool,
+) -> None:
+    """A family counts until retired, except a live Manager or service row.
+
+    Owner ruling 10.3: cleanup at a future expiry the Monitor would handle
+    keeps it active; a running service's own lifecycle family does not.
+    """
+
+    db_path, _make_queue = broker_env
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999999703"),
+        config=_idle_monitor_config(WEFT_TASK_MONITOR_BATCH_SIZE=1),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            updates = []
+            if family != "none":
+                tid = "1778089999999999704"
+                taskspec = _projection_taskspec(tid)
+                if family.endswith("service"):
+                    taskspec["metadata"] = {"role": "heartbeat_service"}
+                updates.append(
+                    update_from_task_log_payload(
+                        {
+                            "event": "work_started",
+                            "status": "running",
+                            "tid": tid,
+                            "taskspec": taskspec,
+                        },
+                        message_id=int(tid),
+                    )
+                )
+                if family.startswith("terminal"):
+                    updates.append(
+                        update_from_task_log_payload(
+                            {
+                                "event": "work_completed",
+                                "status": "completed",
+                                "tid": tid,
+                                "taskspec": taskspec,
+                            },
+                            message_id=int(tid) + 1,
+                        )
+                    )
+            # A second running service family exercises the paged read.
+            other_tid = "1778089999999999705"
+            other_spec = _projection_taskspec(other_tid)
+            other_spec["metadata"] = {"role": "task_monitor"}
+            updates.append(
+                update_from_task_log_payload(
+                    {
+                        "event": "work_started",
+                        "status": "running",
+                        "tid": other_tid,
+                        "taskspec": other_spec,
+                    },
+                    message_id=int(other_tid),
+                )
+            )
+            store.record_task_log_updates(
+                WEFT_GLOBAL_LOG_QUEUE,
+                tuple(update for update in updates if update is not None),
+                checkpoint_message_id=None,
+            )
+            assert worker._retained_families_present(store) is counts
+    finally:
+        task.stop()
+
+
+def _drive_one_monitor_cycle(task: TaskMonitor) -> None:
+    """Request and drive one cycle, then run the turn that applies its result."""
+
+    task._wake_requested = True
+    task.process_once()
+    drive_task_monitor_until_idle(task)
+    task.process_once()
+
+
+@pytest.mark.parametrize("substantive_cycle", [False, True])
+def test_task_monitor_empty_cycles_cross_the_deadline_and_a_substantive_one_resets(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    substantive_cycle: bool,
+) -> None:
+    """Empty cycles never move the idle clock; a substantive cycle clears it.
+
+    The first cycle ingests the Monitor's own lifecycle rows (work). Empty
+    cycles after it start the clock once and leave it alone, an in-flight
+    cycle at the expired deadline defers the exit, and the empty result then
+    exits. A user row ingested mid-window clears the clock instead, and its
+    open family keeps the Monitor active (owner ruling 10.3).
+    """
+
+    db_path, make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    # The Manager-launched service carries its internal-service markers, so
+    # its own lifecycle family is a live service row, not retained work.
+    spec = make_task_monitor_taskspec("1778089999999999706")
+    spec = spec.model_copy(
+        update={
+            "metadata": {
+                **spec.metadata,
+                "role": "task_monitor",
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ),
+            }
+        }
+    )
+    task = TaskMonitor(db_path, spec, config=_idle_monitor_config())
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        task.process_once()
+        assert task._last_cycle_found_work is True
+        assert task._idle_since_monotonic_ns is None
+
+        _drive_one_monitor_cycle(task)
+        started = service_clock["ns"]
+        assert task._has_work() is False
+        assert task._idle_since_monotonic_ns == started
+
+        service_clock["ns"] += _MONITOR_IDLE_WINDOW_NS // 3
+        _drive_one_monitor_cycle(task)
+        assert task._idle_since_monotonic_ns == started
+
+        if substantive_cycle:
+            user_tid = str(time.time_ns())
+            make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+                json.dumps(
+                    {
+                        "event": "work_started",
+                        "status": "running",
+                        "tid": user_tid,
+                        "taskspec": _projection_taskspec(user_tid),
+                    }
+                )
+            )
+            _drive_one_monitor_cycle(task)
+            assert task._last_cycle_found_work is True
+            assert task._idle_since_monotonic_ns is None
+            service_clock["ns"] += 10 * _MONITOR_IDLE_WINDOW_NS
+            _drive_one_monitor_cycle(task)
+            assert not task.should_stop
+            assert task._idle_since_monotonic_ns is None
+            return
+
+        service_clock["ns"] = started + _MONITOR_IDLE_WINDOW_NS
+        task._wake_requested = True
+        task.process_once()
+        assert task._work_undetermined() or not task.should_stop
+        assert not task.should_stop
+        drive_task_monitor_until_idle(task)
+        task.process_once()
+        assert task.should_stop
+        assert task.taskspec.state.status == "completed"
     finally:
         task.stop()

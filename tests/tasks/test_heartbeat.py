@@ -21,6 +21,7 @@ import pytest
 
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.heartbeat as heartbeat_module
+import weft.core.tasks.service as service_module
 from tests.helpers.broker_reads import count_queue_calls
 from tests.helpers.test_backend import (
     POSTGRES_TEST_BACKEND,
@@ -35,6 +36,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    SERVICE_IDLE_EXIT_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
@@ -423,8 +425,9 @@ def test_heartbeat_run_until_stopped_uses_next_wait_timeout(
     try:
         task.run_until_stopped(poll_interval=9.0)
 
-        # An empty table publishes no deadline, so only the caller's bound applies.
-        assert task.next_wait_timeout() is None
+        # An empty table publishes only the idle clock, so the caller's
+        # shorter bound applies.
+        _assert_only_idle_deadline(task)
         assert wait_calls == [9.0]
     finally:
         task.stop(join=False)
@@ -444,8 +447,9 @@ def test_heartbeat_pending_input_wakes_through_reactor_wait(
 
         _upsert(context, tid, "build")
 
-        # No timer with an empty table: the upsert itself must end the wait.
-        assert task.next_wait_timeout() is None
+        # Only the idle clock with an empty table: the upsert itself must end
+        # the wait.
+        _assert_only_idle_deadline(task)
         started_at = time.monotonic()
         task.wait_for_activity(timeout=5.0)
         assert time.monotonic() - started_at < 0.5
@@ -491,8 +495,9 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
             )
         )
 
-        # No timer with an empty table: the PING itself must end the wait.
-        assert task.next_wait_timeout() is None
+        # Only the idle clock with an empty table: the PING itself must end
+        # the wait.
+        _assert_only_idle_deadline(task)
         started_at = time.monotonic()
         task.wait_for_activity(timeout=5.0)
         assert time.monotonic() - started_at < 0.5
@@ -592,6 +597,22 @@ def _patch_heartbeat_clock(
     )
 
 
+def _assert_only_idle_deadline(task: HeartbeatTask) -> None:
+    """Assert the only published deadline is a freshly armed idle clock."""
+
+    timeout = task.next_wait_timeout()
+    assert timeout is not None
+    assert SERVICE_IDLE_EXIT_SECONDS - 10.0 <= timeout <= SERVICE_IDLE_EXIT_SECONDS
+
+
+def _patch_service_clock(
+    monkeypatch: pytest.MonkeyPatch, clock: dict[str, int]
+) -> None:
+    """Freeze the service idle clock through the service module's seam."""
+
+    monkeypatch.setattr(service_module, "_service_monotonic_ns", lambda: clock["ns"])
+
+
 def _force_due(task: HeartbeatTask, heartbeat_id: str, now: float) -> None:
     registration = task._registrations[heartbeat_id]
     registration.next_due_at = now - 1.0
@@ -654,17 +675,21 @@ def test_heartbeat_restart_rebuilds_table_from_queue(workdir: Path) -> None:
         destination.close()
 
 
-def test_heartbeat_empty_table_never_idle_exits(
+def test_heartbeat_empty_table_idle_exits_and_a_row_never_does(
     workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An always-on service keeps running with an empty table [MF-3.2].
+    """An empty table idle-exits after the window; one row keeps it [MF-3.2].
 
-    Mutation caught: an idle exit on an empty table (any timeout).
+    Replaces the 2026-11-03 inverse oracle ("never idle-exits"): services own
+    their lifetime and end themselves after ``SERVICE_IDLE_EXIT_SECONDS``
+    without work (owner, 2026-11-04). Mutations caught: an exit while a row
+    is held; no exit once the table is empty for the window.
     """
 
-    clock: dict[str, Any] = {"monotonic": 1000.0, "ns": None}
-    _patch_heartbeat_clock(monkeypatch, clock)
+    service_clock = {"ns": 10**12}
+    _patch_service_clock(monkeypatch, service_clock)
+    window_ns = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
@@ -672,27 +697,73 @@ def test_heartbeat_empty_table_never_idle_exits(
         _upsert(context, tid, "build")
         task.process_once()
         assert "build" in task._registrations
+        assert task._idle_since_monotonic_ns is None
+        service_clock["ns"] += 10 * window_ns
+        task.process_once()
+        assert not task.should_stop
+        assert task._idle_since_monotonic_ns is None
 
         cancel_heartbeat(context, heartbeat_id="build")
         task.wait_for_activity(0.05)
         task.process_once()
         assert task._registrations == {}
+        assert task._idle_since_monotonic_ns == service_clock["ns"]
 
-        for offset in (61.0, 3600.0, 10.0**6):
-            clock["monotonic"] = 1000.0 + offset
-            task.process_once()
-            assert not task.should_stop
-        assert _task_events(context, tid, "heartbeat_service_idle_shutdown") == []
+        service_clock["ns"] += window_ns - 1
+        task.process_once()
+        assert not task.should_stop
+
+        service_clock["ns"] += 1
+        task.process_once()
+        assert task.should_stop
+        assert task.taskspec.state.status == "completed"
+        exits = _task_events(context, tid, "service_idle_exit")
+        assert len(exits) == 1
+        assert exits[0]["idle_seconds"] == SERVICE_IDLE_EXIT_SECONDS
     finally:
         task.stop(join=False)
         task.cleanup()
 
 
-def test_heartbeat_empty_table_publishes_no_timer(workdir: Path) -> None:
-    """With no rows the service has no deadline and blocks on its watcher.
+def test_heartbeat_empty_table_publishes_only_the_idle_clock(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no rows the only deadline is the idle-clock remainder [MF-3.2].
 
-    This is the "idles when not needed" care for an always-on service.
-    Mutation caught: any timer (audit, idle, poll) armed with an empty table.
+    The "idles when not needed" care stays: no audit, no poll, only the one
+    idle clock, which counts down from the first idle turn. Mutation caught:
+    any other timer armed with an empty table.
+    """
+
+    service_clock = {"ns": 10**12}
+    _patch_service_clock(monkeypatch, service_clock)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    try:
+        task.process_once()
+        assert task._registrations == {}
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
+        service_clock["ns"] += 100 * 1_000_000_000
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS - 100.0
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+
+
+@pytest.mark.parametrize(
+    "input_name", ["none", "row", "rebuild_pending", "pending_worker_result"]
+)
+def test_heartbeat_has_work_reads_each_named_input(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+) -> None:
+    """Work is a table row, a pending rebuild, or a pending worker result.
+
+    A rebuild that finds no row is not work: after the first turn's rebuild
+    of an empty queue the predicate is false.
     """
 
     context = build_context(spec_context=workdir)
@@ -700,8 +771,18 @@ def test_heartbeat_empty_table_publishes_no_timer(workdir: Path) -> None:
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     try:
         task.process_once()
-        assert task._registrations == {}
-        assert task.next_wait_timeout() is None
+        assert task._registrations_rebuild_pending is False
+        assert task._has_work() is False
+        if input_name == "row":
+            _upsert(context, tid, "build")
+            task.wait_for_activity(0.05)
+            task.process_once()
+            assert "build" in task._registrations
+        elif input_name == "rebuild_pending":
+            task._registrations_rebuild_pending = True
+        elif input_name == "pending_worker_result":
+            monkeypatch.setattr(task, "_has_pending_worker_results", lambda: True)
+        assert task._has_work() is (input_name != "none")
     finally:
         task.stop(join=False)
         task.cleanup()
@@ -723,8 +804,10 @@ def test_heartbeat_with_empty_table_runs_zero_timer_turns_and_wakes_on_upsert(
     internal services are always on "with care taken that the service idles
     when not needed": with an empty table the driven service runs zero
     reactor turns over a 30 s quiet window, stays alive, then wakes on an
-    upsert, and emits once due. Mutations caught: an idle exit; a timer with
-    no rows.
+    upsert, and emits once due. Its only deadline with no rows is the
+    five-minute idle clock (owner, 2026-11-04), well outside the window.
+    Mutations caught: an idle exit inside the window; a short timer with no
+    rows.
     """
 
     del thread_exception_guard
@@ -1054,7 +1137,7 @@ def test_heartbeat_cancel_while_paused_empties_table(
         task.wait_for_activity(0.05)
         task.process_once()
         assert task._registrations == {}
-        assert task.next_wait_timeout() is None
+        _assert_only_idle_deadline(task)
 
         clock["monotonic"] = 1005.0
         task.process_once()
@@ -1125,7 +1208,7 @@ def test_heartbeat_expired_registration_is_deleted_at_its_deadline(
         assert destination.read_one() is None
         assert task._paused is True
 
-        assert task.next_wait_timeout() is None
+        _assert_only_idle_deadline(task)
         advance(95.2)
         task.process_once()
         assert not task.should_stop

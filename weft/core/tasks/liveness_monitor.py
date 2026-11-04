@@ -5,6 +5,7 @@ read-only process/runtime inspection; the reactor alone touches broker state.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.2]
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5], Cleanup Boundary
 - docs/specifications/07-System_Invariants.md [LIVENESS.R1]-[LIVENESS.R10]
@@ -25,6 +26,11 @@ from typing import Any
 
 from simplebroker.ext import BrokerError
 from weft._constants import (
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEYS,
+    INTERNAL_SERVICE_ROLES,
+    INTERNAL_SERVICE_RUNTIME_CLASSES,
     LIVENESS_FULL_RECONCILE_INTERVAL_SECONDS,
     LIVENESS_MAPPING_MIN_AGE_SECONDS,
     LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES,
@@ -156,7 +162,63 @@ class LivenessMonitor(ServiceTask):
 
         del message, timestamp, context
 
-    def _process_reactor_turn(self) -> None:
+    @staticmethod
+    def _mapping_counts_as_work(payload: Mapping[str, Any]) -> bool:
+        """Return whether one mapping row is user work (owner ruling 10.4).
+
+        A row counts unless its role is ``manager`` or an internal service
+        role, or its projected metadata names an internal service key or
+        internal service runtime class. Presence is the whole test: no
+        live/stale distinction is read.
+
+        Spec: [MA-1] item 7, [LIVENESS.R1]
+        """
+
+        role = payload.get("role")
+        if role == "manager" or role in INTERNAL_SERVICE_ROLES:
+            return False
+        projection = payload.get("projection")
+        metadata = (
+            projection.get("metadata") if isinstance(projection, Mapping) else None
+        )
+        if isinstance(metadata, Mapping):
+            if metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY) in INTERNAL_SERVICE_KEYS:
+                return False
+            if (
+                metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+                in INTERNAL_SERVICE_RUNTIME_CLASSES
+            ):
+                return False
+        return True
+
+    def _has_work(self) -> bool:
+        """Return whether a counting mapping row or probe is outstanding.
+
+        Inputs, all already held by the reactor: ``_latest_rows`` (a row that
+        counts under ``_mapping_counts_as_work``) and ``_in_flight`` (a probe
+        whose mapping counts; a pending probe result stays in ``_in_flight``
+        until it is applied). A due-heap entry alone is not work, and probes
+        or results of the Manager's, the other services' or this monitor's
+        own mappings never touch the idle clock. A refresh that finds no
+        counting row is not work.
+
+        Spec: [MA-1] item 7, [LIVENESS.R1]
+        """
+
+        return any(
+            self._mapping_counts_as_work(row.payload)
+            for row in self._latest_rows.values()
+        ) or any(
+            self._mapping_counts_as_work(work.payload)
+            for work in self._in_flight.values()
+        )
+
+    def _service_reactor_turn(self) -> None:
+        """Run one liveness turn behind the service idle template.
+
+        Spec: [CC-2.2.1], [LIVENESS.R3], [LIVENESS.R4]
+        """
+
         self._drain_worker_results()
         if not self.should_stop:
             self._drain_queue()
@@ -590,7 +652,13 @@ class LivenessMonitor(ServiceTask):
             return False
 
     def next_wait_timeout(self) -> float | None:
-        """Return the next local liveness scheduling deadline."""
+        """Return the next local liveness scheduling deadline.
+
+        The ``ServiceTask`` idle-clock remainder, when armed, is merged with
+        the refresh, reconcile and due-probe deadlines.
+
+        Spec: [CC-2.5], [MA-1] item 7, [LIVENESS.R8]
+        """
 
         if self._has_pending_worker_results():
             return 0.0

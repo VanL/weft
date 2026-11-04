@@ -242,8 +242,8 @@ class HeartbeatTask(ServiceTask):
             ),
         }
 
-    def _process_reactor_turn(self) -> None:
-        """Run one bounded Heartbeat turn behind the owner template.
+    def _service_reactor_turn(self) -> None:
+        """Run one bounded Heartbeat turn behind the service idle template.
 
         Spec:
         - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
@@ -690,14 +690,33 @@ class HeartbeatTask(ServiceTask):
         self.should_stop = True
         return True
 
+    def _has_work(self) -> bool:
+        """Return whether the heartbeat has work: rows, results, or a rebuild.
+
+        Inputs, all already held by the reactor: ``_registrations`` (any row
+        in the in-memory table), pending worker results, and
+        ``_registrations_rebuild_pending``. A rebuild that finds no row clears
+        the flag and leaves the table empty, so it is not work.
+
+        Spec: [MA-1] item 7, [MF-3.2]
+        """
+
+        return bool(
+            self._registrations
+            or self._registrations_rebuild_pending
+            or self._has_pending_worker_results()
+        )
+
     def next_wait_timeout(self) -> float | None:
-        """Return the next due emission or lease expiry; ``None`` with no rows.
+        """Return the next due emission or lease expiry, else the idle clock.
 
-        The service is always on and idles when not needed: with an empty
-        table there is no timer, and the task blocks on its watcher (ctrl_in
-        and its notification interest on ``weft.state.heartbeats``).
+        With rows the deadlines are the next due emission and the earliest
+        lease expiry, and the idle clock is not armed. With an empty table the
+        only deadline is the idle-clock remainder the ``ServiceTask`` base
+        supplies; otherwise the task blocks on its watcher (ctrl_in and its
+        notification interest on ``weft.state.heartbeats``).
 
-        Spec: [MF-3.2]
+        Spec: [MA-1] item 7, [MF-3.2]
         """
 
         if self._has_pending_worker_results() or self._registrations_rebuild_pending:
