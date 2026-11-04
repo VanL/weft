@@ -4,6 +4,24 @@
 
 ### Changed
 
+- A system STOP of a Manager (`weft manager stop`, a STOP control, `SIGTERM`,
+  `SIGINT`, or parent loss) now stops active user work first, then the
+  internal services (heartbeat, TaskMonitor, LivenessMonitor), then the
+  Manager itself. Each phase has its own escalation and drain window, so the
+  worst-case drain is about 34 s (two 15 s windows plus two 2 s forced-reap
+  deadlines), still inside the 55 s caller default. A launch still in flight
+  when the user-work window expires is logged and released to final cleanup.
+  The STOP now also reaches live user tasks outside the Manager's child
+  table: detached tasks adopted from an earlier, dead Manager (persistent
+  ones included) and tasks another live Manager in the same context covers.
+  STOP goes to each task's resolved `ctrl_in` route; host SIGTERM and forced
+  reap apply only to same-host `host-pid` tasks with a verified
+  `(pid, create_time)` identity that no other live Manager covers. A task
+  another live Manager covers is a STOP-drain member only; that Manager keeps
+  custody and may still launch new work. `SIGUSR1`, supersession, leadership
+  yield, and idle exit are unchanged
+  (`docs/plans/2026-11-02-system-stop-ordering-plan.md`).
+
 - The program theory (`docs/program-theory.md`) is adopted: fourteen identity
   invariants in a new [WT-2a] section, the directional rules and a keyed
   possession probe propagated from agent-theory `e6ac579`, Kind tags on every

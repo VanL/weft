@@ -429,8 +429,8 @@ hardening).
   docs/specifications/05-Message_Flow_and_State.md, and
   docs/program-theory.md (adopted) at plan authoring time.
 - Plan type: implementation with spec revision.
-- Promotion baseline identifier: the task 1 spec-promotion commit, whose
-  SHA is recorded in the Execution log by the next commit.
+- Promotion baseline identifier: `2029b2b4` (the task 1 spec-promotion
+  commit).
 
 ## Proposed Spec Delta
 
@@ -1931,3 +1931,44 @@ Deviations in task 7:
 - Gates before the task 7 commit: fast suite exit 0 (6,384 passed, 47
   skipped); mypy `Success: no issues found in 484 source files`; ruff
   `All checks passed!`; `pgrep -fl weft` showed no leftover process.
+
+Task 7 commit: `03cb56a1`.
+
+Task 8, traceability reconciliation and closeout:
+
+- [MA-3] `_Implementation mapping_` gains a "System STOP coverage beyond
+  the child table (Reading B)" bullet naming
+  `Manager._collect_drain_stop_targets`, `Manager._manager_checkpoint_residents`,
+  `Manager._settle_drain_stop_targets`,
+  `Manager._release_drain_stop_targets_at_expiry`,
+  `Manager._drain_phase_members`, the two wake-interest methods, and the
+  four coverage and CLI tests.
+- `CHANGELOG.md` `[Unreleased]` / `### Changed` notes the ordering, the
+  per-phase windows (worst case about 34 s against the 55 s caller
+  default), and the coverage change.
+- `## Spec Baseline` carries the promotion identifier `2029b2b4`.
+- [WT-7] audit refresh, by reference to the audit table in
+  `docs/plans/2026-11-02-program-theory-reconciliation-plan.md` (row I-13
+  near line 5441; that plan is not edited), against `03cb56a1`: I-13
+  ([WT-2a.13]) is now aligned for both sentences. The implicit-lifecycle
+  sentence is unchanged (the non-stopping drains still never signal user
+  work; `test_manager_superseded_self_record_drains_children_without_stopping`
+  and `test_manager_leadership_yield_drains_nonpersistent_children` stay
+  green unchanged). The system-STOP sentence is realized: [MA-3] orders
+  user work, then internal services, then the Manager
+  (`Manager._continue_shutdown_drain`, evidence
+  `test_manager_stop_orders_user_work_then_services_then_manager` and
+  `test_manager_stop_orders_user_work_before_internal_services`), and the
+  probe's coverage question is closed by Reading B
+  (`test_manager_stop_reaches_earlier_manager_detached_task`,
+  `test_manager_stop_reaches_task_under_another_live_manager`). Absence is
+  still never proof of death: an unconfirmed target is released as
+  unknown, never declared exited. Other rows carry forward unchanged by
+  reference.
+- Not done by the implementing agent: the keyed possession probe (the
+  owner writes the key first; an agent of a different family answers) and
+  the completed-work cross-family review. They are left to the series
+  coordinator, so `Status:` and the `docs/plans/README.md` row stay
+  `promoted` until both are recorded.
+- No theory edit: this plan has no `docs/program-theory.md` Replacement
+  block, so no "Theory:" commit was made.

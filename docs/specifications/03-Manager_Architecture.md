@@ -950,6 +950,21 @@ _Implementation mapping_:
   `tests/core/test_manager.py::test_manager_stop_orders_user_work_then_services_then_manager`,
   `tests/core/test_manager.py::test_manager_sentinel_failure_during_shutdown_still_reaps_children`,
   `tests/core/test_manager.py::test_manager_stop_does_not_hold_past_window_for_stuck_launch`.
+- System STOP coverage beyond the child table (Reading B) — `weft/core/manager.py` ::
+  `Manager._collect_drain_stop_targets` (adopted residents and residents other
+  live Managers cover, from one fresh snapshot pass; route, service-role,
+  terminal and host-escalation filters), `Manager._manager_checkpoint_residents`
+  (the one `covered` rule shared with `Manager._bootstrap_scheduler_evidence`),
+  `Manager._settle_drain_stop_targets` (release on task-owned terminal proof
+  or verified exit), `Manager._release_drain_stop_targets_at_expiry` (forced
+  reap of eligible targets, report and release of the rest),
+  `Manager._drain_phase_members` (escalation clocks), and
+  `Manager._drain_stop_target_queues` / `Manager._has_pending_drain_stop_observation`
+  (wake interest on each target's snapshot queue). Tests:
+  `tests/core/test_manager.py::test_manager_stop_skips_terminal_and_internal_adopted_snapshots`,
+  `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
+  `tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager`,
+  `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`.
 - CLI management — `weft/commands/manager.py` :: `cmd_manager_start`,
   `cmd_manager_stop`, `cmd_manager_list`, `cmd_manager_status`; these structured
   commands are thin wrappers over the shared lifecycle helper.
