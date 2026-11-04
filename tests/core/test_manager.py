@@ -3918,12 +3918,10 @@ def _prime_manager_next_wait_baseline(manager: Manager, now_ns: int) -> None:
     manager.should_stop = False
     manager._draining = False
     manager._drain_immediate_work_pending = False
-    manager._drain_started_ns = None
+    manager._drain_started_monotonic_ns = None
     manager._drain_stops_children = True
     manager._drain_leader_tid = None
-    manager._drain_signaled_children.clear()
-    manager._drain_escalated_children.clear()
-    manager._drain_signal_started_ns.clear()
+    manager._drain_progress.clear()
     manager._pending_termination_sources.clear()
     manager._managed_internal_spawn_enqueued = False
     manager._stalled_control_retry_after_ns = 0
@@ -4562,22 +4560,26 @@ def test_manager_drain_publishes_only_exact_clocks(
     manager, _make_queue = manager_setup
     now_ns = 2_000_000_000_000
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    mono_ns = 5_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "monotonic_ns", lambda: mono_ns)
     _prime_manager_next_wait_baseline(manager, now_ns)
     manager._draining = True
     manager._drain_stops_children = True
-    manager._drain_started_ns = now_ns
+    manager._drain_started_monotonic_ns = mono_ns
     manager._child_processes["child"] = ManagedChild(
         process=cast(BaseProcess, SimpleNamespace(pid=1234)),
         ctrl_queue="Tchild.ctrl_in",
     )
-    manager._drain_signaled_children.add("child")
-    manager._drain_signal_started_ns["child"] = now_ns - int(
-        (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS - 0.35) * 1_000_000_000
+    manager._drain_progress["child"] = manager_mod._StopProgress(
+        attempted_at=mono_ns
+        - int(
+            (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS - 0.35) * 1_000_000_000
+        )
     )
 
     assert manager.next_wait_timeout() == pytest.approx(0.35)
 
-    manager._drain_escalated_children.add("child")
+    manager._drain_progress["child"].term_attempted = True
     assert manager.next_wait_timeout() == pytest.approx(
         manager_mod.MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
     )
@@ -4597,10 +4599,12 @@ def test_manager_drain_immediate_continuation_is_one_shot(
     manager, _make_queue = manager_setup
     now_ns = 2_000_000_000_000
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
+    mono_ns = 5_000_000_000_000
+    monkeypatch.setattr(manager_mod.time, "monotonic_ns", lambda: mono_ns)
     _prime_manager_next_wait_baseline(manager, now_ns)
     manager._draining = True
     manager._drain_immediate_work_pending = True
-    manager._drain_started_ns = now_ns
+    manager._drain_started_monotonic_ns = mono_ns
     manager._child_processes["child"] = ManagedChild(
         process=cast(BaseProcess, SimpleNamespace(pid=1234)),
         ctrl_queue="Tchild.ctrl_in",
@@ -4615,6 +4619,85 @@ def test_manager_drain_immediate_continuation_is_one_shot(
     assert manager.next_wait_timeout() == pytest.approx(
         manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS
     )
+
+
+def test_wall_clock_step_does_not_move_drain_windows(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown and escalation windows measure elapsed time, not wall time [MA-3].
+
+    A wall-clock step during a drain must neither exhaust the shutdown window
+    nor fire a rung's SIGTERM early (forward step), nor stretch either window
+    (backward step). The monotonic clock runs normally throughout.
+    """
+
+    manager, _make_queue = manager_setup
+    manager._child_processes["child"] = ManagedChild(
+        process=cast(BaseProcess, SimpleNamespace(pid=1234)),
+        ctrl_queue="Tchild.ctrl_in",
+    )
+    monkeypatch.setattr(manager, "_revalidate_leadership_drain", lambda: True)
+    monkeypatch.setattr(manager, "_cleanup_children", lambda **_kwargs: False)
+    signals: list[int] = []
+    monkeypatch.setattr(
+        manager_mod,
+        "terminate_process_tree",
+        lambda pid, **_kwargs: signals.append(pid),
+    )
+    manager._begin_shutdown_drain(
+        message_id=None,
+        reason="test",
+        event=None,
+        completion_event="manager_stop_drained",
+    )
+    manager._continue_shutdown_drain()
+    assert manager._drain_immediate_work_pending is False
+    real_time_ns = time.time_ns
+    hour_ns = 3_600 * 1_000_000_000
+    try:
+        monkeypatch.setattr(
+            manager_mod.time, "time_ns", lambda: real_time_ns() + hour_ns
+        )
+        assert manager._shutdown_drain_timed_out() is False
+        manager._signal_children_to_stop(manager._user_work_children())
+        assert signals == []
+        monkeypatch.setattr(
+            manager_mod.time, "time_ns", lambda: real_time_ns() - hour_ns
+        )
+        timeouts = manager._manager_drain_timeouts(now_ns=manager_mod.time.time_ns())
+        assert len(timeouts) == 2
+        shutdown_candidate, escalation_candidate = timeouts
+        assert shutdown_candidate <= manager_mod.MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+        assert escalation_candidate <= manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS
+    finally:
+        manager._child_processes.pop("child", None)
+
+
+@pytest.mark.parametrize("canonical", [True, False])
+@pytest.mark.parametrize("task_monitor", [True, False])
+@pytest.mark.parametrize("liveness_monitor", [True, False])
+def test_desired_internal_service_keys(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    canonical: bool,
+    task_monitor: bool,
+    liveness_monitor: bool,
+) -> None:
+    """Internal-service enablement is one rule: canonical inbox plus flags [MA-1] item 7."""
+
+    manager, _make_queue = manager_setup
+    if canonical:
+        manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    manager._task_monitor_enabled = task_monitor
+    manager._liveness_monitor_enabled = liveness_monitor
+    expected: set[str] = set()
+    if canonical:
+        expected.add(INTERNAL_SERVICE_KEY_HEARTBEAT)
+        if task_monitor:
+            expected.add(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+        if liveness_monitor:
+            expected.add(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR)
+    assert set(manager._desired_internal_service_keys()) == expected
 
 
 def test_manager_autostart_due_bypasses_convergence_throttle(
@@ -8743,7 +8826,7 @@ def test_manager_sigterm_drains_nonpersistent_children(
 
         manager.process_once()
         assert manager._draining
-        assert child_tid in manager._drain_signaled_children
+        assert child_tid in manager._drain_progress
         release.touch()
         drive_until(
             lambda: manager.should_stop,
@@ -9148,7 +9231,9 @@ def test_first_stop_rung_is_one_broadcast_over_pending_targets(
             assert set(names) == routes and len(names) == 2
             assert create_missing is True
             assert not routes.intersection(writes)
-            stamps = {manager._drain_signal_started_ns[tid] for tid in (first, second)}
+            stamps = {
+                manager._drain_progress[tid].attempted_at for tid in (first, second)
+            }
             assert len(stamps) == 1
             manager._signal_children_to_stop({})
             assert len(broadcasts) == 1
@@ -9196,7 +9281,7 @@ def test_manager_stop_keeps_target_whose_identity_probe_fails(
 
         monkeypatch.setattr(psutil.Process, "create_time", denied)
         manager._draining = True
-        manager._drain_started_ns = time.time_ns()
+        manager._drain_started_monotonic_ns = time.monotonic_ns()
         assert worker.poll() is None
 
         assert manager._drain_user_work_phase_holds() is True

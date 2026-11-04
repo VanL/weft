@@ -352,6 +352,20 @@ class _ManagerStartupFeedback:
 
 
 @dataclass(slots=True)
+class _StopProgress:
+    """Progress of one STOP-drain rung [MA-3].
+
+    Presence means a STOP write was attempted for the rung (not that it was
+    received or completed); ``attempted_at`` is the ``time.monotonic_ns()``
+    stamp of that attempt, so the escalation delay measures elapsed time;
+    ``term_attempted`` records that the SIGTERM rung has run.
+    """
+
+    attempted_at: int
+    term_attempted: bool = False
+
+
+@dataclass(slots=True)
 class _ManagerDrainStopTarget:
     """One phase-1 STOP-drain member outside this Manager's child table [MA-3].
 
@@ -707,10 +721,8 @@ class Manager(ServiceTask):
         self._drain_stop_log_cursor: int | None = None
         self._drain_stop_log_wake_id: int | None = None
         self._drain_leader_tid: str | None = None
-        self._drain_signaled_children: set[str] = set()
-        self._drain_escalated_children: set[str] = set()
-        self._drain_signal_started_ns: dict[str, int] = {}
-        self._drain_started_ns: int | None = None
+        self._drain_progress: dict[str, _StopProgress] = {}
+        self._drain_started_monotonic_ns: int | None = None
         self._drain_immediate_work_pending = False
         self._stalled_control_message_id: int | None = None
         self._stalled_control_retry_after_ns = 0
@@ -4887,14 +4899,14 @@ class Manager(ServiceTask):
             )
         pending: list[tuple[str, str]] = []
         for tid, ctrl_queue, escalation_pids in rungs:
-            if tid in self._drain_signaled_children:
-                if tid in self._drain_escalated_children:
+            progress = self._drain_progress.get(tid)
+            if progress is not None:
+                if progress.term_attempted:
                     continue
-                started_ns = self._drain_signal_started_ns.get(tid, time.time_ns())
                 escalation_ns = int(
                     MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000
                 )
-                if time.time_ns() - started_ns >= escalation_ns:
+                if time.monotonic_ns() - progress.attempted_at >= escalation_ns:
                     for pid in escalation_pids():
                         # SIGTERM only at this rung. Task processes defer
                         # signal handling to their run loop's next bounded
@@ -4905,17 +4917,16 @@ class Manager(ServiceTask):
                         # The hard-kill rung stays at drain timeout via
                         # _terminate_children.
                         terminate_process_tree(pid, timeout=0.2, kill_after=False)
-                    self._drain_escalated_children.add(tid)
+                    progress.term_attempted = True
                 continue
             pending.append((tid, ctrl_queue))
         if pending:
             self._broadcast_stop_command(
                 tuple(dict.fromkeys(queue for _tid, queue in pending))
             )
-            stamp = time.time_ns()
+            stamp = time.monotonic_ns()
             for tid, _queue in pending:
-                self._drain_signaled_children.add(tid)
-                self._drain_signal_started_ns[tid] = stamp
+                self._drain_progress[tid] = _StopProgress(attempted_at=stamp)
 
     @staticmethod
     def _child_stop_escalation_pids(child: ManagedChild) -> tuple[int, ...]:
@@ -5257,11 +5268,9 @@ class Manager(ServiceTask):
             return
 
         self._draining = True
-        self._drain_signaled_children.clear()
-        self._drain_escalated_children.clear()
+        self._drain_progress.clear()
         self._drain_services_phase = False
-        self._drain_signal_started_ns.clear()
-        self._drain_started_ns = time.time_ns()
+        self._drain_started_monotonic_ns = time.monotonic_ns()
         self._drain_immediate_work_pending = True
         self._drain_reason = reason
         self._drain_completion_event = completion_event
@@ -5297,11 +5306,9 @@ class Manager(ServiceTask):
             return
 
         self._draining = True
-        self._drain_signaled_children.clear()
-        self._drain_escalated_children.clear()
+        self._drain_progress.clear()
         self._drain_services_phase = False
-        self._drain_signal_started_ns.clear()
-        self._drain_started_ns = time.time_ns()
+        self._drain_started_monotonic_ns = time.monotonic_ns()
         self._drain_immediate_work_pending = True
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
         self._drain_completion_event = "manager_leadership_drained"
@@ -5325,11 +5332,9 @@ class Manager(ServiceTask):
         self._unregistered_status = "superseded"
         if self._user_work_children():
             self._draining = True
-            self._drain_signaled_children.clear()
-            self._drain_escalated_children.clear()
+            self._drain_progress.clear()
             self._drain_services_phase = False
-            self._drain_signal_started_ns.clear()
-            self._drain_started_ns = time.time_ns()
+            self._drain_started_monotonic_ns = time.monotonic_ns()
             self._drain_immediate_work_pending = True
             self._drain_reason = "Superseded by replacement manager"
             self._drain_completion_event = "manager_superseded_drained"
@@ -5354,12 +5359,10 @@ class Manager(ServiceTask):
             self.taskspec.mark_cancelled(reason=self._drain_reason)
             self._report_state_change(event=self._drain_completion_event)
             self._update_process_title("cancelled")
-        self._drain_started_ns = None
+        self._drain_started_monotonic_ns = None
         self._drain_immediate_work_pending = False
-        self._drain_signaled_children.clear()
-        self._drain_escalated_children.clear()
+        self._drain_progress.clear()
         self._drain_services_phase = False
-        self._drain_signal_started_ns.clear()
         self._drain_stops_children = True
         self.should_stop = True
 
@@ -7616,14 +7619,21 @@ class Manager(ServiceTask):
             probe.pong is not None and probe.service_key in known_autostart_sources
             for probe in self._service_probe_pending.values()
         )
-        if include_internal and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            # The heartbeat is a standing internal service; the Manager neither
-            # reads nor deletes weft.state.heartbeats ([MA-1] item 7).
-            internal_services.append(self._heartbeat_service_spec())
-            if self._task_monitor_enabled:
-                internal_services.append(self._task_monitor_service_spec())
-            if self._liveness_monitor_enabled:
-                internal_services.append(self._liveness_monitor_service_spec())
+        if include_internal:
+            desired = self._desired_internal_service_keys()
+            # Ordered: the construction order reaches broker writes and request
+            # IDs, so the builders are filtered, never the set iterated.
+            builders = (
+                (INTERNAL_SERVICE_KEY_HEARTBEAT, self._heartbeat_service_spec),
+                (INTERNAL_SERVICE_KEY_TASK_MONITOR, self._task_monitor_service_spec),
+                (
+                    INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
+                    self._liveness_monitor_service_spec,
+                ),
+            )
+            internal_services.extend(
+                build() for key, build in builders if key in desired
+            )
         if include_autostart:
             autostart_services.extend(
                 self._desired_autostart_services(
@@ -8213,6 +8223,25 @@ class Manager(ServiceTask):
             include_autostart=True,
         )
 
+    def _desired_internal_service_keys(self) -> frozenset[str]:
+        """Return the internal services this Manager wants running.
+
+        One rule for reconciliation, probe ownership and convergence wake
+        reasons: the canonical Manager (public spawn inbox) wants the
+        standing heartbeat, plus TaskMonitor and LivenessMonitor by their
+        flags; a scoped Manager wants none. Pure; no broker, no spec objects.
+
+        Spec: [MA-1] item 7
+        """
+        if self._queue_names["inbox"] != WEFT_SPAWN_REQUESTS_QUEUE:
+            return frozenset()
+        keys = {INTERNAL_SERVICE_KEY_HEARTBEAT}
+        if self._task_monitor_enabled:
+            keys.add(INTERNAL_SERVICE_KEY_TASK_MONITOR)
+        if self._liveness_monitor_enabled:
+            keys.add(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR)
+        return frozenset(keys)
+
     def _pending_service_probes_for_scope(
         self,
         *,
@@ -8220,13 +8249,7 @@ class Manager(ServiceTask):
     ) -> tuple[_ServicePendingPongProbe, ...]:
         """Return pending probes owned by the current convergence scope."""
 
-        internal_keys: set[str] = set()
-        if self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE:
-            internal_keys.add(INTERNAL_SERVICE_KEY_HEARTBEAT)
-            if self._task_monitor_enabled:
-                internal_keys.add(INTERNAL_SERVICE_KEY_TASK_MONITOR)
-            if self._liveness_monitor_enabled:
-                internal_keys.add(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR)
+        internal_keys = self._desired_internal_service_keys()
         return tuple(
             probe
             for probe in self._service_probe_pending.values()
@@ -8268,27 +8291,12 @@ class Manager(ServiceTask):
             reasons.append("internal_spawn_pending")
         if self._managed_service_duplicate_scan_pending:
             reasons.append("duplicate_scan_pending")
-        internal_keys = {
-            INTERNAL_SERVICE_KEY_HEARTBEAT,
-            INTERNAL_SERVICE_KEY_TASK_MONITOR,
-            INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
-        }
+        desired_keys = self._desired_internal_service_keys()
         for service_key, state in self._managed_service_state.items():
             service_unsettled = state.spawn_pending or state.active_tid is None
             if state.spawn_pending:
                 reasons.append("spawn_pending")
-            if (
-                service_unsettled
-                and service_key in internal_keys
-                and (
-                    service_key == INTERNAL_SERVICE_KEY_TASK_MONITOR
-                    and self._task_monitor_enabled
-                    or service_key == INTERNAL_SERVICE_KEY_LIVENESS_MONITOR
-                    and self._liveness_monitor_enabled
-                    or service_key == INTERNAL_SERVICE_KEY_HEARTBEAT
-                )
-                and self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE
-            ):
+            if service_unsettled and service_key in desired_keys:
                 reasons.append("missing_active_tid")
             if state.uncertain_attempts > 0:
                 reasons.append("uncertain_attempts")
@@ -8723,29 +8731,22 @@ class Manager(ServiceTask):
             phase_active = bool(members) or (
                 not self._drain_services_phase and self._has_active_child_launches()
             )
-            if phase_active and self._drain_started_ns is not None:
+            # Drain windows measure elapsed time on the monotonic clock; a
+            # wall-clock step neither shortens nor stretches them.
+            monotonic_now = time.monotonic_ns()
+            if phase_active and self._drain_started_monotonic_ns is not None:
                 shutdown_ns = int(
                     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS * 1_000_000_000
                 )
-                timeouts.append(
-                    self._timeout_until_ns(
-                        self._drain_started_ns + shutdown_ns,
-                        now_ns=now_ns,
-                    )
-                )
+                due_ns = self._drain_started_monotonic_ns + shutdown_ns
+                timeouts.append(max(0.0, (due_ns - monotonic_now) / 1e9))
             escalation_ns = int(MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000)
             for tid, escalates in members.items():
-                if not escalates or tid in self._drain_escalated_children:
+                progress = self._drain_progress.get(tid)
+                if not escalates or progress is None or progress.term_attempted:
                     continue
-                started_ns = self._drain_signal_started_ns.get(tid)
-                if started_ns is None:
-                    continue
-                timeouts.append(
-                    self._timeout_until_ns(
-                        started_ns + escalation_ns,
-                        now_ns=now_ns,
-                    )
-                )
+                due_ns = progress.attempted_at + escalation_ns
+                timeouts.append(max(0.0, (due_ns - monotonic_now) / 1e9))
             return timeouts
 
         if self._drain_leader_tid is not None:
@@ -9111,11 +9112,9 @@ class Manager(ServiceTask):
     def _resume_leadership_after_drain_loss(self) -> None:
         leader_tid = self._drain_leader_tid
         self._draining = False
-        self._drain_signaled_children.clear()
-        self._drain_escalated_children.clear()
+        self._drain_progress.clear()
         self._drain_services_phase = False
-        self._drain_signal_started_ns.clear()
-        self._drain_started_ns = None
+        self._drain_started_monotonic_ns = None
         self._drain_immediate_work_pending = False
         self._drain_reason = None
         self._drain_completion_event = "manager_stop_drained"
@@ -9234,15 +9233,15 @@ class Manager(ServiceTask):
                     sorted(self._active_child_launches),
                 )
         self._drain_services_phase = True
-        self._drain_started_ns = time.time_ns()
+        self._drain_started_monotonic_ns = time.monotonic_ns()
         self._drain_immediate_work_pending = True
         return False
 
     def _shutdown_drain_timed_out(self) -> bool:
-        if self._drain_started_ns is None:
+        if self._drain_started_monotonic_ns is None:
             return False
         timeout_ns = int(MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS * 1_000_000_000)
-        return time.time_ns() - self._drain_started_ns >= timeout_ns
+        return time.monotonic_ns() - self._drain_started_monotonic_ns >= timeout_ns
 
     def _atexit_unregister(self) -> None:
         try:

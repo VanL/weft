@@ -10,6 +10,10 @@
 
 ### Changed
 
+- The Manager's shutdown window and per-task escalation delays are
+  measured on the monotonic clock, so a wall-clock step during a drain no
+  longer shortens or stretches them; published timestamps are unchanged
+  ([MA-3]).
 - A system STOP now reaches every live user-work task in the context
   through the task's own snapshot, whichever Manager launched it and
   whether that Manager is still alive; before, a task whose launching

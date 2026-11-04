@@ -1,6 +1,6 @@
 # Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3], [MA-1] item 7; docs/specifications/07-System_Invariants.md [MANAGER.12]
 Superseded by: none
 
@@ -495,4 +495,95 @@ bin/check-doc-paths
 
 ## Execution log
 
-(empty until implementation)
+### Implementer, 2026-11-04 (series lead, from `79ea73d0`, plan 15 landed; another agent holds uncommitted edits elsewhere in this checkout, so every test run uses a worktree of HEAD plus this plan's files, and every commit stages this plan's hunks only)
+
+Task 0 answers, written before the first edit:
+
+1. A TID present in `_drain_signaled_children` with no entry in
+   `_drain_signal_started_ns`. The escalation loop's
+   `.get(tid, time.time_ns())` would treat it as signalled now and restart
+   its delay. No production path writes that state: the only writer (the
+   post-broadcast loop at the end of `_signal_children_to_stop`) adds the
+   membership and the stamp together, and every clearing site clears all
+   three collections. The record removes an unsupported state.
+2. Windows: the shutdown window (`_drain_started_ns`, written at the three
+   drain entries and at phase-2 start, read by `_manager_drain_timeouts`
+   and `_shutdown_drain_timed_out`) and each rung's escalation delay
+   (`_drain_signal_started_ns`, read by the escalation branch and the wake
+   block). Neither is compared against a broker timestamp. Timestamps:
+   every `timestamp` field published through `_report_state_change`, the
+   admission retry deadlines compared against broker IDs, and the
+   leadership-revalidation branch of the wake block, which stays on the
+   wall clock.
+3. In `_reconcile_managed_services` (the service list), in
+   `_pending_service_probes_for_scope` (`internal_keys`), and in the
+   `missing_active_tid` guard of `_managed_service_convergence_active_reasons`.
+   A divergence could launch a service whose probe convergence does not
+   own, or keep a wake reason for a service that is never launched.
+
+Drain-window test inventory confirmed: of the `time_ns` patches in the
+two test files, the two at `tests/core/test_manager.py` 4564
+(`test_manager_drain_publishes_only_exact_clocks`, which also asserts
+leadership revalidation at 4585-4590) and 4599
+(`test_manager_drain_immediate_continuation_is_one_shot`) drive drain
+windows; the seven others drive other deadlines. Plan 15 landed at
+`79ea73d0` with its three tests present. Post-landing lines:
+`_signal_children_to_stop` 4861, `_begin_shutdown_drain` 5248,
+`_begin_leadership_drain` 5286, `_begin_superseded_shutdown` 5319,
+`_finish_graceful_shutdown` 5351, `_reconcile_managed_services` 7597,
+`_pending_service_probes_for_scope` 8216,
+`_managed_service_convergence_active_reasons` 8249,
+`_manager_drain_timeouts` 8712, `_resume_leadership_after_drain_loss`
+9111, phase-2 start 9237, `_shutdown_drain_timed_out` 9241.
+
+#### Task 2 RED and Task 3's keys test, before any production edit
+
+`test_wall_clock_step_does_not_move_drain_windows` is written against
+observable behavior only (the predicate, the two wake candidates of
+`_manager_drain_timeouts`, and a recorded host signal through a
+`monkeypatch` of `manager_mod.terminate_process_tree`, which is the
+external boundary and must not fire against PID 1234 of the host), so it
+is red at `79ea73d0` for the causal reason: `assert
+manager._shutdown_drain_timed_out() is False` fails with `True` after the
+forward hour. `test_desired_internal_service_keys` (eight cases) is red
+with `AttributeError` for the missing helper. Nine failed in the worktree.
+
+#### Tasks 1, 2 and 3 GREEN (one landing commit)
+
+`weft/core/manager.py`: `_StopProgress(attempted_at, term_attempted)`
+beside `_ManagerDrainStopTarget`; `_drain_progress: dict[str, _StopProgress]`
+replaces the three collections at `__init__`, the signalling loop (the
+escalation branch reads `progress.attempted_at`, no fallback, and sets
+`term_attempted`; the post-broadcast loop inserts one record per pending
+rung with one `time.monotonic_ns()` stamp), `_manager_drain_timeouts`,
+and the five reset sites (each now clears one mapping);
+`_drain_started_ns` is `_drain_started_monotonic_ns` from
+`time.monotonic_ns()` at its four writers and two `None` resets;
+`_shutdown_drain_timed_out` keeps its comparison on the monotonic clock;
+the wake block computes both candidates as
+`max(0.0, (due_ns - monotonic_now) / 1e9)` with the leadership branch
+untouched; `_desired_internal_service_keys()` added, read by
+`_reconcile_managed_services` through an ordered `(key, builder)` tuple
+filtered by membership, by `_pending_service_probes_for_scope`, and by the
+`missing_active_tid` guard as `service_unsettled and service_key in
+desired_keys`. `tests/core/test_manager.py`: the two drain wake tests
+freeze `monotonic_ns` beside their `time_ns` patch and use the record (the
+continuation test needed the same freeze, or its escalation candidate is
+2.0 s minus the microseconds elapsed); the references at the former
+3921-3926, 8746, 9151 and 9199 use the record and the monotonic stamp.
+`grep -rn` for the four old names over `weft` and `tests` prints nothing.
+`ruff format`, `ruff check` and `mypy` on both files clean. In the
+worktree, the two new tests plus the drain, STOP-order, SIGTERM-drain,
+heartbeat-registrations, convergence and plan 15 tests: 46 passed.
+
+#### Task 4. CHANGELOG, status, gates (worktree of `79ea73d0` plus this plan's files, before the landing commit)
+
+CHANGELOG bullet under `## [Unreleased]` / `### Changed`; plan `Status:`
+and index row `promoted` (both staged as blobs from `HEAD` plus this
+plan's hunk, apart from another agent's uncommitted edits in the same
+files). Gates: `tests/specs/test_plan_metadata.py` 4 passed;
+`bin/check-doc-paths` OK; `ruff check .` clean; `ruff format --check .`
+657 files formatted; the `## 7` two-file gate with `-m ""`: 313 passed, 0
+failed; `mypy` over the CI set: "Success: no issues found in 487 source
+files"; full fast suite: 6488 passed, 0 failed, 25 skipped, exit 0;
+`./bin/pytest-pg --fast`: 6338 passed, 27 skipped in 322.27 s, exit 0.
