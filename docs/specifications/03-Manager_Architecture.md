@@ -37,7 +37,7 @@ always be rolled back from the public request queue.
 - [System STOP Targets Every Live Task by Snapshot](../plans/2026-11-04-system-stop-snapshot-targets-plan.md) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
 - [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MA-1] item 7).
-- [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) orders a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3].
+- [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) ordered a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3]; the services phase is since removed (internal services are context-level singletons, see the first entry above), and its user-work phase and snapshot targets stand.
 
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MA-1.8].
 
@@ -964,11 +964,11 @@ _Implementation mapping_:
   snapshot pass plus this Manager's user-work children),
   `Manager._detach_launched_services` (services dropped from tracking,
   never signalled, at the drained event and at final cleanup), `Manager._signal_children_to_stop`
-  (the one STOP-then-SIGTERM rung, per phase), `Manager._terminate_children`
-  (the forced-reap rung, limited to a phase's TIDs), and
-  `Manager._manager_drain_timeouts` (active-phase clocks only). Error-path
-  order — `Manager._cleanup_task_resources` (user work, then everything still
-  tracked, under one deadline). Tests:
+  (the one STOP-then-SIGTERM rung), `Manager._terminate_children`
+  (the forced-reap rung, limited to the drain's TIDs), and
+  `Manager._manager_drain_timeouts` (drain clocks only). Error-path
+  order — `Manager._cleanup_task_resources` (launched services detached,
+  then user work only, under one deadline). Tests:
   `tests/core/test_manager.py::test_manager_stop_drains_user_work_then_manager_leaving_services`,
   `tests/core/test_manager.py::test_manager_sentinel_failure_during_shutdown_still_reaps_children`,
   `tests/core/test_manager.py::test_manager_stop_does_not_hold_past_window_for_stuck_launch`.
