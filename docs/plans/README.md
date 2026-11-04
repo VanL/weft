@@ -27,7 +27,7 @@ There are currently 65 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `completed` | none |
+| [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `promoted` | none |
 | [`2026-11-03-watcher-hint-gated-observation-plan.md`](./2026-11-03-watcher-hint-gated-observation-plan.md) | Reactor Wait: Observation Checks Only on Evidence | `promoted` | none |
 | [`2026-11-03-control-replies-only-on-request-plan.md`](./2026-11-03-control-replies-only-on-request-plan.md) | Control Replies Only on Request: Outcomes Are Broadcast | `promoted` | none |
 | [`2026-11-03-family-scheduler-frontier-ring-plan.md`](./2026-11-03-family-scheduler-frontier-ring-plan.md) | Family Scheduler: Frontier Ring and Contracted Ancestry | `promoted` | none |

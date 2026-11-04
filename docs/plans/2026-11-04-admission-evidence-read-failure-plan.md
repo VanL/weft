@@ -1,6 +1,6 @@
 # Admission Evidence: A Failed Read Changes No Mode
 
-Status: completed
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md MANAGER.11
 Superseded by: none
 
@@ -899,6 +899,29 @@ re-litigated.
   older plan files (pre-existing); the historical 2026-10-15 plan still
   names the flag (pre-existing); removing only the bootstrap disjunct from
   `_queue_has_pending` is outside the second test's direct assertion.
+- Closure correction, 2026-11-04 (series lead): the closeout commit
+  `347b1c55` set this plan to `completed` without the two [WT-7] closure
+  items that every class-5 completion requires
+  (`docs/program-theory.md` `## Tensions and falsifiers [WT-7]`, line
+  993): the owner-keyed possession probe and the theory-versus-code audit
+  table refresh. That was the author's error; the status returns to
+  `promoted` here, as the other series plans stand. Audit table refresh
+  (`docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+  `### Audit table`, line 5409, carried forward by reference; touched rows
+  re-audited): I-2 → [WT-2a.2] (line 5430): aligned, strengthened; the
+  removed flag was process memory steering dispatch, and after `e3817033`
+  no in-memory mode records a read failure, with
+  `test_failed_evidence_read_leaves_custody_and_dispatch_unchanged` as
+  evidence. I-7 → [WT-2a.8] (line 5435): aligned; whether the database is
+  readable is reported by SimpleBroker's exceptions and no longer
+  remembered by Weft. 4.4-d No over-armoring (line 5465): aligned,
+  strengthened; the reap and periodic read handlers now try, catch and log
+  only, matching `_reconcile_launch_now`. 4.4-a As few concepts as possible
+  (line 5462): aligned; one mode removed, none added (the bootstrap gate
+  reuses `_admission_bootstrapped`). Closure to `completed` awaits the
+  owner's keyed possession probe: the owner writes the key first; a
+  different-family agent that did not author this plan answers from
+  `docs/program-theory.md` alone; the key and the result go here.
 
 ## Revision Log
 
@@ -906,6 +929,7 @@ re-litigated.
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-04 | `c857e10b` (draft, uncommitted) | `## 1`, `## 2`, `## 3`, `## 4`, register, spec delta, Tasks 2-3, `## 6`, `## 7`, `## 10` | Round-1 F1-F5: the bootstrap publication failure is kept gated through `not _admission_bootstrapped`; a second firing test; custody deletion sites and coupling text corrected; the spec delta gains the bootstrap clause. | Yes: round 2, scoped to the F1 resolution and the second test. |
 | 2026-11-04 | `d4241946` | spec delta backlink, Task 4 | Round-2 F6: the backlink and CHANGELOG bullets name the bootstrap wait beside the undurable set. Wording only. | No. |
+| 2026-11-04 | `347b1c55` | `Status:`, index row, Review Log | Closure correction: `completed` reverted to `promoted` pending the owner's [WT-7] keyed probe; audit table rows I-2, I-7, 4.4-a, 4.4-d refreshed. | No. |
 
 ## Execution log
 
