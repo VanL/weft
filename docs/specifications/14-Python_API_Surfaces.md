@@ -488,6 +488,10 @@ a value the TaskSpec schema rejects raises the schema's validation error (a
 `prepare_spec(...)`; a `name` in the reserved `_weft.` namespace raises
 `ValueError`. Each `submit(...)`, `submit_spec(...)`, and `submit_pipeline(...)`
 raises exactly what its `prepare*` counterpart raises.
+`submit_command(...)` never runs a shell: a string command is split with
+`shlex.split` into argv, and `shell=True` raises `NotImplementedError` before
+any TaskSpec is built or any queue is written ([CLI-1.1.1]; program theory
+[WT-2a.10]).
 `weft.client.normalize_taskspec_payload(taskspec, **overrides)` runs the shared
 definition-normalization contract without a client or context and returns the validated,
 normalized TaskSpec definition as a fresh JSON-compatible `dict`: the definition
@@ -589,5 +593,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-12-public-api-surface-remediation — source 396c3b85; see docs/plans/README.md
 - retired: 2026-09-08-django-override-normalization-seam-plan — source 396c3b85; see docs/plans/README.md
+
+- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 
 Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

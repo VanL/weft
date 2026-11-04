@@ -30,6 +30,7 @@ from weft._constants import (
     SUBMIT_OVERRIDE_NAMES,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.client import (
     ControlRejected,
@@ -590,6 +591,26 @@ def test_submit_command_returns_task_with_completed_result() -> None:
 
         assert result.status == "completed"
         assert "hello" in (result.stdout or str(result.value))
+
+
+def test_submit_command_rejects_shell_before_any_spawn_write() -> None:
+    """`shell=True` is refused before TaskSpec construction or any queue write.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-3]; program theory
+    [WT-2a.10] (argv, never a shell).
+    """
+
+    with WeftTestHarness() as harness:
+        client = WeftClient(path=harness.root)
+
+        with pytest.raises(NotImplementedError, match=r"shell=True"):
+            client.submit_command(["echo", "hi"], shell=True)
+        assert client.queues.peek(WEFT_SPAWN_REQUESTS_QUEUE, all_messages=True) == []
+
+        # Without shell, [""] fails TaskSpec validation; the refusal must win.
+        with pytest.raises(NotImplementedError, match=r"shell=True"):
+            client.submit_command([""], shell=True)
+        assert client.queues.peek(WEFT_SPAWN_REQUESTS_QUEUE, all_messages=True) == []
 
 
 def test_entered_client_submit_command_uses_retained_submission_session(

@@ -1225,4 +1225,56 @@ Baseline tests green:
 `weft.client.__all__` length at baseline: 42.
 
 Owner decisions F1 to F3: ruled 2026-11-03; recorded in §3 with the owner's words (F1 (a), F2 (b) with the theory exception, F3 (a) as the recommended default).
-Comprehension answers: pending (implementer).
+Comprehension answers (implementer, 2026-11-03, before the first edit, at `4372e20e`):
+
+1. `client.system.prune` must not call `prune.cmd_system_prune(context=self.client.context.root, ...)`
+   because `cmd_system_prune` hands the path to `run_runtime_prune` and
+   `run_retention_prune`, and each calls `build_context(spec_context=config.context_path)`.
+   That rebuilds a fresh context from the root and discards the client's resolved
+   `Config` (an alternate `broker_target` / `broker_config` / `database_path`, or a
+   non-default `WEFT_DIRECTORY_NAME`). [PY-2] requires client system maintenance to use
+   the supplied resolved context. A path-based mirror passes a happy-path test on the
+   default broker and fails Task 4's alternate-broker test, which seeds only the
+   replaced context's broker.
+2. The new client code imports only `weft.commands.*` modules (`prune`, `task_monitor`,
+   `weft.commands.types`) and `weft._constants`; never `weft.core.*` and never
+   `weft.cli` ([PY-4]; `tests/architecture/test_import_boundaries.py::test_internal_import_boundaries`).
+   `client.system.prune(family="bogus")` raises the same `CommandUsageError` that
+   `cmd_system_prune` raises, because both reach `_validate_public_prune_options`
+   through the shared `_prune_families`; the CLI maps that class to exit code 2, and the
+   mapping does not change.
+
+### Implementation, 2026-11-03 (base `4372e20e`)
+
+Context: series plan 6 landed before this plan with the owner's always-on
+services redirect (`c9369ee6`, `1b319004`, `4372e20e`). This plan touches
+neither `weft/commands/system.py` nor the `weft status` surface, so nothing
+here builds on or changes that shape. Series plan 10 already corrected the
+stale `weft/cli/validate_taskspec.py` reference that §12 reports: the [CLI-X1]
+`spec` row now names `weft/commands/specs.py`, `weft/cli/app.py` (verified at
+`4372e20e`); nothing is redone here.
+
+Task 1 (slice S). Added
+`tests/core/test_client.py::test_submit_command_rejects_shell_before_any_spawn_write`
+and
+`tests/specs/taskspec/test_process_target.py::test_spec_section_rejects_shell_as_unsupported_field`;
+applied the [PY-3] Replacement block and the spec 14 backlink. Both tests are
+characterization tests and passed on first run (`2 passed`). Mutation proofs,
+one at a time, each restored from a byte copy of the original file taken
+before the mutation (no `git checkout`):
+
+```text
+# Guard removed (deleted `if shell:` in weft/commands/submission.py::_prepare_command)
+E           Failed: DID NOT RAISE NotImplementedError
+tests/core/test_client.py:606: Failed
+# Guard moved below validate_taskspec_payload(...): the ["echo", "hi"] case passes,
+# the [""] case fails on the TaskSpec error
+E       pydantic_core._pydantic_core.ValidationError: 2 validation errors for TaskSpec
+FAILED tests/core/test_client.py::test_submit_command_rejects_shell_before_any_spawn_write
+# Schema guard removed (deleted extra="forbid" from SpecSection.model_config)
+E       Failed: DID NOT RAISE ValidationError
+tests/specs/taskspec/test_process_target.py:27: Failed
+```
+
+The installed pytest prints the class name without the plan's
+`<class '...'>` wrapper; the failure lines are otherwise as the plan predicted.
