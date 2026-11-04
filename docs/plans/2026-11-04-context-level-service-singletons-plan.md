@@ -1,6 +1,6 @@
 # Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-1.6a], [MA-3]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2]; docs/specifications/07-System_Invariants.md [MANAGER.13], [MANAGER.15]
 Superseded by: none
 
@@ -72,9 +72,12 @@ Make the code match that intent:
    the deadline is committed detached and registered (A8).
 2. **Services own their lifetime.** Each `ServiceTask` decides for
    itself what "work" is. A service with work runs on, whether or not a
-   Manager is alive. A service with no work for
+   Manager is alive. A service with no work, and no live non-superseded
+   Manager in the context (owner ruling §10.1), for
    `SERVICE_IDLE_EXIT_SECONDS` (300 s) ends itself on one idle clock of
-   its own, exactly as the Manager idle-exits on its own clock. Checking
+   its own, exactly as the Manager idle-exits on its own clock. While a
+   Manager lives the service stays, so a Manager's ensure never cycles
+   an idle service. Checking
    for work is never itself work: an empty periodic cycle, a mapping
    refresh that finds nothing, or a registration peek that finds no row
    does not restart the idle clock. An explicit STOP addressed to the
@@ -287,7 +290,7 @@ Status and harness:
 
 | # | Difference | Kind | Disposition |
 |---|---|---|---|
-| A1 | After `weft manager stop` (and SIGTERM/SIGINT/parent loss), the heartbeat, TaskMonitor and LivenessMonitor keep running while they have work, and otherwise exit within 300 s on their own. Before: stopped in phase 2 within the drain window. | Changed timeliness; no lost capability | Owner rule 2026-11-04 |
+| A1 | After `weft manager stop` (and SIGTERM/SIGINT/parent loss), the heartbeat, TaskMonitor and LivenessMonitor keep running while they have work or another Manager lives, and otherwise exit within 300 s on their own. Before: stopped in phase 2 within the drain window. `weft system stop` (Task 7) is the one command that empties a context, so no capability is lost. | Changed timeliness; capability moved to `weft system stop` | Owner rule 2026-11-04 |
 | A2 | After a Manager idle exit, services keep running up to 300 s with no work. Before: terminated by final cleanup. | Changed timeliness | Owner rule 2026-11-04 |
 | A3 | A superseded Manager with no user work exits at once even when it launched services. Before: drained for ever when it had launched the heartbeat (the CI defect). | Defect removed | This plan |
 | A4 | Worst-case `weft manager stop` drain shrinks from about 34 s to about 17 s (one window plus one forced-reap deadline). | Improvement | [MA-3] text updated |
@@ -567,8 +570,16 @@ In `weft/core/tasks/service.py`:
   it has not yet applied (TaskMonitor's in-flight builtin cycle). Order:
   if `should_stop` or the taskspec is terminal (a STOP handled earlier in
   the same turn), do nothing (round-2 F8: `mark_completed` after a
-  cancel is a rejected transition). Else if `_has_work()`: clear the
-  clock. Else if `_work_undetermined()`: leave the clock exactly as it is
+  cancel is a rejected transition). Else if `_has_work()` or
+  `_live_manager_present()`: clear the clock. `_live_manager_present`
+  is one shared `ServiceTask` helper: it reduces `weft.state.services`
+  to the latest row per Manager owner through the existing
+  `service_convergence` readers and reports whether any non-superseded
+  Manager record is live (PID identity verified where available), the
+  same selection `weft status` and the Manager's own leadership check
+  use. It is evaluated only when `_has_work()` is false, at most once
+  per turn, so an idle service reads the registry once per wake and once
+  at its idle deadline (§10.1). Else if `_work_undetermined()`: leave the clock exactly as it is
   and do not exit (an observation in progress neither resets nor
   satisfies the idle window; round-2 F2). Else if the clock is `None`:
   set it to now. Else if `now - _idle_since >= SERVICE_IDLE_EXIT_SECONDS`:
@@ -640,8 +651,15 @@ turn that reaches the window expiry stops the task with no
   cycle already returns to the reactor and the cached deferred-write
   status, never the `MaintenanceWorker`'s store directly.
 - **LivenessMonitor** (`weft/core/tasks/liveness_monitor.py`): work =
-  a `_latest_rows` entry that counts (§10.4), or an `_in_flight` probe
-  or pending probe result whose mapping counts. The counting rule is
+  a `_latest_rows` entry that counts (§10.4: role is user work, not
+  `manager` and not an internal service class), or an `_in_flight` probe
+  or pending probe result whose mapping counts. Cooperation with
+  TaskMonitor needs no dependency between the processes: TaskMonitor
+  waits on row presence in `weft.state.tasks.<tid>` and never probes
+  (`_active_runtime_tids`, [OBS.13.7]); a mapping row that still needs
+  retiring is a user-work row, so LivenessMonitor counts it as work and
+  stays until it is retired, and the Monitor sees the row gone on its
+  next cycle. The rows order the two exits. The counting rule is
   applied to probes and results as well as rows (round-2 F5a): the
   monitor keeps probing and retiring its own, the Manager's and the other
   services' mappings as today, but those probes and results never touch
@@ -749,6 +767,34 @@ test is the contract check the owner asked for.
   verified by the release run, not assumed.
 - `weft/commands/system.py`: document `manager_tid` as "launched by" in
   the status docstring.
+
+### Task 7. `weft system stop` (owner ruling §10.2)
+
+One shared capability, `weft/commands/system.py::stop_system(context, *,
+timeout, force)`: stop the active Manager exactly as
+`weft/commands/manager.py::stop_manager` does (reuse it), then STOP every
+live internal service of the context by its registry record (`ctrl_in`
+from the record's `queues`, the three internal keys, latest live row per
+owner through the `service_convergence` readers), wait for each to leave
+the registry or exit within the same window, and escalate as the Manager
+drain's rungs do: host SIGTERM after `MANAGER_CHILD_STOP_ESCALATION_SECONDS`
+and a forced reap at the window, only for same-host `host-pid` handles
+whose `(pid, create_time)` identity verifies. Returns a typed result
+naming what it stopped, what it escalated and what it could not reach;
+raises the same typed errors as `stop_manager`. CLI: `weft system stop
+[--timeout SECONDS] [--force]` in `weft/cli/app.py` beside `system prune`,
+exit codes as `weft manager stop`. Client: `client.system.stop(...)`
+mirrors it ([IP-1], [PY-2] parity, as `client.system.prune` does). The
+harness (Task 5) calls `stop_system` instead of a private copy. Spec:
+`10-CLI_Interface.md` system subcommand list and a behavior bullet;
+`14-Python_API_Surfaces.md` [PY-2] client table row; `03` [MA-3] gains
+one sentence: "`weft system stop` stops the Manager and then the
+context's internal services by registry record; it is the one command
+that empties a context." Firing tests: CLI stop with a live Manager and
+three services leaves no weft process and exits 0; with no Manager but
+live services it stops the services and exits 0; an unreachable service
+(record with no route) is reported, not guessed; `--force` escalates;
+client parity test beside the prune parity test.
 
 ### Task 6. Specs, theory, CHANGELOG, closure
 
@@ -891,7 +937,9 @@ so it idle-exits only once no Manager remains; one registry read per
 idle check (every 300 s), which TaskMonitor already performs and the
 heartbeat can perform through the same helper. Recommendation: (b); it is
 the "last Manager out" behavior with no Manager-side logic.
-**Pending owner ruling.**
+**Ruled by the owner, 2026-11-04: agree with (b).** A live Manager
+keeps a service alive; written into §1 and Task 1
+(`_live_manager_present`).
 
 ### 10.2 `weft manager stop` and services
 
@@ -899,7 +947,8 @@ The owner's wording "can persist after the manager stop if they have
 work to do" is read as: no Manager stop of any kind stops a service.
 Phase 2 is removed. A user who wants the services gone sends them STOP
 directly (`weft task stop <tid>`) or waits out the idle clock.
-**Confirm.**
+**Ruled by the owner, 2026-11-04: agree, with `weft system stop` as the
+command that stops everything** (Task 7).
 
 ### 10.3 TaskMonitor retained work with a future expiry
 
@@ -919,7 +968,7 @@ the three services keep each other alive in an idle context after the
 Manager leaves, and LivenessMonitor never idles while a Manager runs.
 Recommendation: only rows whose role is user work (not `manager`, not an
 internal service class) count; their presence is the whole test.
-**Pending owner ruling.**
+**Ruled by the owner, 2026-11-04: agree.**
 
 ### 10.5 A launch result that lands after the cleanup deadline
 
@@ -933,7 +982,7 @@ termination path (the Manager undoes a launch it could not complete; the
 next Manager's ensure launches a fresh service); (b) leave the process
 running unregistered (an undiscoverable duplicate until its own
 registry-free evidence is found; rejected). Recommendation: (a), written
-into §1 and Task 3. **Confirm.**
+into §1 and Task 3. **Ruled by the owner, 2026-11-04: agree.**
 
 ## Review Log
 
@@ -998,6 +1047,10 @@ into §1 and Task 3. **Confirm.**
 - 2026-11-04: round 2 applied; §10.5 added; forks reported to the owner.
 - 2026-11-04: §10.3 ruled by the owner (retained work with a future
   expiry keeps the Monitor alive); Task 2 updated.
+- 2026-11-04: §10.1, §10.2, §10.4, §10.5 ruled; Task 7 (`weft system
+  stop`) added at the owner's direction; A1 updated; LivenessMonitor and
+  TaskMonitor cooperation stated in Task 2. Task 7 is new scope after
+  the review rounds and is covered by the implementation review.
 
 ## Execution log
 
