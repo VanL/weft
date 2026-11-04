@@ -604,12 +604,15 @@ Implementation plans: `2026-08-31-registry-custody-contracts-plan` (retired — 
 _Implementation mapping_: `weft/helpers/__init__.py::encode_tid` and
 `weft/helpers/__init__.py::decode_tid` own the two TID spellings;
 `weft/commands/submission.py::normalize_tid` is the one TID canonicalization
-function and the only production caller of `decode_tid`;
+function and the only production caller of `weft/helpers/__init__.py::decode_tid`;
 `weft/commands/tasks.py::resolve_full_tid`,
 `weft/commands/tasks.py::_command_tid`, `weft/commands/result.py`, and the
 Manager and prune selector mappings in `weft/commands/manager.py` and
 `weft/commands/prune.py` call it;
-`weft/core/task_state.py` owns suffix-bound newest-valid snapshot reads.
+`weft/core/task_state.py` owns suffix-bound newest-valid snapshot reads;
+tests: `tests/system/test_tid_encoding.py`, `tests/cli/test_cli_list_task.py`,
+`tests/commands/test_retention_prune.py`,
+`tests/commands/test_tid_mapping_contracts.py`.
 
 - `weft task stop` and `weft task kill` can act on one task, all active tasks,
   or a name-pattern subset. A genuinely unknown TID is rejected before a

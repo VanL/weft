@@ -132,22 +132,34 @@ def test_encoded_and_full_tid_arguments_name_the_same_task(
 
 
 def test_tid_argument_probes(workdir: Path, weft_harness: WeftTestHarness) -> None:
-    """Rejected TID spellings exit 2 with a diagnostic and no traceback."""
+    """Rejected TID spellings exit 2 with a one-line diagnostic naming the input.
+
+    Each probe's whole output is exactly one line that carries the input as
+    given, so a generic message (one that drops or rewrites the input) fails.
+    The empty argument has no visible spelling: its diagnostic is pinned
+    exactly, the input appearing as the empty text between ``Task `` and
+    `` not found``.
+    """
 
     probes = [
-        ("task", "status", "0123456789"),
-        ("task", "status", "1JZKD3PKK000I"),
-        ("task", "status", "8000000000000"),
-        ("task", "status", ""),
-        ("task", "tid", "--reverse", "9999999999999999999"),
-        ("task", "stop", "0123456789"),
-        ("result", "1JZKD-PKK0000"),
+        (("task", "status", "0123456789"), "Task 0123456789 not found"),
+        (("task", "status", "1JZKD3PKK000I"), "Task 1JZKD3PKK000I not found"),
+        (("task", "status", "8000000000000"), "Task 8000000000000 not found"),
+        (("task", "status", ""), "Task  not found"),
+        (
+            ("task", "tid", "--reverse", "9999999999999999999"),
+            "Invalid full task ID: '9999999999999999999'",
+        ),
+        (("task", "stop", "0123456789"), "Invalid task ID: '0123456789'"),
+        (("result", "1JZKD-PKK0000"), "invalid task id '1JZKD-PKK0000'"),
     ]
-    for args in probes:
+    for args, diagnostic in probes:
         rc, out, err = run_cli(*args, cwd=workdir, harness=weft_harness)
         assert rc == 2, (args, rc, out, err)
         assert "Traceback" not in err, (args, err)
-        assert (out + err).strip(), args
+        lines = [line for line in (out + err).splitlines() if line.strip()]
+        assert lines == [diagnostic], (args, lines)
+        assert args[-1] in lines[0], (args, lines)
     queue = weft_harness.context.queue("T0123456789.ctrl_in", persistent=False)
     try:
         assert queue.peek_many() == []

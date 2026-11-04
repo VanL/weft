@@ -350,7 +350,9 @@ budget is not measurable here by this method" if the readback shows the
 unchanged argv. The procedure and the script text are in the plan's Execution
 log.
 
-_Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py`.
+_Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py`;
+the 71-character budget and the untruncated TID segment are pinned by
+`tests/system/test_tid_encoding.py`.
 
 - **OBS.5**: Every rendering of a TID decodes back to the same TID. A TID
   has exactly two spellings: the canonical 19-ASCII-decimal full TID of

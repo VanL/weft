@@ -980,13 +980,21 @@ Replacement (`docs/specifications/10-CLI_Interface.md`):
 _Implementation mapping_: `weft/helpers/__init__.py::encode_tid` and
 `weft/helpers/__init__.py::decode_tid` own the two TID spellings;
 `weft/commands/submission.py::normalize_tid` is the one TID canonicalization
-function and the only production caller of `decode_tid`;
+function and the only production caller of `weft/helpers/__init__.py::decode_tid`;
 `weft/commands/tasks.py::resolve_full_tid`,
 `weft/commands/tasks.py::_command_tid`, `weft/commands/result.py`, and the
 Manager and prune selector mappings in `weft/commands/manager.py` and
 `weft/commands/prune.py` call it;
-`weft/core/task_state.py` owns suffix-bound newest-valid snapshot reads.
+`weft/core/task_state.py` owns suffix-bound newest-valid snapshot reads;
+tests: `tests/system/test_tid_encoding.py`, `tests/cli/test_cli_list_task.py`,
+`tests/commands/test_retention_prune.py`,
+`tests/commands/test_tid_mapping_contracts.py`.
 ```
+
+Completed-work review round 1 (2026-11-03; `## Revision Log` row 1): the
+bare `decode_tid` token drew backstitch BSM005 ("bare mapping symbol is
+advisory") and became the `path::symbol` form; the test files that cite
+[CLI-1.2.3] were added so their citations are mapped (BSC008).
 
 Backlink, inserted as the first item under `## Related Plans`:
 
@@ -994,6 +1002,37 @@ Replacement (`docs/specifications/10-CLI_Interface.md`):
 ```markdown
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.
 ```
+
+### Implementation mappings for [OBS.4] and [CC-3.2] (completed-work review round 1)
+
+Added after promotion (`## Revision Log` row 1). The new code citations of
+[OBS.4] in `tests/system/test_tid_encoding.py` and of [CC-3.2] on
+`weft/liveness/host.py::inspect_host_process` were named by no
+`_Implementation mapping_` (backstitch BSC008). These lines record
+traceability only and add no normative behavior. The [OBS.4] mapping line is
+extended in place; the [CC-3.2] mapping paragraph (the one that opens
+"`weft/ext.py::RunnerHandle`") gains one clause at its end.
+
+Replacement (`docs/specifications/07-System_Invariants.md`):
+```markdown
+_Implementation mapping_: `weft/core/process_title.py`, `weft/core/tasks/base.py`;
+the 71-character budget and the untruncated TID segment are pinned by
+`tests/system/test_tid_encoding.py`.
+```
+
+Replacement (`docs/specifications/01-Core_Components.md`):
+```markdown
+`weft/commands/system.py` and `weft/commands/tasks.py`;
+`weft/liveness/host.py::inspect_host_process` decides host-pid evidence on the
+scoped identity alone and reads no process title.
+```
+
+[OBS.5] and [LIVENESS.R5] get no mapping here: both are invariant bullets
+(`- **OBS.5**:`, `- **LIVENESS.R5**:`), and backstitch v1 assigns a mapping
+block to the nearest preceding ID-bearing heading ([SC-4] in the backstitch
+core spec), so a mapping written under either bullet is owned by [OBS.4] or
+[LIVENESS.R4] instead. Their code citations keep backstitch BSC003 (see the
+Execution log, "Completed-work review round 1").
 
 ### [PY-2] — vocabulary in the `runtime_liveness` clause
 
@@ -1866,6 +1905,12 @@ told by the CHANGELOG. One-way doors: none; the change is reversible.
   1; review of completed work before Task 8's commit, which is also the +P
   pre-landing different-family review.
 
+## Revision Log
+
+| Date | Baseline | Section | Change and reason | Re-review required? |
+|------|----------|---------|-------------------|---------------------|
+| 2026-11-03 | `df9a2821` | §Proposed Spec Delta ([CLI-1.2.3] mapping block revised; new "Implementation mappings for [OBS.4] and [CC-3.2]" block); `tests/cli/test_cli_list_task.py::test_tid_argument_probes`; Execution log; Review Log | Completed-work review round 1: F2 (probe tests assert the exact one-line diagnostic naming the input); backstitch BSM005 on the bare `decode_tid` mapping token and the BSC008 infos on [CLI-1.2.3], [OBS.4] and [CC-3.2] cleared by Replacement, applied verbatim; F1 recorded with its evidence and kept open. | Yes: round 2 pending |
+
 ## Review Log
 
 self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 18 corrections — host.py line span; only `expected_tid` caller (manager_runtime calls named); reducer filter line 196; `weft/core/task_state.py` dropped from edits (docstring makes no short-ID claim); D2 no-match outcome is `InvalidTID`; D8 drops nonexistent `task events` and notes 13-digit decimal inputs; test_host already asserts `live`; exact-maximum test wording; property test sets `tid_short` and names what it proves; moved consumer test's expected name; `task_tid` reverse branch keeps its `None` contract; 10 remaining `resolve_full_tid` call sites; stop probe peeks `T0123456789.ctrl_in`; README line 848 `Short-ID` sentence added to Task 7; mapping paragraph spans six lines; execution-log constant count and four line numbers; owner forks consolidated under "Owner decisions"; two fresh-eyes findings for the owner (`WeftClient.task` widening, title-regex scope reading); cross-family round 1: done (next entry)
@@ -1875,6 +1920,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - Cross-family review round 1 on the six rulings (codex 0.161.0, 2026-11-03): BLOCKED on F1–F3 (the structural test's package-wide heuristics overclaimed; no behavior test for the widened manager and prune surfaces; the client test file missing from the staging list): accepted and applied (bounded per-boundary checks with their limits stated; selection-observing tests for the three surfaces and a mixed-case client row; staging list corrected). F4 (the host fake's `cmdline()` now raises), F5 (a Windows readback of zero is 'unavailable', not 'below budget'), F6 (stale test reference and counts), F7 (the universal boundary claim qualified for the strict `runtime_liveness` and `--reverse` boundaries): accepted and applied. The round confirmed D14's class C (no reachable case where the title decided liveness) and the completeness of the spec inventory. Round 2 (codex 0.161.0, 2026-11-03, scoped to F1–F7): no blocker; all seven closed with live evidence (the bounded checks ignore an unrelated status fold and detect a fold on result.py:42's `raw_tid`; Manager lookups use the supplied TID and pruning uses exact filter membership, so the selection tests observe a discarded normalization; `WeftClient.task` at _client.py:323 stores the normalizer's result; the host catch at host.py:44 lets `AssertionError` escape; 25 importing test files leave 23 after two removals; [PY-2]'s canonical-full-TID requirement at 14:222 is preserved by the strict exceptions). Review loop on the six rulings closed; the plan waits only on the owner's endorsement of the [ALT-WT-022] text at closeout.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): the prune `task` selector normalization lives in the shared prune capability that both the CLI adapter and series plan 11's `client.system.prune` call (`cmd_system_prune` today, `_prune_families` after plan 11), which the structural inventory now locates by its `task_filters=` binding rather than by function name; a client-path selection case added to `test_force_deletes_active_ping_in_selected_scope`, skipped visibly until plan 11 lands; landing-order coupling with plan 11 recorded as hidden coupling 8 and in Task 6. Plan metadata gate and `bin/check-doc-paths` re-run.
 - implementation 2026-11-03 (series plan 12, Anthropic implementer, on `main` at `af98c73b`): Tasks 0–8 executed; owner item 6 closed as accepted by the owner (2026-11-03: "I accept the theory edits"); the theory blocks land in a separate `Theory:` commit after the landing commit (Deviation Log), which moves `Status:` to `promoted`. Three deviations recorded in the Deviation Log (span pending on Linux and Windows; commit split; out-of-range status path). Owed before `completed`: the [WT-7] keyed possession probe (owner-written key, different-family answerer) and the different-family review of the completed work (§10), both with the series lead.
+- Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range af98c73b..c380cef3): no production defect; 17 Replacement blocks verbatim; title arithmetic, AST gate, selection tests and host liveness class C confirmed. BLOCKED on F1 (the slow-suite failure in the Manager-reuse convergence test is not closed by isolated passes): verification kept open; the series lead re-runs under original load after plan 8 lands, with [TS-0] cause-finding if it recurs. F2 (probe tests lack diagnostic-content assertions): accepted and fixed in the commit that adds this entry. Backstitch mappings for [CLI-1.2.3], [OBS.4] and [CC-3.2] added by Replacement; [OBS.5] and [LIVENESS.R5] are invariant bullets that cannot own a mapping in backstitch v1, so their BSC003 warnings remain (Execution log). Round 2 pending.
 
 ## Execution log
 
@@ -2355,3 +2401,134 @@ commit, which also moves `Status:` and the index row to `promoted`.
 `bin/check-doc-paths` (which checks every Replacement block of a `promoted`
 plan against its target) reports OK. `completed` waits on the [WT-7] keyed
 possession probe and the different-family review of the completed work.
+
+### Completed-work review round 1, 2026-11-03 (codex 0.161.0, range af98c73b..c380cef3)
+
+**F1 (P2, blocker): the all-tests gate failed once; verification stays
+open.** The §7 command `./.venv/bin/python -m pytest -m ""` run from the
+landing tree (before commit `309dc2b4`, with the same content) on 2026-11-03
+ended:
+
+```text
+FAILED tests/cli/test_cli_run.py::test_parallel_manager_reuse_converges_to_single_manager_under_repeated_bootstrap
+1 failed, 6469 passed, 58 skipped in 310.18s (0:05:10)
+```
+
+The failing assertion, verbatim from the run's output (worker `[gw1] darwin
+-- Python 3.14.9`; the per-attempt Manager TID lists, the per-task rows, and
+the harness snapshot are elided here; the full 573-line excerpt is kept at the
+session scratchpad `series/impl/plan12/r1/f1-slow-suite-failure.txt`):
+
+```text
+>       raise AssertionError(json.dumps(payload, indent=2, ensure_ascii=False))
+E       AssertionError: {
+E         "phase": "manager_convergence_timeout",
+E         "root": "/var/folders/m_/2tncpj593tj8s_jdbdhj8g5m0000gn/T/weft-harness-_yj03kw9",
+E         "max_workers": 4,
+E         "submit_timeout": 60.0,
+E         "status_timeout": 5.0,
+E         "reuse_enabled": "1",
+E         "broker_test_backend": "sqlite",
+E         "submit_results": [ four rows, each [0, "<tid>", ""] ],
+E         "status_observations": [ attempts 1 through 11, each "rc": 0,
+E           "stderr": "", "manager_count": 2, "manager_tids": [
+E           "1793767865260781568", "1793767865258872832" ] ],
+E         "manager_list_snapshot": {
+E           "exit_code": 0,
+E           "payload": [
+E             { "tid": "1793767865260781568", "status": "draining", "name": "manager" },
+E             { "tid": "1793767865321103360", "status": "stopped", "name": "manager" },
+E             { "tid": "1793767865258872832", "status": "active", "name": "manager" },
+E             { "tid": "1793767865266077696", "status": "stopped", "name": "manager" }
+E           ]
+E         },
+```
+
+Every submission succeeded; two Managers stayed listed (one `draining`, one
+`active`) through all eleven status attempts, so the test's convergence to a
+single Manager did not happen within its window. Load conditions: the
+default addopts (`-n logical --maxprocesses 12 --dist load`) on a 16-logical-CPU
+Mac, so 12 xdist workers, the whole suite including slow tests; the
+implementer started nothing else during that run. Whether another session's
+work was running on the machine at the same time was not recorded.
+
+The implementer's three isolated passes of the same test at the same tree
+(each `1 passed`, about 22 s) do not close this failure, and the earlier
+attribution to the test-suite-structure plan's load exposure was a claim, not
+a finding: the test runs the changed BaseTask encoding, worker-name, title,
+event and snapshot paths, though its bootstrap and convergence logic and
+`tests/helpers/weft_harness.py` are unchanged. Protocol: the series lead
+re-runs the full slow suite under the original load once series plan 8 has
+landed and nothing else is running. If it fails again, the cause is
+established under the test-suite-structure plan's [TS-0] trigger table
+before this plan closes. If it passes, that pass under original load is
+recorded here and F1 closes. The implementer did not rerun the slow suite in
+this round.
+
+**F2 (P3): accepted and fixed.**
+`tests/cli/test_cli_list_task.py::test_tid_argument_probes` now pairs each
+probe with its exact diagnostic and asserts that the whole output, stripped of
+blank lines, is exactly that one line (`lines == [diagnostic]`) and that the
+line contains the argument as given (`args[-1] in lines[0]`). The pinned
+lines, read from the CLI at `c7007f96` and unchanged at `df9a2821`: `Task 0123456789 not found`, `Task
+1JZKD3PKK000I not found`, `Task 8000000000000 not found`, `Task  not found`
+(the empty argument; its explicit representation is the exact line, with the
+empty input between `Task ` and ` not found`, since a containment check on
+`""` is vacuous), `Invalid full task ID: '9999999999999999999'`, `Invalid task
+ID: '0123456789'`, and `invalid task id '1JZKD-PKK0000'`. The mutation it
+catches: a generic message (for example `Oops`, or a diagnostic that drops or
+rewrites the input) fails the exact-line assertion, and a second output line
+fails the line count. Production messages are unchanged. Checked by hand at
+`df9a2821`: with `weft/cli/app.py::_command_exit` rendering `Oops` instead of
+the error text, the test fails (`assert ['Oops'] == ["Invalid full task ID:
+'9999999999999999999'"]`); the file was restored from a copy.
+
+**Backstitch.** This plan's §7 gates contain no backstitch condition (the CLI
+and client surface parity plan's §11 does). The mappings were added anyway,
+as traceability (`CLAUDE.md` requires it), by the Replacement blocks in the
+delta (`## Revision Log` row 1):
+
+- [CLI-1.2.3] (spec 10): the bare `decode_tid` token is now
+  `weft/helpers/__init__.py::decode_tid`; the four test files citing
+  [CLI-1.2.3] are listed.
+- [OBS.4] (spec 07): `tests/system/test_tid_encoding.py` added.
+- [CC-3.2] (spec 01): `weft/liveness/host.py::inspect_host_process` added.
+- [OBS.5] and [LIVENESS.R5] (spec 07): not mappable. Both are invariant
+  bullets; backstitch v1 gives a mapping block to the nearest preceding
+  ID-bearing heading, so a mapping under them would be owned by [OBS.4] and
+  [LIVENESS.R4] (checked: a trial paragraph under each bullet was attributed
+  to those headings and left the BSC003 warnings in place). The limitation
+  is backstitch's ([SC-4] in its core spec: a mapping is credited to the
+  nearest preceding ID-bearing heading, so an invariant bullet cannot own
+  one; none of the repository's 111 invariant bullets does). The series lead
+  chose not to restructure the promoted [OBS.5] bullet into a heading to
+  satisfy the tool (a tooling-driven change to spec structure, and this plan
+  has no backstitch gate); the owner holds the tooling item.
+
+Command (from the repository root): `../backstitch/.venv/bin/backstitch check
+--repo-root . --spec-root docs/specifications --plan-root docs/plans
+--code-root weft --code-root tests --test-root tests --format json`, compared
+by diagnostic identity (code, severity, path, message, with multiplicity).
+Totals (errors / warnings / infos): `4372e20e` 36 / 1206 / 720; `df9a2821`
+(after series plan 8) 35 / 1216 / 734; after this change 35 / 1215 / 723.
+Against `df9a2821` this change adds no diagnostic and removes 1 warning (the
+BSM005 on `decode_tid`) and 11 infos. Against `4372e20e`, the diagnostics attributable to this plan
+are 19 new warnings, all BSC003: 18 on [OBS.5] citations (in
+`weft/helpers/__init__.py` ×2, `weft/commands/tasks.py` ×3,
+`weft/commands/submission.py` ×2, `weft/commands/result.py`,
+`weft/commands/prune.py`, `tests/system/test_tid_encoding.py` ×4,
+`tests/cli/test_cli_list_task.py`, `tests/commands/test_retention_prune.py`,
+`tests/commands/test_task_commands.py`, `tests/core/test_client.py`,
+`tests/core/test_pipelines.py`) and 1 on the [LIVENESS.R5] citation in
+`weft/liveness/host.py::inspect_host_process`. They are of the same kind as
+the pre-existing [OBS.5] warnings on `weft/helpers/message_ids.py` and the
+[LIVENESS.R5] warnings on the other `weft/liveness/` modules. Removed
+against `4372e20e` and attributable to this plan: 6 (the [OBS.5] BSC003 on
+the deleted `tests/system/test_short_tid.py`, three BSM005 on the old
+[CLI-1.2.3] mapping's bare `stop_tasks`, `kill_tasks` and
+`_task_control_result`, the BSC008 on
+`tests/commands/test_tid_mapping_contracts.py`, and the BSC008 on
+`weft/liveness/host.py` for [CC-3.2]). The other diagnostics that are new against `4372e20e` belong to the
+CLI and client surface parity plan ([IP-1] and [CLI-X1] infos) and to series
+plan 8 (for example the [CC-3.2] info on the moved
+`weft/core/runners/sessions.py`).

@@ -1146,7 +1146,9 @@ owns the Docker agent-runner path; `weft/core/tasks/base.py::BaseTask.register_r
 publishes the durable mapping; `BaseTask._stop_managed_runtime` routes active
 worker control and `weft/helpers/__init__.py::terminate_verified_process_tree`
 owns same-instance host identity verification and signaling; CLI status/control surfaces live in
-`weft/commands/system.py` and `weft/commands/tasks.py`.
+`weft/commands/system.py` and `weft/commands/tasks.py`;
+`weft/liveness/host.py::inspect_host_process` decides host-pid evidence on the
+scoped identity alone and reads no process title.
 
 Plan backlink:
 `2026-08-31-runtime-identity-custody-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
