@@ -79,12 +79,14 @@ set[str]`, `_drain_escalated_children: set[str]`,
 `_drain_started_ns: int | None` (713). Readers: the signalling and
 escalation loop in `_signal_children_to_stop` (4885-4907: membership,
 `.get(tid, time.time_ns())`, the escalated set, the add and the stamp) and
-the drain wake-timer block (8688-8712: the shutdown deadline from
+`_manager_drain_timeouts` (8678-8712: the shutdown deadline from
 `_drain_started_ns`, then one escalation deadline per member from
 `_drain_signal_started_ns.get(tid)`, skipping escalated members). Reset
 sites that clear the three collections together: `_begin_shutdown_drain`
-(5246-5249), the two drains that follow it at 5286-5289 and 5314-5317, the
-reset at 5345-5348, and `_resume_leadership_after_drain_loss` (9080-9083).
+(5246-5249), `_begin_leadership_drain` (5286-5289),
+`_begin_superseded_shutdown` (5314-5317), `_finish_graceful_shutdown`
+(5345-5348), and `_resume_leadership_after_drain_loss` (9080-9083); with
+`__init__`, six writers of the same three attributes.
 `_drain_started_ns` is set from `time.time_ns()` at 5250, 5290, 5318 and
 9203 (phase 2 start) and read by the wake block and by
 `_shutdown_drain_timed_out` (9207-9211).
@@ -114,7 +116,9 @@ the three keys). The flags are `_task_monitor_enabled` and
 decisions; it is not touched.
 
 Tests that reference the drain attributes: `tests/core/test_manager.py`
-lines 3921-3926, 4568-4603, 8746, 9106, plus plan 15's
+lines 3921-3926 and 4568-4603 (set `_drain_started_ns` directly), 8746
+(asserts membership of `_drain_signaled_children`), 9106 (sets the start
+stamp), plus plan 15's
 `test_first_stop_rung_is_one_broadcast_over_pending_targets`.
 
 ### Files to modify
@@ -398,8 +402,12 @@ bin/check-doc-paths
 
 - 2026-11-04: plan drafted by the series lead (Fable 5.1) from the outside
   review's suggestions 2, 3 and 4 after evaluating all five against the
-  code. Self-driven fresh-eyes review: pending. Cross-family round 1:
-  pending.
+  code. Self-driven fresh-eyes review: done 2026-11-04 (distinct pass
+  after drafting): the wake block is `_manager_drain_timeouts` (8678), the
+  four reset sites outside `_begin_shutdown_drain` are named by function,
+  and the four test references are described by what each does; every
+  other path, symbol, line and constant resolved by lookup. Cross-family
+  round 1: pending.
 
 ## Revision Log
 
