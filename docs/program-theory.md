@@ -990,6 +990,23 @@ alternative. An agent must not propose the alternative again unless the
   `2026-11-02-program-theory-reconciliation-plan.md` §9 fork 2 (b) and
   audit row I-1.
 
+### [ALT-WT-023] Internal services started on demand and stopped when idle
+
+- Kind: tried and discarded (built for the heartbeat by `2026-11-02-task-monitor-heartbeat-clock-plan.md`, then removed by the owner's redirect of 2026-11-03)
+- Disposition: rejected
+- Candidate: internal services started on demand and stopped when idle.
+- Why plausible: No process runs while nothing needs it.
+- Reason: Owner, 2026-11-03: "trying to make services stop and start ended
+  up creating too much state. The simpler, more robust design is always on
+  services, with care taken that the service idles when not needed." If what
+  is wanted is a ServiceTask, there will be a process.
+- Current consequence: internal services are always on under the canonical
+  Manager and idle when not needed: no timer and no poll with nothing to do,
+  blocking on the watcher.
+- Reconsider when: Never for an internal service of the canonical Manager; a
+  consumer that wants no process does not want a ServiceTask.
+- Evidence: owner decision 2026-11-03; `docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.
+
 ## Tensions and falsifiers [WT-7]
 
 - **Possession probe, keyed:** At each release or class-5 completion, the
