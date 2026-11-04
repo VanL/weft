@@ -116,6 +116,7 @@ from weft.core.tasks import (
 from weft.core.tasks import multiqueue_watcher as multiqueue_watcher_module
 from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext, QueueMode
+from weft.core.tasks.service import ServiceWorkerEvent
 from weft.core.taskspec import (
     IOSection,
     ReservedPolicy,
@@ -7351,6 +7352,56 @@ def test_manager_late_service_launch_before_cleanup_deadline_is_detached(
     assert _active_service_owner_rows(
         make_queue, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, tid=child_spec.tid
     )
+
+
+def test_manager_cleanup_final_pass_commits_result_published_before_the_deadline(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result published before the deadline is committed by the final pass.
+
+    Spec: docs/specifications/07-System_Invariants.md [IMPL.10]; plan
+    2026-11-04-context-level-service-singletons ruling 10.5. The worker
+    publishes a launch result before the cleanup deadline, after the drain
+    loop's last pass (here: the deadline has already passed when the drain
+    runs, so the loop body never runs). The reactor still owns the result:
+    one final drain commits it, so the process is neither orphaned nor
+    unregistered. Named mutation: returning from the drain as soon as the
+    deadline has passed leaves the launch active and the service untracked.
+    """
+
+    manager, make_queue = manager_setup
+    child_spec, process, _entered, release = _start_blocked_service_launch(
+        manager, monkeypatch
+    )
+    assert child_spec.tid is not None
+    release.set()
+    deadline = time.monotonic() + 10.0
+    while not any(
+        isinstance(queued.value, ServiceWorkerEvent) and queued.value.kind == "result"
+        for queued in list(manager._worker_result_queue.queue)
+    ):
+        assert time.monotonic() < deadline, "launch result was not published"
+        manager._worker_result_event.wait(timeout=0.05)
+    assert manager._has_active_child_launches()
+
+    try:
+        manager._drain_active_child_launches_for_cleanup(time.monotonic() - 1.0)
+
+        assert not manager._has_active_child_launches()
+        assert child_spec.tid in manager._child_processes
+        assert process.is_alive()
+        assert _active_service_owner_rows(
+            make_queue, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, tid=child_spec.tid
+        )
+    finally:
+        child = manager._child_processes.get(child_spec.tid)
+        if child is not None:
+            # The stand-in is no process: retire its registry row so harness
+            # cleanup does not wait on a service that cannot be stopped.
+            manager._register_terminal_managed_service_owner(
+                child_spec.tid, child, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT
+            )
 
 
 def test_manager_late_service_launch_after_cleanup_deadline_is_reaped(

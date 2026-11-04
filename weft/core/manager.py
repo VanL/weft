@@ -8584,6 +8584,13 @@ class Manager(ServiceTask):
             self._worker_result_event.wait(
                 timeout=min(0.05, self._remaining_deadline(deadline))
             )
+        if self._has_active_child_launches():
+            # A result the worker published before the deadline, after this
+            # loop's last pass, is still the reactor's to commit: one final
+            # non-blocking drain takes it. A result published after the
+            # deadline meets the worker's own reap instead ([IMPL.10]; plan
+            # 2026-11-04-context-level-service-singletons, ruling 10.5).
+            self._drain_worker_results()
 
     def _cleanup_task_resources(self, deadline: float) -> None:
         """Release Manager-owned children and registrations by the deadline.

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import queue as thread_queue
-import selectors
 import subprocess
 import sys
 import threading
@@ -26,6 +25,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_KEYS,
     MANAGER_SERVE_LOG_SCHEMA,
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     SERVICE_STATUS_TERMINAL,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -328,84 +328,27 @@ def _wait_for_single_live_service(
     )
 
 
-_PIPE_SELECT_SECONDS = 0.05
-"""Select slice while the serve process runs; its exit is not selectable."""
-
-
 def _stop_process(
     process: subprocess.Popen[str], *, timeout: float = 10.0
 ) -> tuple[str, str]:
     """Wait for the process to exit, escalating, and return what it wrote.
 
-    On POSIX, reading ends at the process's exit, not at pipe EOF: the
-    internal services a serve process launched outlive it ([MA-1] item 7)
-    and keep ``multiprocessing``'s resource tracker alive, and the tracker
-    holds the inherited stdout/stderr write ends until they exit. Windows
-    passes no such handles, so ``communicate`` reaches EOF at exit there.
+    Reads to pipe EOF: a serve process's stdout and stderr close at its exit
+    even though the internal services it launched run on, because the
+    foreground Manager starts the resource tracker with stdio detached
+    ([MA-1] item 7; ``weft.core.launcher.start_resource_tracker_detached``).
     """
 
-    if os.name == "nt":
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.terminate()
         try:
-            return process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                return process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                return process.communicate(timeout=timeout)
-    return _read_until_exit(process, timeout=timeout)
-
-
-def _read_until_exit(
-    process: subprocess.Popen[str], *, timeout: float
-) -> tuple[str, str]:
-    """Read both pipes while the process runs, then drain them once it exits."""
-
-    assert process.stdout is not None and process.stderr is not None
-    streams = (process.stdout, process.stderr)
-    fds = tuple(stream.fileno() for stream in streams)
-    chunks: dict[int, list[bytes]] = {fd: [] for fd in fds}
-    escalations = iter((process.terminate, process.kill))
-    deadline = time.monotonic() + timeout
-    with selectors.DefaultSelector() as selector:
-        for fd in chunks:
-            os.set_blocking(fd, False)
-            selector.register(fd, selectors.EVENT_READ)
-        while True:
-            exited = process.poll() is not None
-            for key, _events in selector.select(
-                timeout=0.0 if exited else _PIPE_SELECT_SECONDS
-            ):
-                if _read_available(key.fd, chunks[key.fd]):
-                    selector.unregister(key.fd)
-            if exited:
-                break
-            if time.monotonic() >= deadline:
-                escalate = next(escalations, None)
-                if escalate is None:
-                    raise subprocess.TimeoutExpired(process.args, timeout)
-                escalate()
-                deadline = time.monotonic() + timeout
-    for stream in streams:
-        stream.close()
-    stdout, stderr = (
-        b"".join(chunks[fd]).decode("utf-8", errors="replace") for fd in fds
-    )
+            process.kill()
+            stdout, stderr = process.communicate(timeout=timeout)
     return stdout, stderr
-
-
-def _read_available(fd: int, chunks: list[bytes]) -> bool:
-    """Append everything readable now from a non-blocking pipe; True at EOF."""
-
-    while True:
-        try:
-            data = os.read(fd, 65536)
-        except BlockingIOError:
-            return False
-        if not data:
-            return True
-        chunks.append(data)
 
 
 def _is_multiprocessing_resource_tracker(child: psutil.Process) -> bool:
@@ -987,6 +930,53 @@ def _stop_services_and_wait(
         while pid_is_live(pid) and time.monotonic() < deadline:
             time.sleep(0.05)
         assert not pid_is_live(pid), f"service {key} did not exit on STOP"
+
+
+def test_serve_pipes_reach_eof_at_exit_while_its_services_live(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
+    """A serve process's pipes close at its exit although its services run on.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7. The
+    foreground Manager starts multiprocessing's resource tracker with stdio
+    detached, so the tracker that outlives it with the services does not
+    hold the serve process's stdout and stderr. Named mutation: starting the
+    tracker lazily at the first launch makes ``communicate`` wait on the
+    services' lifetime.
+    """
+
+    context_root = workdir
+    context = build_context(spec_context=context_root)
+    process = _popen_cli(
+        "manager", "serve", "--context", context_root, cwd=workdir, env={}
+    )
+    weft_harness.register_pid(process.pid, kind="owner")
+    try:
+        manager = _wait_for_active_canonical_manager(context, process=process)
+        weft_harness.register_manager_tid(manager["tid"])
+        heartbeat = _wait_for_single_live_service(
+            context, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, process=process
+        )
+        weft_harness.register_tid(str(heartbeat["tid"]))
+        heartbeat_pid = _host_pid_from_record(heartbeat)
+        assert isinstance(heartbeat_pid, int)
+        rc, out, err = run_cli(
+            "manager",
+            "stop",
+            manager["tid"],
+            "--context",
+            context_root,
+            cwd=workdir,
+            harness=weft_harness,
+        )
+        assert rc == 0, (rc, out, err)
+        stdout, stderr = process.communicate(
+            timeout=MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 10.0
+        )
+        assert process.returncode == 0, (process.returncode, stdout, stderr)
+        assert pid_is_live(heartbeat_pid), "the heartbeat should outlive the Manager"
+    finally:
+        _stop_process(process, timeout=5.0)
 
 
 def test_serve_adopts_live_services_and_launches_after_they_exit(

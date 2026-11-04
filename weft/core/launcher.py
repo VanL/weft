@@ -17,6 +17,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import replace
+from multiprocessing import resource_tracker
 from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
@@ -164,6 +165,37 @@ def _task_process_entry(
         if stop_with_parent:
             flush_serve_log_records()
         os._exit(0)
+
+
+def start_resource_tracker_detached() -> None:
+    """Start multiprocessing's resource tracker with stdio on devnull.
+
+    A foreground Manager (``weft manager serve``) keeps real stdout and
+    stderr. The tracker is spawned at the first child launch, inherits
+    them, and lives as long as any launched process. Internal services
+    outlive the Manager ([MA-1] item 7), so a supervisor reading the serve
+    process's pipes to EOF would otherwise wait on the services. Starting
+    the tracker first, with stdio on devnull, keeps EOF at the Manager's
+    exit. POSIX only: Windows passes no inherited handles.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+    """
+
+    if os.name == "nt":
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = [os.dup(fd) for fd in (1, 2)]
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        resource_tracker.ensure_running()
+    finally:
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for fd in (devnull, *saved):
+            os.close(fd)
 
 
 def launch_task_process(

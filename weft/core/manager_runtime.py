@@ -57,6 +57,7 @@ from weft.core.control_probe import (
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
 )
+from weft.core.launcher import start_resource_tracker_detached
 from weft.core.queue_window import iter_broker_queue_json_entries
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.task_state import read_task_state_snapshot
@@ -2284,6 +2285,7 @@ def serve_manager_foreground(context: WeftContext) -> tuple[int, str | None]:
     )
     if isinstance(invocation.spec, TaskSpec):
         invocation.spec.metadata["foreground_serve"] = True
+    start_resource_tracker_detached()
     _run_manager_process_foreground(invocation, context)
     return 0, None
 
