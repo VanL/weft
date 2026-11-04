@@ -590,9 +590,10 @@ alternative. An agent must not propose the alternative again unless the
   one.
 - Current consequence: TaskMonitor's only clock is its cycle deadline
   through `next_wait_timeout()`; it registers nothing. The heartbeat service
-  runs only while `weft.state.heartbeats` holds a row that is unexpired or
-  not yet rejected ([MA-1] item 7), so with no consumer no heartbeat process
-  runs (this supersedes the `da5fa0f6` gate).
+  is a standing internal service of the canonical Manager ([MA-1] item 7)
+  that idles with no timer when nothing is due; it is the only reader and
+  deleter of `weft.state.heartbeats`, and the Manager neither reads nor
+  deletes that queue (this supersedes the `da5fa0f6` gate).
 - Reconsider when: Never for a clock. A consumer that wants a periodic
   message can still register.
 - Evidence: Owner decision, 2026-09-08; `2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md` (draft); `2026-11-02-task-monitor-heartbeat-clock-plan.md`.
