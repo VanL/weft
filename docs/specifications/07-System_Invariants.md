@@ -1316,20 +1316,26 @@ Current invariant visibility comes from:
 There is now a manager-supervised `TaskMonitor` in addition to the
 foreground `weft system task-monitor` command. In the current contract it is
 operational only. The default mode is `delete`, which may delete exact
-rows selected by supported cleanup paths. Retained task-log cleanup is
-Monitor-table driven: malformed `weft.log.tasks` rows are exact-deleted; valid
-rows older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` are folded into
-Monitor-owned tables before exact deletion; exact raw deletion is reconciled
-by physically deleting the corresponding pending child refs from
-`weft_monitor_task_messages`; visible raw rows older than the forward Monitor
-checkpoint and missing from `weft_monitor_task_messages` are recovered by a
-bounded pre-checkpoint pass that does not move the checkpoint; raw rows left by
-an interrupted current cleanup transaction for terminal/disposed families may
-be exact-deleted by a bounded recovery pass that records a completed no-row
-probe on the parent family; and family summaries/disposition can run only after
-the FIFO pass reaches a completed high-water mark
-(`empty` or first too-young visible row). A batch-limited, scan-limited, or
-error-limited pass must not close a task family.
+rows selected by supported cleanup paths. Under collated ownership, both
+destructive modes (`delete` and `jsonl_then_delete`) are Monitor-table driven:
+valid `weft.log.tasks` rows are folded into Monitor-owned tables and then those
+exact raw rows are deleted without waiting for `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`
+or summary emission; malformed/unrecognized `weft.log.tasks` rows are
+exact-deleted (after accepted external or durable deferred-report handoff in
+`jsonl_then_delete`); exact raw deletion is reconciled by physically deleting
+the corresponding pending child refs from `weft_monitor_task_messages` on every
+destructive collated cycle independently of FIFO high-water completion; visible
+raw rows older than the forward Monitor checkpoint and missing from
+`weft_monitor_task_messages` are recovered by a bounded pre-checkpoint pass
+that folds unknown valid rows immediately, preserves age-gating for
+pre-checkpoint malformed rows, and does not move the checkpoint; raw rows left
+by an interrupted current cleanup transaction for terminal/disposed families
+fold any unknown valid rows and are exact-deleted by a bounded orphan-recovery
+pass that records a completed no-row probe on the parent family without waiting
+for summary emission; and family summaries/disposition can run only after the
+FIFO pass reaches a completed high-water mark (the end of the visible queue
+without stopping at a batch, scan, or error limit). A batch-limited,
+scan-limited, or error-limited pass must not close a task family.
 Terminal family disposition records retryable compact table state while raw
 deletion, summary, and runtime cleanup remain incomplete. Once raw deletion,
 summary emission, disposition, task-local control cleanup, and any required

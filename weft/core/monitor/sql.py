@@ -921,12 +921,10 @@ def select_raw_deleted_task_log_recovery_tids(
 ) -> str:
     """Build a query for terminal families needing raw-log orphan recovery.
 
-    ``require_summary`` enforces the jsonl_then_delete audit invariant on
-    the orphan path: the eligibility OR-condition below admits
-    terminal-but-unsummarized marked families, whose raw rows must not be
-    deleted before their summary/JSONL export. With the flag set, only
-    summarized families are selected; unsummarized ones reach the summary
-    stage first and recover on a later pass.
+    When ``require_summary`` is set, selection is restricted to families whose
+    ``summary_emitted_at_ns`` is non-null. Collated orphan recovery passes
+    ``False`` because unknown valid orphan rows are folded into the parent
+    collation before exact raw deletion.
 
     Spec: [MF-5], [OBS.13], [OBS.17]
     """

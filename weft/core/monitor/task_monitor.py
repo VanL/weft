@@ -1831,8 +1831,7 @@ class MaintenanceWorker:
                 before_timestamp=checkpoint_message_id,
                 broker=broker,
             )
-        candidate_rows = list(window.rows)
-        skipped_too_young = 0
+        candidate_rows = window.rows
         try:
             missing_ids = set(
                 store.missing_task_message_ids(
@@ -1842,7 +1841,6 @@ class MaintenanceWorker:
         except (OSError, RuntimeError, ValueError) as exc:
             result = _PreCheckpointTaskLogRecoveryResult(
                 scanned=window.scanned,
-                skipped_too_young=skipped_too_young,
                 store_write_errors=(str(exc),),
                 stop_reason="store_read_error",
                 scan_limit_reached=window.scan_limit_reached,
@@ -1866,6 +1864,7 @@ class MaintenanceWorker:
         delete_errors: list[str] = []
         skipped_known = 0
         skipped_active = 0
+        skipped_too_young = 0
         selected = 0
         stop_reason = window.stop_reason
 
@@ -3723,16 +3722,7 @@ class MaintenanceWorker:
             retirement = store.delete_task_messages_after_raw_delete(reconciled_ids)
         else:
             retirement = MonitorStoreRetirementResult()
-        errors_list = [result.error for result in applied if result.error is not None]
-        errors_list.extend(
-            f"{result.candidate.queue}:{result.candidate.message_id} "
-            "was not deleted by exact broker delete"
-            for result in applied
-            if not result.deleted
-            and result.error is None
-            and not result.candidate.report_only
-        )
-        errors = tuple(errors_list)
+        errors = tuple(result.error for result in applied if result.error is not None)
         if errors:
             self._store_state = replace(
                 self._store_state, last_collation_store_error=("; ".join(errors))

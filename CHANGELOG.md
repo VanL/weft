@@ -30,7 +30,9 @@
   [OBS.13.3]). Exact raw-message reference retries now run on every destructive
   collated cycle independently of FIFO high-water completion, and bounded
   pre-checkpoint/orphan recovery folds unknown valid rows before exact deletion
-  without waiting for a summary. Manager-authored `task_spawned` rows follow the
+  without waiting for a summary (while `fetch_dead_task_log_coalesce_group`
+  reads only unclaimed `weft.log.tasks` rows so claimed rows remain with
+  SimpleBroker vacuum). Manager-authored `task_spawned` rows follow the
   same valid-row fold-and-delete rule: the separate keep-newest-1000 launch-hint
   compactor and creation of `manager_task_spawned_retained_event` reports are
   retired (existing deferred launch-event reports still flush on upgrade; use

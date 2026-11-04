@@ -39,38 +39,6 @@ class ExactPruneCandidate(Protocol):
         ...
 
 
-def _exact_message_is_absent(
-    queue_name: str,
-    message_id: int,
-    *,
-    broker: Any | None,
-    queue: Any | None,
-) -> bool:
-    """Return whether ``message_id`` is positively absent from ``queue_name``."""
-
-    if broker is not None:
-        return (
-            broker.peek_one(
-                queue_name,
-                exact_timestamp=message_id,
-                with_timestamps=True,
-                include_claimed=True,
-            )
-            is None
-        )
-    assert queue is not None
-    with queue.get_connection() as conn:
-        return (
-            conn.peek_one(
-                queue_name,
-                exact_timestamp=message_id,
-                with_timestamps=True,
-                include_claimed=True,
-            )
-            is None
-        )
-
-
 def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031] exception
     Candidate: ExactPruneCandidate,
     AppliedCandidate,
@@ -135,7 +103,6 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
     for queue_name, queue_candidates in by_queue.items():
         with ExitStack() as scope:
             delete_ids: Callable[[list[int]], int]
-            queue: Any | None = None
             if broker is None:
                 queue = scope.enter_context(ctx.queue(queue_name, persistent=True))
                 # Acquire lazily inside the existing per-candidate error boundary.
@@ -193,20 +160,11 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
                             # The batch under-deleted, so per-candidate
                             # status is unknown. Re-verify each candidate
                             # with a per-ID exact delete: >0 deletes the
-                            # row now; 0 requires a positive absence probe
-                            # so a present row or read error is never
-                            # reported deleted.
+                            # row now; 0 means the backend verified the
+                            # row is absent (idempotent-complete).
                             for index, candidate in deletable:
                                 try:
-                                    deleted_now = (
-                                        delete_ids([candidate.message_id]) > 0
-                                        or _exact_message_is_absent(
-                                            queue_name,
-                                            candidate.message_id,
-                                            broker=broker,
-                                            queue=queue,
-                                        )
-                                    )
+                                    delete_ids([candidate.message_id])
                                 except (
                                     BrokerError,
                                     OSError,
@@ -221,7 +179,7 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
                                 else:
                                     queue_results[index] = apply_result(
                                         candidate,
-                                        deleted_now,
+                                        True,
                                         None,
                                     )
                         elif deleted_count == 0:

@@ -3135,11 +3135,11 @@ class MonitorStore:
     ) -> tuple[str, ...]:
         """Return terminal families that may have orphan raw task-log rows.
 
-        ``require_summary`` restricts the selection to families whose
-        ``summary_emitted_at_ns`` is set. Callers operating in
-        ``jsonl_then_delete`` mode must pass ``True`` so orphan recovery
-        never deletes a family's raw rows before its summary/JSONL export
-        (the mode's audit invariant).
+        ``require_summary`` optionally restricts the selection to families
+        whose ``summary_emitted_at_ns`` is set. Collated orphan recovery
+        passes ``False`` because valid orphan rows fold into
+        ``weft_monitor_tasks`` before raw deletion without awaiting summary
+        emission.
 
         Spec: [MF-5], [OBS.13], [OBS.17]
         """

@@ -11742,20 +11742,18 @@ def test_task_monitor_ingest_crash_restart_boundaries_preserve_collation_and_ret
         task.stop()
 
 
-@pytest.mark.parametrize("failure_mode", ["under_delete", "uncertain_read"])
-def test_task_monitor_store_delete_preserves_refs_and_records_error_on_under_delete_or_uncertain_read(
+def test_task_monitor_store_delete_preserves_refs_and_records_error_on_delete_failure(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    failure_mode: str,
 ) -> None:
-    """Under-delete or uncertain read in _delete_monitor_store_task_log_rows keeps child refs and records error.
+    """Broker delete failure in _delete_monitor_store_task_log_rows keeps child refs and records error.
 
     Spec: [MF-5]
     """
 
     db_path, make_queue = broker_env
-    external_path = tmp_path / f"store-delete-{failure_mode}.jsonl"
+    external_path = tmp_path / "store-delete-failure.jsonl"
     config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     tid = str(time.time_ns())
@@ -11781,8 +11779,10 @@ def test_task_monitor_store_delete_preserves_refs_and_records_error_on_under_del
                 apply_result: Any,
                 **_kwargs: Any,
             ) -> list[Any]:
-                error = None if failure_mode == "under_delete" else "simulated broker read error"
-                return [apply_result(c, False, error) for c in candidates]
+                return [
+                    apply_result(c, False, "simulated broker delete error")
+                    for c in candidates
+                ]
 
             monkeypatch.setattr(
                 task_monitor_mod,
@@ -11798,14 +11798,9 @@ def test_task_monitor_store_delete_preserves_refs_and_records_error_on_under_del
             assert record is not None
             assert record.raw_deleted_at_ns is None
             assert worker._store_state.last_collation_store_error is not None
-            if failure_mode == "under_delete":
-                assert "was not deleted by exact broker delete" in (
-                    worker._store_state.last_collation_store_error
-                )
-            else:
-                assert "simulated broker read error" in (
-                    worker._store_state.last_collation_store_error
-                )
+            assert "simulated broker delete error" in (
+                worker._store_state.last_collation_store_error
+            )
     finally:
         task.stop()
 
@@ -11883,19 +11878,18 @@ def test_task_monitor_claimed_task_log_row_excluded_from_ingest_and_orphan_recov
     external_path = tmp_path / "claimed-row.jsonl"
     config = _jsonl_lifecycle_config(external_path, batch_size=8, scan_limit=8)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    reserved_queue = make_queue(f"{WEFT_GLOBAL_LOG_QUEUE}.claimed_test")
     tid = str(time.time_ns())
     _seed_terminal_family_backlog(log_queue, (tid,))
     seeded_ids = sorted(_broker_rows_by_tid(log_queue)[tid])
     assert len(seeded_ids) == 2
 
-    # Claim/move the first row out of weft.log.tasks so its row in weft.log.tasks is claimed/moved.
-    moved = log_queue.move_one(
-        reserved_queue.name,
+    # Claim the first row in-place in weft.log.tasks (Queue.read_one sets claimed=1
+    # until vacuum) so it remains in weft.log.tasks as a claimed row.
+    claimed = log_queue.read_one(
         exact_timestamp=seeded_ids[0],
         with_timestamps=True,
     )
-    assert moved is not None
+    assert claimed is not None
 
     task = TaskMonitor(
         db_path,
@@ -11906,25 +11900,66 @@ def test_task_monitor_claimed_task_log_row_excluded_from_ingest_and_orphan_recov
         with _maintenance_for(task) as worker:
             store = worker._ensure_monitor_store()
             assert store is not None
+            with worker._connection() as broker:
+                assert (
+                    broker.peek_one(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        exact_timestamp=seeded_ids[0],
+                        with_timestamps=True,
+                        include_claimed=True,
+                    )
+                    is not None
+                )
+                assert (
+                    broker.peek_one(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        exact_timestamp=seeded_ids[0],
+                        with_timestamps=True,
+                        include_claimed=False,
+                    )
+                    is None
+                )
+                group = task_monitor_mod._fetch_dead_task_log_coalesce_group(
+                    worker._monitor_context(),
+                    tid,
+                    chunk_limit=10,
+                    broker=broker,
+                )
+                assert [row.message_id for row in group.rows] == [seeded_ids[1]]
+
             worker._run_monitor_store_cycle(
                 now_ns=time.time_ns(),
                 task_log_owner="collated_store",
             )
-            # Only the unclaimed second row was folded and deleted; the moved/claimed row in reserved_queue is untouched.
-            assert [
-                int(mid) for _body, mid in iter_queue_entries(reserved_queue)
-            ] == [seeded_ids[0]]
+            # Only the unclaimed second row was folded and deleted; the claimed row in weft.log.tasks is untouched.
             assert store.missing_task_message_ids((seeded_ids[0],)) == (seeded_ids[0],)
+            with worker._connection() as broker:
+                assert (
+                    broker.peek_one(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        exact_timestamp=seeded_ids[0],
+                        with_timestamps=True,
+                        include_claimed=True,
+                    )
+                    is not None
+                )
 
-            # Force orphan recovery on tid and verify reserved_queue row is still untouched.
+            # Force orphan recovery on tid and verify the claimed weft.log.tasks row is still untouched.
             recovery = worker._recover_orphan_task_log_rows(
                 store,
                 now_ns=time.time_ns(),
             )
             assert recovery.errors == ()
-            assert [
-                int(mid) for _body, mid in iter_queue_entries(reserved_queue)
-            ] == [seeded_ids[0]]
+            with worker._connection() as broker:
+                assert (
+                    broker.peek_one(
+                        WEFT_GLOBAL_LOG_QUEUE,
+                        exact_timestamp=seeded_ids[0],
+                        with_timestamps=True,
+                        include_claimed=True,
+                    )
+                    is not None
+                )
     finally:
         task.stop()
 

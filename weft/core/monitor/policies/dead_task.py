@@ -220,7 +220,7 @@ def fetch_dead_task_log_coalesce_group(
             api_matches += len(message_ids)
             after_timestamp = max(int(message_id) for message_id in message_ids)
             for message_id in message_ids:
-                row = _task_log_row_for_message_id_including_claimed(
+                row = _unclaimed_task_log_row_for_message_id(
                     db,
                     int(message_id),
                 )
@@ -235,7 +235,7 @@ def fetch_dead_task_log_coalesce_group(
     )
 
 
-def _task_log_row_for_message_id_including_claimed(
+def _unclaimed_task_log_row_for_message_id(
     broker: Any,
     message_id: int,
 ) -> QueueWindowRow | None:
