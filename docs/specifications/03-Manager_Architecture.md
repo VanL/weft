@@ -935,6 +935,21 @@ _Implementation mapping_:
   signal in plain in-memory state (signal handlers must not touch broker
   connections); `weft/core/manager.py::Manager._apply_termination_request`
   applies it on the next `process_once` turn (TERM/INT drain, SIGUSR1 kill).
+- System STOP phase ordering — `weft/core/manager.py` ::
+  `Manager._begin_shutdown_drain` (enters phase 1 and signals user work),
+  `Manager._continue_shutdown_drain` and `Manager._drain_user_work_phase_holds`
+  (phase 1, the in-flight-launch hold bounded by the phase-1 window, the
+  fresh phase-2 window, and the drained event once no service remains),
+  `Manager._drain_phase_children` (the active phase's members, from the one
+  `Manager._child_is_supervision_only` split), `Manager._signal_children_to_stop`
+  (the one STOP-then-SIGTERM rung, per phase), `Manager._terminate_children`
+  (the forced-reap rung, limited to a phase's TIDs), and
+  `Manager._manager_drain_timeouts` (active-phase clocks only). Error-path
+  order — `Manager._cleanup_task_resources` (user work, then everything still
+  tracked, under one deadline). Tests:
+  `tests/core/test_manager.py::test_manager_stop_orders_user_work_then_services_then_manager`,
+  `tests/core/test_manager.py::test_manager_sentinel_failure_during_shutdown_still_reaps_children`,
+  `tests/core/test_manager.py::test_manager_stop_does_not_hold_past_window_for_stuck_launch`.
 - CLI management — `weft/commands/manager.py` :: `cmd_manager_start`,
   `cmd_manager_stop`, `cmd_manager_list`, `cmd_manager_status`; these structured
   commands are thin wrappers over the shared lifecycle helper.

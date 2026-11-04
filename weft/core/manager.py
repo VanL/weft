@@ -2193,6 +2193,7 @@ class Manager(ServiceTask):
         """Return the stopping drain's active-phase children.
 
         Phase 1 is user work; phase 2 is the supervision-only services.
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
         if not self._drain_services_phase:
@@ -4661,7 +4662,8 @@ class Manager(ServiceTask):
         ``tids`` limits every step to those tracked children; ``None`` covers
         every tracked child (the ``SIGUSR1`` and final-cleanup passes).
 
-        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10];
+        docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
         selected = None if tids is None else frozenset(tids)
@@ -4820,6 +4822,8 @@ class Manager(ServiceTask):
 
         The caller passes the active phase's members: user work in phase 1,
         internal services in phase 2. One rung serves both phases.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
         for tid, child in list(children.items()):
@@ -8158,7 +8162,7 @@ class Manager(ServiceTask):
 
         attempt(lambda: self._drain_active_child_launches_for_cleanup(deadline))
         # User work first, then everything still tracked, services included,
-        # under the same absolute deadline.
+        # under the same absolute deadline [MA-3].
         attempt(
             lambda: self._terminate_children(
                 deadline, tids=tuple(self._user_work_children())
@@ -8763,6 +8767,8 @@ class Manager(ServiceTask):
         window expires), phase 2 drains the internal services under a fresh
         window, and then the Manager publishes its drained event. The drain
         never returns from phase 2 to phase 1.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
         self._drain_immediate_work_pending = False
@@ -8799,6 +8805,8 @@ class Manager(ServiceTask):
         or when its window expires: remaining user work is then force-reaped
         and an unsettled launch is logged and released to final cleanup. On
         ending it starts phase 2 with a fresh window.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
         self._signal_children_to_stop(self._drain_phase_children())
