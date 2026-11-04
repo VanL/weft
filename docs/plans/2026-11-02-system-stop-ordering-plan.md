@@ -1,6 +1,6 @@
 # System STOP: Tasks, Then Internal Services, Then the Manager
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.10], [OBS.6], [LIVENESS.R3]-[LIVENESS.R7]; docs/specifications/02-TaskSpec.md [TS-1], [TS-1.1]; docs/specifications/05-Message_Flow_and_State.md [MF-5]
 Superseded by: none
 
@@ -429,7 +429,8 @@ hardening).
   docs/specifications/05-Message_Flow_and_State.md, and
   docs/program-theory.md (adopted) at plan authoring time.
 - Plan type: implementation with spec revision.
-- Promotion baseline identifier: pending. Record it at task 1.
+- Promotion baseline identifier: the task 1 spec-promotion commit, whose
+  SHA is recorded in the Execution log by the next commit.
 
 ## Proposed Spec Delta
 
@@ -487,6 +488,27 @@ its internal services, then itself.
    window expires. A launch still unsettled at that expiry is logged and
    released from the phase; a child it later commits is terminated by the
    Manager's final cleanup, not by a return to phase 1.
+   Phase 1 also covers every live, user-work task in the scoped context.
+   The Manager finds these tasks through task-owned snapshots, the
+   checkpoints of earlier Managers that are no longer live, and the
+   checkpoints of other live Managers, including a superseded Manager still
+   draining ([MF-5]). That evidence names the tasks; the authority to stop
+   them is the system-STOP rule. A task another live Manager covers is a
+   STOP-drain member only: that Manager keeps its custody and its handles
+   and reaps it, and the stopping Manager never sends it a host signal.
+   For any such task, STOP goes to the `ctrl_in` route resolved from the
+   task's snapshot observation; a task whose route cannot be resolved is
+   reported and released from the phase, never sent a guessed route. Host
+   SIGTERM and forced reap apply only to same-host processes whose
+   `(pid, create_time)` identity is verified and that no other live Manager
+   covers. Phase 1 ends only when no tracked user-work child and no other
+   member with live evidence remains; a member leaves on task-owned
+   terminal proof or verified process exit, whichever Manager sent the STOP
+   it acted on. A member whose liveness is still unknown when the window
+   expires is reported and released from the phase, never treated as
+   exited. A system STOP stops the tasks live when it runs; another live
+   Manager that is not itself stopped may still restart a service it keeps
+   desired or launch new work.
 2. Internal services. Once phase 1 ends, the Manager broadcasts STOP to its
    internal services, with the same escalation delay and one fresh drain
    window of the same length, and forcefully reaps any service process tree
@@ -519,7 +541,11 @@ observable registry propagation and scheduler delay under release-load
 parallelism.
 ```
 
-Coverage sentence. This one is not promoted until the owner decides
+Coverage sentence. Promoted at task 1 (2026-11-03) after the owner's
+Reading B ruling: Candidate B below is relabelled as a Replacement block and
+is also carried, as the last sentences of item 1, inside the ordering
+Replacement block above (`## Revision Log`). Candidate A stays unlabelled.
+The original note follows: this one is not promoted until the owner decides
 `## Owner Decision: STOP Coverage`. The two candidates below are deliberately not labelled `Replacement`, so
 the Replacement-sync gate (`bin/check-doc-paths`) never checks an unchosen
 variant. After the decision, the chosen candidate is relabelled
@@ -536,6 +562,8 @@ Candidate A (this Manager's children only):
 
 Candidate B (every live user-work task in the scoped context, including
 tasks another live Manager covers; owner rulings 2026-11-03):
+
+Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```markdown
    Phase 1 also covers every live, user-work task in the scoped context.
@@ -572,8 +600,8 @@ The `## Related Plans` addition (in the promotion slice):
 1. Plan (this file) and its `docs/plans/README.md` row.
 2. Independent cross-family review of the plan and `## Proposed Spec Delta`.
    Then the owner's coverage decision (`## Owner Decision: STOP Coverage`):
-   ruled Reading B on 2026-11-03. A cross-family round on the ruling's
-   changes to this plan is pending.
+   ruled Reading B on 2026-11-03. The cross-family rounds on the ruling's
+   changes to this plan are closed (`## Review Log`).
 3. Spec-promotion slice (task 1): the ordering Replacement, plus the
    Reading B coverage candidate. The decision section's sub-question was
    ruled (a) on 2026-11-03, so the candidate promotes with the tasks other
@@ -798,6 +826,10 @@ saving is N-1 transactions on a path that runs once per system STOP. This
 plan keeps per-target writes; the owner may adopt the variant, which would
 change only task 3's `_signal_children_to_stop` body and task 7's send
 step.
+
+**Closed (2026-11-03):** closed on the owner's implement instruction
+(2026-11-03) with the recommended option: keep per-target STOP writes (the
+probe showed patterns match only queues that already hold rows).
 
 Cross-family round of 2026-11-03 on this fork: exact-name broadcast with
 `create_missing=True` reaches the same resolved destinations, creates the
@@ -1564,6 +1596,12 @@ Difference register (current versus planned STOP drain):
 | Tasks under another live Manager in the context | Not signalled | Signalled in phase 1 as STOP-drain members, drained on task-owned evidence; their own Manager keeps custody and reaps them; no host escalation by the stopping Manager; current TIDs only (that Manager may still restart an `ensure` autostart or launch new work) | Changed (owner ruling 2026-11-03) |
 | Signalling step for phase 1 | Per-target STOP writes | Per-target STOP writes; pattern broadcast `T*.ctrl_in` evaluated and rejected (misses never-controlled tasks, hits services and Managers); exact-name broadcast recorded as an unadopted fork | Preserved |
 
+## Revision Log
+
+| Date | Change | Reason |
+|------|--------|--------|
+| 2026-11-03 | Task 1 promotion: Candidate B relabelled `Replacement`; its text appended as the last sentences of item 1 inside the ordering Replacement block, so both blocks are verbatim substrings of [MA-3]. | The owner ruled Reading B and sub-question (a); `## Proposed Spec Delta` says the chosen candidate is inserted as the last sentence of item 1. |
+
 ## Review Log
 
 self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 15 corrections — `_commit_child_launch_success` definition line is 1672 (write at 1686); evidence refresh is rate-gated and adoption skips rows with no `root_tid`; replaced spec span is one paragraph, not two; worst-case drain is about 34 s with forced-reap deadlines, not 30 s; a late child reopening phase 1 cannot withdraw STOP already sent to services (Replacement and task 3 made consistent); task 3 names every all-children step in `_terminate_children` that `tids` must filter; task 2 tests cannot use `manager_setup` (its custom inbox launches no services) and now construct a TaskMonitor-enabled Manager; only the first task 2 test is required RED, the other two are named-mutation guards; task 5 re-enables TaskMonitor (the harness disables it) and asserts a service exists; Reading B host escalation is limited to `host-pid` authority (LIVENESS.R5 covers `runner` too); task 7 records evidence that its pipeline stop gate will likely fire; task 7 names the refresh gate and bootstrap side effects; risk 5 states that adopted-task exit has no drain wake source; Replacement list gets blank lines so the trailing paragraph does not render inside item 3; stale index-row note corrected (a fresh-eyes finding for the owner is added at the coverage decision)
@@ -1578,6 +1616,7 @@ requires a `docs/plans/README.md` Status Index row (`draft`) for this file.
 The row is present in the working tree and must land in
 the same change as this file.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer; owner: 'I accept the disclosed bounded-shutdown choice; I would tighten the promise'): the spec delta's unconditional "the last lifecycle event of the stop" now reads as the last event the Manager publishes for the stop, with the released-launch child named as the one exception whose own events may follow (final cleanup runs after the drained event, manager.py:4908 then `_finalize_task_once`); the kept-sentence note and the register row say the same. Plan metadata gate and `bin/check-doc-paths` re-run.
+- implementation 2026-11-03: the exact-name broadcast fork was closed on the owner's implement instruction (2026-11-03) with the recommended option: keep per-target STOP writes (the probe showed patterns match only queues that already hold rows). Tasks 1 to 5, 7 and 8 executed from `26cc08da`; task 6 is the rejected variant and was not run.
 
 ## Execution log
 
@@ -1606,3 +1645,43 @@ Plan-authoring evidence (2026-11-02, worktree at `b7eed9f9`, clean):
   all three present.
 - New test names in tasks 2, 5, 6, and 7 are intentionally new; the task 2
   fatal-path test extends an existing one by name.
+
+Implementation evidence (2026-11-03, `main` at `26cc08da`, clean tree; plans
+10, 9, 5, 2 and 3 landed after the authoring baseline `b7eed9f9`; every line
+citation below was re-resolved by symbol before editing):
+
+Task 0, comprehension answers (before the first edit):
+
+1. `Manager._begin_superseded_shutdown` sets `_drain_stops_children = False`
+   (verified at `26cc08da`), and `Manager._continue_shutdown_drain` calls
+   `_signal_children_to_stop` only inside `if self._drain_stops_children`.
+   Supersession changes who takes future work and never stops running work
+   ([ALT-WT-007]; [WT-2a.13], first sentence). The phases live entirely
+   inside the `_drain_stops_children` branch, so the superseded and
+   leadership drains are untouched.
+2. No. `_finish_graceful_shutdown` is reached only once the active phase has
+   no member, and phase 2 (the services) begins only after phase 1, so a
+   TaskMonitor child still in `_child_processes` blocks the drained event.
+   Phase 2 resets `_drain_started_ns` because phase 1 may spend the whole
+   `MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` (15.0 s) forcing user work down;
+   that constant's docstring sizes the budget for services to "deliver STOP,
+   publish terminal service state" on slow backends, so a shared window
+   would leave services no time and force-kill them. Worst case is
+   15 + 2 + 15 + 2 = 34 s against `MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS`
+   (15.0 + 40.0 = 55 s).
+
+Task 1, spec promotion (strategy A):
+
+- The replaced span in `docs/specifications/03-Manager_Architecture.md`
+  [MA-3] was re-read at `26cc08da` and matched the quoted baseline text
+  exactly (from "`SIGTERM` and `SIGINT` against a Manager enter the same
+  drain path as STOP." to "scheduler delay under release-load
+  parallelism."), so no clause re-audit was needed. The ordering
+  Replacement, with Candidate B appended to item 1 (`## Revision Log`),
+  replaced it verbatim; the "Voluntary leadership drain ..." and "Reader
+  omission ..." paragraphs are untouched. `## Related Plans` gained the
+  backlink. No `_Implementation mapping_` claim was added (task 4).
+- Plan `Status:` and its `docs/plans/README.md` row moved to `promoted`, so
+  the Replacement-sync gate now checks both blocks.
+- `./.venv/bin/python bin/check-doc-paths`: `check-doc-paths: OK`.
+  `./.venv/bin/python -m pytest tests/specs -q`: all passed.

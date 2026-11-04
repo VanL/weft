@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) orders a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3].
+
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MA-1.8].
 
 - [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
@@ -801,18 +803,76 @@ Voluntary leadership drain does not kill user children. It waits for already
 owned non-persistent children while the lower-TID leader remains positively
 proved; if that proof disappears, the manager publishes
 `manager_leadership_resumed`, restores active ownership, and resumes serving.
-`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP. A
-manager drain has a bounded child-exit window; if child tasks do not exit after
-STOP is broadcast, the Manager sends host SIGTERM after the named escalation
-delay. If the drain window then expires, the Manager forcefully reaps tracked
-child process trees before publishing its drained terminal event. A fatal child
-sentinel observer error is preserved as the cleanup failure, but it cannot skip
-that termination and reap sequence.
-`SIGUSR1` retains immediate kill semantics. Caller-facing manager stop defaults
-must be materially longer than the internal manager drain window, because a
-Manager may use the full drain budget before publishing its stopped registry
-record, and slower broker backends can add observable registry propagation and
-scheduler delay under release-load parallelism.
+`SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP.
+That drain is a system stop: the Manager stops active user work first, then
+its internal services, then itself.
+
+1. User work. The Manager takes no new intake (a draining Manager launches
+   no reserved child) and broadcasts STOP to every tracked child that is not
+   an internal service. Internal services are the supervision-only children:
+   heartbeat, TaskMonitor, and LivenessMonitor. Every other child is user
+   work, including pipelines, autostart children, and persistent tasks; STOP
+   is the documented end of a persistent task's lifetime. If a user child
+   does not exit after STOP, the Manager sends host SIGTERM after the named
+   escalation delay. If the phase's bounded drain window expires, the
+   Manager forcefully reaps the remaining user-work process trees. Internal
+   services keep running, unsignalled, throughout this phase.
+   Phase 1 lasts until no user-work child remains and no child launch that
+   was in flight when the drain began is still unsettled, or until its
+   window expires. A launch still unsettled at that expiry is logged and
+   released from the phase; a child it later commits is terminated by the
+   Manager's final cleanup, not by a return to phase 1.
+   Phase 1 also covers every live, user-work task in the scoped context.
+   The Manager finds these tasks through task-owned snapshots, the
+   checkpoints of earlier Managers that are no longer live, and the
+   checkpoints of other live Managers, including a superseded Manager still
+   draining ([MF-5]). That evidence names the tasks; the authority to stop
+   them is the system-STOP rule. A task another live Manager covers is a
+   STOP-drain member only: that Manager keeps its custody and its handles
+   and reaps it, and the stopping Manager never sends it a host signal.
+   For any such task, STOP goes to the `ctrl_in` route resolved from the
+   task's snapshot observation; a task whose route cannot be resolved is
+   reported and released from the phase, never sent a guessed route. Host
+   SIGTERM and forced reap apply only to same-host processes whose
+   `(pid, create_time)` identity is verified and that no other live Manager
+   covers. Phase 1 ends only when no tracked user-work child and no other
+   member with live evidence remains; a member leaves on task-owned
+   terminal proof or verified process exit, whichever Manager sent the STOP
+   it acted on. A member whose liveness is still unknown when the window
+   expires is reported and released from the phase, never treated as
+   exited. A system STOP stops the tasks live when it runs; another live
+   Manager that is not itself stopped may still restart a service it keeps
+   desired or launch new work.
+2. Internal services. Once phase 1 ends, the Manager broadcasts STOP to its
+   internal services, with the same escalation delay and one fresh drain
+   window of the same length, and forcefully reaps any service process tree
+   that remains when that window expires. The drain does not return to
+   phase 1.
+3. The Manager. Once the tracked child table is empty, apart from any
+   child committed by a launch released at the phase-1 window expiry, the
+   Manager publishes its drained terminal event and exits. That event is
+   the last lifecycle event the Manager publishes for the stop, with one
+   bounded exception: a child committed by a launch released at the
+   phase-1 window expiry is terminated by the Manager's final cleanup,
+   which runs after the drained event, so that child's own lifecycle
+   events may follow the Manager's drained event. No other child's event
+   does.
+
+A phase with no members completes at once. Services are not restarted
+during the drain. The Manager applies its own `reserved_policy_on_stop` when
+the drain begins; each task applies its own policy when it handles STOP. A
+fatal child sentinel observer error is preserved as the cleanup failure, but
+it cannot skip the termination and reap sequence: cleanup on that path
+attempts user-work termination before internal-service termination under
+one absolute cleanup deadline, then raises the original failure. Manager
+supersession, leadership yield, idle exit, and crash are not system stops
+and never signal running user work.
+`SIGUSR1` retains immediate kill semantics, with no phases. Caller-facing
+manager stop defaults must be materially longer than the sum of the two
+phase windows, because a Manager may use both drain budgets before
+publishing its stopped registry record, and slower broker backends can add
+observable registry propagation and scheduler delay under release-load
+parallelism.
 
 Reader omission alone does not prove manager exit. When a previously observed
 row disappears from the filtered view, stop confirmation requires definitive
