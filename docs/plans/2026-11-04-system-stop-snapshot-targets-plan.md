@@ -1,6 +1,6 @@
 # System STOP Targets Every Live Task by Snapshot
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.12]
 Superseded by: none
 
@@ -319,7 +319,7 @@ No D row.
 
 - `e0290792` — `docs/specifications/03-Manager_Architecture.md` at plan
   authoring time. Plan type: implementation with spec revision; strategy B.
-- Promotion baseline identifier: pending (the landing commit).
+- Promotion baseline identifier: `79ea73d0`, the landing commit.
 
 ## Proposed Spec Delta
 
@@ -647,6 +647,56 @@ write, so the choice is mechanism, not semantics (register row 4).
   `escalate` instead. Blast radius: the dataclass, the constructor call,
   one assertion.
 
+- Completed-work review (codex 0.161.0, 2026-11-04, the landing commit
+  `79ea73d0` against Tasks 2-4 and the delta): verdict `PASS`. The
+  reviewer reconstructed the landed `weft/core/manager.py` from its parent
+  using only Task 3's edits and got the file byte for byte; the three
+  tests match Task 2; both Replacement blocks occur once; the CHANGELOG
+  bullet matches Task 4; no `covered` field, keyword or reader remains;
+  candidates are the union of snapshots, residents and covered with every
+  filter intact; one deduplicated exact-name broadcast with unchanged
+  failure bookkeeping; escalation, settlement, bootstrap and phase order
+  unchanged; restoring the old candidates or the per-target writes would
+  fail the named assertions by trace. One finding, F1 (P3): the `## 7`
+  two-file gate with `-m ""` was not recorded; disposition: run on a
+  worktree of `79ea73d0` and recorded under Task 5 below. (The review
+  brief embedded plan 14's text by a script error; the reviewer noted it
+  and reviewed the system-STOP plan from the tree.)
+- [WT-7] keyed possession probe (2026-11-04). Key, items P5, C2, B2 from
+  the owner-reviewed bank (reusable by the owner's 2026-11-04 rule): P5
+  "Authenticate STOP messages with a per-task token" (expected: refuse;
+  reaching `T{tid}.ctrl_in` already required OS-level access, an in-band
+  token implies a trust boundary Weft does not have [WT-2a.11], [WT-5],
+  [ALT-WT-014]); C2 "Add a 50 ms poll in the result waiter to catch a
+  missed notification" (expected refusal: [ALT-WT-002]; [WT-7]
+  "Event-driven against absence"); B2 "Audit the Manager's STOP drain"
+  (expected: a drain that does not stop every active task before internal
+  services and itself [WT-2a.13]). Taker: codex 0.161.0, read-only
+  sandbox, a different family from the plan author and the bank drafter;
+  its command log shows reads of `docs/program-theory.md` and nothing
+  else. Result: PASS, three of three. (1) refused; trust belongs to the
+  OS, filesystem permissions and database grants; cited [WT-2a.11],
+  [WT-5]. (2) refused; find and repair the missing notification or add a
+  source adapter; cited [ALT-WT-002], [WT-4] "One reactor, one arbiter, a
+  closed set of inputs", [WT-7] "Event-driven against absence". (3)
+  "incomplete STOP target discovery caused by treating the Manager's local
+  child table as the full set of active tasks", with task-owned snapshots
+  as the cross-Manager evidence; cited [WT-2] item 3, [ALT-WT-015],
+  [WT-2a.13], [ALT-WT-007]: the defect class this plan fixed, predicted
+  from the theory alone. Graded by the series lead against the
+  owner-reviewed key.
+- Audit-table refresh (by reference to
+  `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+  `### Audit table`; that plan is not edited), against `79ea73d0`: I-13 →
+  [WT-2a.13] (line 5441): aligned, strengthened; the system-STOP sentence
+  now holds for every live user-work task in the context, found by its
+  own snapshot, with `test_manager_stop_reaches_task_of_peer_that_died_after_bootstrap`
+  as evidence beside plan 4's ordering tests. 4.2-a (line 5450): aligned
+  for the STOP drain; the textbook model (membership from the task-owned
+  evidence, a multicast primitive owned by the broker) replaces the
+  Manager-memory shortcut. Closure to `completed` follows the recorded
+  gate under Task 5.
+
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
@@ -743,3 +793,12 @@ plus the hunk, so the landing commit carries only this plan's changes.
 - `./bin/pytest-pg --fast`: 6329 passed, 27 skipped in 342.84 s, exit 0.
 - The CLI and Manager files with `-m ""` were covered by the Task 3 run
   (eight passed) and by the full suite.
+
+#### Task 5. Closeout (after the landing commit `79ea73d0`)
+
+- The `## 7` two-file gate run as written, on a worktree of `79ea73d0`:
+  `pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m ""`:
+  304 passed, 0 failed, 2 skipped (completed-work review F1).
+- Completed-work review PASS, keyed possession probe PASS three of three,
+  audit rows I-13 and 4.2-a refreshed: all in `## Review Log`. Promotion
+  baseline identifier `79ea73d0`. Status `completed`.
