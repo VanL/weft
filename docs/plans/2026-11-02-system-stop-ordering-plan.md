@@ -1619,6 +1619,8 @@ the same change as this file.
 - implementation 2026-11-03: the exact-name broadcast fork was closed on the owner's implement instruction (2026-11-03) with the recommended option: keep per-target STOP writes (the probe showed patterns match only queues that already hold rows). Tasks 1 to 5, 7 and 8 executed from `26cc08da`; task 6 is the rejected variant and was not run.
 - Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range 26cc08da..e266a85a): BLOCKED on F1 (a failed identity probe released a live target as exited) and F2 (snapshot-only completion observation; the terminal event precedes the snapshot, so a failed snapshot append hid published proof): accepted and fixed (tri-state `inspect_host_process`; weft.log.tasks terminal-event interest restored per Task 7). F3 (PID-absence and terminal-event oracles), F4 (one shared phase-1 cleanup deadline), F5 (lower-bound assertion on the stuck-launch guard): accepted and fixed. Publication-order claims in the execution log corrected. Round 2 pending.
 
+- Scoped round 2 (codex 0.161.0, 2026-11-03, range e266a85a..d53929c9): F1, F3, F4, F5 confirmed fixed; the publication-order correction confirmed. BLOCKED on F2 residual (the settlement cursor started at the newest log row, excluding terminal proof published before collection) and F6 (the cursor advanced during iteration, so a page-read failure discarded observed proof and skipped it permanently); F7 (the log-handle closure assertion was vacuous): all accepted and fixed in `3cd931d6`. No round 3 under the owner's one-scoped-round rule; the fix verified by the series lead (tests run, mutations reasoned from the code).
+
 ## Execution log
 
 Plan-authoring evidence (2026-11-02, worktree at `b7eed9f9`, clean):
