@@ -386,7 +386,7 @@ measure properly.
 | PostgreSQL native waiter, listener failure | `_error` stored and raised from `wait_any` (305, 428–429); the wait marks itself degraded (1167) and polls | No hints (PostgreSQL has no data version, plugin.py 841–843) | Unchanged: degraded fallback checks every return; the next wait re-creates the waiter (917) and its entry check reads |
 | PostgreSQL native waiter, a listener connection broken without an error | Notifications stop arriving | No | Unchanged: the native idle return keeps its checks (Owner Decisions item 1) |
 | Any backend, waiter creation failed (`_native_activity_degraded` set at 942, 951) | Polling with or without a data version | Not reliably | Unchanged: degraded fallback checks every return |
-| Any backend, a caller-injected `polling_strategy` (in the repository: tests only, `tests/tasks/test_multiqueue_watcher.py` 1195 and 1484, `tests/helpers/multiqueue_sigint_probe.py` 123) | `BaseWatcher._start_strategy` passes the same change callback to any strategy that has `start` (watcher.py 540–544), so the hint path is the default strategy's | Same as the default strategy | Same gate |
+| Any backend, a caller-injected `polling_strategy` (in the repository: tests only, `tests/tasks/test_multiqueue_watcher.py` 1195 and 1484, `tests/helpers/multiqueue_sigint_probe.py` 123) | `BaseWatcher._start_strategy` passes the same change callback to any strategy that has `start` (watcher.py 540–544); the three repository injections are `PollingStrategy` subclasses that inherit `wait_for_activity`, so their hint path is the default strategy's. A strategy that overrode `wait_for_activity` would own its own hints; none exists in the repository | Same as the default strategy, for the three verified subclasses | Same gate |
 | Any backend, the observation read itself raises (the overrider catches, logs and returns `False`) | The same failure class as the detector row: the database is not readable | Not repeated by this plan | Do nothing (Owner Decisions item 2): the overriders' `except` blocks are unchanged, and the next hinted, deadline or wait-entry return reads |
 
 Conclusion: on every path the design either reads on the return that carries
@@ -685,7 +685,7 @@ D diminution (must be fixed in plan or escalated).
 | 11 | Readiness scans everywhere else | Plan 2's rule | Same | N | existing readiness tests (Task 4 list) |
 | 12 | Idle voluntary context switches, idle manager tree | Plan 2's after-numbers: 10,088 (SQLite) and 20,347 (PostgreSQL) over 30 s at `da2e3b92`; re-measured in Task 0 with the heartbeat now resident | Expected lower on SQLite (fewer broker calls per pass), equal on PostgreSQL. The strategy's own SQLite wake cadence (about 8.7 returns a second) is unchanged | C | Task 0 and Task 6 measurements |
 | 13 | Observation semantics: which queues, which reads, which thread | — | Unchanged | N | — |
-| 14 | A caller-injected `polling_strategy` | Observation on every return | The same gate as the default strategy (the change callback reaches any strategy with `start`, watcher.py 540–544) | C | G2 runs with the default strategy; the sigint probe (`tests/helpers/multiqueue_sigint_probe.py`) still passes |
+| 14 | A caller-injected `polling_strategy` | Observation on every return | The same gate as the default strategy (the change callback reaches any strategy with `start`, watcher.py 540–544; the three repository injections inherit `PollingStrategy.wait_for_activity`) | C | G2 runs with the default strategy; the sigint probe (`tests/helpers/multiqueue_sigint_probe.py`) still passes |
 
 No D row remains. Rows 9 and 10 are owner-decided (A).
 
@@ -750,15 +750,15 @@ return can carry new evidence. One check runs at wait entry, after the waiter
 is registered, so a publication committed before the wait is found without a
 strategy return. After that, a check runs on a strategy return that carries a
 local, native or data-version hint; on a return at the owner's deadline; on
-every native-waiter return, including the strategy's slow safety recheck; on
-and on every return of the degraded and nonpersistent polling fallbacks,
+every native-waiter return, including the strategy's slow safety recheck; and
+on every return of the degraded and nonpersistent polling fallbacks,
 which have no durable change detector. A persistent SQLite return with none
 of these reads nothing: an unchanged `data_version` means no other connection
 committed since the last check, and the owner's own writes are made in turns
-and found by the next wait-entry check. A failed detector check, cache
-refresh or observation read is not retried and opens no later check: on a
-readable database those reads do not fail, and on one that is not readable
-nothing is done. The readiness scan
+and found by the next wait-entry check. The gate adds no retry of its own:
+a failed detector check, cache refresh or observation read opens no later
+check, SimpleBroker's own polling continues unchanged, and on a database
+that is not readable nothing is done. The readiness scan
 keeps its rule: it runs on returns with a local, native or data-version hint
 (before any deadline test), on native-waiter returns before the deadline and
 on fallback returns, and not on a hint-free return at or past the owner's
@@ -899,7 +899,9 @@ next.
      (wrap `simplebroker.watcher.PollingStrategy.wait_for_activity`) and
      `_has_pending_observation` calls. Paste the script into the log.
   3. Observation latency: in the same setup with 0 rows, after the settle,
-     20 upserts from the test thread, 1 s apart; for each, the time from the
+     20 upserts from the test thread, 1 s apart, each with a distinct
+     heartbeat ID (a repeated ID is already a member after its first
+     upsert); for each, the time from the
      write's return to `heartbeat_id in task._registrations`, and the number
      of strategy returns in between. Record median and maximum of both.
   4. Plan 2's `quiet_task.py` (plan 2 lines 1557–1635): readiness probes and
@@ -940,9 +942,10 @@ next.
   process. It does not cover reads made in another process or through a
   method added to SimpleBroker after 8.7.2 (Task 0 re-lists the class's
   methods against the tuples). `test_manager.py` uses the helper in place
-  of its inline wrapper (5531–5547); its assertion
-  `counts == {"reads": 0, "deletes": 0}` reads the two keys it asserted
-  before, now with `queue_exists` counted too.
+  of its inline wrapper (5531–5547); its assertion becomes
+  `counts["reads"] == 0 and counts["deletes"] == 0`, the two keys it
+  asserted before (the helper also returns `whole_database_reads`, which
+  this test does not assert), now with `queue_exists` counted too.
 - **R1** `tests/tasks/test_multiqueue_watcher.py::test_hint_free_persistent_return_reads_no_observation`
   (module is `shared`): an `ObservationWatcher` on a real queue
   (`persistent=True`), with a counter around `_has_pending_observation`.
@@ -1041,7 +1044,10 @@ next.
     `watcher.wait_for_activity(timeout=20.0)` on the test thread, measure the
     elapsed time, join the writer. Assert `registrations == [[observation.name]]`,
     `observed_timestamp` equals the written ID, elapsed < 10.0 s, and the
-    strategy calls after the write are at most 2 (record the count).
+    strategy calls after the write are at most 2 (record the count). The
+    write is not aligned with a detector check on purpose; the bound of 2
+    covers every alignment (found on the same return, or on the next one
+    when the commit lands in a pass's final chunk).
     Mutations: dropping `data_version_hint` from the gate fails the
     persistent SQLite case (observed only at the 20 s deadline); dropping
     `transient_fallback` fails the nonpersistent case (the baseline hint
@@ -1108,8 +1114,9 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
   `::test_manager_stop_skips_terminal_and_internal_adopted_snapshots`,
   `::test_manager_stop_keeps_target_whose_identity_probe_fails`,
   `::test_manager_stop_releases_target_on_terminal_log_event`,
-  `::test_manager_stop_releases_target_on_terminal_event_before_collection`,
-  `::test_manager_stop_keeps_terminal_proof_across_a_failed_log_page`;
+  `::test_manager_stop_releases_target_on_terminal_event_before_collection`
+  (`test_manager_stop_keeps_terminal_proof_across_a_failed_log_page` was
+  removed in `c857e10b` as read-failure armor and is no longer a target);
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
   `::test_manager_stop_reaches_task_under_another_live_manager`.
 - Heartbeat: all of `tests/tasks/test_heartbeat.py`, and
@@ -1194,9 +1201,9 @@ Re-run, unchanged, on SQLite and with `./bin/pytest-pg`:
   child processes. The strategy is stubbed only in R1, R7 and G3 to force a
   return shape that a real strategy produces nondeterministically (a
   hint-free return, a degraded return, a native-waiter return with no
-  hint); every other test uses the real strategy. No fault is injected:
-  the owner ruled the read-failure paths out of scope (Owner Decisions
-  item 2).
+  hint); every other test uses the real strategy. No broker-read fault is
+  injected (G3's waiter-creation failure is a different seam): the owner
+  ruled the read-failure paths out of scope (Owner Decisions item 2).
 - Counting boundary: R2 counts at the broker class (the class that defines
   `peek_many` in a live connection's MRO), as plan 6's Manager test does:
   every call, in the counting process, of a `BrokerCore` method that reads
@@ -1256,8 +1263,10 @@ data migration exists. The [CC-2.1] text and the code revert together.
 - `weft/core/queue_wait.py` (the command-side waiter) and Taut's watcher copy.
 - Any handling of a database that is no longer readable (a failed
   `PRAGMA data_version`, `refresh_last_ts()` or observation read): the
-  owner ruled "do nothing" (Owner Decisions item 2); SimpleBroker's own
-  tenth-failure `RuntimeError` remains the exit.
+  owner ruled "do nothing" (Owner Decisions item 2). SimpleBroker's own
+  behavior on such failures is unchanged: a raised detector failure counts
+  toward its tenth-failure `RuntimeError`, while a suppressed SQLite error
+  returns `None` and is not counted (`## Context`, lines 310–316).
 - Plan 6's closure.
 
 ## Revision Log
@@ -1267,10 +1276,35 @@ data migration exists. The [CC-2.1] text and the code revert together.
 | 2026-11-03 | Round 1 (codex 0.161.0, 2026-11-03): F1–F8 accepted and applied; see Review Log | Cross-family plan review round 1 |
 | 2026-11-04 | Owner ruling on the underlying reads: F1's flag-first callback, F2's reporting strategy subclass and the round-0 retry flag (Task 3) declined; the SimpleBroker upstream item declined; R3–R6, R8, R9 removed; register rows 9, 10, 14 rewritten and 15, 16 removed; [CC-2.1] delta shortened; Manager and heartbeat files out of the edit set | "Neither"; "Refesh last ts is also not going to fail on a reasonable sqlite"; "If those underlying reads fail, do nothing is the correct response" (Owner Decisions item 2) |
 | 2026-11-04 | `3c7c6add` | Task 2 note, Task 3, Owner Decisions, Review Log, Revision Log | Attribution corrected: the owner ruled on the underlying reads; the author declined the round-1 remedies under those rulings. Wording only. | No. |
+| 2026-11-04 | `734a89c9` | [CC-2.1] delta, `## Out of Scope`, hint table, register row 14, Tasks 0, 1, 4, Testing Plan, Review Log | Round-2 F9–F11 and four observations applied; wording and one removed test target; no design change. | No. |
 
 ## Review Log
 
-Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner ruled on the underlying reads, and the author declined the F1 and F2 remedies and the Task 3 retry flag under that ruling (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 pending on this revision.
+Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner ruled on the underlying reads, and the author declined the F1 and F2 remedies and the Task 3 retry flag under that ruling (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 done; see the entry below.
+
+- Cross-family scoped round 2 (codex 0.161.0, 2026-11-04, the plan at
+  `734a89c9`, unit = the delta after the declines): verdict `no blocker`.
+  F9 (P3): "not retried" overstated the change and the tenth-failure
+  `RuntimeError` is not a general exit (suppressed SQLite errors return
+  `None` uncounted); fixed in plan, [CC-2.1] delta and `## Out of Scope`.
+  F10 (P3): the injected-strategy claim is proved only for the three
+  repository subclasses, which inherit `PollingStrategy.wait_for_activity`;
+  fixed in plan, hint table and register row 14, claim limited. F11 (nit):
+  stray "on" in the delta; fixed. Observations applied: Task 4 named
+  `test_manager_stop_keeps_terminal_proof_across_a_failed_log_page`,
+  removed in `c857e10b`, now noted as no longer a target; the
+  `test_manager.py` assertion now selects the two keys it asserted before
+  rather than equating the three-key helper result; Task 0 measurement 3
+  uses a distinct heartbeat ID per sample; G2's deliberate non-alignment of
+  the write with a detector check is stated with the bound that covers it;
+  "no fault is injected" narrowed to broker-read faults. Round 2 confirmed:
+  no working-detector path observes a publication later than one strategy
+  return; the three overriders keep their contracts and the override
+  inventory is complete; R1 and R2 are genuine RED, G1–G3 and R7 are
+  genuine guards; both quoted [CC-2.1] spans match verbatim and the
+  `## Related Plans` anchor is now at line 1314 (bullet 1318); no operative
+  step still assumes a declined remedy; class 5 with hardening stands.
+  Review before implementation is complete.
 
 - Cross-family round 1 (codex 0.161.0, 2026-11-03, plan text at `b85b798b`):
   BLOCKED on F1 (P1: SimpleBroker advances its data-version baseline before
