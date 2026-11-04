@@ -30,13 +30,13 @@ There are currently 65 plan files in this directory.
 | [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `completed` | none |
 | [`2026-11-03-watcher-hint-gated-observation-plan.md`](./2026-11-03-watcher-hint-gated-observation-plan.md) | Reactor Wait: Observation Checks Only on Evidence | `completed` | none |
 | [`2026-11-03-control-replies-only-on-request-plan.md`](./2026-11-03-control-replies-only-on-request-plan.md) | Control Replies Only on Request: Outcomes Are Broadcast | `completed` | none |
-| [`2026-11-03-family-scheduler-frontier-ring-plan.md`](./2026-11-03-family-scheduler-frontier-ring-plan.md) | Family Scheduler: Frontier Ring and Contracted Ancestry | `promoted` | none |
+| [`2026-11-03-family-scheduler-frontier-ring-plan.md`](./2026-11-03-family-scheduler-frontier-ring-plan.md) | Family Scheduler: Frontier Ring and Contracted Ancestry | `completed` | none |
 | [`2026-11-02-cli-client-surface-parity-plan.md`](./2026-11-02-cli-client-surface-parity-plan.md) | CLI and Client Surface Parity, and the Shell Refusal Test | `completed` | none |
 | [`2026-11-02-docs-and-broker-boundary-plan.md`](./2026-11-02-docs-and-broker-boundary-plan.md) | Docs and the Broker Boundary: Security Account and Layer Ownership | `completed` | none |
 | [`2026-11-02-python-craft-late-imports-plan.md`](./2026-11-02-python-craft-late-imports-plan.md) | Python Craft: Late Imports and the Expert-Developer Test (owner decision first) | `completed` | none |
 | [`2026-11-02-reactor-edge-timer-floors-plan.md`](./2026-11-02-reactor-edge-timer-floors-plan.md) | Reactor Edges: Replace Timer Floors with Readiness Waits | `completed` | none |
 | [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `promoted` | none |
-| [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `promoted` | none |
+| [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `completed` | none |
 | [`2026-11-02-test-suite-structure-plan.md`](./2026-11-02-test-suite-structure-plan.md) | Test Suite: Release-Tool Tests and Structural Flakiness (owner decision first) | `draft` | none |
 | [`2026-11-02-tid-display-encoding-plan.md`](./2026-11-02-tid-display-encoding-plan.md) | TID Display Encoding: Lossless Rendering Everywhere | `completed` | none |
 | [`2026-11-02-program-theory-reconciliation-plan.md`](./2026-11-02-program-theory-reconciliation-plan.md) | Program Theory Reconciliation: Hub Propagation, Four-Way Balance, and Adoption | `completed` | none |

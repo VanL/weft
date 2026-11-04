@@ -1,6 +1,6 @@
 # Family Scheduler: Frontier Ring and Contracted Ancestry
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8] (one sentence added; mapping bullet added); docs/specifications/07-System_Invariants.md [MANAGER.18] (the same sentence, because its paragraph is a verbatim copy of the [MA-1.8] paragraph), [MANAGER.16] and [OBS.6] (unchanged, constraint); docs/specifications/05-Message_Flow_and_State.md [MF-5] (unchanged, constraint); docs/program-theory.md [ALT-WT-016] (owner-gated wording)
 Superseded by: none
 
@@ -1038,7 +1038,9 @@ D diminution (must be fixed in plan or escalated).
 | 16 | Calls between `recover(..., defer=True)` and `finish_recovery`, including a deferred former resident whose `_up` entry survived | `retire` pops the resident and merges its bucket; `launched` filters the deferred parent into its path | the same outcomes once `finish_recovery` runs: `retire` of the deferred resident merges the bucket and leaves the frontier to the rebuild; `retire` beneath it contracts to the nearest registered ancestor and merges its bucket into the deferred resident, as today; `launched` attaches beneath the nearest registered ancestor until the rebuild repairs it; nothing raises | N | T13, T14, T15; E25, E26 |
 
 No D row. Row 9 is N only if Task 6 confirms it; row 15 is C only if Task 6
-confirms it; row 10 is reported with its measured maximum.
+confirms it; row 10 is reported with its measured maximum. (Task 6 found
+row 9 D on the 1,024-sibling shape; the owner ruled it A on 2026-11-04;
+see §10 O2.)
 
 ## Deviation Log
 
@@ -2260,6 +2262,11 @@ test (T12).
   the control's 1.000, per-round 0.975–1.016). Register row 9 is therefore
   D on that shape; under the Task 6 Stop-if this is reported to the owner
   untuned (execution log, Task 6).
+  Ruled by the owner on 2026-11-04 ("Accept both"): the 4.3 % slower
+  checkpoint derivation on the 1,024-sibling shape, against retire and
+  recovery over a hundred times faster, is an accepted observable
+  difference, not a diminution. Register row 9 is A on that shape and N
+  on the other four.
 
 ## Review Log
 
@@ -2323,6 +2330,8 @@ test (T12).
 - owner acceptance applied 2026-11-03 ("I accept the theory edits"): the [ALT-WT-016] Replacement promoted into docs/program-theory.md (Owner Decision 1 closed as accepted); Status moved to promoted. Still open for completed: the register row 9 ruling and the [WT-7] possession probe.
 
 - [WT-7] keyed possession probe (2026-11-04). Key, items P1, C1, B3 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P1 "Retry a failed task up to N times with backoff" (expected: above Weft by re-submission; nearest primitive the reserved-queue keep/clear disposition [WT-2a.7]; an in-Manager retry counter makes Weft a workflow engine [WT-5]); C1 "Cache task status in a Manager-local table so `weft task list` is fast" (expected refusal: [WT-2a.2], [ALT-WT-010], [ALT-WT-019]; correct move an observer-addressed read model over queues or faster peeks); B3 "Audit the family scheduler's retire path" (expected: frontier structures rebuilt on retire instead of the O(1) consume-on-dispatch update [ALT-WT-016]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) above Weft as application policy through a coordinating task, a new identity per attempt; nearest primitive the reserved queue's keep (task-level REQUEUE removed); cited [WT-5], [WT-2], [WT-2a.7], [ALT-WT-006], [WT-2a.1], [WT-2a.3]. (2) refused as process-local state becoming status truth; cited [WT-2a.2], [ALT-WT-010], [ALT-WT-020], "Queues carry facts; processes carry hints" ([ALT-WT-019] not cited but entailed); correct move the newest-valid snapshot reader over queues. (3) repeated global work on retirement, scanning or rebuilding the frontier graph or moving pending children, quadratic under an exit burst, against pointer contraction and amortized compaction; cited [ALT-WT-016], [WT-7]. The probe is spent for this plan; `completed` still waits on the owner's ruling on register row 9 (the 1.043 checkpoint payload proxy on the 1,024-sibling shape) and the 4.2-a audit row that follows it, so the plan stays `promoted`.
+
+- Register row 9 ruled (owner, 2026-11-04, "Accept both"): the 1.043 checkpoint payload proxy on the 1,024-sibling shape is an accepted observable difference (A), not a diminution. Audit-row refresh, by reference to `docs/plans/2026-11-02-program-theory-reconciliation-plan.md` `### Audit table` row 4.2-a (line 5450; that plan is not edited), against the landed tree (`ab24c416`, theory `4ac6a1e7`): aligned. `weft/core/family_scheduling.py::FamilyScheduler.retire` and `::finish_recovery` now contract scheduling-parent pointers and the cursor ring in amortized O(log n) with wholesale compaction past twice the live count, the pointer update [ALT-WT-016] describes; the retire/recovery drift the row recorded is gone. Evidence: Task 6's measurements (wide-shape `retire` and `finish_recovery` over a hundred times faster; `select` and drain rows within the control band), `tests/core/test_family_dispatch_scaling.py::test_completion_to_next_real_launch_does_not_scan_sibling_backlog` (dispatch side, unchanged), and the plan's T13 and T14 ring tests. With this ruling, the refresh, the completed-work review and the [WT-7] probe recorded above, the plan closes as `completed`.
 
 ## Execution log
 

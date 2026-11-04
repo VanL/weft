@@ -1,6 +1,6 @@
 # TaskMonitor: One Clock, Not Two
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-5]; docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.5] (unchanged, constraint); docs/specifications/03-Manager_Architecture.md [MA-1] item 7; docs/specifications/00-Quick_Reference.md (environment table, global queue table); docs/specifications/07-System_Invariants.md [QUEUE.7] (one sentence added), [IMPL.8]–[IMPL.11], [OBS.13], [MANAGER.15]–[MANAGER.18] (constraints, unchanged)
 Superseded by: none
 
@@ -2919,6 +2919,8 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 
 - [WT-7] keyed possession probe (2026-11-04). Key, items P2, C2, B4 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P2 "A `weft top` daemon that keeps a live index of task status" (expected: a stateless CLI read model over queues is fine; a daemon with its own index is a second control plane [WT-5], "Observable with standard tools", [WT-2a.2]; a view, never a store); C2 "Add a 50 ms poll in the result waiter to catch a missed notification" (expected refusal: [ALT-WT-002]; [WT-7] "Event-driven against absence": name the event that cannot arrive before adding a timer); B4 "Audit the service worker and interactive loops" (expected: fixed timer floors standing in for readiness waits [WT-2a.6], [WT-7] "Event-driven against absence", [ALT-WT-021]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) a CLI display over authoritative queues with any index a disposable hint; a daemon owning status truth refused; cited [WT-2a.2], [WT-5], "Observable with standard tools", [ALT-WT-020]. (2) refused; find the missing wake source and repair its notification, a timer needs real clock work or justified absence detection; cited [ALT-WT-002], [WT-2a.6], "A quiet task does nothing", [WT-7] "Event-driven against absence". (3) work driven by competing clocks, polling loops or shared state instead of one owner's inputs, including a heartbeat duplicating a local clock and timer-polled pipe supervision; cited [WT-2a.6], [ALT-WT-004], [ALT-WT-005], [ALT-WT-021], "Subprocess and stream supervision is readiness-driven, not timer-polled". The probe is spent for this plan; the audit refresh (4.3-a) is recorded above. `completed` still waits on the owner's acceptance of the drafted rejected-alternative entry "Internal services started on demand and stopped when idle" (proposed in this plan, not in `docs/program-theory.md`), so the plan stays `promoted`.
 
+- Theory entry accepted (owner, 2026-11-04, "Accept both"): the rejected-alternative entry drafted after the redirect, "Internal services started on demand and stopped when idle", is in `docs/program-theory.md` as [ALT-WT-023] (theory commit `d0dd0a63`, applied verbatim from the Replacement block above). With the [WT-7] probe and the 4.3-a audit refresh recorded above, the plan closes as `completed`.
+
 ## Execution log
 
 Plan-authoring resolution checks (2026-11-02, `b7eed9f9`, author). Each
@@ -3639,10 +3641,12 @@ Proposed replacement for the `docs/program-theory.md` [ALT-WT-004]
   deletes that queue (this supersedes the `da5fa0f6` gate).
 ```
 
-Proposed new entry for `docs/program-theory.md`, after [ALT-WT-021]:
+Entry for `docs/program-theory.md`, after [ALT-WT-022] (drafted as [ALT-WT-022]; accepted by the owner on 2026-11-04, "Accept both"; numbered [ALT-WT-023] because plan 12's lossy TID short form entry took the drafted number; landed in the theory commit `d0dd0a63`).
+
+Replacement (`docs/program-theory.md`):
 
 ```text
-### [ALT-WT-022] Internal services started on demand and stopped when idle
+### [ALT-WT-023] Internal services started on demand and stopped when idle
 
 - Kind: tried and discarded (built for the heartbeat by `2026-11-02-task-monitor-heartbeat-clock-plan.md`, then removed by the owner's redirect of 2026-11-03)
 - Disposition: rejected

@@ -57,8 +57,8 @@ This section comes first because the owner's instruction for this fix is
   current consequence ("the strategy, not Weft, owns the pass length") is kept:
   this plan does not touch the strategy's pass, burst or backoff; it stops
   Weft attaching a broker read to every pass.
-- Draft [ALT-WT-022] "Internal services started on demand and stopped when
-  idle", proposed in plan 6 (`docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`
+- [ALT-WT-023] "Internal services started on demand and stopped when
+  idle" (drafted as [ALT-WT-022] in plan 6, landed 2026-11-04 in `d0dd0a63`), proposed in plan 6 (`docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`
   lines 3642–3657, not yet applied to `docs/program-theory.md`). Its current
   consequence reads "internal services are always on under the canonical
   Manager and idle when not needed: no timer and no poll with nothing to do,
@@ -143,7 +143,7 @@ code lagged it. One tension is recorded for the owner rather than resolved by
 editing theory text: on PostgreSQL the resident heartbeat will still read its
 table on each native-waiter return (SimpleBroker's "slow safety recheck",
 [CC-2.1] line 196), about once every 1 to 2 s. Whether that counts as "a poll
-with nothing to do" under the draft [ALT-WT-022] is `## Owner Decisions`
+with nothing to do" under [ALT-WT-023] (plan 6's draft, landed 2026-11-04) is `## Owner Decisions`
 item 1. Either answer leaves the theory text as drafted: if the owner keeps
 the recheck (the recommendation), the recheck has a job (recovering
 evidence the notification channel cannot carry); if the owner removes it,
@@ -197,8 +197,8 @@ Source specs:
 
 Theory and guidance:
 - `docs/program-theory.md` [WT-0], [WT-2], [WT-2a], [WT-4], [WT-5], [WT-7],
-  [ALT-WT-002], [ALT-WT-009], [ALT-WT-010], [ALT-WT-021]; draft [ALT-WT-022]
-  in plan 6 (lines 3642–3657)
+  [ALT-WT-002], [ALT-WT-009], [ALT-WT-010], [ALT-WT-021]; [ALT-WT-023]
+  (plan 6's draft, landed 2026-11-04 in `d0dd0a63`)
 - `docs/agent-context/decision-hierarchy.md` [DOM-15]
 - `docs/agent-context/runbooks/writing-plans.md`, `hardening-plans.md`,
   `review-loops-and-agent-bootstrap.md`
@@ -1512,7 +1512,8 @@ Line-number re-verification (`grep -n`):
   [ALT-WT-022] in `docs/program-theory.md` (line 964) is now "A lossy TID
   short form"; the plan's "draft [ALT-WT-022]" refers to plan 6's
   unapplied draft text of that id and is not the applied entry. No theory
-  edit is made.
+  edit is made. (2026-11-04, later: that draft landed as [ALT-WT-023] in
+  `d0dd0a63` on the owner's acceptance; the references above now name it.)
 - `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
   `### Audit table` at 5409 holds.
 
