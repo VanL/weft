@@ -2876,6 +2876,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - owner correction applied 2026-11-03: the tension with [ALT-WT-019] (queues as unconsumed tables or event logs) made explicit in §4, the Source Documents, the read-first list, and the [MF-3.2] rule: a registration row is an active leased request, one token per live `heartbeat_id`, consumed at the moment the request ends (cancel or lease expiry); the reader is not the consumer; no row outlives its request, no tombstone or expired-marker record exists, no sweep runs; the upsert's older-row delete is the second half of a replacement finished by the next build, not a history collection. Plan metadata gate and `bin/check-doc-paths` re-run.
 
 - owner closures recorded 2026-11-03 at implementation: F2 closed on the owner's implement instruction (2026-11-03) with the recommended option: (a), the grid anchored at the first cycle start; F3 closed on the owner's implement instruction (2026-11-03) with the recommended option: overlap recorded, the older draft not touched; the F5 first-emission note closed on the owner's implement instruction (2026-11-03) with the recommended option: no first emission is guaranteed, a registrant resubmits whenever it likes, no renewal protocol; F4 accepted by the owner (2026-11-03: "I accept the theory edits").
+- Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range ecf7ad42..db824087): BLOCKED on F1 (both registration decoders caught `JSONDecodeError` only, so an oversized integer in a row raised `ValueError` past the malformed-row disposition and could crash-loop the emitter): accepted and fixed in `1409b4f2`, with the T6 case. F2 (literal planned assertions absent in H1, H3, T8, T9, T10): accepted and applied. The reviewer confirmed all 18 Replacement blocks verbatim, the lease model as ruled, the rebuild continuation and helper split as behavior-preserving, no remaining readers of the removed events, and the heartbeat interest composing with plan 4's drain interests; it corrected the log's predicate-call-rate attribution (a call rate, not a turn rate; no new poll interval). Round 2 pending.
 
 ## Execution log
 
@@ -3380,12 +3381,20 @@ thread, 5 s settle, then a 30 s quiet window; SQLite.
 | 10 | 120 | 120 |
 
 The early return at the first unexpired row keeps each call at one row
-with live registrations. The call rate (about 4 per second) is the idle
-Manager's own turn rate: a 10 s caller count at zero registrations
-attributed 57 of 61 calls to `_pending_service_probes_for_scope` (each
-turn) and 4 to `_reconcile_managed_services`; with an empty queue each call
-is one empty peek, where the old gate read a boolean. Recorded as the
-measured cost; no cache or registry is added ([ALT-WT-010]).
+with live registrations. Correction (cross-family completed-work review,
+round 1): about 4 calls per second is a predicate call rate, not the idle
+Manager's turn rate. One wake can reach the predicate several times
+(`run_until_stopped` → turn → `_run_managed_service_convergence` →
+`_managed_service_convergence_active_reasons` →
+`_pending_service_probes_for_scope` → `_heartbeat_registrations_present`,
+and independently `Manager.next_wait_timeout`); the idle wakes themselves
+come from the existing one-second leadership and family-repair deadlines
+and the five-second stable-service audit. No new poll interval exists. The
+cost is one broker read per call where the old gate read a boolean; an exact
+attribution would need turns and timeout causes counted separately. (A 10 s
+caller count at zero registrations attributed 57 of 61 calls to
+`_pending_service_probes_for_scope` and 4 to `_reconcile_managed_services`.)
+Recorded as the measured cost; no cache or registry is added ([ALT-WT-010]).
 
 Theory edit (F4): [ALT-WT-004] Kind, Current consequence, and Evidence
 applied verbatim as Task 5 words them, accepted by the owner on 2026-11-03
@@ -3416,3 +3425,32 @@ by the implementer (the dispatch forbids delegation); left to the series
 lead.
 
 Final gates at the bookkeeping commit: recorded in the implementer's report.
+
+Review round 1 fixes (2026-11-03).
+
+- F1: `weft/core/tasks/heartbeat.py::HeartbeatTask._peek_registration_rows`
+  and `weft/core/heartbeat.py::_delete_rows_for_id` now catch `ValueError`
+  (which `json.JSONDecodeError` subclasses) from `json.loads`, so a row
+  whose integer exceeds Python's 4,300-digit conversion limit takes the
+  malformed-row path: rejected with `heartbeat_request_invalid` and deleted
+  by exact ID at the build, skipped by the helpers' id scan. T6
+  (`test_heartbeat_invalid_registration_row_is_deleted_and_reported`) gains
+  a row with a 5,000-digit `lease_seconds` and an unrelated upsert and
+  cancel written while it is present; it expects six invalid events.
+  Mutation caught: catching only `JSONDecodeError`. RED, before the fix: the
+  unrelated `upsert_heartbeat` raised `ValueError: Exceeds the limit (4300
+  digits) for integer string conversion: value has 5000 digits` in
+  `_delete_rows_for_id`; with only the helper fixed, `process_once()` raised
+  the same `ValueError` from `_peek_registration_rows`. GREEN after both.
+  The Manager predicate and `weft status` already classify that row as
+  invalid (`model_validate_json` raises `ValidationError`, checked).
+- F2: H1 and H3 assert the `None` returns (through a `Callable[..., object]`
+  alias, since mypy rejects a direct check of a `-> None` call). T8 and T9:
+  the plan's "pause ack" predates plan 3, which removed PAUSE
+  acknowledgement rows; both now assert the `control_pause` lifecycle event
+  (plan 3's observable outcome) and keep the paused-state check. T10 asserts
+  the expiry event's `message_id` is B's in its expired and failed-delete
+  cases.
+- The cost-reduction early return in `_pending_service_probes_for_scope` was
+  not applied (withdrawn by the coordinator pending an owner redirect of how
+  the Manager reads `weft.state.heartbeats`).
