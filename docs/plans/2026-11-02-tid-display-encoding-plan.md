@@ -1,6 +1,6 @@
 # TID Display Encoding: Lossless Rendering Everywhere
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/07-System_Invariants.md [OBS.4], [OBS.5], [OBS.6], [OBS.8], [IMMUT.3], [LIVENESS.R5]; docs/specifications/01-Core_Components.md [CC-3.2]; docs/specifications/10-CLI_Interface.md [CLI-1.2.3]; docs/specifications/14-Python_API_Surfaces.md [PY-2]; docs/program-theory.md [WT-2a.1], [WT-6]
 Superseded by: none
 
@@ -1749,6 +1749,8 @@ one commit (strategy B).
      `docs/plans/README.md`, `tests/core/test_client.py`, and the three
      Task 6 selection-test files; no CI workflow file, owner ruling 4); flip `Status:` and the index row to `completed` in the same
      change; record the commit SHA as the promotion baseline identifier.
+
+- [WT-7] keyed possession probe (2026-11-04). Key, items P2, C4, B3 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P2 "A `weft top` daemon that keeps a live index of task status" (expected: a stateless CLI read model over queues is fine; a daemon with its own index is a second control plane [WT-5], "Observable with standard tools", [WT-2a.2]; a view, never a store); C4 "Keep the old ten-digit TID short form decodable for one release" (expected refusal: [WT-2a.9], [ALT-WT-012]; a bounded forward migration, not a dual decoder); B3 "Audit the family scheduler's retire path" (expected: frontier structures rebuilt on retire instead of the O(1) consume-on-dispatch update [ALT-WT-016]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) a CLI live view over queue facts and process titles, the daemon-held index refused as a second control plane; cited "Observable with standard tools", [WT-5], [WT-7] "Inspection needs Weft-only tooling", [WT-2a.2]. (2) refused; one current contract, no tolerance window, the ten-digit form lossy; all producers and consumers together, bounded forward migration only; cited [ALT-WT-012], [WT-2a.9], [WT-2a.1], [ALT-WT-022]. (3) backlog-dependent retirement work, scanning or moving pending children or tombstone-driven cleanup; cited [ALT-WT-016], [ALT-WT-019], "Consume-to-disappear queues, not relational tables". The audit refresh (I-1) and the completed-work reviews (round 1 and the scoped round 2) are recorded above. The plan closes as `completed`.
 
 ## 6. Testing Plan
 

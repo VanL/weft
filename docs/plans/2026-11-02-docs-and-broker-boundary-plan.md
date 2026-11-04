@@ -1,6 +1,6 @@
 # Docs and the Broker Boundary: Security Account and Layer Ownership
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/00-Overview_and_Architecture.md "Observability and Security"; docs/specifications/04-SimpleBroker_Integration.md [SB-0.1], [SB-0.2], [SB-0.3], [SB-0.4], [SB-0.4a]
 Superseded by: none
 
@@ -742,6 +742,8 @@ Reviewer inputs when run: this plan including §5, the seven target spec
 files at `b7eed9f9`, `docs/program-theory.md` [WT-2a.8], [WT-2a.11], [WT-5],
 [ALT-WT-014], and the two SimpleBroker sources named in §2.
 - Cross-family review of the landed implementation (codex 0.161.0, 2026-11-03, range da957a29..f2d9b36f): no blocker. All ten Replacement blocks verified byte-exact against the approved plan and present once in their targets; E9 (149 paths, none missing) and E10 (245 references, none dead) reproduced; the eight repaired mapping pointers confirmed to name live owners by direct inspection; an in-memory reversion of spec 00 produces the two containment failures `bin/check-doc-paths` is expected to raise. Task 5's keyed possession probe recorded as unrun by accepted constraint; Status stays `promoted` until the owner supplies the key.
+
+- [WT-7] keyed possession probe (2026-11-04). Key, items P3, C3, B5 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P3 "Per-queue message priority" (expected: SimpleBroker, not Weft [WT-2a.8], [WT-5]); C3 "Give the pipeline subsystem its own MODULE-THEORY.md" (expected refusal: [WT-7] "Module theory used to excuse a divergent subsystem"; pipelines compose from existing [WT-3] rows); B5 "Audit the client against the CLI" (expected: verbs present on the CLI with no client counterpart, "The client mirrors the CLI"). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) SimpleBroker, as a queue mechanic; cited [WT-2a.8], [WT-5], "Push a concern down when it belongs lower". (2) refused; a pipeline is a task whose stages are ordinary tasks; cited [WT-3], [WT-7] "Module theory used to excuse a divergent subsystem". (3) missing or differently shaped client verbs and divergent behavior from duplicate implementations, with `weft init` the stated exception; cited "The client mirrors the CLI", "Shared function, shared code". The audit refresh is recorded above (Task 5); the completed-work review is recorded above. The plan closes as `completed`.
 
 ## Execution log
 

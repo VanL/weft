@@ -1,6 +1,6 @@
 # Python Craft: Late Imports and the Expert-Developer Test (owner decision first)
 
-Status: promoted
+Status: completed
 Source specs: None for behavior — code craft under existing contracts; edits CLAUDE.md §4.2 (a third permitted late-import reason, Task 3), the docs/program-theory.md [WT-3] ownership-table row "Agent runtime and session" (module locator only, Task 13), and path-only `_Implementation mapping_` notes in six spec files (Task 13); new comments cite docs/specifications/10-CLI_Interface.md [CLI-5] and docs/specifications/13-Agent_Runtime.md [AR-7]
 Superseded by: none
 
@@ -1357,6 +1357,8 @@ refresh, by reference, of the audit-table rows in
 table`) whose evidence names a file this plan touched, starting with row
 4.4-c, recorded in `## Execution log` without editing that plan. Then the
 pre-landing different-family review that +P requires, over the landed diff.
+
+- [WT-7] keyed possession probe (2026-11-04). Key, items P1, C1, B4 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P1 "Retry a failed task up to N times with backoff" (expected: above Weft by re-submission; nearest primitive the reserved-queue keep/clear disposition [WT-2a.7]; an in-Manager retry counter makes Weft a workflow engine [WT-5]); C1 "Cache task status in a Manager-local table so `weft task list` is fast" (expected refusal: [WT-2a.2], [ALT-WT-010], [ALT-WT-019]; correct move an observer-addressed read model over queues or faster peeks); B4 "Audit the service worker and interactive loops" (expected: fixed timer floors standing in for readiness waits [WT-2a.6], [WT-7] "Event-driven against absence", [ALT-WT-021]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) above Weft as caller policy through a supervising task that submits fresh attempts; nearest primitives a task spawning tasks and the keep/clear disposition, Manager requeue only for launch failure; cited [WT-5], [WT-2], [WT-3], [WT-2a.3], [WT-2a.7], [ALT-WT-006]. (2) refused; status must not depend on one process's private state; read authoritative queues through the shared snapshot reader and measure before new machinery; cited [WT-2a.2], [ALT-WT-010], [ALT-WT-020], [ALT-WT-015], "Measure; do not bake in inefficiency". (3) missing notifications masked by polling caps, competing waits or clocks, workers touching another owner's state, timer-polled reads and unbounded buffering in interactive loops; cited [WT-2a.6], [ALT-WT-002], [ALT-WT-004], [ALT-WT-005], [ALT-WT-021]. The audit refresh and the completed-work review are recorded above; the pre-landing different-family rounds (round 1, the no-cycles round, and the owner-ruling round, all codex) stand as the +P pre-landing review. The plan closes as `completed`.
 
 ## Rollback
 

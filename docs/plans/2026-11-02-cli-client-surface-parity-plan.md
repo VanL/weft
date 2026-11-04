@@ -1,6 +1,6 @@
 # CLI and Client Surface Parity, and the Shell Refusal Test
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/09-Implementation_Plan.md [IP-1]; docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X1]; docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-2], [PY-3], [PY-4]; docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-6]; docs/program-theory.md [WT-4] §4.4
 Superseded by: none
 
@@ -1001,6 +1001,8 @@ Stop and re-evaluate if any of the following happens: the client method
 wants to import `weft.core.*`; a `cmd_*` signature or result must change; a
 test needs a mock around queues or brokers; or the alternate-context test
 can only pass by rebuilding a context from a path.
+
+- [WT-7] keyed possession probe (2026-11-04). Key, items P3, C3, B5 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P3 "Per-queue message priority" (expected: SimpleBroker, not Weft [WT-2a.8], [WT-5]); C3 "Give the pipeline subsystem its own MODULE-THEORY.md" (expected refusal: [WT-7] "Module theory used to excuse a divergent subsystem"; pipelines compose from existing [WT-3] rows); B5 "Audit the client against the CLI" (expected: verbs present on the CLI with no client counterpart, "The client mirrors the CLI"). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) SimpleBroker; cited [WT-2a.8], [WT-5], "Push a concern down when it belongs lower". (2) refused; pipelines are tasks whose stages are ordinary tasks; cited [WT-3], [WT-7] "Module theory used to excuse a divergent subsystem". (3) CLI verbs missing from the client or diverging behavior from separate implementations, `weft init` the explicit exception; cited "The client mirrors the CLI", "Shared function, shared code". The audit refresh (Task 9) and the completed-work review are recorded above. The plan closes as `completed`.
 
 ## 10. Testing Plan
 
