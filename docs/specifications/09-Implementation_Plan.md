@@ -82,6 +82,8 @@ packages.
 - `weft/core/agents/backends/__init__.py` owns built-in backend registration
   only; backend classes remain owned by their leaf modules.
 
+_Implementation mapping_: `weft/client/_namespaces.py::SystemNamespace.prune` over `weft/commands/prune.py::prune_system`; `weft/client/_namespaces.py::SystemNamespace.task_monitor` over `weft/commands/task_monitor.py::task_monitor_system`; the [IP-1.1] client API parity matrix's verb coverage is enforced by `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart`.
+
 ## Boundary Inventory [IP-1.0]
 
 The current implementation is intentionally layered. The important rule is not

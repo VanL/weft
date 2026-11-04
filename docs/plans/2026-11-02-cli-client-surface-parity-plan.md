@@ -541,6 +541,28 @@ under `## Related Plans` in `docs/specifications/09-Implementation_Plan.md`,
 `docs/specifications/14-Python_API_Surfaces.md`. Slice S adds only the spec
 14 backlink; slice C adds the other two.
 
+### [IP-1] and [CLI-X1] — implementation mappings (completed-work review round 1, F2)
+
+Added after promotion (see `## Revision Log`, 2026-11-03 row 2). Neither
+section declared an `_Implementation mapping_`, so every code citation of
+[IP-1] or [CLI-X1], the four new ones included, drew backstitch BSC003. The
+mappings record traceability that `CLAUDE.md` requires; they add no
+normative behavior. The [IP-1] line is placed at the end of the
+"Current Ownership [IP-1]" list (the parity matrix itself sits in [IP-1.1],
+"Public Python Client Surface", but the code and the promoted text cite it as
+[IP-1]); it is inserted, nothing is replaced. The [CLI-X1] line is appended
+after the paragraph that ends "fails when a verb has neither.".
+
+Replacement (`docs/specifications/09-Implementation_Plan.md`):
+```markdown
+_Implementation mapping_: `weft/client/_namespaces.py::SystemNamespace.prune` over `weft/commands/prune.py::prune_system`; `weft/client/_namespaces.py::SystemNamespace.task_monitor` over `weft/commands/task_monitor.py::task_monitor_system`; the [IP-1.1] client API parity matrix's verb coverage is enforced by `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart`.
+```
+
+Replacement (`docs/specifications/11-CLI_Architecture_Crosswalk.md`):
+```markdown
+_Implementation mapping_: `weft/cli/app.py` registers the verbs; `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart` enforces the client-counterpart rule.
+```
+
 ## 8. Rollback
 
 All changes are additive. Rollback is `git revert` of the slice C commit,
@@ -1084,6 +1106,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - owner rulings applied 2026-11-03: F1 (a) promote `task_monitor` and `prune`; F2 (b) `weft init` stays CLI-only with the declared [WT-4] §4.4 exception granted as a theory Replacement block (class 5); F3 (a) the derived parity gate, applied as the recommended default under the parity ruling, +P. Cross-family round 1 on the change (codex 0.161.0, 2026-11-03): PASS, two P2 applied without a further round (F1: the derived gate accepted an empty counterpart tuple; it now asserts every tuple is non-empty before resolving paths. F2: the hand-written guard's cited client-only example was wrong; corrected to `TasksNamespace.stats` and `QueuesNamespace.write_endpoint`, and the guard is kept, not deleted). The round confirmed the deferral premise ([IP-1]'s "until promoted with typed result contracts" is met by [PY-2]), the byte-exact theory and spec quotes, the 41-verb enumeration with 40 counterparts and `cmd_init` as the sole verb-level exception, class 5+P, and that the slice C approval line is satisfied by the recorded F1 ruling rather than a renewed request.
 - owner confirmation applied 2026-11-03: F3 (a), the derived parity gate, confirmed ("You can use the derived parity gate"); the provisional wording is withdrawn; no item of this plan waits on the owner beyond the §12 observations routed to later plans and the [WT-7] closeout requirements. Reviewed baseline: `b7eed9f9` + worktree (the plan text closed by cross-family round 2, 2026-11-02).
 - implementation 2026-11-03 (base `4372e20e`): slice S landed as `6054aea1`; slice C landed in the commit that promotes this plan. The [WT-4] §4.4 theory Replacement block was applied verbatim inside the slice C commit, atomically with its [IP-1] `cli_only` row as §7 requires; the owner accepted the series' theory edits on 2026-11-03 ("I accept the theory edits"), and the owner's 2026-11-03 ruling "Init is an exception" is the edit's source. Evidence and deviations: `## Execution log`. The [WT-7] keyed possession probe (Task 9) waits on the owner's key; the plan stays `promoted` until it is recorded.
+- Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range 4372e20e..b85b798b): production diff confirmed (six Replacement blocks verbatim; `_prune_families` extraction byte-identical; Task 5 oracle stronger than planned; derived gate complete; theory row atomic per §7). BLOCKED on F1 (the §11 full-suite run was made but not recorded) and F2 (four new BSC003 warnings without disposition): accepted; the slow-suite result recorded, [IP-1] and [CLI-X1] given implementation mappings by Replacement (Revision Log row) and the backstitch baseline comparison recorded. F3 (function-local test imports) moved to module scope. Round 2 pending.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): `_prune_families` is the shared prune capability where series plan 12's `task` selector normalization lives, whichever plan lands first; the extraction carries or receives it, and neither adapter normalizes on its own; plan 12's client-path selection case un-skips once `client.system.prune` exists. Recorded in Task 4 and the hidden couplings. Plan metadata gate and `bin/check-doc-paths` re-run.
 
 ## Revision Log
@@ -1091,6 +1114,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-03 | `b7eed9f9` + worktree | Header class line; §1; §3; §5; §6 register; §7 delta ([IP-1] row 1, [PY-2], [CLI-X1] note, new [WT-4] §4.4 block, strategy table); §8; §9 Tasks 2, 3, 6, 7, 8, 9; §10; §11; §13; Execution log | Owner rulings 2026-11-03 applied. F2 changed from the drafted assumption (a) to (b): `WeftClient.init` removed; the [IP-1] `weft init` `cli_only` row and a [WT-4] §4.4 theory Replacement block added, landing atomically. Class raised from 5 to 5+P because the F3 (a) derived gate changes how future CLI verbs are verified. Unchosen variants deleted from the delta with one sentence of history each. | Yes: done, cross-family round 1 on the change (codex 0.161.0, 2026-11-03): PASS, recorded in `## Review Log` (corrected 2026-11-03 at implementation; the cell had still said "pending") |
+| 2026-11-03 | `b85b798b` | §7 (new "[IP-1] and [CLI-X1] — implementation mappings" block); Execution log; Review Log | Completed-work review round 1, F2: the four new BSC003 warnings came from [IP-1] and [CLI-X1] declaring no implementation mapping; two `_Implementation mapping_` lines added by Replacement and applied verbatim. F1 (slow-suite record) and F3 (module-scope test imports) applied in the same commit. | Yes: round 2 pending |
 
 ## Execution log
 
@@ -1411,3 +1435,30 @@ the four integration and extension roots (`integrations/weft_django/tests`,
 `grep -rn "shell=True" tests/` now returns lines (the slice S test).
 `weft.client.__all__` and `weft.commands.__all__` are unchanged (pinned by
 `tests/architecture/test_import_boundaries.py::test_official_python_surface_inventories_are_exact`).
+
+Completed-work review round 1 dispositions (2026-11-03):
+
+- F1. The §11 full suite was run after the slice C commit, at `b85b798b`:
+  `./.venv/bin/python -m pytest -m "" -q -p no:cacheprovider`, exit 0, with no
+  `FAILED` or `ERROR` line (the repository's quiet setting prints no count
+  line; the last output line is a `SKIPPED` summary). The fix commit changes
+  only test-module import placement and documents, so that result stands for
+  the unchanged production code; the fast suite is re-run on the fix.
+- F2. `_Implementation mapping_` lines added to [IP-1] and [CLI-X1] (§7
+  block). Backstitch, `4372e20e` baseline rerun against the fixed tree:
+  errors 36 -> 36; warnings 1206 -> 1196; infos 720 -> 741. No new error or
+  warning; the four BSC003 warnings are gone, and so are ten baseline BSC003
+  warnings on module-level [IP-1] / [CLI-X1] citations. New infos: 15 BSC008
+  "code cites [PY-2] but is not in that section's implementation mapping"
+  on this plan's new [PY-2] citations (the new prune and task-monitor
+  helpers and tests); 8 BSC008 on baseline module-level [IP-1] / [CLI-X1]
+  citations that were BSC003 warnings and are now info because the module is
+  not named symbol by symbol; 2 baseline BSS007 infos ("section has no
+  implementation mapping") are gone. Clearing the 15 [PY-2] infos would
+  need new entries in an existing [PY-2] mapping, which the review did not
+  ask for; reported, not added.
+- F3. The three function-local imports in
+  `test_every_cli_verb_has_a_client_counterpart` moved to module scope in
+  `tests/architecture/test_import_boundaries.py`; no import cycle forced them
+  (the file's fresh-import laziness probes run in subprocesses and still
+  pass).

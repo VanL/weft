@@ -22,6 +22,9 @@ from typer.testing import CliRunner
 import simplebroker
 import simplebroker.ext as simplebroker_ext
 from simplebroker import commands as simplebroker_commands
+from weft.cli.app import app
+from weft.client import Task, WeftClient
+from weft.client import _namespaces as namespaces
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "weft"
@@ -1171,10 +1174,6 @@ def test_every_cli_verb_has_a_client_counterpart() -> None:
     Spec: docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X1];
     docs/specifications/09-Implementation_Plan.md [IP-1].
     """
-
-    from weft.cli.app import app
-    from weft.client import Task, WeftClient
-    from weft.client import _namespaces as namespaces
 
     paths = _leaf_paths(typer.main.get_command(app))
     derived = {

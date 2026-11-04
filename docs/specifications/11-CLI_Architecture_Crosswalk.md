@@ -45,6 +45,8 @@ same command capability, listed in the client API parity matrix in
 `cli_only` with its reason. `tests/architecture/test_import_boundaries.py`
 derives the verb list from the Typer app and fails when a verb has neither.
 
+_Implementation mapping_: `weft/cli/app.py` registers the verbs; `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart` enforces the client-counterpart rule.
+
 ## Current Helper Boundaries [CLI-X2]
 
 The command-family table above is only the top layer. Several shared helpers
