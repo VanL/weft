@@ -1,6 +1,6 @@
 # Reactor Wait: Observation Checks Only on Evidence
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1] (one paragraph and the implementation mapping extended), [CC-2.5] (constraint, unchanged); docs/specifications/07-System_Invariants.md [QUEUE.7], [QUEUE.8], [IMPL.10], [IMPL.11] (constraints, unchanged); docs/specifications/04-SimpleBroker_Integration.md [SB-0.4] (constraint, unchanged); docs/specifications/03-Manager_Architecture.md [MA-1.8], [MA-3] (constraints, unchanged); docs/specifications/05-Message_Flow_and_State.md [MF-3.2] (constraint, unchanged)
 Superseded by: none
 
@@ -1278,6 +1278,7 @@ data migration exists. The [CC-2.1] text and the code revert together.
 | 2026-11-04 | Owner ruling on the underlying reads: F1's flag-first callback, F2's reporting strategy subclass and the round-0 retry flag (Task 3) declined; the SimpleBroker upstream item declined; R3–R6, R8, R9 removed; register rows 9, 10, 14 rewritten and 15, 16 removed; [CC-2.1] delta shortened; Manager and heartbeat files out of the edit set | "Neither"; "Refesh last ts is also not going to fail on a reasonable sqlite"; "If those underlying reads fail, do nothing is the correct response" (Owner Decisions item 2) |
 | 2026-11-04 | `3c7c6add` | Task 2 note, Task 3, Owner Decisions, Review Log, Revision Log | Attribution corrected: the owner ruled on the underlying reads; the author declined the round-1 remedies under those rulings. Wording only. | No. |
 | 2026-11-04 | `734a89c9` | [CC-2.1] delta, `## Out of Scope`, hint table, register row 14, Tasks 0, 1, 4, Testing Plan, Review Log | Round-2 F9–F11 and four observations applied; wording and one removed test target; no design change. | No. |
+| 2026-11-04 | `6d365b83` | `Status:`, index row, Review Log | [WT-7] keyed possession probe recorded (P4, C2, B4: PASS 3/3); closure to `completed`. | No. |
 
 ## Review Log
 
@@ -1386,6 +1387,38 @@ Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted 
   theory consistency, the deferred-read flag (not an [ALT-WT-010] cache), the
   PostgreSQL decision (keep the native-return checks), the final-chunk bound
   for a working detector and the own-commit premise.
+
+- [WT-7] keyed possession probe (2026-11-04). Key: three unspent items
+  drawn by the owner's instruction ("There were existing proposed
+  possession questions. Use those.") from the fourteen-item bank the
+  owner reviewed on 2026-11-02 (held outside the repository; P2, C1 and B2
+  were spent by plan 1, B1 awaits the owner's re-key after plan 3). Drawn:
+  P4 "One task that supervises several agent sessions at once" (expected:
+  in core, as a reactor tree under [WT-2a.6], the task the root owner and
+  each session a child reactor, immutable controls down and events up, no
+  shared handles); C2 "Add a 50 ms poll in the result waiter to catch a
+  missed notification" (expected refusal: [ALT-WT-002]; [WT-7]
+  "Event-driven against absence": name the event that cannot arrive before
+  adding a timer); B4 "Audit the service worker and interactive loops"
+  (expected: fixed timer floors standing in for readiness waits;
+  [WT-2a.6], [WT-7] "Event-driven against absence", [ALT-WT-021]). Grading
+  rule as in plan 1: pass on reaching the expected placement, refusal or
+  prediction with at least one expected entry or one that entails it.
+  Taker: codex 0.161.0, read-only sandbox, a different family from the
+  plan author and the bank drafter; its command log shows three reads of
+  `docs/program-theory.md` and nothing else. Result: PASS, three of
+  three. (1) a reactor tree in the task's runtime, root owner plus one
+  child reactor per session, immutable controls down and events up over
+  declared channels, no shared handles; cited [WT-2a.6], [WT-2], [WT-5].
+  (2) refused; the proposer must find the missing wake source and route
+  it to the arbiter; cited [ALT-WT-002], [WT-4] "One reactor, one arbiter,
+  a closed set of inputs", [WT-7] "Event-driven against absence". (3)
+  completions and IO transitions that fail to wake their owner, with
+  periodic polling masking the gap, judged against readiness-driven
+  supervision; cited [WT-2] item 4, [ALT-WT-002], [ALT-WT-021]. Graded by
+  the plan author against the owner-reviewed key. P4, C2 and B4 are
+  spent. With this probe and the audit refresh above, the plan closes as
+  `completed`.
 
 ## Execution log
 

@@ -1,6 +1,6 @@
 # Admission Evidence: A Failed Read Changes No Mode
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md MANAGER.11
 Superseded by: none
 
@@ -922,6 +922,34 @@ re-litigated.
   owner's keyed possession probe: the owner writes the key first; a
   different-family agent that did not author this plan answers from
   `docs/program-theory.md` alone; the key and the result go here.
+- [WT-7] keyed possession probe (2026-11-04). Key: three unspent items
+  drawn, on the owner's instruction, from the fourteen-item bank the owner
+  reviewed on 2026-11-02 (held outside the repository): P1 "Retry a failed
+  task up to N times with backoff" (expected: above Weft, by
+  re-submission; the nearest primitive is the reserved-queue keep/clear
+  disposition [WT-2a.7]; an in-Manager retry counter makes Weft a workflow
+  engine [WT-5]); C4 "Keep the old ten-digit TID short form decodable for
+  one release" (expected refusal: [WT-2a.9] one current contract,
+  [ALT-WT-012] no compatibility code; a bounded forward migration, not a
+  dual decoder); B3 "Audit the family scheduler's retire path" (expected:
+  frontier structures rebuilt on retire instead of the O(1)
+  consume-on-dispatch update of [ALT-WT-016]). Grading rule as in plan 1.
+  Taker: codex 0.161.0, read-only sandbox, a different family from the
+  plan author and the bank drafter; its command log shows four reads of
+  `docs/program-theory.md` and nothing else. Result: PASS, three of
+  three. (1) above Weft, a fresh task per attempt owned by the caller or
+  a supervising task; nearest mechanisms named as the Manager's
+  launch-failure requeue ([ALT-WT-006]) and the keep/clear reservation
+  policy ([WT-2a.7]); cited [WT-5], [WT-2a.3]. (2) refused as a tolerance
+  window under [ALT-WT-012] and [WT-2a.9], with [WT-2a.1] and [ALT-WT-022]
+  for the lossy form; correct shape: all producers and consumers in one
+  release, old path removed, bounded forward migration only. (3)
+  backlog-proportional retirement work, scanning or rebuilding ancestry or
+  bulk-moving pending tokens on parent exit, against the pointer
+  contraction and amortized compaction of [ALT-WT-016]; cited
+  [ALT-WT-016], [WT-7]. Graded by the plan author against the
+  owner-reviewed key. P1, C4 and B3 are spent. With this probe and the
+  audit refresh above, the plan closes as `completed`.
 
 ## Revision Log
 
@@ -930,6 +958,7 @@ re-litigated.
 | 2026-11-04 | `c857e10b` (draft, uncommitted) | `## 1`, `## 2`, `## 3`, `## 4`, register, spec delta, Tasks 2-3, `## 6`, `## 7`, `## 10` | Round-1 F1-F5: the bootstrap publication failure is kept gated through `not _admission_bootstrapped`; a second firing test; custody deletion sites and coupling text corrected; the spec delta gains the bootstrap clause. | Yes: round 2, scoped to the F1 resolution and the second test. |
 | 2026-11-04 | `d4241946` | spec delta backlink, Task 4 | Round-2 F6: the backlink and CHANGELOG bullets name the bootstrap wait beside the undurable set. Wording only. | No. |
 | 2026-11-04 | `347b1c55` | `Status:`, index row, Review Log | Closure correction: `completed` reverted to `promoted` pending the owner's [WT-7] keyed probe; audit table rows I-2, I-7, 4.4-a, 4.4-d refreshed. | No. |
+| 2026-11-04 | `68b11356` | `Status:`, index row, Review Log | [WT-7] keyed possession probe recorded (P1, C4, B3: PASS 3/3); closure to `completed`. | No. |
 
 ## Execution log
 
