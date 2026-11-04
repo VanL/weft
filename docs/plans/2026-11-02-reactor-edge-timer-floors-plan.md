@@ -1453,6 +1453,7 @@ Source of `idle_tree.py` (the version used for every recorded run, before and af
 
 ```python
 """Task 0 item 1: idle manager tree voluntary context switches and CPU over 30 s."""
+
 from __future__ import annotations
 
 import json
@@ -1474,7 +1475,9 @@ WINDOW = float(os.environ.get("WINDOW", "30"))
 
 
 def weft(*args: str) -> str:
-    return subprocess.run([WEFT, *args], check=True, capture_output=True, text=True, timeout=60).stdout
+    return subprocess.run(
+        [WEFT, *args], check=True, capture_output=True, text=True, timeout=60
+    ).stdout
 
 
 def snap(pids: list[int]) -> dict[int, tuple[str, int, float]]:
@@ -1483,7 +1486,9 @@ def snap(pids: list[int]) -> dict[int, tuple[str, int, float]]:
         try:
             p = psutil.Process(pid)
             ct = p.cpu_times()
-            label = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:60]
+            label = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+            ).stdout.strip()[:60]
             out[pid] = (label, p.num_ctx_switches().voluntary, ct.user + ct.system)
         except psutil.Error:
             pass
@@ -1519,9 +1524,15 @@ def main() -> None:
             total_cs += cs1 - cs0
             total_cpu += cpu1 - cpu0
             print(f"pid={p} vcs_delta={cs1 - cs0} cpu_delta_s={cpu1 - cpu0:.3f} {name}")
-        print(f"TOTAL window={WINDOW}s vcs_delta={total_cs} ({total_cs / WINDOW:.1f}/s) cpu_delta_s={total_cpu:.3f}")
+        print(
+            f"TOTAL window={WINDOW}s vcs_delta={total_cs} ({total_cs / WINDOW:.1f}/s) cpu_delta_s={total_cpu:.3f}"
+        )
     finally:
-        subprocess.run([WEFT, "manager", "stop", "--context", str(root)], capture_output=True, timeout=60)
+        subprocess.run(
+            [WEFT, "manager", "stop", "--context", str(root)],
+            capture_output=True,
+            timeout=60,
+        )
         cleanup_prepared_roots(root)
 
 
@@ -1556,6 +1567,7 @@ Source of `quiet_task.py`:
 
 ```python
 """Task 0 item 4 (owner item 6): does a quiet persistent task run turns when the native idle poll returns?"""
+
 from __future__ import annotations
 
 import os
@@ -1606,6 +1618,7 @@ def main() -> None:
     tid = str(time.time_ns())
     spec = make_function_taskspec(tid, "tests.tasks.sample_targets:echo_payload")
     from weft.core.taskspec import TaskSpec
+
     data = spec.model_dump()
     data["spec"]["persistent"] = True
     spec = TaskSpec.model_validate(data)
@@ -1625,7 +1638,9 @@ def main() -> None:
     after = dict(counts)
     task.stop()
     th.join(10)
-    print(f"backend={os.environ.get('BROKER_TEST_BACKEND', 'sqlite')} window={WINDOW}s (after 2 s settle)")
+    print(
+        f"backend={os.environ.get('BROKER_TEST_BACKEND', 'sqlite')} window={WINDOW}s (after 2 s settle)"
+    )
     for k in counts:
         print(f"  {k}: {after[k] - base[k]} in window (total incl. startup {after[k]})")
     cleanup_prepared_roots(root)

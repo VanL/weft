@@ -394,7 +394,7 @@ New `FamilyScheduler` state; `_stacks` is deleted, and `_turn` keeps its
 name and role (where the next selection starts asking) but holds a stack id
 instead of a list index:
 
-```python
+```text
 self._residents: dict[str, _Resident]   # unchanged
 self._up: dict[str, str | None]          # union-find: an ancestor with no registered resident in between; None above a root
 self._live_children: dict[str, int]      # residents whose nearest live ancestor is the key (registered residents only)

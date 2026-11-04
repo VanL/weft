@@ -1242,12 +1242,16 @@ one commit (strategy B).
              chars.append(TASKSPEC_TID_ENCODING_ALPHABET[digit])
          return "".join(reversed(chars))
 
+
      def decode_tid(text: str) -> str:
          if is_task_tid(text):
              normalize_exact_message_id(text)
              return text
-         if not (isinstance(text, str) and len(text) == TASKSPEC_TID_ENCODED_LENGTH
-                 and text.isascii()):
+         if not (
+             isinstance(text, str)
+             and len(text) == TASKSPEC_TID_ENCODED_LENGTH
+             and text.isascii()
+         ):
              raise ValueError("not a full or encoded task ID")
          value = 0
          for char in text.upper():  # canonicalize case at the boundary [OBS.5]
@@ -2177,7 +2181,16 @@ def _child(conn: Connection) -> None:
     if conn.recv() == "exit":
         return
     if sys.platform == "darwin":
-        owner.set("weft-" + "c" * 8 + "-" + "0" * 13 + ":" + "n" * 17 + ":cancelled:" + "d" * 15)
+        owner.set(
+            "weft-"
+            + "c" * 8
+            + "-"
+            + "0" * 13
+            + ":"
+            + "n" * 17
+            + ":cancelled:"
+            + "d" * 15
+        )
         owner._deadline = 0
         owner.tick()
         owner.set(PROBE)
