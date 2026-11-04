@@ -1,6 +1,6 @@
 # Admission Evidence: A Failed Read Changes No Mode
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md MANAGER.11
 Superseded by: none
 
@@ -420,7 +420,7 @@ are the round-1 finding F1 resolved under MANAGER.11.
   to `promoted`, so `bin/check-doc-paths` checks the two Replacement blocks
   against the spec file from then on; the closeout commit moves both to
   `completed`.
-- Promotion baseline identifier: pending (the landing commit SHA).
+- Promotion baseline identifier: `e3817033`, the landing commit (spec sentence, backlink, code, tests, CHANGELOG, `promoted`).
 
 ## Proposed Spec Delta
 
@@ -883,6 +883,22 @@ re-litigated.
   with nothing in [MA-1.8] or MANAGER.18, and is at spec altitude; rows 5a
   and 5b are correctly N. The reviewer did not rerun the scratch
   experiments. Review before implementation is complete; Task 1 is done.
+- Completed-work review (codex 0.161.0, 2026-11-04, the landing commit
+  `e3817033` against Tasks 2-4 and the delta): verdict `PASS`. One
+  finding, F1 (P3): the Execution log did not record the `## 7` four-file
+  Manager gate on the landed tree. Disposition: run and recorded under
+  Task 5 (323 passed). The reviewer reconstructed the landed
+  `weft/core/manager.py` from its parent using only Task 3's edits and got
+  the file exactly; both tests match Task 2 verbatim; both Replacement
+  blocks occur once; the CHANGELOG bullet matches Task 4; the reap and
+  periodic handlers, the two dispatch sites, and the wake timer read as
+  the plan states; the two obvious one-line mutations (a re-added failure
+  gate; the bootstrap disjunct dropped from `_process_queue_message`)
+  would each fail a new test by trace; nothing in `## 9` was touched.
+  Observations: `ruff format --check .` still flags three code fences in
+  older plan files (pre-existing); the historical 2026-10-15 plan still
+  names the flag (pre-existing); removing only the bootstrap disjunct from
+  `_queue_has_pending` is outside the second test's direct assertion.
 
 ## Revision Log
 
@@ -965,3 +981,23 @@ finds nothing.
   exit 0 (two runs; the first captured no failures, the second added the
   counts).
 - The per-task and doc gates are recorded under Tasks 2-4 above.
+
+#### Landing commit
+
+`e3817033` "Remove the Manager's admission-evidence mode": 6 files, 200
+insertions, 26 deletions; `weft/core/manager.py` 7 insertions, 22
+deletions.
+
+#### Task 5. Completed-work review and the four-file gate (on `e3817033`)
+
+- The `## 7` four-file Manager gate, run on the landed tree after the
+  review asked for it: `tests/core/test_manager_family_maintenance.py`,
+  `tests/core/test_family_dispatch_scaling.py`,
+  `tests/core/test_family_source_reconciliation.py`,
+  `tests/core/test_manager.py`: 323 passed, 0 failed, 2 skipped, exit 0.
+- The `## 7` residue grep as written matches stale `.pyc` files in the
+  working tree; the committed-source form
+  `git grep -l "_admission_evidence_unavailable" -- weft tests docs/specifications CHANGELOG.md`
+  finds nothing. The name survives in one historical plan,
+  `docs/plans/2026-10-15-work-conserving-family-scheduling.md` lines 185
+  and 605, which describe the code of their day and are not edited.
