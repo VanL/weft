@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 66 plan files in this directory.
+There are currently 67 plan files in this directory.
 
 ## Curation Policy
 
@@ -27,6 +27,7 @@ There are currently 66 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-04-manager-drain-and-service-bookkeeping-plan.md`](./2026-11-04-manager-drain-and-service-bookkeeping-plan.md) | Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule | `draft` | none |
 | [`2026-11-04-system-stop-snapshot-targets-plan.md`](./2026-11-04-system-stop-snapshot-targets-plan.md) | System STOP Targets Every Live Task by Snapshot | `draft` | none |
 | [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `completed` | none |
 | [`2026-11-03-watcher-hint-gated-observation-plan.md`](./2026-11-03-watcher-hint-gated-observation-plan.md) | Reactor Wait: Observation Checks Only on Evidence | `completed` | none |
