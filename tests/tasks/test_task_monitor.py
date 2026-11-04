@@ -10874,9 +10874,7 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
                             )
                         )
                         late_rows_written += 1
-                elif not _seeded_lifecycle_pending(
-                    store, log_queue, tuple(all_tids)
-                ):
+                elif not _seeded_lifecycle_pending(store, log_queue, tuple(all_tids)):
                     break
             assert late_rows_written > 0, (
                 "the interleave never produced a marked family to write late "
@@ -11680,13 +11678,17 @@ def test_task_monitor_ingest_crash_restart_boundaries_preserve_collation_and_ret
                         RuntimeError("simulated crash before raw delete")
                     ),
                 )
-                with pytest.raises(RuntimeError, match="simulated crash before raw delete"):
+                with pytest.raises(
+                    RuntimeError, match="simulated crash before raw delete"
+                ):
                     worker._ingest_retained_task_log_rows(
                         store=store,
                         now_ns=time.time_ns(),
                         apply=True,
                     )
-                monkeypatch.setattr(worker, "_delete_exact_task_log_rows", original_delete)
+                monkeypatch.setattr(
+                    worker, "_delete_exact_task_log_rows", original_delete
+                )
             elif crash_boundary == "after_raw_delete_before_reconcile":
                 original_reconcile = store.delete_task_messages_after_raw_delete
                 monkeypatch.setattr(
@@ -11791,9 +11793,14 @@ def test_task_monitor_store_delete_preserves_refs_and_records_error_on_delete_fa
             )
             retired = worker._delete_monitor_store_task_log_rows(store)
             assert retired.message_rows_deleted == 0
-            assert sorted(
-                ref.message_id for ref in _live_monitor_store_refs(store) if ref.tid == tid
-            ) == seeded_ids
+            assert (
+                sorted(
+                    ref.message_id
+                    for ref in _live_monitor_store_refs(store)
+                    if ref.tid == tid
+                )
+                == seeded_ids
+            )
             record = store.get_task(tid)
             assert record is not None
             assert record.raw_deleted_at_ns is None

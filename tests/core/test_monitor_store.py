@@ -2958,11 +2958,15 @@ def test_monitor_store_partial_chunk_commit_replay_is_idempotent(
     assert clean_record is not None
     assert replay_record is not None
     assert replay_record.completed_at_ns == clean_record.completed_at_ns == base + 200
-    assert replay_record.resources == clean_record.resources == {
-        "peak_memory": 120,
-        "memory_mb": 80,
-        "cpu_percent": 5,
-    }
+    assert (
+        replay_record.resources
+        == clean_record.resources
+        == {
+            "peak_memory": 120,
+            "memory_mb": 80,
+            "cpu_percent": 5,
+        }
+    )
     assert replay_record.last_message_id == clean_record.last_message_id == base + 2
     assert _monitor_message_ids(
         replay_ctx,
