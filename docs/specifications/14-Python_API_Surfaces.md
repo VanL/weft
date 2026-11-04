@@ -264,6 +264,21 @@ coverage lives in `tests/commands/test_submission_custody.py`,
 and cleanup priority at public boundaries.
 `weft/commands/result.py::_task_result_event` projects the shared settled-result
 shape for consuming follow and stream adapters.
+`weft/client/_namespaces.py::SystemNamespace.prune` and
+`weft/client/_namespaces.py::SystemNamespace.task_monitor` run prune and
+task-monitor on the client's resolved context through
+`weft/commands/prune.py::prune_system`, which shares
+`weft/commands/prune.py::_prune_families` with
+`weft/commands/prune.py::cmd_system_prune` and passes the context to
+`weft/commands/prune.py::run_runtime_prune` and
+`weft/commands/prune.py::run_retention_prune`, and through
+`weft/commands/task_monitor.py::task_monitor_system`, which shares
+`weft/commands/task_monitor.py::_task_monitor_outcome` with
+`weft/commands/task_monitor.py::cmd_system_task_monitor` and passes the context
+to `weft/commands/task_monitor.py::run_task_monitor` on every
+`weft/commands/task_monitor.py::_TaskMonitorSummaryStream` poll.
+Resolved-context coverage lives in `tests/commands/test_retention_prune.py`
+and `tests/commands/test_task_monitor.py`.
 
 Related plan: [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md).
 Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).

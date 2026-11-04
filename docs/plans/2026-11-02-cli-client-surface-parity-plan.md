@@ -563,6 +563,37 @@ Replacement (`docs/specifications/11-CLI_Architecture_Crosswalk.md`):
 _Implementation mapping_: `weft/cli/app.py` registers the verbs; `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart` enforces the client-counterpart rule.
 ```
 
+### [PY-2] — implementation mapping entries (completed-work review round 2, F2)
+
+Added after promotion (see `## Revision Log`, 2026-11-03 row 3). The new
+[PY-2] citations on the prune and task-monitor helpers, the two
+`SystemNamespace` methods, and their tests were not named by any [PY-2]
+`_Implementation mapping_`, so backstitch reported 15 BSC008 infos. The
+entries below are inserted after the last sentence of the first [PY-2]
+`_Implementation mapping_` paragraph (the one that opens
+"`weft/core/spawn_requests.py::_submit_spawn_request_with_payload`"); the
+existing text of that paragraph is unchanged and not restated here. They
+record traceability only and add no normative behavior.
+
+Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
+```markdown
+`weft/client/_namespaces.py::SystemNamespace.prune` and
+`weft/client/_namespaces.py::SystemNamespace.task_monitor` run prune and
+task-monitor on the client's resolved context through
+`weft/commands/prune.py::prune_system`, which shares
+`weft/commands/prune.py::_prune_families` with
+`weft/commands/prune.py::cmd_system_prune` and passes the context to
+`weft/commands/prune.py::run_runtime_prune` and
+`weft/commands/prune.py::run_retention_prune`, and through
+`weft/commands/task_monitor.py::task_monitor_system`, which shares
+`weft/commands/task_monitor.py::_task_monitor_outcome` with
+`weft/commands/task_monitor.py::cmd_system_task_monitor` and passes the context
+to `weft/commands/task_monitor.py::run_task_monitor` on every
+`weft/commands/task_monitor.py::_TaskMonitorSummaryStream` poll.
+Resolved-context coverage lives in `tests/commands/test_retention_prune.py`
+and `tests/commands/test_task_monitor.py`.
+```
+
 ## 8. Rollback
 
 All changes are additive. Rollback is `git revert` of the slice C commit,
@@ -1107,6 +1138,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - owner confirmation applied 2026-11-03: F3 (a), the derived parity gate, confirmed ("You can use the derived parity gate"); the provisional wording is withdrawn; no item of this plan waits on the owner beyond the §12 observations routed to later plans and the [WT-7] closeout requirements. Reviewed baseline: `b7eed9f9` + worktree (the plan text closed by cross-family round 2, 2026-11-02).
 - implementation 2026-11-03 (base `4372e20e`): slice S landed as `6054aea1`; slice C landed in the commit that promotes this plan. The [WT-4] §4.4 theory Replacement block was applied verbatim inside the slice C commit, atomically with its [IP-1] `cli_only` row as §7 requires; the owner accepted the series' theory edits on 2026-11-03 ("I accept the theory edits"), and the owner's 2026-11-03 ruling "Init is an exception" is the edit's source. Evidence and deviations: `## Execution log`. The [WT-7] keyed possession probe (Task 9) waits on the owner's key; the plan stays `promoted` until it is recorded.
 - Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range 4372e20e..b85b798b): production diff confirmed (six Replacement blocks verbatim; `_prune_families` extraction byte-identical; Task 5 oracle stronger than planned; derived gate complete; theory row atomic per §7). BLOCKED on F1 (the §11 full-suite run was made but not recorded) and F2 (four new BSC003 warnings without disposition): accepted; the slow-suite result recorded, [IP-1] and [CLI-X1] given implementation mappings by Replacement (Revision Log row) and the backstitch baseline comparison recorded. F3 (function-local test imports) moved to module scope. Round 2 pending.
+- Scoped round 2 (codex 0.161.0, 2026-11-03, af98c73b): F1 and F3 confirmed closed; [IP-1] placement and the §7 blocks confirmed verbatim. F2 residual (15 new [PY-2] BSC008 infos; §11's 'no new issue' is wider than 'no new warning'): accepted; the [PY-2] implementation mapping extended by Replacement in the commit that adds this entry; backstitch compared by diagnostic identity against 4372e20e. No round 3 under the owner's one-scoped-round rule; the fix verified by the series lead.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): `_prune_families` is the shared prune capability where series plan 12's `task` selector normalization lives, whichever plan lands first; the extraction carries or receives it, and neither adapter normalizes on its own; plan 12's client-path selection case un-skips once `client.system.prune` exists. Recorded in Task 4 and the hidden couplings. Plan metadata gate and `bin/check-doc-paths` re-run.
 
 ## Revision Log
@@ -1115,6 +1147,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-03 | `b7eed9f9` + worktree | Header class line; §1; §3; §5; §6 register; §7 delta ([IP-1] row 1, [PY-2], [CLI-X1] note, new [WT-4] §4.4 block, strategy table); §8; §9 Tasks 2, 3, 6, 7, 8, 9; §10; §11; §13; Execution log | Owner rulings 2026-11-03 applied. F2 changed from the drafted assumption (a) to (b): `WeftClient.init` removed; the [IP-1] `weft init` `cli_only` row and a [WT-4] §4.4 theory Replacement block added, landing atomically. Class raised from 5 to 5+P because the F3 (a) derived gate changes how future CLI verbs are verified. Unchosen variants deleted from the delta with one sentence of history each. | Yes: done, cross-family round 1 on the change (codex 0.161.0, 2026-11-03): PASS, recorded in `## Review Log` (corrected 2026-11-03 at implementation; the cell had still said "pending") |
 | 2026-11-03 | `b85b798b` | §7 (new "[IP-1] and [CLI-X1] — implementation mappings" block); Execution log; Review Log | Completed-work review round 1, F2: the four new BSC003 warnings came from [IP-1] and [CLI-X1] declaring no implementation mapping; two `_Implementation mapping_` lines added by Replacement and applied verbatim. F1 (slow-suite record) and F3 (module-scope test imports) applied in the same commit. | Yes: round 2 pending |
+| 2026-11-03 | `af98c73b` | §7 (new "[PY-2] — implementation mapping entries" block); Execution log; Review Log | Scoped round 2, F2 residual: §11's "no new issue" also covers infos; the 15 new [PY-2] BSC008 infos cleared by extending the first [PY-2] `_Implementation mapping_` by Replacement, applied verbatim. | No: no round 3 under the owner's one-scoped-round rule; fix verified by the series lead |
 
 ## Execution log
 
@@ -1462,3 +1495,30 @@ Completed-work review round 1 dispositions (2026-11-03):
   `tests/architecture/test_import_boundaries.py`; no import cycle forced them
   (the file's fresh-import laziness probes run in subprocesses and still
   pass).
+
+Scoped round 2 disposition (2026-11-03): F2 residual. The first [PY-2]
+`_Implementation mapping_` paragraph gains path::symbol entries for
+`SystemNamespace.prune`, `SystemNamespace.task_monitor`, `prune_system`,
+`_prune_families`, `cmd_system_prune`, `run_runtime_prune`,
+`run_retention_prune`, `task_monitor_system`, `_task_monitor_outcome`,
+`cmd_system_task_monitor`, `run_task_monitor`, and
+`_TaskMonitorSummaryStream`, plus the two test files (§7 block). Every symbol
+is written as `path::symbol`: a bare `cmd_system_prune` drew BSM005 "bare
+mapping symbol is advisory" in a trial. Backstitch, `4372e20e` baseline rerun
+compared by diagnostic identity (code, path, symbol, section, message;
+line numbers ignored):
+errors 36 / warnings 1206 / infos 720 at `4372e20e`; 36 / 1212 / 750 at
+`c380cef3` (after series plan 12 landed); 36 / 1212 / 729 with this fix.
+Against `c380cef3` the fix adds no diagnostic and removes 21 infos (this
+plan's 15 [PY-2] BSC008 infos and 6 baseline [PY-2] BSC008 infos on
+`cmd_system_prune`, `cmd_system_task_monitor`, `TaskMonitorResult`,
+`TaskMonitorRecord`, the `weft/client/_namespaces.py` module, and
+`TasksNamespace.runtime_liveness`). Against `4372e20e`, the only diagnostics
+attributable to this plan are the 8 BSC008 infos on module-level [IP-1] /
+[CLI-X1] citations that were baseline BSC003 warnings before the round 1
+mappings (existing debt, accepted by the series lead). Every other
+diagnostic new since `4372e20e` comes from series plan 12's [OBS.5],
+[OBS.4], and [CLI-1.2.3] citations, plus the `weft/liveness/host.py::inspect_host_process`
+[LIVENESS.R5] warning and [CC-3.2] info (none of them in files or
+symbols this plan cites for those sections), and was already present at
+`c380cef3`.
