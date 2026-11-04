@@ -349,16 +349,24 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
         def launch(
             _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
         ) -> BaseProcess:
-            index = len(processes)
+            # The standing heartbeat service launches through this hook too
+            # ([MA-1] item 7); only the three user requests, whose child TIDs
+            # are their request IDs, own the test's indexed events.
+            tid = str(child_spec.tid)
+            if tid in tids:
+                index = tids.index(tid)
+                ready_event, started_event = ready[index], started[index]
+            else:
+                ready_event, started_event = spawn.Event(), spawn.Event()
             process = spawn.Process(
                 target=_publish_waiting_task,
                 args=(
                     child_spec.model_dump(mode="json"),
                     kwargs["runtime_identity"].to_dict(),
-                    ready[index],
+                    ready_event,
                     release,
                     publication,
-                    started[index],
+                    started_event,
                     False,
                     True,
                 ),
@@ -367,7 +375,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
             process.start()
             assert process.pid is not None
             harness.register_pid(process.pid)
-            assert started[index].wait(timeout=30.0)
+            assert started_event.wait(timeout=30.0)
             return process
 
         monkeypatch.setattr(manager_mod, "launch_task_process", launch)
