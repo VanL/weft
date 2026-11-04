@@ -1685,3 +1685,103 @@ Task 1, spec promotion (strategy A):
   the Replacement-sync gate now checks both blocks.
 - `./.venv/bin/python bin/check-doc-paths`: `check-doc-paths: OK`.
   `./.venv/bin/python -m pytest tests/specs -q`: all passed.
+
+Task 1 commit: `2029b2b4` ("Promote the phased system STOP drain into
+[MA-3]") is the promotion baseline identifier. The fast suite before it
+exited 0 (6,378 tests passed, 47 skipped; this repository's `-q -ra` run
+prints the skip list and no pass-count line, so the count is from the
+progress dots).
+
+Task 2, RED (before any production edit, `-n 0`):
+
+```
+./.venv/bin/python -m pytest tests/core/test_manager.py -k "orders_user_work_then_services or sentinel_failure_during_shutdown_still_reaps" -q -n 0
+>   assert kill_order == ["child", "service"]
+E   AssertionError: assert ['service', 'child'] == ['child', 'service']
+>   assert _process_running(process.pid), (
+E   AssertionError: service 1793750792389971968 exited while user work 1793750792391716864 was still tracked
+```
+
+Both fail on the named assertions (check 1's service-alive assertion and
+the extended test's kill-order assertion), not on setup: the readiness
+marker and a service child were both reached.
+
+- `test_manager_stop_orders_user_work_then_services_then_manager` is placed
+  after `test_manager_stop_command_drains_nonpersistent_children`. The
+  user task is a `command` task running the SIGTERM-ignoring script from
+  `_write_term_trapping_descendant_scripts`; readiness waits for its PID
+  marker, a supervision-only child, and no launch in flight. Log reads peek
+  `weft.log.tasks` with `include_claimed=True`, consuming nothing.
+- The extended fatal-path test now inserts a TaskMonitor-role fake first,
+  drives `Manager._cleanup_task_resources` with the unrelated steps stubbed
+  as in `test_manager_cleanup_surfaces_sentinel_failure_published_after_termination`,
+  keeps its three existing assertions and adds the kill-order assertion.
+
+Task 3, GREEN (`weft/core/manager.py`):
+
+- One new field, `_drain_services_phase`, initialized beside
+  `_drain_stops_children` and reset at every `_drain_escalated_children.clear()`
+  site (`_begin_shutdown_drain`, `_begin_leadership_drain`,
+  `_begin_superseded_shutdown`, `_finish_graceful_shutdown`,
+  `_resume_leadership_after_drain_loss`).
+- `_signal_children_to_stop(children)` takes the phase's mapping, body
+  unchanged; `_begin_shutdown_drain` passes `_user_work_children()`.
+  `_drain_phase_children()` returns user work in phase 1 and the
+  supervision-only children in phase 2 (it reuses
+  `_child_is_supervision_only`; no second classifier).
+- `_continue_shutdown_drain` keeps the non-stopping branch's behavior and,
+  for a stopping drain, runs phase 1 through `_drain_user_work_phase_holds`
+  (extracted only to keep `_continue_shutdown_drain` under ruff's C901
+  limit): signal and reap user work; hold while user work or an in-flight
+  launch remains and the window is open; at expiry force-reap user work
+  with `_terminate_children(..., tids=...)` and log unsettled launch TIDs;
+  then set the phase, reset `_drain_started_ns`, set
+  `_drain_immediate_work_pending`, and continue in the same call into
+  phase 2 (signal, reap, forced reap of services at its window, then
+  `_finish_graceful_shutdown` once no service remains).
+- `_terminate_children(deadline, *, tids=None)` filters the initial
+  snapshot, both merges, the STOP loop and `_wait_for_children_to_exit`.
+  `_cleanup_task_resources` runs two attempts under one deadline: user
+  work, then everything still tracked.
+- `_manager_drain_timeouts` publishes the window clock while the active
+  phase has a member (in phase 1 an in-flight launch counts) and
+  escalation clocks only for active-phase members.
+- Test plumbing: `finish_stubborn_child`, the cleanup fake
+  `terminate_children`, and `fail_if_signal_handler_terminates_children`
+  (mypy flagged its narrower signature) accept `**_kwargs`.
+  `test_manager_cleanup_attempts_every_phase_and_raises_first_failure`
+  now expects `"children"` twice in its call order: that is the plan's
+  two-attempt split itself, not a weakened assertion (deviation 2 below).
+- Guard `test_manager_stop_does_not_hold_past_window_for_stuck_launch`
+  added (blocked `launch_task_process`, 0.5 s window, outer bound of six
+  windows plus 5 s).
+- GREEN: the task 2 tests, the guard, and every `## Testing Plan` anchor
+  pass (`-k "stop or drain or supersed or sigusr1 or sigterm or leadership
+  or sentinel_failure or cleanup_attempts or cleanup_surfaces"`: 59
+  passed); `tests/core/test_manager.py` and `tests/cli/test_cli_manager.py`
+  exit 0; mypy clean on 484 files; ruff clean.
+
+Deviations recorded during tasks 2 and 3:
+
+1. The lifecycle test keeps `MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` at
+   15.0 instead of "a few seconds". Measured: the user task leaves the
+   table in about 0.3 s, but in one run of four TaskMonitor's own
+   `control_stop` arrived 10.35 s after the STOP. TaskMonitor's STOP
+   handler (`weft/core/monitor/task_monitor.py::TaskMonitor._handle_control_command`)
+   calls `_cancel_heartbeat`, which calls
+   `weft/core/heartbeat.py::cancel_heartbeat`, which calls
+   `ensure_heartbeat_service` (default `startup_timeout` is
+   `MANAGER_STARTUP_TIMEOUT_SECONDS`, 10.0 s, and it calls
+   `manager_runtime.ensure_manager`). When the heartbeat stops in the same
+   phase it can wait out that timeout. With a 6 s window the Manager
+   force-reaped TaskMonitor and its `control_stop` never appeared. This is
+   pre-existing (before this plan both services were stopped in the same
+   turn too) and is reported, not fixed: it is outside this plan's files
+   and scope.
+2. `test_manager_cleanup_attempts_every_phase_and_raises_first_failure`
+   asserts the cleanup call order; the plan's split adds a second
+   `_terminate_children` attempt, so its expected list gains a second
+   `"children"` entry. Its other assertions are unchanged.
+- Gates before the task 2 and 3 commit: fast suite exit 0 (6,380 passed,
+  47 skipped, from the progress dots); mypy `Success: no issues found in
+  484 source files`; ruff `All checks passed!`; `bin/check-doc-paths` OK.

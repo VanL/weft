@@ -23,7 +23,14 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, replace
 from functools import cache, partial
 from heapq import nsmallest
@@ -667,6 +674,7 @@ class Manager(ServiceTask):
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
         self._drain_stops_children = True
+        self._drain_services_phase = False
         self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
         self._drain_escalated_children: set[str] = set()
@@ -2179,6 +2187,20 @@ class Manager(ServiceTask):
             tid: child
             for tid, child in self._child_processes.items()
             if not self._child_is_supervision_only(child)
+        }
+
+    def _drain_phase_children(self) -> dict[str, ManagedChild]:
+        """Return the stopping drain's active-phase children.
+
+        Phase 1 is user work; phase 2 is the supervision-only services.
+        """
+
+        if not self._drain_services_phase:
+            return self._user_work_children()
+        return {
+            tid: child
+            for tid, child in self._child_processes.items()
+            if self._child_is_supervision_only(child)
         }
 
     def _admission_enabled(self) -> bool:
@@ -4628,13 +4650,30 @@ class Manager(ServiceTask):
             self._clear_admission_retry()
         return child_exited
 
-    def _terminate_children(self, deadline: float) -> None:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
+    def _terminate_children(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
+        self,
+        deadline: float,
+        *,
+        tids: Collection[str] | None = None,
+    ) -> None:
         """Stop tracked children under one absolute monotonic deadline.
+
+        ``tids`` limits every step to those tracked children; ``None`` covers
+        every tracked child (the ``SIGUSR1`` and final-cleanup passes).
 
         Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
         """
 
-        children: dict[str, ManagedChild] = dict(self._child_processes)
+        selected = None if tids is None else frozenset(tids)
+
+        def in_scope() -> dict[str, ManagedChild]:
+            return {
+                tid: child
+                for tid, child in self._child_processes.items()
+                if selected is None or tid in selected
+            }
+
+        children: dict[str, ManagedChild] = in_scope()
         managed_pids: dict[str, set[int]] = {
             tid: self._managed_pids_for_child(tid) for tid in children
         }
@@ -4651,8 +4690,8 @@ class Manager(ServiceTask):
             )
 
         self._cleanup_children(deadline=deadline)
-        children.update(self._child_processes)
-        for tid in self._child_processes:
+        children.update(in_scope())
+        for tid in in_scope():
             managed_pids.setdefault(tid, set()).update(
                 self._managed_pids_for_child(tid)
             )
@@ -4662,12 +4701,14 @@ class Manager(ServiceTask):
                 raise observer_failure
             return
 
-        for tid, child in list(self._child_processes.items()):
+        for tid, child in in_scope().items():
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
         grace_deadline = time.monotonic() + (self._remaining_deadline(deadline) / 2.0)
         try:
-            self._wait_for_children_to_exit(min(deadline, grace_deadline))
+            self._wait_for_children_to_exit(
+                min(deadline, grace_deadline), tids=selected
+            )
         except BaseException as exc:
             if observer_failure is None:
                 observer_failure = exc
@@ -4676,7 +4717,7 @@ class Manager(ServiceTask):
                 "continuing child termination",
                 exc_info=True,
             )
-        children.update(self._child_processes)
+        children.update(in_scope())
         for tid in children:
             managed_pids.setdefault(tid, set()).update(
                 self._managed_pids_for_child(tid)
@@ -4761,18 +4802,27 @@ class Manager(ServiceTask):
         if observer_failure is not None:
             raise observer_failure
 
-    def _wait_for_children_to_exit(self, deadline: float) -> None:
-        while self._child_processes and self._remaining_deadline(deadline) > 0:
+    def _wait_for_children_to_exit(
+        self, deadline: float, *, tids: Collection[str] | None = None
+    ) -> None:
+        def remaining() -> bool:
+            return any(tids is None or tid in tids for tid in self._child_processes)
+
+        while remaining() and self._remaining_deadline(deadline) > 0:
             self._drain_child_sentinel_events()
             self._cleanup_children(deadline=deadline)
-            if not self._child_processes:
+            if not remaining():
                 return
             self._child_sentinel_adapter.wait(self._remaining_deadline(deadline))
 
-    def _signal_children_to_stop(self) -> None:
-        """Best-effort STOP broadcast to currently tracked child tasks."""
+    def _signal_children_to_stop(self, children: Mapping[str, ManagedChild]) -> None:
+        """Best-effort STOP, then host SIGTERM, for one drain phase's children.
 
-        for tid, child in list(self._child_processes.items()):
+        The caller passes the active phase's members: user work in phase 1,
+        internal services in phase 2. One rung serves both phases.
+        """
+
+        for tid, child in list(children.items()):
             if tid in self._drain_signaled_children:
                 if tid in self._drain_escalated_children:
                     continue
@@ -4821,6 +4871,7 @@ class Manager(ServiceTask):
         self._draining = True
         self._drain_signaled_children.clear()
         self._drain_escalated_children.clear()
+        self._drain_services_phase = False
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = time.time_ns()
         self._drain_immediate_work_pending = True
@@ -4839,7 +4890,7 @@ class Manager(ServiceTask):
         policy = self.taskspec.spec.reserved_policy_on_stop
         self._apply_reserved_policy(policy)
 
-        self._signal_children_to_stop()
+        self._signal_children_to_stop(self._user_work_children())
 
     def _begin_leadership_drain(self, *, leader_tid: str) -> None:
         """Stop accepting new work and drain owned children before yielding.
@@ -4857,6 +4908,7 @@ class Manager(ServiceTask):
         self._draining = True
         self._drain_signaled_children.clear()
         self._drain_escalated_children.clear()
+        self._drain_services_phase = False
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = time.time_ns()
         self._drain_immediate_work_pending = True
@@ -4884,6 +4936,7 @@ class Manager(ServiceTask):
             self._draining = True
             self._drain_signaled_children.clear()
             self._drain_escalated_children.clear()
+            self._drain_services_phase = False
             self._drain_signal_started_ns.clear()
             self._drain_started_ns = time.time_ns()
             self._drain_immediate_work_pending = True
@@ -4913,6 +4966,7 @@ class Manager(ServiceTask):
         self._drain_immediate_work_pending = False
         self._drain_signaled_children.clear()
         self._drain_escalated_children.clear()
+        self._drain_services_phase = False
         self._drain_signal_started_ns.clear()
         self._drain_stops_children = True
         self.should_stop = True
@@ -8103,6 +8157,13 @@ class Manager(ServiceTask):
                 failures.append(exc)
 
         attempt(lambda: self._drain_active_child_launches_for_cleanup(deadline))
+        # User work first, then everything still tracked, services included,
+        # under the same absolute deadline.
+        attempt(
+            lambda: self._terminate_children(
+                deadline, tids=tuple(self._user_work_children())
+            )
+        )
         attempt(lambda: self._terminate_children(deadline))
         attempt(self._cleanup_own_internal_reserved_queue)
         attempt(self._unregister_manager)
@@ -8257,7 +8318,11 @@ class Manager(ServiceTask):
 
         timeouts: list[float] = []
         if self._drain_stops_children:
-            if self._child_processes and self._drain_started_ns is not None:
+            members = self._drain_phase_children()
+            phase_active = bool(members) or (
+                not self._drain_services_phase and self._has_active_child_launches()
+            )
+            if phase_active and self._drain_started_ns is not None:
                 shutdown_ns = int(
                     MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS * 1_000_000_000
                 )
@@ -8268,7 +8333,7 @@ class Manager(ServiceTask):
                     )
                 )
             escalation_ns = int(MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000)
-            for tid in self._child_processes:
+            for tid in members:
                 if tid in self._drain_escalated_children:
                     continue
                 started_ns = self._drain_signal_started_ns.get(tid)
@@ -8647,6 +8712,7 @@ class Manager(ServiceTask):
         self._draining = False
         self._drain_signaled_children.clear()
         self._drain_escalated_children.clear()
+        self._drain_services_phase = False
         self._drain_signal_started_ns.clear()
         self._drain_started_ns = None
         self._drain_immediate_work_pending = False
@@ -8691,28 +8757,79 @@ class Manager(ServiceTask):
         return False
 
     def _continue_shutdown_drain(self) -> None:
+        """Advance the drain one turn; a stopping drain runs in phases.
+
+        Phase 1 drains user work (and holds for launches in flight until its
+        window expires), phase 2 drains the internal services under a fresh
+        window, and then the Manager publishes its drained event. The drain
+        never returns from phase 2 to phase 1.
+        """
+
         self._drain_immediate_work_pending = False
         if not self._revalidate_leadership_drain():
             return
-        if self._drain_stops_children:
-            self._signal_children_to_stop()
-        self._cleanup_children(
-            retain_managed_survivors=self._drain_stops_children,
-        )
-        if (
-            self._drain_stops_children
-            and self._child_processes
-            and self._shutdown_drain_timed_out()
-        ):
+        if not self._drain_stops_children:
+            self._cleanup_children(retain_managed_survivors=False)
+            if not self._child_processes:
+                self._finish_graceful_shutdown()
+            return
+        if not self._drain_services_phase and self._drain_user_work_phase_holds():
+            return
+        self._signal_children_to_stop(self._drain_phase_children())
+        self._cleanup_children(retain_managed_survivors=True)
+        services = self._drain_phase_children()
+        if services and self._shutdown_drain_timed_out():
             logger.warning(
-                "Manager %s drain timed out with %s child task(s); terminating",
+                "Manager %s drain timed out with %s internal service(s); terminating",
                 self.tid,
-                len(self._child_processes),
+                len(services),
             )
-            self._terminate_children(time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS)
+            self._terminate_children(
+                time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
+                tids=tuple(services),
+            )
             self._cleanup_children()
-        if not self._child_processes:
+        if not self._drain_phase_children():
             self._finish_graceful_shutdown()
+
+    def _drain_user_work_phase_holds(self) -> bool:
+        """Advance phase 1; return whether it still holds the drain.
+
+        Phase 1 ends when no user-work child and no in-flight launch remains,
+        or when its window expires: remaining user work is then force-reaped
+        and an unsettled launch is logged and released to final cleanup. On
+        ending it starts phase 2 with a fresh window.
+        """
+
+        self._signal_children_to_stop(self._drain_phase_children())
+        self._cleanup_children(retain_managed_survivors=True)
+        members = self._drain_phase_children()
+        launches = self._has_active_child_launches()
+        if members or launches:
+            if not self._shutdown_drain_timed_out():
+                return True
+            if members:
+                logger.warning(
+                    "Manager %s drain timed out with %s user-work task(s); terminating",
+                    self.tid,
+                    len(members),
+                )
+                self._terminate_children(
+                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
+                    tids=tuple(members),
+                )
+                self._cleanup_children()
+            if launches:
+                logger.warning(
+                    "Manager %s drain window expired with unsettled child "
+                    "launch(es) %s; releasing them to final cleanup",
+                    self.tid,
+                    sorted(self._active_child_launches),
+                )
+        self._drain_services_phase = True
+        self._drain_started_ns = time.time_ns()
+        self._drain_immediate_work_pending = True
+        return False
 
     def _shutdown_drain_timed_out(self) -> bool:
         if self._drain_started_ns is None:

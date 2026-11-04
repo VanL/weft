@@ -78,6 +78,8 @@ from weft._constants import (
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
+    TERMINAL_TASK_EVENTS,
+    TERMINAL_TASK_STATUSES,
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -4165,16 +4167,27 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A fatal sentinel error still reaps user work, then services [MA-3].
+
+    The error path in ``Manager._cleanup_task_resources`` terminates user
+    work before internal services under one deadline and re-raises the
+    original failure. The service child is inserted first so one unfiltered
+    termination pass, in table order, kills it first.
+    """
+
     manager, _make_queue = manager_setup
 
     class SentinelFailure(BaseException):
         pass
 
+    kill_order: list[str] = []
+
     class LiveProcess:
         pid = None
         exitcode = None
 
-        def __init__(self) -> None:
+        def __init__(self, name: str) -> None:
+            self.name = name
             self.kill_calls = 0
 
         def is_alive(self) -> bool:
@@ -4185,9 +4198,16 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
 
         def kill(self) -> None:
             self.kill_calls += 1
+            kill_order.append(self.name)
 
     failure = SentinelFailure("sentinel observer failed during shutdown")
-    process = LiveProcess()
+    service_process = LiveProcess("service")
+    process = LiveProcess("child")
+    manager._child_processes["service"] = ManagedChild(
+        process=cast(BaseProcess, service_process),
+        ctrl_queue="Tservice.ctrl_in",
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+    )
     manager._child_processes["child"] = ManagedChild(
         process=cast(BaseProcess, process),
         ctrl_queue="Tchild.ctrl_in",
@@ -4199,13 +4219,25 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     monkeypatch.setattr(manager, "_cleanup_children", lambda **_kwargs: False)
     monkeypatch.setattr(manager, "_send_stop_command", lambda _queue: None)
     monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
+    monkeypatch.setattr(
+        manager, "_drain_active_child_launches_for_cleanup", lambda _: None
+    )
+    monkeypatch.setattr(manager, "_cleanup_own_internal_reserved_queue", lambda: None)
+    monkeypatch.setattr(manager, "_unregister_manager", lambda: None)
+    monkeypatch.setattr(
+        manager_mod.ServiceTask,
+        "_cleanup_task_resources",
+        lambda _self, _deadline: None,
+    )
+    monkeypatch.setattr(manager, "_unregister_atexit_callback", lambda: None)
 
     with pytest.raises(SentinelFailure) as exc_info:
-        manager._terminate_children(time.monotonic() + 1.0)
+        manager._cleanup_task_resources(time.monotonic() + 1.0)
 
     assert exc_info.value is failure
     assert process.kill_calls == 1
     assert manager._child_processes == {}
+    assert kill_order == ["child", "service"]
 
 
 def test_manager_sentinel_failure_without_children_is_not_dropped(
@@ -4240,7 +4272,7 @@ def test_manager_cleanup_surfaces_sentinel_failure_published_after_termination(
 
     failure = SentinelFailure("sentinel observer failed before adapter close")
 
-    def terminate_children(_deadline: float) -> None:
+    def terminate_children(_deadline: float, **_kwargs: object) -> None:
         manager._child_sentinel_adapter._results.put(
             manager_mod._ManagerChildSentinelFailure(failure)
         )
@@ -4328,6 +4360,7 @@ def test_manager_cleanup_attempts_every_phase_and_raises_first_failure(
     assert exc_info.value is first
     assert calls == [
         "launches",
+        "children",
         "children",
         "reserved",
         "registry",
@@ -8398,6 +8431,191 @@ def test_manager_stop_command_drains_nonpersistent_children(
     assert any(event.get("event") == "manager_stop_drained" for event in events)
 
 
+def _task_log_entries(log_queue: Queue) -> list[tuple[dict[str, Any], int]]:
+    """Peek every task-log row with its broker message ID, consuming none."""
+
+    return [
+        (json.loads(body), int(timestamp))
+        for body, timestamp in cast(
+            list[tuple[str, int]],
+            log_queue.peek_many(
+                limit=100_000, with_timestamps=True, include_claimed=True
+            )
+            or [],
+        )
+    ]
+
+
+def _first_terminal_log_id(
+    entries: list[tuple[dict[str, Any], int]], tid: str
+) -> int | None:
+    for payload, timestamp in entries:
+        if payload.get("tid") != tid:
+            continue
+        if payload.get("event") in TERMINAL_TASK_EVENTS or (
+            payload.get("status") in TERMINAL_TASK_STATUSES
+        ):
+            return timestamp
+    return None
+
+
+def _first_event_log_id(
+    entries: list[tuple[dict[str, Any], int]], tid: str, event: str
+) -> int | None:
+    return next(
+        (
+            timestamp
+            for payload, timestamp in entries
+            if payload.get("tid") == tid and payload.get("event") == event
+        ),
+        None,
+    )
+
+
+def test_manager_stop_orders_user_work_then_services_then_manager(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system STOP drains user work, then internal services, then the Manager.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+    docs/program-theory.md [WT-2a.13].
+
+    Check 1 (RED before the phased drain): while the user task is still a
+    tracked child, every retained service process stays alive, and no
+    retained service has a ``control_stop`` event before the user task's
+    terminal event.
+    Check 2 (guard): at ``should_stop`` no retained service process is alive
+    and each service's first ``control_stop`` follows the user task's
+    terminal event. Fires on the mutation "finish the drain once user work is
+    empty" (services left running at ``should_stop``).
+    Check 3 (guard): the Manager's ``manager_stop_drained`` event has the
+    greatest message ID among the stop's lifecycle events for the Manager,
+    the user task and every retained service. Fires on the mutation
+    "publish the drained event before the services are reaped". It guards
+    publication order only; check 2's liveness assertion covers exit order.
+    """
+
+    pytest.importorskip("psutil")
+    db_path, make_queue = broker_env
+    # Keep the production window: TaskMonitor's STOP handler cancels its
+    # heartbeat through ``ensure_heartbeat_service``, which can wait up to
+    # MANAGER_STARTUP_TIMEOUT_SECONDS (10 s) when the heartbeat stops in the
+    # same phase. A shorter window would force-reap it and drop its
+    # ``control_stop`` event.
+    monkeypatch.setattr(manager_mod, "MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 15.0)
+    _parent_script, term_trapping_script = _write_term_trapping_descendant_scripts(
+        tmp_path
+    )
+    marker = tmp_path / "user-task-ready.pid"
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_LIVENESS_MONITOR_ENABLED": "0",
+            }
+        ),
+    )
+    try:
+        log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+        make_queue(manager._queue_names["inbox"]).write(
+            json.dumps(
+                {
+                    "name": "term-trapping-user-work",
+                    "spec": {
+                        "type": "command",
+                        "process_target": sys.executable,
+                        "args": [str(term_trapping_script), str(marker)],
+                    },
+                }
+            )
+        )
+
+        def ready() -> bool:
+            return (
+                marker.exists()
+                and bool(marker.read_text(encoding="utf-8").strip())
+                and any(
+                    manager._child_is_supervision_only(child)
+                    for child in manager._child_processes.values()
+                )
+                and bool(manager._user_work_children())
+                and not manager._has_active_child_launches()
+            )
+
+        deadline = time.monotonic() + (60.0 if os.name == "nt" else 30.0)
+        while not ready() and time.monotonic() < deadline:
+            manager.process_once()
+            time.sleep(0.05)
+        assert ready(), (
+            "readiness not reached: "
+            f"marker={marker.exists()} children={sorted(manager._child_processes)}"
+        )
+
+        services = {
+            tid: child.process
+            for tid, child in manager._child_processes.items()
+            if manager._child_is_supervision_only(child)
+        }
+        (user_tid,) = tuple(manager._user_work_children())
+        user_process = manager._child_processes[user_tid].process
+
+        stop_id = make_queue(manager._queue_names["ctrl_in"]).write(
+            encode_control_message(CONTROL_STOP)
+        )
+        user_tracked_turns = 0
+        deadline = time.monotonic() + 40.0
+        while not manager.should_stop and time.monotonic() < deadline:
+            manager.process_once()
+            if user_tid in manager._child_processes:
+                user_tracked_turns += 1
+                for service_tid, process in services.items():
+                    assert _process_running(process.pid), (
+                        f"service {service_tid} exited while user work "
+                        f"{user_tid} was still tracked"
+                    )
+            time.sleep(0.05)
+        assert manager.should_stop
+        assert user_tracked_turns > 0
+
+        entries = _task_log_entries(log_queue)
+        user_terminal_id = _first_terminal_log_id(entries, user_tid)
+        assert user_terminal_id is not None
+        for service_tid in services:
+            service_stop_id = _first_event_log_id(entries, service_tid, "control_stop")
+            assert service_stop_id is None or service_stop_id > user_terminal_id, (
+                f"service {service_tid} control_stop preceded the user terminal event"
+            )
+
+        # Check 2 (guard): services stopped after user work.
+        assert not _process_running(user_process.pid)
+        for service_tid, process in services.items():
+            assert not _process_running(process.pid), (
+                f"service {service_tid} still alive at should_stop"
+            )
+            service_stop_id = _first_event_log_id(entries, service_tid, "control_stop")
+            assert service_stop_id is not None
+            assert service_stop_id > user_terminal_id
+
+        # Check 3 (guard): the Manager's drained event is the stop's last.
+        drained_id = _first_event_log_id(entries, manager.tid, "manager_stop_drained")
+        assert drained_id is not None
+        cohort = {manager.tid, user_tid, *services}
+        stop_ids = [
+            timestamp
+            for payload, timestamp in entries
+            if timestamp > stop_id and payload.get("tid") in cohort
+        ]
+        assert max(stop_ids) == drained_id
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
 def test_manager_sigterm_drains_nonpersistent_children(
     manager_setup: tuple[Manager, Callable[[str], Queue]], tmp_path: Path
@@ -8499,7 +8717,9 @@ def test_foreground_serve_sigterm_uses_async_drain_path(
         drain_started = True
         raise AssertionError("signal handler must not synchronously start draining")
 
-    def fail_if_signal_handler_terminates_children(deadline: float) -> None:
+    def fail_if_signal_handler_terminates_children(
+        deadline: float, **_kwargs: object
+    ) -> None:
         raise AssertionError("signal handler must not synchronously terminate children")
 
     try:
@@ -8553,7 +8773,7 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
     )
     terminated = False
 
-    def finish_stubborn_child(_deadline: float) -> None:
+    def finish_stubborn_child(_deadline: float, **_kwargs: object) -> None:
         nonlocal terminated
         terminated = True
         manager._child_processes.clear()
@@ -8572,6 +8792,61 @@ def test_manager_drain_timeout_force_finishes_stubborn_children(
     events = [json.loads(item) for item in drain(log_queue)]
     assert any(event.get("event") == "control_stop" for event in events)
     assert any(event.get("event") == "manager_stop_drained" for event in events)
+
+
+def test_manager_stop_does_not_hold_past_window_for_stuck_launch(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 1 holds for an in-flight launch only until its window expires.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3].
+
+    Guard. Named mutation: ending phase 1 only when launches settle (removing
+    the window bound) makes STOP hold while the launch worker is blocked, and
+    the test fails at its outer bound.
+    """
+
+    manager, make_queue = manager_setup
+    window = 0.5
+    monkeypatch.setattr(manager_mod, "MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", window)
+    release = threading.Event()
+
+    def blocked_launch(*_args: object, **_kwargs: object) -> FakeLaunchProcess:
+        release.wait(timeout=60.0)
+        return FakeLaunchProcess(pid=None, alive=False)
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    drain(log_queue)
+    try:
+        payload = make_child_spec()
+        payload["name"] = "stuck-launch"
+        launch_id = make_queue(manager._queue_names["inbox"]).write(json.dumps(payload))
+        drive_manager_until(manager, manager._has_active_child_launches)
+
+        make_queue(manager._queue_names["ctrl_in"]).write(
+            encode_control_message(CONTROL_STOP)
+        )
+        caplog.set_level(logging.WARNING, logger="weft.core.manager")
+        outer_bound = time.monotonic() + 6 * window + 5.0
+        while not manager.should_stop and time.monotonic() < outer_bound:
+            manager.process_once()
+            manager.wait_for_activity(0.05)
+
+        assert manager.should_stop
+        assert not release.is_set()
+        assert manager._has_active_child_launches()
+        events = [json.loads(item) for item in drain(log_queue)]
+        assert any(event.get("event") == "manager_stop_drained" for event in events)
+        assert any(
+            "unsettled child launch" in record.getMessage()
+            and str(launch_id) in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        release.set()
 
 
 @pytest.mark.skipif(
