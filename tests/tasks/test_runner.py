@@ -1093,7 +1093,12 @@ def _agent_session_hold_then_reply_worker(
 
 
 class _RecordingLimitMonitor(BaseResourceMonitor):
-    """Monitor double that records a monotonic timestamp per limit check."""
+    """Monitor double that records a `perf_counter` timestamp per limit check.
+
+    `perf_counter` keeps sub-millisecond resolution on every platform;
+    `time.monotonic` on Windows before Python 3.13 ticks at about 15.6 ms,
+    which made a sample and the wait that follows it share one timestamp.
+    """
 
     def __init__(
         self,
@@ -1115,7 +1120,7 @@ class _RecordingLimitMonitor(BaseResourceMonitor):
         return ResourceMetrics(memory_mb=1.0)
 
     def check_limits(self) -> tuple[bool, str | None]:
-        self.sample_times.append(time.monotonic())
+        self.sample_times.append(time.perf_counter())
         if self._violation_at is not None and len(self.sample_times) >= (
             self._violation_at
         ):
@@ -1218,7 +1223,7 @@ def test_agent_session_samples_limits_at_monitor_interval(
     real_wait_seconds = session._terminal_handoff_wait_seconds
 
     def recording_wait_seconds(**kwargs: Any) -> float | None:
-        wait_times.append(time.monotonic())
+        wait_times.append(time.perf_counter())
         return real_wait_seconds(**kwargs)
 
     monkeypatch.setattr(
