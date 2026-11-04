@@ -14,7 +14,10 @@ def register_builtin_agent_runtimes() -> None:
 
     # Runtime adapters are loaded only at the explicit registration boundary so
     # schema-only imports do not initialize model clients or provider tooling.
+    # [AR-7]: loaded only at the registration boundary.
     from .llm import LLMBackend
+
+    # [AR-7]: loaded only at the registration boundary.
     from .provider_cli import ProviderCLIBackend
 
     try:

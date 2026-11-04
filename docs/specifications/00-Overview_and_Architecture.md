@@ -179,7 +179,7 @@ _Implementation mapping per layer_:
   `weft/core/manager_runtime.py`, `weft/manager_process.py`
 - **Task runtime**: `weft/core/tasks/base.py`,
   `weft/core/tasks/consumer.py`, `weft/core/tasks/runner.py`,
-  `weft/core/tasks/sessions.py`
+  `weft/core/runners/sessions.py`
 - **Runner plugins**: `weft/core/runners/`, `weft/_runner_plugins.py`,
   `weft/ext.py`
 - **Queues and persistence**: SimpleBroker broker target and queue API

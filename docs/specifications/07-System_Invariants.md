@@ -246,7 +246,7 @@ runtime.
 ### Resource Invariants
 
 _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/resource_monitor.py`,
-`weft/core/tasks/consumer.py`, `weft/core/tasks/sessions.py`,
+`weft/core/tasks/consumer.py`, `weft/core/runners/sessions.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`.
 
 - **RES.1**: limits live under `spec.limits`
@@ -260,7 +260,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py`, `weft/core/resource_mon
 
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
-`weft/core/taskspec/model.py`, `weft/core/tasks/sessions.py`,
+`weft/core/taskspec/model.py`, `weft/core/runners/sessions.py`,
 `weft/core/terminal_handoff.py`, `weft/core/terminal_handoff_transport.py`, and
 `weft/ext.py`.
 

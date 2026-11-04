@@ -323,7 +323,7 @@ policies cancellation is first, confirmed resource limit follows both timeout
 and payload, and the first accepted stop remains final.
 
 _Implementation mapping_: `weft/core/runners/host.py` owns the one-shot timeout
-observation boundary; `weft/core/tasks/sessions.py` owns the persistent-session
+observation boundary; `weft/core/runners/sessions.py` owns the persistent-session
 boundary; both route observations through `weft/core/terminal_handoff.py`.
 `weft/core/runners/subprocess_runner.py` owns the shared subprocess supervisor
 (`run_monitored_subprocess`), its platform readiness adapter

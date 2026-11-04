@@ -629,17 +629,29 @@ def test_weft_uses_only_supported_simplebroker_surfaces() -> None:
     assert not violations, "\n".join(violations)
 
 
-def test_weft_has_no_eager_import_cycles() -> None:
-    """Module-scope runtime imports must form an acyclic package graph."""
+def test_weft_import_graph_is_acyclic_including_function_level_imports() -> None:
+    """No import cycle may hide behind a function-level import or a package initializer."""
 
-    edges = [
-        (edge.source_module, edge.target_module)
-        for edge in _iter_import_edges(PACKAGE_ROOT)
-        if edge.scope == "module"
-        and not edge.type_checking
-        and edge.target_module.startswith("weft.")
-    ]
-    assert _strongly_connected_components(edges) == []
+    known = {
+        _module_name(path)
+        for path in PACKAGE_ROOT.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    edges: set[tuple[str, str]] = set()
+    for edge in _iter_import_edges(PACKAGE_ROOT):
+        if edge.type_checking or not edge.target_module.startswith("weft."):
+            continue
+        edges.add((edge.source_module, edge.target_module))
+        # Importing a.b.c first runs a.b's __init__; count that edge unless
+        # the importer already lives inside a.b.
+        parts = edge.target_module.split(".")
+        for index in range(2, len(parts)):
+            package = ".".join(parts[:index])
+            if package in known and not _is_module_or_child(
+                edge.source_module, package
+            ):
+                edges.add((edge.source_module, package))
+    assert _strongly_connected_components(sorted(edges)) == []
 
 
 def test_runner_runtime_imports_have_no_cycles() -> None:
@@ -831,15 +843,20 @@ def test_agents_import_does_not_register_or_load_builtin_backends() -> None:
     assert "weft.core.agents.backends.provider_cli" not in modules
 
 
-def test_host_import_registers_builtin_agent_backends() -> None:
-    modules = _fresh_import_modules(
-        "import weft.core.runners.host\n"
-        "from weft.core.agents.runtime import get_agent_runtime\n"
-        "assert get_agent_runtime('llm') is not None\n"
-        "assert get_agent_runtime('provider_cli') is not None"
-    )
-    assert "weft.core.agents.backends.llm" in modules
-    assert "weft.core.agents.backends.provider_cli" in modules
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import weft.core.runners.host",
+        "import weft.core.runner_validation",
+        "import weft.cli.app",
+    ],
+)
+def test_host_import_does_not_load_builtin_agent_backends(statement: str) -> None:
+    """Backends load only when the host runtime boundary registers them [AR-7]."""
+
+    modules = _fresh_import_modules(statement)
+    assert "weft.core.agents.backends.llm" not in modules
+    assert "weft.core.agents.backends.provider_cli" not in modules
 
 
 def test_root_package_exposes_only_metadata() -> None:

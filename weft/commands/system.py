@@ -331,21 +331,6 @@ def _runtime_evidence_details(
     return _runtime_description_is_live(runtime_description), "none", "unknown"
 
 
-def _is_internal_service_record(record: Mapping[str, Any]) -> bool:
-    """Return whether a task-log record describes manager-owned service work."""
-
-    metadata = record.get("metadata")
-    if not isinstance(metadata, Mapping):
-        return False
-    if metadata.get("internal") is True:
-        return True
-    role = metadata.get("role")
-    if role in {"task_monitor", "heartbeat_service", "liveness_monitor"}:
-        return True
-    service_key = metadata.get("_weft_service_key")
-    return isinstance(service_key, str) and service_key.startswith("_weft.service.")
-
-
 def _service_display_name(key: str) -> str:
     if key == INTERNAL_SERVICE_KEY_HEARTBEAT:
         return "heartbeat-service"

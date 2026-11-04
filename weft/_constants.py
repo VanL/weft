@@ -5,15 +5,11 @@ for Weft. Constants are immutable values that control various aspects
 of the system's behavior, from message size limits to timing parameters.
 
 Environment Variables:
-    See the load_config() function for a complete list of supported environment
-    variables and their default values.
+    See WEFT_CONFIG_FIELDS for the complete catalog of supported environment
+    variables and their default values; load_config() resolves them.
 
 Usage:
-    from weft._constants import WEFT_DEBUG, load_config
-
-    # Use constants directly
-    if WEFT_DEBUG:
-       #....
+    from weft._constants import load_config
 
     # Load configuration once at module level
     _config = load_config()
@@ -114,7 +110,7 @@ ACTIVE_CONTROL_POLL_INTERVAL: Final[float] = 0.05
 ``Callable[[], bool]`` with no waitable, so it cannot wake a readiness wait
 ([WT-7] "Event-driven against absence": the event cannot arrive). Used so,
 only while a predicate is present, by
-``weft/core/tasks/sessions.py::AgentSession._terminal_handoff_wait_seconds``
+``weft/core/runners/sessions.py::AgentSession._terminal_handoff_wait_seconds``
 and ``weft/core/runners/subprocess_runner.py::_supervision_wait_timeout``.
 ``weft/core/runners/host.py::HostTaskRunner._terminal_handoff_wait_seconds``
 still uses it as an unconditional observation floor in the one-shot

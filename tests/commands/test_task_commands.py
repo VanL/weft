@@ -26,6 +26,7 @@ from weft._exceptions import (
     ControlRejected,
     TaskNotFound,
 )
+from weft.commands import _observation as observation_cmd
 from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.control_convergence import (
@@ -643,7 +644,9 @@ def test_deadline_from_timeout_clamps_at_zero(
     timeout: float | None,
     expected: float | None,
 ) -> None:
-    monkeypatch.setattr(task_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    monkeypatch.setattr(
+        observation_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0)
+    )
 
     assert task_cmd._deadline_from_timeout(timeout) == expected
 
@@ -663,7 +666,9 @@ def test_deadline_helpers_share_exact_expiry_boundary(
     remaining: float | None,
     expired: bool,
 ) -> None:
-    monkeypatch.setattr(task_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    monkeypatch.setattr(
+        observation_cmd, "time", SimpleNamespace(monotonic=lambda: 100.0)
+    )
 
     assert task_cmd._remaining_timeout(deadline) == remaining
     assert task_cmd._deadline_expired(deadline) is expired

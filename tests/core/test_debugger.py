@@ -10,8 +10,8 @@ import pytest
 
 from simplebroker import Queue
 from tests.helpers.typing import BrokerEnv
+from weft.core.runners.sessions import InProcessCommandSession
 from weft.core.tasks.debugger import Debugger
-from weft.core.tasks.sessions import InProcessCommandSession
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 

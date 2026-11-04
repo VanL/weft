@@ -42,7 +42,15 @@ from weft.core.agents.runtime import (
 )
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
+from weft.core.runners.agent_session_protocol import (
+    make_booted_response,
+    make_ready_response,
+    make_result_response,
+    make_startup_error_response,
+    parse_request_type,
+)
 from weft.core.runners.outcome import RunnerOutcome
+from weft.core.runners.sessions import AgentSession, CommandSession
 from weft.core.runners.subprocess_runner import (
     cleanup_after_execution_failure,
     close_supervised_pipes,
@@ -56,14 +64,6 @@ from weft.core.runtime_identity import (
     install_runtime_identity,
 )
 from weft.core.targets import execute_function_target
-from weft.core.tasks.agent_session_protocol import (
-    make_booted_response,
-    make_ready_response,
-    make_result_response,
-    make_startup_error_response,
-    parse_request_type,
-)
-from weft.core.tasks.sessions import AgentSession, CommandSession
 from weft.core.taskspec import AgentSection
 from weft.core.terminal_handoff import (
     TerminalHandoffEvent,
@@ -97,8 +97,6 @@ from weft.helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-register_builtin_agent_runtimes()
 
 
 def _plain_spawn_value(value: Any) -> Any:
@@ -178,6 +176,7 @@ def _worker_entry(
                 )
             elif spec_data["type"] == "agent":
                 agent = AgentSection.model_validate(spec_data["agent"])
+                register_builtin_agent_runtimes()
                 value = execute_agent_target(
                     agent,
                     work_item,
@@ -304,6 +303,7 @@ def _agent_session_worker_entry(
         send_terminal_payload(response_sender, make_booted_response())
         with _worker_runtime_context(spec_data):
             agent = AgentSection.model_validate(spec_data["agent"])
+            register_builtin_agent_runtimes()
             session = start_agent_runtime_session(
                 agent,
                 tid=spec_data.get("tid"),

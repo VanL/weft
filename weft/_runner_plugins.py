@@ -15,6 +15,7 @@ from weft._constants import (
     RUNNER_ENTRY_POINT_GROUP,
     RUNNER_PLUGIN_EXTRA_INSTALL_HINTS,
 )
+from weft.core.runners.host import get_runner_plugin as get_host_runner_plugin
 from weft.ext import RunnerPlugin
 
 
@@ -42,8 +43,6 @@ def get_runner_plugin(name: str) -> RunnerPlugin:
     """Return the built-in or installed runner plugin by name."""
     normalized = name.strip()
     if normalized == DEFAULT_RUNNER_NAME:
-        from weft.core.runners.host import get_runner_plugin as get_host_runner_plugin
-
         return get_host_runner_plugin()
     return _load_entry_point_plugin(normalized)
 

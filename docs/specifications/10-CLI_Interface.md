@@ -274,7 +274,7 @@ JSON remains `{tid,status,result}` and failure JSON remains
 command result schema.
 
 _Terminal handoff implementation mapping_: `weft/core/runners/host.py` and
-`weft/core/tasks/sessions.py` place the public category in the existing error
+`weft/core/runners/sessions.py` place the public category in the existing error
 outcome; `weft/core/tasks/consumer.py` publishes it through normal failed-task
 state; `weft/commands/run.py` renders the unchanged plain and JSON shapes.
 

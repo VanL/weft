@@ -539,7 +539,7 @@ _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/debugger.py`, `weft/core/tasks/heartbeat.py`,
 `weft/core/tasks/liveness_monitor.py`, `weft/liveness/`,
 `weft/core/tasks/interactive.py`, `weft/core/tasks/service.py`,
-`weft/core/tasks/sessions.py`, `weft/core/manager.py`;
+`weft/core/runners/sessions.py`, `weft/core/manager.py`;
 task primitives are re-exported from `weft/core/tasks/__init__.py` where
 intended for package-level use. The internal `ServiceTask` helper is imported
 directly from `weft/core/tasks/service.py`, while the TaskMonitor runtime is
@@ -706,7 +706,7 @@ Current task families:
 
 Interactive command sessions reuse the same task/runtime conventions rather
 than inventing a second terminal subsystem, and long-lived agent sessions reuse
-the same session helpers in `weft/core/tasks/sessions.py`.
+the same session helpers in `weft/core/runners/sessions.py`.
 
 ### 2.4 Control and State Expectations [CC-2.4]
 
@@ -1228,7 +1228,7 @@ _Implementation mapping_: `weft/core/resource_monitor.py`,
 presentation adapter over `weft/core/runner_diagnostics.py::diagnostic_summary`;
 the shared result contract lives in `weft/ext.py::RunnerOutcome`. Session and
 task ownership lives in
-`weft/core/tasks/sessions.py`,
+`weft/core/runners/sessions.py`,
 `weft/core/tasks/consumer.py`. Monitor-owned durable collation is implemented
 by `weft/core/monitor/store.py`, `weft/core/monitor/sql.py`,
 `weft/core/monitor/collation.py`, and `weft/core/monitor/task_monitor.py`.
@@ -1306,7 +1306,7 @@ worker entrypoint can publish a terminal outcome.
 _Implementation mapping_: `weft/core/terminal_handoff.py` owns the pure reducer,
 same-turn selectors, and edge-consumption driver;
 `weft/core/terminal_handoff_transport.py` owns synchronous private framing;
-`weft/core/runners/host.py` and `weft/core/tasks/sessions.py` acquire
+`weft/core/runners/host.py` and `weft/core/runners/sessions.py` acquire
 observations, apply effects, and own cleanup.
 
 ## Related Plans

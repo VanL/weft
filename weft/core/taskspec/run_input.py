@@ -40,6 +40,15 @@ def validate_run_input_adapter_ref(ref: str) -> str:
     return normalized
 
 
+def validate_parameterization_adapter_ref(ref: str) -> str:
+    """Validate and normalize a parameterization adapter import ref."""
+    normalized = ref.strip()
+    if not normalized:
+        raise ValueError("spec.parameterization.adapter_ref must be a non-empty string")
+    split_import_ref(normalized)
+    return normalized
+
+
 def normalize_run_input_value(kind: str, raw_value: str) -> str:
     """Normalize one declared CLI value for adapter consumption."""
     if kind == "string":
@@ -207,6 +216,7 @@ __all__ = [
     "normalize_declared_option_name",
     "parse_declared_option_args",
     "parse_declared_run_input_args",
+    "validate_parameterization_adapter_ref",
     "validate_run_input_adapter",
     "validate_run_input_adapter_ref",
 ]

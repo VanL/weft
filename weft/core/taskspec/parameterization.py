@@ -14,12 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from weft.core.imports import import_callable_ref, split_import_ref
+from weft.core.imports import import_callable_ref
 
 from .run_input import (
     ensure_json_serializable_work_payload,
     parse_declared_option_args,
+    validate_parameterization_adapter_ref,
 )
+from .transport import validate_taskspec_payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,15 +32,6 @@ class SpecParameterizationRequest:
     context_root: str | None
     spec_name: str
     taskspec_payload: Mapping[str, Any]
-
-
-def validate_parameterization_adapter_ref(ref: str) -> str:
-    """Validate and normalize a parameterization adapter import ref."""
-    normalized = ref.strip()
-    if not normalized:
-        raise ValueError("spec.parameterization.adapter_ref must be a non-empty string")
-    split_import_ref(normalized)
-    return normalized
 
 
 def validate_parameterization_adapter(
@@ -126,9 +119,6 @@ def materialize_taskspec_template(
     payload = json.loads(json.dumps(payload))
     if isinstance(payload.get("spec"), dict):
         payload["spec"].pop("parameterization", None)
-
-    # Local import breaks model -> parameterization -> transport -> model.
-    from .transport import validate_taskspec_payload
 
     return validate_taskspec_payload(
         payload,

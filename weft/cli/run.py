@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import typer
 
+import weft.cli.deferred
 from weft._constants import INTERACTIVE_OUTPUT_DRAIN_TIMEOUT, load_config
 from weft.commands import (
     CommandStream,
@@ -216,13 +217,7 @@ def drive_interactive_session(session: RunSession, stdin_text: str | None) -> No
     if stdin_text is not None:
         _render_interactive_events(session.events())
         return
-    try:
-        # Optional dependency is imported only for the interactive terminal mode.
-        from prompt_toolkit import PromptSession
-    except ImportError as exc:  # pragma: no cover - optional dependency guard
-        raise RuntimeError("prompt_toolkit is required for interactive mode") from exc
-
-    prompt: PromptSession[str] = PromptSession()
+    prompt = weft.cli.deferred.get_prompt_session()()
     done = threading.Event()
     errors: list[BaseException] = []
     live_session = cast(_LiveRunSession, session)

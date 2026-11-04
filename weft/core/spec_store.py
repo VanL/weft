@@ -102,10 +102,6 @@ def _spec_path(context: WeftContext, spec_type: str, name: str) -> Path:
     return _spec_dir(context, spec_type) / f"{name}.json"
 
 
-def _spec_bundle_path(context: WeftContext, spec_type: str, name: str) -> Path:
-    return _spec_dir(context, spec_type) / name / _spec_entry_file(spec_type)
-
-
 def _spec_path_from_root(spec_root: Path, spec_type: str, name: str) -> Path:
     return _spec_dir_from_root(spec_root, spec_type) / f"{name}.json"
 

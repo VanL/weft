@@ -76,6 +76,7 @@ from weft.helpers import (
 )
 from weft.liveness.host import inspect_host_process
 from weft.liveness.registry import runtime_liveness_from_registered_probe
+from weft.manager_process import run_manager_process
 
 from .queue_wait import QueueChangeMonitor
 from .service_convergence import (
@@ -366,34 +367,6 @@ def _select_active_manager_from_snapshot(
     if decision.canonical_live is None:
         return None
     return projected_by_timestamp.get(decision.canonical_live.timestamp)
-
-
-def _record_is_recent_enough_for_uncertain_selection(record: dict[str, Any]) -> bool:
-    timestamp = _manager_record_timestamp(record)
-    if timestamp is None:
-        return False
-    stale_after_ns = int(
-        MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
-    )
-    return time.time_ns() - timestamp <= stale_after_ns
-
-
-def _select_uncertain_active_manager_from_snapshot(
-    snapshot: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Return a fresh canonical incumbent whose liveness is namespace-ambiguous."""
-
-    candidates = [
-        record
-        for record in snapshot.values()
-        if record.get("status") == SERVICE_STATUS_ACTIVE
-        and is_canonical_manager_record(record)
-        and _host_pid_visibility_is_namespace_ambiguous(record)
-        and _record_is_recent_enough_for_uncertain_selection(record)
-    ]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda record: int(str(record.get("tid", "0"))))
 
 
 def _public_spawn_backlog_pending(
@@ -2284,10 +2257,7 @@ def _run_manager_process_foreground(
     invocation: ManagerRuntimeInvocation,
     context: WeftContext,
 ) -> None:
-    """Run a foreground manager without importing the CLI module at import time."""
-
-    from weft.manager_process import run_manager_process
-
+    """Run a foreground manager."""
     run_manager_process(
         invocation.task_cls_path,
         context.broker_target,

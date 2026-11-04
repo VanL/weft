@@ -104,9 +104,11 @@ def main() -> int | None:
     # CLI context loading validates WEFT_* configuration. Keep that failure
     # inside this bootstrap boundary and render SimpleBroker's public safe
     # diagnostic without a traceback; ambient BROKER_* is ignored.
+    # [CLI-5]: these imports run only after WEFT_ENV_FILE is applied.
     from simplebroker.ext import InvalidConfigError
 
     try:
+        # [CLI-5]: the full CLI imports only after WEFT_ENV_FILE is applied.
         from weft.cli.app import app
 
         app()

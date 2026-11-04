@@ -41,6 +41,7 @@ from weft._constants import (
 from weft._exceptions import CommandUsageError, SubmissionError
 from weft.commands._boundary import typed_command_errors
 from weft.commands._result_wait import result_observation
+from weft.commands.events import iter_task_realtime_events
 from weft.commands.result import await_task_result
 from weft.commands.submission import (
     _annotate_accepted_submission_error,
@@ -54,6 +55,11 @@ from weft.commands.submission import (
     ensure_manager_after_submission as _shared_ensure_manager_after_submission,
 )
 from weft.commands.submission import prepare_spec as _prepare_spec_submission
+from weft.commands.tasks import (
+    _require_observation_config,
+    _task_control_result,
+    _terminal_observation_snapshot,
+)
 from weft.commands.types import (
     CommandStream,
     RunExecutionResult,
@@ -380,9 +386,6 @@ class _LiveRunSession:
             self._input_resources = resources.pop_all()
 
     def events(self) -> CommandStream[TaskEvent]:
-        # Late import breaks the real result/events cycle.
-        from .events import iter_task_realtime_events
-
         def events_on_owner() -> Iterator[TaskEvent]:
             stream = cast(
                 CommandStream[TaskEvent],
@@ -434,9 +437,6 @@ class _LiveRunSession:
     @typed_command_errors
     def stop(self) -> TaskControlResult:
         """Stop this session's task on the context it was submitted with [PY-2]."""
-        # Late import avoids the tasks -> system -> run dependency closure.
-        from .tasks import _task_control_result
-
         return _task_control_result(
             "stop",
             self.tid,
@@ -492,9 +492,6 @@ def _stop_interactive_run_session(session: _LiveRunSession) -> None:
 
     Spec: [CLI-1.1.1], [MF-3]
     """
-    # Late import avoids the tasks -> system -> run dependency closure.
-    from .tasks import _terminal_observation_snapshot
-
     ctx = session._context
     tid = session.tid
     session.close_input()
@@ -505,9 +502,6 @@ def _stop_interactive_run_session(session: _LiveRunSession) -> None:
     )
     config = task_evidence.observation_config_from_taskspec_payload(payload)
     if config is None:
-        # Late import avoids the tasks -> system -> run dependency closure.
-        from .tasks import _require_observation_config
-
         config = _require_observation_config(ctx, tid)
     names = [task_state_queue_name(tid), config.ctrl_in, config.ctrl_out, config.outbox]
     with result_observation(ctx, names) as (queues, monitor):

@@ -10,6 +10,17 @@
 
 ### Changed
 
+- The host runner's session modules moved from `weft.core.tasks` to
+  `weft.core.runners`: `weft.core.tasks.sessions` is now
+  `weft.core.runners.sessions` (its logger name changes with it) and
+  `weft.core.tasks.agent_session_protocol` is now
+  `weft.core.runners.agent_session_protocol`, with no re-export at the old
+  paths. Importing `weft.core.runners.host` no longer registers the built-in
+  agent backends; the host worker registers them just before it runs an agent,
+  so a registration failure is reported as that task's failure. An install
+  missing the declared `prompt-toolkit` dependency now fails an interactive run
+  with `ModuleNotFoundError` instead of a `RuntimeError`. The Weft import graph
+  has no cycles, counting function-level imports and package initializers.
 - Every TID rendering is now lossless ([OBS.5]): process titles and the
   `short`, `tid_short`, and `manager_tid_short` values carry the 13-character
   Crockford base32 encoded TID (for example `1JZKD3PKK0000`), uppercase,

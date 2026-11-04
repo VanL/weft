@@ -54,18 +54,18 @@ from weft.core.launcher import _request_parent_loss_shutdown, _task_process_entr
 from weft.core.manager import Manager
 from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.runners import RunnerOutcome
+from weft.core.runners import sessions as sessions_module
+from weft.core.runners.sessions import AgentSession, CommandSession
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
 from weft.core.tasks import consumer as consumer_module
-from weft.core.tasks import sessions as sessions_module
 from weft.core.tasks.base import BaseTask, TaskWorkerResult
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.monitor import Monitor
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.pipeline import PipelineEdgeTask, PipelineTask
 from weft.core.tasks.service import ServiceTask
-from weft.core.tasks.sessions import AgentSession, CommandSession
 from weft.core.taskspec import (
     IOSection,
     ReservedPolicy,
@@ -1450,7 +1450,7 @@ def test_agent_session_close_reports_stop_request_failure_and_cleans_up(
         "_close_ipc_resources",
         lambda *, deadline=None: calls.append("close_ipc"),
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.close()
     session.close()
@@ -1501,7 +1501,7 @@ def test_agent_session_close_reports_join_os_error_and_cleans_up(
         "_close_ipc_resources",
         lambda *, deadline=None: calls.append("close_ipc"),
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.close()
 
@@ -1659,7 +1659,7 @@ def test_agent_session_terminate_reports_os_join_failure_by_branch(
         timeout=None,
     )
     monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     deadline = time.monotonic() + 1.0 if deadline_enabled else None
     session.terminate(deadline=deadline)
@@ -1691,7 +1691,7 @@ def test_agent_session_terminate_propagates_unexpected_join_failure(
         None,
         timeout=None,
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     with pytest.raises(RuntimeError, match="unexpected agent process wait defect"):
         session.terminate()
@@ -1910,7 +1910,7 @@ def test_command_session_reports_cleanup_callback_failure_once(
         None,
         cleanup_callback=cleanup,
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.close()
     session.close()
@@ -1943,7 +1943,7 @@ def test_command_session_reports_monitor_cleanup_failures_and_clears_owner(
         queue.Queue(),
         Monitor(),  # type: ignore[arg-type]
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.stop_monitor()
     session.stop_monitor()

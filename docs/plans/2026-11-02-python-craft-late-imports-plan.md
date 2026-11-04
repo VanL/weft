@@ -565,7 +565,8 @@ the hardening checklist applies. What this plan adds for it:
 - *Rollback.* Each of Tasks 11–13 is its own revertable hunk set; see Rollback.
 - *Review before implementation begins.* The cross-family round on Tasks 11–13
   closed on 2026-11-02 (Review Log). The cross-family round on the owner's
-  2026-11-03 rulings as applied is pending; no task starts before it closes.
+  2026-11-03 rulings as applied closed on 2026-11-03 (Review Log, round 2: no
+  blocker).
 
 ## 5. Findings Re-derived
 
@@ -1425,6 +1426,11 @@ landed, `git revert` the commit.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| none ([WT-3] row) | Strategy B: the `docs/program-theory.md` [WT-3] row lands in the same commit as Task 13 | The row lands in a separate `Theory:` commit after the code commit | Series common rule (2026-11-03): every theory edit is its own commit so it can be reverted alone; the owner accepted it on 2026-11-03 ("I accept the theory edits") | none |
+| none | Task 6 pins `EXPECTED_DIRECTIVE_COUNT` 325 → 324 | 323 → 322 | Plans 2 and 6 each removed one directive before this plan; recounted on the starting tree | none |
+| none | Task 7 deletes eleven helpers | Also deletes `weft/core/manager_runtime.py::_record_is_recent_enough_for_uncertain_selection` | Its only caller was `_select_uncertain_active_manager_from_snapshot`; keeping it would create the dead code H5 removes | none |
+| none | Task 13 rewrite list (P24, 21 lines) | Three more import sites (`tests/core/test_debugger.py`, `tests/helpers/leaked_sender.py`, `tests/tasks/test_task_interactive.py`) and one docstring path (`weft/_constants.py`) | Added to the tree after `b7eed9f9`; found by rerunning the inventory | none |
+| none | No CHANGELOG entry named | One `[Unreleased]` Changed bullet | [ALT-WT-012]: the CHANGELOG records each break (module paths, logger name, import-time registration, broken-install error type) | none |
 
 ## Spec Baseline
 
@@ -1772,3 +1778,37 @@ summarized here.
   is the only theory line naming `weft.core.tasks.sessions` (byte-compared
   in the delta). `host.py` call lines: `execute_agent_target(` at 181,
   `start_agent_runtime_session(` at 307.
+
+### Implementation, 2026-11-03 (series plan 8, Anthropic implementer, on `main` at `c7007f96`)
+
+All commands from `/Users/van/Developer/weft` after `. ./.envrc`. The P2 AST
+gate, the Task 13 inventory, and an SCC probe that reproduces the Task 11 test
+body were re-created as scratch scripts (logic as written in this plan).
+Owner acceptance: the theory row (owner item 4) was accepted by the owner on
+2026-11-03 ("I accept the theory edits") and lands in its own `Theory:`
+commit. No owner item was open; no closure was recorded.
+
+- **Baseline (`c7007f96`).** AST gate → `TOTAL 23` (same sites as P2, line
+  numbers shifted, e.g. `run.py:384/438/496/509`, `tasks.py:2421`,
+  `manager.py:2183–2199/3007/3014`). SCC probe on a `git archive HEAD` copy →
+  three SCCs: the 14-module runner-plugins SCC,
+  `('weft.commands.events', 'weft.commands.tasks')`, and the three taskspec
+  modules. `tests/specs/test_ruff_policy.py` pins `EXPECTED_DIRECTIVE_COUNT =
+  323`; registry global inventory `BLE001=132`; `RUFF-SUP-344` rows at lines
+  182 and 381.
+- **Task 1.** Four late imports hoisted. `grep -n "dependency closure\|result/events cycle" weft/commands/run.py` → nothing. Patch scan: only `tests/core/test_client.py:271`, `:325` patch `_task_control_result` (client path), so the stop gate did not fire.
+- **Task 2.** Five manager imports and `run_manager_process` hoisted; docstring now "Run a foreground manager." Closure check → `True`.
+- **Task 3.** Comments added at `agent_images.py`, `bootstrap.py` (two), `backends/__init__.py` (two); `CLAUDE.md` (symlink to `AGENTS.md`) §4.2 block applied verbatim; `grep -n "import order that a governing spec requires" CLAUDE.md` → one line (350).
+- **Task 4.** `weft/cli/deferred.py` created; `weft/cli/run.py` calls `weft.cli.deferred.get_prompt_session()()`; six patch sites retargeted. `grep -n "Optional dependency\|prompt_toolkit" weft/cli/run.py` → nothing; `grep -c '"prompt_toolkit.PromptSession"' …` → `0`; `prompt_toolkit` in `sys.modules` after `import weft.cli.app` → `False`.
+- **Task 5.** Three accessors in `weft/core/deferred.py`; call sites look them up as `weft.core.deferred.get_pg_*()`. Task 5 gate → nothing; SQLite probe → `simplebroker_pg loaded: False`. PG lane not run (no PostgreSQL target configured).
+- **Task 6.** `_poll_monitor_limits` added; `grep -c` → `1`. Recount: `RUFF-SUP-344` cell `2` → `1`, global `BLE001=132` → `131`, `EXPECTED_DIRECTIVE_COUNT` `323` → `322` (the plan's 325 → 324 was stale); `bin/ruff_suppression_index.py --write` then `--check` → exit 0; index row names `_poll_monitor_limits`.
+- **Task 7.** P13 rerun before deletion → `refs=0` for all eleven. Deleted them plus `_record_is_recent_enough_for_uncertain_selection` (Deviation Log). `ruff check --select F401` → no finding.
+- **Tasks 8–10.** `grep -n "import WEFT_DEBUG\|if WEFT_DEBUG" weft/_constants.py` → nothing; the four `[CLI-1.x]` headings are at lines 92, 388, 625, 700; `grep -n "isinstance(entry, tuple)" weft/commands/result.py` → nothing; mypy clean.
+- **Tasks 1–10 targeted tests** (the Task 1–6, 10 lists) → `1011 passed, 9 skipped`.
+- **Task 11.** `weft/commands/_observation.py` holds the seven helpers (imports `encode_tid`, since plan 12 deleted `tid_short_form`; `_task_snapshot_from_live_pong` was still in `tasks.py` at `c7007f96`). Strengthened test added with the strict xfail marker. RED/after: `--runxfail` and the SCC probe → exactly two SCCs (runner-plugins, taskspec); plan 11's client imports form no cycle. `grep -n task_ops weft/commands/events.py` → nothing. Targeted tests → `352 passed, 1 xfailed`.
+- **Task 12.** Validator moved to `run_input.py`; same function object at all three paths (`True`). SCC probe → one SCC (runner-plugins). Targeted tests → `195 passed, 1 xfailed`.
+- **Task 13 (O3).** `git mv` of both modules; inventory rerun → nothing; spec/registry grep → nothing; 13 spec path edits in six files plus the [AR-7] backlink; nine registry rows; `register_builtin_agent_runtimes()` now runs only before `execute_agent_target(` and `start_agent_runtime_session(` (the only two agent-run sites, grep). `weft.core.agents.backends.llm` and `provider_cli` absent after each of `weft.cli.app`, `weft.client`, `weft.core.manager`, `weft.core.runner_validation`, `weft.core.task_evidence`, `weft.core.runners.host`, `weft._runner_plugins`. SCC probe → `SCC count 0`; marker removed; the test passes. Targeted tests (Task 13 list plus `tests/core/test_debugger.py`) → `731 passed`.
+- **Final gate.** AST gate → `TOTAL 10`; the only `weft.*` rows are `bootstrap.py:112` and `backends/__init__.py:18`, `:21`; every row carries its reason comment. Fast suite → exit 0; mypy → `Success: no issues found in 486 source files`; `ruff check .` → `All checks passed!`; `ruff format --check weft tests bin extensions integrations` → clean; `bin/check-doc-paths` → OK.
+- **Timing** (three fresh interpreters, `perf_counter` around `import weft.cli.app`): now 149–161 ms / 492 modules; the `c7007f96` copy 132–138 ms / 460 modules (first run 276 ms, cold bytecode, not counted). Increase about 15–25 ms and 32 modules, within the accepted 26–35 ms estimate.
+- **Audit refresh, by reference** (`docs/plans/2026-11-02-program-theory-reconciliation-plan.md`, `### Audit table`; that plan is not edited). Row 4.4-c: its counter-evidence (the `weft/commands/run.py` late imports of `weft/commands/tasks.py` private names) is gone, so the row holds without the "unsettled" note. Rows I-7 and 4.2-d: `weft/core/runtime_identity.py` still binds the connection owner through `simplebroker_pg`, now via `weft/core/deferred.py`; they hold. Row 4.3-c: the cited `AgentSession._terminal_handoff_wait_seconds` now lives in `weft/core/runners/sessions.py`; the verdict does not change. The other rows that name a touched file cite behavior this plan does not change.
+- **Owed before `completed`:** the [WT-7] keyed possession probe (owner-written key, different-family answerer), the different-family review of the completed work, and the +P pre-landing review, all with the series lead.

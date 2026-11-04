@@ -9,8 +9,9 @@ import time
 from collections.abc import Callable
 from typing import Any, cast
 
+from weft.core.runners.sessions import CommandSession, InProcessCommandSession
+
 from .consumer import Consumer
-from .sessions import CommandSession, InProcessCommandSession
 
 
 class Debugger(Consumer):

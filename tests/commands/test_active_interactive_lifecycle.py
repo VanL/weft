@@ -27,6 +27,7 @@ from weft._constants import (
 )
 from weft._exceptions import CommandExecutionError
 from weft.cli import app as cli_app
+from weft.cli import deferred as cli_deferred
 from weft.cli import run as cli_run
 from weft.commands import _result_wait
 from weft.commands import run as run_commands
@@ -36,8 +37,8 @@ from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext
 from weft.core.control_messages import ControlRequest, parse_control_request
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.runners.sessions import CommandSession
 from weft.core.tasks import Consumer
-from weft.core.tasks.sessions import CommandSession
 from weft.core.taskspec import TaskSpec
 
 pytestmark = pytest.mark.shared
@@ -260,7 +261,9 @@ def test_active_cli_quit_sends_stop_and_keeps_terminal_proof(
         monkeypatch.setattr(Queue, "write", write)
         with create_pipe_input() as pipe:
             prompt: PromptSession[str] = PromptSession(input=pipe, output=DummyOutput())
-            monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+            monkeypatch.setattr(
+                cli_deferred, "get_prompt_session", lambda: lambda: prompt
+            )
             pipe.send_text(f"{quit_command}\n")
             cli_run.drive_interactive_session(session, None)
         parsed = [parse_control_request(raw) for raw in requests]
@@ -294,7 +297,9 @@ def test_active_cli_stop_failure_cancels_idle_output_before_join(
         monkeypatch.setattr(Queue, "write", write)
         with create_pipe_input() as pipe:
             prompt: PromptSession[str] = PromptSession(input=pipe, output=DummyOutput())
-            monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+            monkeypatch.setattr(
+                cli_deferred, "get_prompt_session", lambda: lambda: prompt
+            )
 
             ready = threading.Event()
 
@@ -407,7 +412,9 @@ def test_active_cli_eof_closes_input_and_renders_final_frames_without_stop(
                 prompt: PromptSession[str] = PromptSession(
                     input=pipe, output=DummyOutput()
                 )
-                monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+                monkeypatch.setattr(
+                    cli_deferred, "get_prompt_session", lambda: lambda: prompt
+                )
                 pipe.send_bytes(b"\x04")
                 cli_run.drive_interactive_session(session, None)
         finally:
@@ -593,7 +600,9 @@ def test_active_output_acquisition_failure_wakes_prompt_and_keeps_primary_error(
             _schedule_settlement_prompt(
                 monkeypatch, prompt, phase, prompt_started, failure_processed
             )
-            monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+            monkeypatch.setattr(
+                cli_deferred, "get_prompt_session", lambda: lambda: prompt
+            )
             outcome = CliRunner().invoke(cli_app.app, ["run", "--interactive", "echo"])
         assert outcome.exit_code == 1
         assert len(errors) == 1
@@ -677,7 +686,9 @@ def test_actual_consumer_completion_wakes_idle_active_prompt(
                 _schedule_settlement_prompt(
                     monkeypatch, prompt, phase, prompt_started, settlement_processed
                 )
-                monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+                monkeypatch.setattr(
+                    cli_deferred, "get_prompt_session", lambda: lambda: prompt
+                )
                 cli_run.drive_interactive_session(session, None)
         finally:
             thread.join(timeout=10)
@@ -767,7 +778,9 @@ def test_active_quit_stops_real_child_that_ignores_eof(
                 prompt: PromptSession[str] = PromptSession(
                     input=pipe, output=DummyOutput()
                 )
-                monkeypatch.setattr("prompt_toolkit.PromptSession", lambda: prompt)
+                monkeypatch.setattr(
+                    cli_deferred, "get_prompt_session", lambda: lambda: prompt
+                )
                 pipe.send_text(":quit\n")
                 cli_run.drive_interactive_session(session, None)
         finally:

@@ -35,6 +35,7 @@ def prepare_agent_images_task(work_item: Any = None) -> dict[str, Any]:
 
     try:
         require_runner_plugin("docker")
+        # Optional weft-docker extension; require_runner_plugin("docker") guards it.
         from weft_docker.agent_images import ensure_agent_image, get_agent_image_recipe
     except RuntimeError as exc:
         raise RuntimeError(

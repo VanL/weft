@@ -27,6 +27,7 @@ from time import monotonic as _runtime_liveness_monotonic
 from time import time_ns as _runtime_liveness_time_ns
 from typing import Any, Literal, cast
 
+import weft.commands.events as events_cmd
 import weft.commands.system as system_cmd
 from simplebroker import Queue
 from weft._constants import (
@@ -87,6 +88,14 @@ from weft.liveness.models import RuntimeProbeResult
 from weft.liveness.registry import has_runtime_liveness_probe, liveness_provider_key
 
 from ._boundary import typed_command_errors
+from ._observation import (
+    _deadline_expired,
+    _deadline_from_timeout,
+    _public_snapshot,
+    _remaining_timeout,
+    _runner_name_from_taskspec,
+    _task_snapshot_from_live_pong,
+)
 from ._result_wait import result_observation
 from ._task_history import (
     pipeline_status_queue_name,
@@ -211,137 +220,6 @@ def list_tasks(
     if status_filter:
         snapshots = [s for s in snapshots if s.status == status_filter]
     return snapshots
-
-
-def _state_from_taskspec(taskspec_payload: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(taskspec_payload, dict):
-        return {}
-    state = taskspec_payload.get("state")
-    return state if isinstance(state, dict) else {}
-
-
-def _task_is_persistent_payload(taskspec_payload: dict[str, Any] | None) -> bool:
-    return task_evidence.task_is_persistent_payload(taskspec_payload)
-
-
-def _queue_names_for_tid(
-    tid: str,
-    taskspec_payload: dict[str, Any] | None,
-) -> tuple[str, str]:
-    return task_evidence.queue_names_for_tid(tid, taskspec_payload)
-
-
-def _peek_final_outbox_snapshot(
-    ctx: WeftContext,
-    *,
-    tid: str,
-    outbox_name: str,
-    taskspec_payload: dict[str, Any] | None,
-) -> TaskTerminalSnapshot | None:
-    evidence = task_evidence.peek_final_outbox_evidence(
-        ctx,
-        tid=tid,
-        outbox_name=outbox_name,
-        taskspec_payload=taskspec_payload,
-    )
-    if evidence is None:
-        return None
-    return task_evidence.terminal_snapshot_from_evidence(evidence)
-
-
-def _coerce_terminal_envelope(
-    raw: str,
-    *,
-    tid: str,
-) -> dict[str, Any] | None:
-    try:
-        return task_evidence.coerce_terminal_envelope(raw, tid=tid)
-    except TypeError:
-        return None
-
-
-def _peek_terminal_ctrl_out_snapshot(
-    ctx: WeftContext,
-    *,
-    tid: str,
-    ctrl_out_name: str,
-) -> TaskTerminalSnapshot | None:
-    evidence = task_evidence.peek_terminal_ctrl_out_evidence(
-        ctx,
-        tid=tid,
-        ctrl_out_name=ctrl_out_name,
-    )
-    if evidence is None:
-        return None
-    return task_evidence.terminal_snapshot_from_evidence(evidence)
-
-
-def _public_snapshot(
-    status_snapshot: system_cmd.TaskSnapshot,
-    *,
-    taskspec_payload: dict[str, Any] | None,
-) -> TaskSnapshot:
-    state = _state_from_taskspec(taskspec_payload)
-    error = state.get("error")
-    return_code = state.get("return_code")
-    return TaskSnapshot(
-        tid=status_snapshot.tid,
-        tid_short=status_snapshot.tid_short,
-        name=status_snapshot.name,
-        status=status_snapshot.status,
-        event=status_snapshot.event,
-        activity=status_snapshot.activity,
-        waiting_on=status_snapshot.waiting_on,
-        return_code=(
-            status_snapshot.return_code
-            if isinstance(status_snapshot.return_code, int)
-            else return_code
-            if isinstance(return_code, int)
-            else None
-        ),
-        started_at=status_snapshot.started_at,
-        completed_at=status_snapshot.completed_at,
-        error=(
-            status_snapshot.error
-            if isinstance(status_snapshot.error, str) and status_snapshot.error
-            else error
-            if isinstance(error, str) and error
-            else None
-        ),
-        last_timestamp=status_snapshot.last_timestamp,
-        duration_seconds=status_snapshot.duration_seconds,
-        runner=status_snapshot.runner,
-        runtime_handle=status_snapshot.runtime_handle,
-        runtime=status_snapshot.runtime,
-        metadata=dict(status_snapshot.metadata),
-        pipeline_status=status_snapshot.pipeline_status,
-        reconciliation=(
-            dict(status_snapshot.reconciliation)
-            if isinstance(status_snapshot.reconciliation, dict)
-            else None
-        ),
-        runner_diagnostics=(
-            dict(status_snapshot.runner_diagnostics)
-            if isinstance(status_snapshot.runner_diagnostics, dict)
-            else None
-        ),
-    )
-
-
-def _deadline_from_timeout(timeout: float | None) -> float | None:
-    if timeout is None:
-        return None
-    return time.monotonic() + max(0.0, timeout)
-
-
-def _remaining_timeout(deadline: float | None) -> float | None:
-    if deadline is None:
-        return None
-    return max(0.0, deadline - time.monotonic())
-
-
-def _deadline_expired(deadline: float | None) -> bool:
-    return deadline is not None and time.monotonic() >= deadline
 
 
 def _raise_watch_timeout(
@@ -1061,46 +939,6 @@ def _enrich_known_snapshot(
     return snapshot
 
 
-def _terminal_snapshot_from_status_snapshot(
-    snapshot: system_cmd.TaskSnapshot | None,
-) -> TaskTerminalSnapshot | None:
-    """Project the shared status path into the compact terminal snapshot shape."""
-
-    if snapshot is None:
-        return None
-    if snapshot.status not in system_cmd.TERMINAL_TASK_STATUSES:
-        return None
-
-    reconciliation = snapshot.reconciliation or {}
-    classification = reconciliation.get("classification")
-    metadata: dict[str, Any] = {
-        "classification": (
-            classification
-            if isinstance(classification, str) and classification
-            else "terminal_status"
-        )
-    }
-    if snapshot.event:
-        metadata["event"] = snapshot.event
-    if snapshot.name:
-        metadata["name"] = snapshot.name
-    if snapshot.metadata:
-        metadata["task_metadata"] = dict(snapshot.metadata)
-    if snapshot.runner is not None:
-        metadata["runner"] = snapshot.runner
-
-    return TaskTerminalSnapshot(
-        tid=snapshot.tid,
-        status=snapshot.status,
-        source="status",
-        error=snapshot.error,
-        return_code=snapshot.return_code,
-        terminal=True,
-        observed_at=snapshot.last_timestamp,
-        metadata=metadata,
-    )
-
-
 def task_ping(
     tid: str,
     *,
@@ -1133,127 +971,6 @@ def task_ping(
         "observed_at": result.matched.observed_at if result.matched else None,
         "pong": result.matched.payload if result.matched else None,
     }
-
-
-def _task_snapshot_from_live_pong(
-    tid: str,
-    evidence: task_evidence.TaskEvidenceSnapshot,
-    *,
-    base_snapshot: system_cmd.TaskSnapshot | None,
-    taskspec_payload: dict[str, Any] | None,
-) -> system_cmd.TaskSnapshot:
-    state = taskspec_payload.get("state") if isinstance(taskspec_payload, dict) else {}
-    state = state if isinstance(state, dict) else {}
-    spec = taskspec_payload.get("spec") if isinstance(taskspec_payload, dict) else {}
-    spec = spec if isinstance(spec, dict) else {}
-    metadata: dict[str, Any] = {}
-    if base_snapshot is not None:
-        metadata.update(base_snapshot.metadata)
-    task_metadata = (
-        taskspec_payload.get("metadata") if isinstance(taskspec_payload, dict) else None
-    )
-    if base_snapshot is None and isinstance(task_metadata, dict):
-        metadata.update(task_metadata)
-
-    observed_at = evidence.observed_at or time.time_ns()
-    started_at = (
-        base_snapshot.started_at
-        if base_snapshot is not None
-        else state.get("started_at")
-        if isinstance(state.get("started_at"), int)
-        else None
-    )
-    completed_at = (
-        base_snapshot.completed_at
-        if base_snapshot is not None
-        else state.get("completed_at")
-        if isinstance(state.get("completed_at"), int)
-        else None
-    )
-    if (
-        evidence.status not in system_cmd.TERMINAL_TASK_STATUSES
-        or evidence.classification == "claimed_result_without_terminal"
-    ):
-        completed_at = None
-    elif not isinstance(completed_at, int):
-        completed_at = evidence.completed_at or (
-            observed_at
-            if evidence.classification == "result_without_terminal"
-            else None
-        )
-
-    if isinstance(started_at, int) and not isinstance(completed_at, int):
-        duration = max(0.0, (time.time_ns() - started_at) / 1_000_000_000)
-    elif isinstance(started_at, int) and isinstance(completed_at, int):
-        duration = max(0.0, (completed_at - started_at) / 1_000_000_000)
-    else:
-        duration = None
-
-    runtime = evidence.runtime or (
-        base_snapshot.runtime if base_snapshot is not None else None
-    )
-    runner = (
-        str(runtime.get("runner"))
-        if isinstance(runtime, dict) and isinstance(runtime.get("runner"), str)
-        else base_snapshot.runner
-        if base_snapshot is not None
-        else _runner_name_from_taskspec(spec)
-    )
-    name = (
-        base_snapshot.name
-        if base_snapshot is not None
-        else str(taskspec_payload.get("name") or tid)
-        if isinstance(taskspec_payload, dict)
-        else tid
-    )
-    return system_cmd.TaskSnapshot(
-        tid=tid,
-        tid_short=encode_tid(tid),
-        name=name,
-        status=evidence.status,
-        event="live_pong",
-        activity=evidence.activity
-        if evidence.status not in system_cmd.TERMINAL_TASK_STATUSES
-        else None,
-        waiting_on=evidence.waiting_on
-        if evidence.status not in system_cmd.TERMINAL_TASK_STATUSES
-        else None,
-        started_at=started_at if isinstance(started_at, int) else None,
-        completed_at=completed_at if isinstance(completed_at, int) else None,
-        return_code=evidence.return_code
-        if evidence.return_code is not None
-        else base_snapshot.return_code
-        if base_snapshot is not None
-        else None,
-        error=evidence.error
-        if evidence.error is not None
-        else base_snapshot.error
-        if base_snapshot is not None
-        else None,
-        last_timestamp=observed_at,
-        duration_seconds=duration,
-        runner=runner,
-        runtime_handle=base_snapshot.runtime_handle
-        if base_snapshot is not None
-        else None,
-        runtime=runtime,
-        metadata=metadata,
-        pipeline_status=base_snapshot.pipeline_status
-        if base_snapshot is not None
-        else None,
-        reconciliation=evidence.reconciliation,
-        runner_diagnostics=base_snapshot.runner_diagnostics
-        if base_snapshot is not None
-        else None,
-    )
-
-
-def _runner_name_from_taskspec(spec: dict[str, Any]) -> str | None:
-    runner = spec.get("runner")
-    if isinstance(runner, dict):
-        name = runner.get("name")
-        return name if isinstance(name, str) and name else None
-    return None
 
 
 def list_task_snapshots(
@@ -1607,20 +1324,6 @@ def _require_observation_config(
     if config is None:
         raise CommandExecutionError(f"observation metadata unavailable for task {tid}")
     return config
-
-
-def _ctrl_in_for_tid(ctx: WeftContext, tid: str) -> str:
-    return _require_observation_config(ctx, tid).ctrl_in
-
-
-def _ctrl_out_for_tid(
-    ctx: WeftContext,
-    tid: str,
-    *,
-    taskspec: dict[str, Any] | None = None,
-) -> str:
-    config = task_evidence.observation_config_from_taskspec_payload(taskspec)
-    return (config or _require_observation_config(ctx, tid)).ctrl_out
 
 
 def _send_control(
@@ -2417,10 +2120,9 @@ def cmd_task_status(
     if snapshot is None:
         raise TaskNotFound(f"Task {tid} not found")
     if watch:
-        # Late import breaks the intentional tasks <-> events helper cycle.
-        from .events import follow_task_events
-
-        return cast(CommandStream[TaskEvent], follow_task_events(ctx, full_tid))
+        return cast(
+            CommandStream[TaskEvent], events_cmd.follow_task_events(ctx, full_tid)
+        )
     if process:
         process_fields = _process_fields_for_tid(ctx, full_tid)
         snapshot = replace(

@@ -15,7 +15,7 @@ from contextlib import ExitStack
 from dataclasses import asdict
 from typing import Any
 
-import weft.commands.tasks as task_ops
+import weft.commands.system as system_cmd
 from simplebroker import Queue
 from weft._constants import (
     TASK_HISTORY_MAX_MESSAGE_ID,
@@ -40,6 +40,13 @@ from weft.core.taskspec import TaskSpec
 from weft.helpers import encode_tid
 
 from ._boundary import typed_command_errors
+from ._observation import (
+    _deadline_expired,
+    _deadline_from_timeout,
+    _public_snapshot,
+    _remaining_timeout,
+    _task_snapshot_from_live_pong,
+)
 from ._resources import command_resource_scope
 from ._result_wait import (
     ResultMaterialization,
@@ -125,19 +132,17 @@ def _task_snapshot_event(
     accepted_taskspec_payload: dict[str, Any] | None = None,
     evidence: TaskEvidenceSnapshot | None = None,
 ) -> TaskEvent | None:
-    record = task_ops.system_cmd.collect_known_tid_record(
-        context, normalized_tid, broker=broker
-    )
+    record = system_cmd.collect_known_tid_record(context, normalized_tid, broker=broker)
     internal = record.snapshot if record is not None else None
     if evidence is not None and evidence.terminal:
-        internal = task_ops._task_snapshot_from_live_pong(
+        internal = _task_snapshot_from_live_pong(
             normalized_tid,
             evidence,
             base_snapshot=internal,
             taskspec_payload=accepted_taskspec_payload,
         )
     snapshot = (
-        task_ops._public_snapshot(internal, taskspec_payload=accepted_taskspec_payload)
+        _public_snapshot(internal, taskspec_payload=accepted_taskspec_payload)
         if internal is not None
         else None
     )
@@ -188,7 +193,7 @@ def iter_task_events(
     """Yield raw lifecycle events for one task."""
 
     normalized_tid = normalize_tid(tid)
-    deadline = task_ops._deadline_from_timeout(timeout)
+    deadline = _deadline_from_timeout(timeout)
     with result_observation(context, [WEFT_GLOBAL_LOG_QUEUE]) as observation:
         queues, monitor = observation
         log_queue = queues[WEFT_GLOBAL_LOG_QUEUE]
@@ -216,14 +221,14 @@ def iter_task_events(
 
             if terminal_seen or not follow:
                 return
-            if task_ops._deadline_expired(deadline):
+            if _deadline_expired(deadline):
                 _raise_follow_timeout(
                     tid=normalized_tid,
                     operation="events",
                     timeout=timeout,
                 )
             if not saw_event:
-                remaining = task_ops._remaining_timeout(deadline)
+                remaining = _remaining_timeout(deadline)
                 monitor.wait(remaining)
 
 
@@ -336,7 +341,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
     normalized_tid = normalize_tid(tid)
     if observation_cancelled(cancel_event):
         return
-    deadline = task_ops._deadline_from_timeout(timeout) if follow else time.monotonic()
+    deadline = _deadline_from_timeout(timeout) if follow else time.monotonic()
     materialized = (
         _accepted_result_materialization(_accepted_taskspec)
         if _accepted_taskspec is not None

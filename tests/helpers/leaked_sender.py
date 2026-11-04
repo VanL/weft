@@ -22,7 +22,7 @@ from typing import Any, Final, NoReturn
 
 import psutil
 
-from weft.core.tasks.agent_session_protocol import (
+from weft.core.runners.agent_session_protocol import (
     make_booted_response,
     make_ready_response,
 )

@@ -179,7 +179,7 @@ generated source index defined by that policy.
 | `RUFF-SUP-341` | `BLE001` | `1` directive; raw: `BLE001=1` | Ordinary pipeline-edge handoff failure becomes failed state/event and applies reserved policy; fatal exits propagate exactly. Error text is raw/unbounded and broken stringification may escape. | Real reservation proves default KEEP retains exact reserved payload and empties source; fatal proof retains running state and identity. | Handoff spans broker/cardinality/serialization/cleanup without exhaustive taxonomy; extraction separates one result transaction. | Corrected reserved-policy proof and exact review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-342` | `BLE001` | `1` directive; raw: `BLE001=1` | Ordinary host one-shot worker execution failure becomes terminal error with child traceback/diagnostics and closed sender; fatal exits propagate. | Direct ordinary/fatal worker tests prove exact result, traceback, close, and identity. | Configured target execution lacks exhaustive taxonomy; parent conversion loses child traceback. | Exact/locality review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-343` | `BLE001` | `2` directives; raw: `BLE001=2` | Ordinary host lifecycle callback failure preserves outcome with fixed private warnings; fatal exits propagate exactly while enclosing cleanup owns process/pipes. | Direct tests fire both callbacks for ordinary/fatal partitions and prove outcome/warnings/privacy/identity/cleanup. | Arbitrary callbacks lack exhaustive taxonomy; merging separates phase-specific publication warnings. | Exact/locality review `NET POSITIVE`; owner approved 2026-08-07. |
-| `RUFF-SUP-344` | `BLE001` | `2` directives; raw: `BLE001=2` | Confirmed limit violation wins before metrics. Ordinary session monitor failure silently fails open, caches/stops/clears ownership; fatal exits propagate and retain ownership. | Mirrored session tests prove violation priority, fail-open cleanup/cache, and fatal identity in reverse order. | Configured adapters lack exhaustive taxonomy. Silent loss of enforcement is an explicit preserved RM-5.1 tradeoff. | Failing-first fix and exact review `NET POSITIVE`; owner approved 2026-08-07. |
+| `RUFF-SUP-344` | `BLE001` | `1` directive; raw: `BLE001=1` | Confirmed limit violation wins before metrics. Ordinary session monitor failure silently fails open, caches/stops/clears ownership; fatal exits propagate and retain ownership. | Mirrored session tests prove violation priority, fail-open cleanup/cache, and fatal identity in reverse order. | Configured adapters lack exhaustive taxonomy. Silent loss of enforcement is an explicit preserved RM-5.1 tradeoff. | Failing-first fix and exact review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-345` | `BLE001` | `2` directives; raw: `BLE001=2` | Detached-launch payload and launch ordinary failures return 2 through phase-specific stderr or structured stdout; fatal exits propagate without output. Diagnostics are raw/semantic-raw and unbounded. | Four tests prove both ordinary/fatal phases and channels in both orders. | One handshake partition owns both phases. Pre-existing post-spawn stderr-close failure can lose a live child handle, so no no-child guarantee exists. | Exact caveat/order review `NET POSITIVE`; owner approved 2026-08-07. |
 | `RUFF-SUP-346` | `BLE001` | `1` directive; raw: `BLE001=1` | Manager launch-admission failure stays local, clears active/start bookkeeping, and delegates one complete typed result. | `tests/core/test_manager.py::test_manager_child_launch_admission_failure_is_returned_locally` proves exact request/defaults/error, one delegation, and cleanup. Stale missing results reconcile without another launch. | Queue/thread admission and partial unwind lack exhaustive taxonomy; wider containment hides request defects. | Corrected full-envelope review `NET POSITIVE`; owner approved 2026-08-07. Cardinality reduced 2026-10-14: unsafe stale launch retry removed. |
 | `RUFF-SUP-347` | `BLE001` | `3` directives; raw: `BLE001=3` | Manager, BaseTask, and Service daemon workers transport every throwable through complete typed owner channels. | Direct fatal tests prove exact identity and complete results/events/transitions without collection order. | Narrowing loses fatal identity; shared wrappers obscure distinct typed contracts. | Corrected metadata review `NET POSITIVE`; owner approved 2026-08-07. |
@@ -208,7 +208,7 @@ generated source index defined by that policy.
 | `RUFF-SUP-377` | `BLE001` | `3` directives; raw: `BLE001=3` | Manager finalization and partial-construction unwind attempt every declared owner in order and retain the first exact throwable after later cleanup runs. | `tests/core/test_manager.py::test_manager_cleanup_attempts_every_phase_and_raises_first_failure`; `tests/core/test_manager.py::test_manager_partial_initialization_cleanup_attempts_both_owners` fire all three catches and prove order plus first-failure identity. | Child launch, process, queue, registry, sentinel, inherited task, and atexit owners do not share an exhaustive failure family. Narrowing can skip later owners after a control-flow failure; moving the catches outward loses per-phase continuation and first-failure priority. | User-authorized watcher reactor restoration plan; independent suppression review `NET POSITIVE` 2026-09-18. |
 | `RUFF-SUP-378` | `BLE001` | `2` directives; raw: `BLE001=2` | Isolated core and Django fork probes must transport every child throwable to the parent before exiting, so an inherited-session or inherited-lock failure cannot become an opaque empty-pipe or JSON error. | `tests/core/test_client.py::test_client_resets_inherited_session_after_real_fork`; `integrations/weft_django/tests/test_lifecycle.py::test_registry_resets_inherited_lock_and_client_after_real_fork` run the isolated probes and require complete child reports plus successful parent reuse. | Narrowing cannot cover assertions, broker failures, serialization, pipe I/O, or control-flow failures as one stable family. Letting the child traceback escape loses the structured evidence the parent owns. | User-authorized retained-session implementation; independent core and Django reviews PASS 2026-09-25. |
 
-Global raw-`noqa` inventory: `BLE001=132`, `C901=112`, `E402=33`, `F401=5`, `FLY002=12`, `PLR0402=2`, `RUF022=3`, `S110=1`, `SIM102=3`, `SIM115=1`, `TRY004=67`
+Global raw-`noqa` inventory: `BLE001=131`, `C901=112`, `E402=33`, `F401=5`, `FLY002=12`, `PLR0402=2`, `RUF022=3`, `S110=1`, `SIM102=3`, `SIM115=1`, `TRY004=67`
 
 <!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->
 | Group | Locations | Directives | Raw diagnostics |
@@ -246,8 +246,8 @@ Global raw-`noqa` inventory: `BLE001=132`, `C901=112`, `E402=33`, `F401=5`, `FLY
 | `RUFF-SUP-043` | `weft/core/tasks/heartbeat.py::HeartbeatTask._emit_due_registrations` | 1 | `C901=1` |
 | `RUFF-SUP-044` | `weft/core/tasks/interactive.py::InteractiveTaskMixin._interactive_finalize_session` | 1 | `C901=1` |
 | `RUFF-SUP-045` | `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._apply_topology_mutation_on_owner` | 1 | `C901=1` |
-| `RUFF-SUP-047` | `weft/core/tasks/sessions.py::AgentSession.wait_ready` | 1 | `C901=1` |
-| `RUFF-SUP-049` | `weft/core/tasks/sessions.py::AgentSession.terminate` | 1 | `C901=1` |
+| `RUFF-SUP-047` | `weft/core/runners/sessions.py::AgentSession.wait_ready` | 1 | `C901=1` |
+| `RUFF-SUP-049` | `weft/core/runners/sessions.py::AgentSession.terminate` | 1 | `C901=1` |
 | `RUFF-SUP-050` | `weft/core/taskspec/model.py::resolve_taskspec_payload` | 1 | `C901=1` |
 | `RUFF-SUP-051` | `weft/core/taskspec/model.py::AgentSection.validate_runtime_constraints` | 1 | `C901=1` |
 | `RUFF-SUP-052` | `weft/core/taskspec/model.py::SpecSection.validate_target` | 1 | `C901=1` |
@@ -305,7 +305,7 @@ Global raw-`noqa` inventory: `BLE001=132`, `C901=112`, `E402=33`, `F401=5`, `FLY
 | `RUFF-SUP-242` | `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._apply_topology_mutation_on_owner` | 1 | `SIM102=1` |
 | `RUFF-SUP-246` | `weft/commands/queue.py::<module>` | 1 | `RUF022=1` |
 | `RUFF-SUP-248` | `weft/core/tasks/__init__.py::<module>` | 1 | `RUF022=1` |
-| `RUFF-SUP-249` | `weft/core/tasks/agent_session_protocol.py::<module>` | 1 | `RUF022=1` |
+| `RUFF-SUP-249` | `weft/core/runners/agent_session_protocol.py::<module>` | 1 | `RUF022=1` |
 | `RUFF-SUP-252` | `weft/core/monitor/runtime.py::<module>` | 1 | `PLR0402=1` |
 | `RUFF-SUP-253` | `weft/commands/task_monitor.py::<module>` | 1 | `PLR0402=1` |
 | `RUFF-SUP-255` | `tests/fixtures/mcp_stdio_fixture.py::call_fixture_tool` | 1 | `TRY004=1` |
@@ -346,11 +346,11 @@ Global raw-`noqa` inventory: `BLE001=132`, `C901=112`, `E402=33`, `F401=5`, `FLY
 | `RUFF-SUP-294` | `extensions/weft_microsandbox/weft_microsandbox/_runtime.py::_exec_with_cancel` | 1 | `BLE001=1` |
 | `RUFF-SUP-295` | `weft/core/runners/host.py::HostTaskRunner._close_mp_queue` | 2 | `BLE001=2` |
 | `RUFF-SUP-298` | `weft/core/runners/host.py::_agent_session_worker_entry` | 1 | `BLE001=1` |
-| `RUFF-SUP-299` | `weft/core/tasks/sessions.py::CommandSession.close` | 1 | `BLE001=1` |
-| `RUFF-SUP-300` | `weft/core/tasks/sessions.py::CommandSession.stop_monitor` | 2 | `BLE001=2` |
-| `RUFF-SUP-303` | `weft/core/tasks/sessions.py::AgentSession.stop_monitor` | 2 | `BLE001=2` |
-| `RUFF-SUP-304` | `weft/core/tasks/sessions.py::AgentSession.last_metrics` | 1 | `BLE001=1` |
-| `RUFF-SUP-307` | `weft/core/tasks/sessions.py::AgentSession.close` | 1 | `BLE001=1` |
+| `RUFF-SUP-299` | `weft/core/runners/sessions.py::CommandSession.close` | 1 | `BLE001=1` |
+| `RUFF-SUP-300` | `weft/core/runners/sessions.py::CommandSession.stop_monitor` | 2 | `BLE001=2` |
+| `RUFF-SUP-303` | `weft/core/runners/sessions.py::AgentSession.stop_monitor` | 2 | `BLE001=2` |
+| `RUFF-SUP-304` | `weft/core/runners/sessions.py::AgentSession.last_metrics` | 1 | `BLE001=1` |
+| `RUFF-SUP-307` | `weft/core/runners/sessions.py::AgentSession.close` | 1 | `BLE001=1` |
 | `RUFF-SUP-308` | `tests/tasks/process_target.py::run_task` | 1 | `SIM115=1` |
 | `RUFF-SUP-310` | `tests/conftest.py::run_cli` | 2 | `BLE001=2` |
 | `RUFF-SUP-311` | `weft/core/runners/subprocess_runner.py::_last_monitor_metrics`; `weft/core/runners/subprocess_runner.py::_stop_monitor`; `weft/core/runners/subprocess_runner.py::run_monitored_subprocess` | 5 | `BLE001=5` |
@@ -378,7 +378,7 @@ Global raw-`noqa` inventory: `BLE001=132`, `C901=112`, `E402=33`, `F401=5`, `FLY
 | `RUFF-SUP-341` | `weft/core/tasks/pipeline.py::PipelineEdgeTask._handle_work_message` | 1 | `BLE001=1` |
 | `RUFF-SUP-342` | `weft/core/runners/host.py::_worker_entry` | 1 | `BLE001=1` |
 | `RUFF-SUP-343` | `weft/core/runners/host.py::HostTaskRunner.run_with_hooks` | 2 | `BLE001=2` |
-| `RUFF-SUP-344` | `weft/core/tasks/sessions.py::AgentSession.poll_limits`; `weft/core/tasks/sessions.py::CommandSession.poll_limits` | 2 | `BLE001=2` |
+| `RUFF-SUP-344` | `weft/core/runners/sessions.py::_poll_monitor_limits` | 1 | `BLE001=1` |
 | `RUFF-SUP-345` | `weft/manager_detached_launcher.py::main` | 2 | `BLE001=2` |
 | `RUFF-SUP-346` | `weft/core/manager.py::Manager._launch_child_task` | 1 | `BLE001=1` |
 | `RUFF-SUP-347` | `weft/core/manager.py::Manager._run_child_launch_worker`; `weft/core/tasks/base.py::BaseTask._submit_worker_lane`; `weft/core/tasks/service.py::ServiceTask._run_service_worker_thread` | 3 | `BLE001=3` |

@@ -345,11 +345,16 @@ from weft.core.taskspec import TaskSpec
 **Rules**:
 - `from __future__ import annotations` in every file (enables forward references)
 - Imports at the top of the module. Function-level imports are allowed only
-  to break a real import cycle or to guard an optional dependency, and must
-  carry a brief comment naming that reason; plain stdlib late imports are
-  not allowed. House style is to put all deferred imports into a deferred.py file
-  with a dedicated accessor function unless doing so would cause a significant
-  readability or performance issue.
+  for one of three reasons, and must carry a brief comment naming that
+  reason: (1) to break a real import cycle; (2) to guard an optional
+  dependency; (3) to keep an import order that a governing spec requires,
+  with the comment naming the spec section (for example `[CLI-5]`). Plain
+  stdlib late imports are not allowed. House style is to put all deferred
+  imports into a deferred.py file with a dedicated accessor function unless
+  doing so would cause a significant readability or performance issue.
+  Named exceptions granted by the owner are listed in the accessor module
+  that holds them (today: `weft/cli/deferred.py`, prompt-toolkit,
+  2026-11-03).
 - Group: stdlib → third-party → local, alphabetized within groups
 - Use `collections.abc` for abstract types (Callable, Iterator, Mapping, Sequence)
 - Use `Path` from pathlib, never `os.path`

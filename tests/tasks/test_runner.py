@@ -39,13 +39,8 @@ from weft.core.resource_monitor import BaseResourceMonitor, ResourceMetrics
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
-from weft.core.runners.host import HostTaskRunner
-from weft.core.runners.subprocess_runner import (
-    open_supervised_process,
-    run_monitored_subprocess,
-)
-from weft.core.tasks import sessions as sessions_module
-from weft.core.tasks.agent_session_protocol import (
+from weft.core.runners import sessions as sessions_module
+from weft.core.runners.agent_session_protocol import (
     make_booted_response,
     make_execute_request,
     make_ready_response,
@@ -54,8 +49,13 @@ from weft.core.tasks.agent_session_protocol import (
     make_stop_request,
     parse_request_type,
 )
+from weft.core.runners.host import HostTaskRunner
+from weft.core.runners.sessions import AgentSession
+from weft.core.runners.subprocess_runner import (
+    open_supervised_process,
+    run_monitored_subprocess,
+)
 from weft.core.tasks.runner import TaskRunner
-from weft.core.tasks.sessions import AgentSession
 from weft.core.taskspec import FrozenList, LimitsSection
 from weft.core.terminal_handoff import (
     TerminalHandoffEvent,
@@ -572,7 +572,7 @@ def test_agent_session_ipc_cleanup_reports_supported_process_close_failure(
         None,
         timeout=None,
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session._close_ipc_resources()
 
@@ -637,7 +637,7 @@ def test_agent_session_reports_monitor_cleanup_failures_and_clears_owner(
         Monitor(),  # type: ignore[arg-type]
         timeout=None,
     )
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.stop_monitor()
     session.stop_monitor()
@@ -677,7 +677,7 @@ def test_agent_session_metrics_failure_returns_cache_and_later_recovers(
         timeout=None,
     )
     session._last_metrics = cached
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     assert session.last_metrics is cached
     assert session._monitor is monitor
@@ -891,7 +891,7 @@ def test_agent_startup_late_drain_survives_process_join_os_error(
         return {"late": True}
 
     monkeypatch.setattr(session, "_drain_ready_response", drain)
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     assert session._join_and_drain_ready_response() == {"late": True}
     assert join_attempts == 1
@@ -960,7 +960,7 @@ def test_agent_wait_ready_survives_join_os_error_after_channel_seal(
         return make_ready_response()
 
     monkeypatch.setattr(session, "_drain_ready_response", drain)
-    caplog.set_level(logging.WARNING, logger="weft.core.tasks.sessions")
+    caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     session.wait_ready(timeout=0.1)
 

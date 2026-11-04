@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
+import weft.core.deferred
 from simplebroker import (
     BrokerTarget,
     Config,
@@ -226,9 +227,7 @@ def install_runtime_identity(identity: RuntimeIdentity) -> None:
             raise RuntimeError("runtime identity is immutable for this process")
         return
     if identity.backend_name == "postgres":
-        # Optional backend dependency: SQLite must never load PostgreSQL helpers.
-        from simplebroker_pg import bind_connection_owner
-
+        bind_connection_owner = weft.core.deferred.get_pg_bind_connection_owner()
         assert identity.connection_owner is not None
         bind_connection_owner(identity.connection_owner)
     _runtime_identity = identity

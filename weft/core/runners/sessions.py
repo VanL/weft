@@ -31,7 +31,7 @@ from weft.core.resource_monitor import (
     ResourceMetrics,
 )
 from weft.core.runner_diagnostics import diagnostic_summary, runner_diagnostics
-from weft.core.tasks.agent_session_protocol import (
+from weft.core.runners.agent_session_protocol import (
     is_booted_response,
     is_ready_response,
     make_execute_request,
@@ -188,17 +188,7 @@ class CommandSession:
             logger.warning("Failed to run command session cleanup callback")
 
     def poll_limits(self) -> tuple[bool, str | None]:
-        if not self._monitor:
-            return True, None
-        try:
-            ok, violation = self._monitor.check_limits()
-            if not ok:
-                return ok, violation
-            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            return ok, violation
-        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-344] exception
-            self.stop_monitor()
-            return True, None
+        return _poll_monitor_limits(self)
 
     def stop_monitor(self) -> None:
         if self._monitor:
@@ -906,17 +896,7 @@ class AgentSession:
             logger.warning("Failed to close agent session process handle")
 
     def poll_limits(self) -> tuple[bool, str | None]:
-        if not self._monitor:
-            return True, None
-        try:
-            ok, violation = self._monitor.check_limits()
-            if not ok:
-                return ok, violation
-            self._last_metrics = self._monitor.last_metrics() or self._last_metrics
-            return ok, violation
-        except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-344] exception
-            self.stop_monitor()
-            return True, None
+        return _poll_monitor_limits(self)
 
     def stop_monitor(self) -> None:
         if self._monitor:
@@ -972,6 +952,22 @@ class AgentSession:
                 self.stop_monitor()
             finally:
                 self._close_ipc_resources(deadline=deadline)
+
+
+def _poll_monitor_limits(
+    session: CommandSession | AgentSession,
+) -> tuple[bool, str | None]:
+    if not session._monitor:
+        return True, None
+    try:
+        ok, violation = session._monitor.check_limits()
+        if not ok:
+            return ok, violation
+        session._last_metrics = session._monitor.last_metrics() or session._last_metrics
+        return ok, violation
+    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-344] exception
+        session.stop_monitor()
+        return True, None
 
 
 class InProcessCommandSession:

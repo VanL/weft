@@ -16,6 +16,7 @@ import pytest
 from simplebroker import Queue
 from tests.helpers.task_observation import write_task_observation
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft.commands import _observation as observation_cmd
 from weft.commands import events as events_cmd
 from weft.context import WeftContext, build_context
 from weft.core.taskspec import TaskSpec
@@ -166,7 +167,7 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
 
     clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
     monkeypatch.setattr(events_cmd, "time", clock)
-    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
+    monkeypatch.setattr(observation_cmd, "time", clock)
     monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))
@@ -247,7 +248,7 @@ def test_realtime_observer_rebinds_to_independent_custom_route_commits(
 
     clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
     monkeypatch.setattr(events_cmd, "time", clock)
-    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
+    monkeypatch.setattr(observation_cmd, "time", clock)
     monkeypatch.setattr(events_cmd, "_open_realtime_routes", open_routes)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(events_cmd.iter_task_realtime_events(ctx, tid, timeout=10))
@@ -444,7 +445,7 @@ def test_realtime_cancellation_precedes_coincident_caller_timeout(
 
     clock = SimpleNamespace(monotonic=lambda: now, time_ns=time.time_ns)
     monkeypatch.setattr(events_cmd, "time", clock)
-    monkeypatch.setattr(events_cmd.task_ops, "time", clock)
+    monkeypatch.setattr(observation_cmd, "time", clock)
     monkeypatch.setattr(events_cmd, "_peek_result_value", peek)
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
     emitted = list(

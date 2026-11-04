@@ -154,12 +154,8 @@ def _read_outbox_task_result(
         complete_prefix_length = 0
         iterator = queue.peek_generator(with_timestamps=True)
         with closing_queue_iterator(iterator) as rows:
-            for entry in rows:
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    payload, timestamp = entry
-                    observed_timestamps.append(int(timestamp))
-                else:
-                    payload = entry
+            for payload, timestamp in rows:
+                observed_timestamps.append(int(timestamp))
                 final, decoded = process_outbox_message(
                     str(payload),
                     stream_buffer,

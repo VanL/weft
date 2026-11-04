@@ -24,12 +24,12 @@ from weft._constants import (
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
 from weft.core.control_messages import ControlRequest, encode_control_message
+from weft.core.runners.sessions import CommandSession
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.tasks import Consumer
 from weft.core.tasks import interactive as interactive_module
 from weft.core.tasks.base import BaseTask
 from weft.core.tasks.runner import TaskRunner
-from weft.core.tasks.sessions import CommandSession
 from weft.core.taskspec import (
     IOSection,
     LimitsSection,

@@ -58,10 +58,10 @@ from weft.core.task_lifecycle import (
 )
 from weft.helpers.message_ids import normalize_exact_message_id
 
-from .parameterization import validate_parameterization_adapter_ref
 from .run_input import (
     RUN_COMMAND_RESERVED_OPTION_NAMES,
     normalize_declared_option_name,
+    validate_parameterization_adapter_ref,
     validate_run_input_adapter_ref,
 )
 

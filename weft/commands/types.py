@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/09-Implementation_Plan.md [IP-1.1]
-- docs/specifications/10-CLI_Interface.md [CLI-1], [CLI-4], [CLI-6]
+- docs/specifications/10-CLI_Interface.md [CLI-1.1], [CLI-1.2], [CLI-1.3], [CLI-1.4], [CLI-4], [CLI-6]
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/14-Python_API_Surfaces.md [PY-2]
 """

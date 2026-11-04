@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import ValidationError
 
+import weft.core.deferred
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from weft._constants import (
@@ -195,6 +196,7 @@ from .manager_services import (
     service_key_from_metadata,
     service_metadata,
 )
+from .monitor.task_monitor import TaskMonitor
 from .pipelines import (
     PipelineCompilationContext,
     compile_linear_pipeline,
@@ -225,13 +227,14 @@ from .service_convergence import (
     reduce_service_ownership,
 )
 from .spec_store import resolve_named_spec_from_root
-from .tasks import Consumer
+from .tasks import Consumer, HeartbeatTask, PipelineEdgeTask, PipelineTask
 from .tasks.base import (
     BaseTask,
     QueueMessageContext,
     TaskControlPolicy,
     TaskWorkerResult,
 )
+from .tasks.liveness_monitor import LivenessMonitor
 from .tasks.multiqueue_watcher import QueueMode, QueueRuntimeConfig
 from .tasks.service import (
     ServiceTask,
@@ -2180,24 +2183,14 @@ class Manager(ServiceTask):
         if runtime_class is None:
             return Consumer
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_PIPELINE:
-            from .tasks.pipeline import PipelineTask
-
             return PipelineTask
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_PIPELINE_EDGE:
-            from .tasks.pipeline import PipelineEdgeTask
-
             return PipelineEdgeTask
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT:
-            from .tasks.heartbeat import HeartbeatTask
-
             return HeartbeatTask
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR:
-            from .monitor.task_monitor import TaskMonitor
-
             return TaskMonitor
         if runtime_class == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR:
-            from .tasks.liveness_monitor import LivenessMonitor
-
             return LivenessMonitor
         raise ValueError(f"unknown internal runtime task class '{runtime_class}'")
 
@@ -3003,16 +2996,12 @@ class Manager(ServiceTask):
 
     def _read_postgres_connection_stats(self) -> dict[str, int]:
         """Read the current public backend ceiling on the existing Queue [SB-0.4]."""
-        # PostgreSQL is an optional backend on SQLite-only installations.
-        from simplebroker_pg import get_connection_stats
-
+        get_connection_stats = weft.core.deferred.get_pg_connection_stats()
         return get_connection_stats(self._get_connected_queue())
 
     def _read_postgres_connection_usage(self) -> ConnectionUsage:
         """Use the released coherent population, outside a caller transaction [SB-0.4]."""
-        # PostgreSQL is an optional backend on SQLite-only installations.
-        from simplebroker_pg import get_connection_usage
-
+        get_connection_usage = weft.core.deferred.get_pg_connection_usage()
         return get_connection_usage(self._get_connected_queue())
 
     def _admission_allows_queue(self, queue_name: str) -> bool:

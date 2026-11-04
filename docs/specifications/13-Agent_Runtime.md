@@ -508,14 +508,14 @@ existing persistent-session deadline boundary. Accepted stop and producer-exit
 signals are consumed once so their persistent level state cannot starve bounded
 drain.
 
-_Implementation mapping:_ `weft/core/tasks/agent_session_protocol.py` --
+_Implementation mapping:_ `weft/core/runners/agent_session_protocol.py` --
 `make_execute_request`, `make_stop_request`, `make_booted_response`,
 `make_ready_response`, `make_startup_error_response`, `make_result_response`,
 `parse_request_type`, `response_type`, `parse_result_response`,
 `is_ready_response`, `is_booted_response`, `startup_error_message`.
 Versioned via
 `AGENT_SESSION_PROTOCOL_VERSION`. Session management:
-`weft/core/tasks/sessions.py` (`AgentSession` class),
+`weft/core/runners/sessions.py` (`AgentSession` class),
 `weft/core/tasks/consumer.py` (`_uses_agent_session`, `_ensure_agent_session`,
 `_shutdown_agent_session`), `weft/core/tasks/runner.py`
 (`start_agent_session`). Terminal work-item selection and private framing live
@@ -553,7 +553,8 @@ _Implementation mapping:_ `weft/core/agents/backends/llm.py` --
 registration: `_register_plugin_modules`. Backend is registered via
 `weft/core/agents/backends/__init__.py` when the host/runtime boundary
 explicitly requests built-in registration; importing schema or validation
-modules alone does not load backend adapters.
+modules alone does not load backend adapters. Plan backlink:
+[`2026-11-02-python-craft-late-imports-plan.md`](../plans/2026-11-02-python-craft-late-imports-plan.md).
 
 ### `provider_cli` backend
 
@@ -874,9 +875,9 @@ This slice does not attempt to:
 - Backend package init and registration: `weft/core/agents/__init__.py`,
   `weft/core/agents/backends/__init__.py`
 - Task execution and outbox emission: `weft/core/tasks/consumer.py`
-- Persistent session management (`AgentSession`): `weft/core/tasks/sessions.py`
+- Persistent session management (`AgentSession`): `weft/core/runners/sessions.py`
 - Persistent runtime subprocess orchestration: `weft/core/tasks/runner.py`
-- Private session protocol: `weft/core/tasks/agent_session_protocol.py`
+- Private session protocol: `weft/core/runners/agent_session_protocol.py`
 - CLI result aggregation: `weft/cli/run.py`, `weft/commands/result.py`
 - Microsandbox-backed one-shot provider execution:
   `extensions/weft_microsandbox/weft_microsandbox/plugin.py`
