@@ -614,15 +614,29 @@ turn that reaches the window expiry stops the task with no
   `monitor_store_families_retired` from `_collation_state`, recovery
   `valid_ingested`, a deferred-write flush observed through the existing
   flush-status transition), or `_deferred_task_log_pending > 0`, or a
-  catch-up backlog is flagged. `_work_undetermined` is true while a
+  catch-up backlog is flagged, or the applied cycle reports retained work
+  awaiting a future action (owner, 2026-11-04: "if there is cleanup at
+  the next expiration date that the Monitor would handle, it stays
+  active ... until everything has timed out and been deleted"). That
+  flag, `retained_work_pending`, is computed by the cycle worker from
+  what the cycle already enumerates and returned in its diagnostics: any
+  collation family in the store not yet retired or disposed (families
+  awaiting a lifetime report included), `last_control_cleanup_pending`,
+  `last_reserved_skipped_not_ready > 0` (a retention window still
+  running), pending deferred writes, scan candidates seen but not yet
+  safe to delete, or runtime prune candidates not yet deleted. The one
+  store read it adds is the open-family presence check, run inside the
+  cycle worker beside the family retirement it already performs, never
+  from the reactor. The Monitor therefore outlives its Manager for as
+  long as retained state has a future expiry, absent a STOP, and exits
+  five minutes after the cycle that finds nothing left. `_work_undetermined` is true while a
   builtin cycle worker has been started (`_maybe_start_builtin_cycle_worker`,
   5600) and `_handle_builtin_cycle_worker_result` (5987) has not applied
   its diagnostics. Freshness rule: the idle clock is settled from a
   cycle's applied result, so an empty cycle leaves the clock where it
   was, an in-flight cycle defers the decision without moving it, and a
   300 s grid of empty cycles crosses the deadline. Starting a cycle is
-  not work. Families awaiting a future lifetime report are not counted
-  (§10.3). No new query is added; the predicate reads the diagnostics the
+  not work; retained work with a future expiry is (§10.3). No new query is added; the predicate reads the diagnostics the
   cycle already returns to the reactor and the cached deferred-write
   status, never the `MaintenanceWorker`'s store directly.
 - **LivenessMonitor** (`weft/core/tasks/liveness_monitor.py`): work =
@@ -887,12 +901,15 @@ Phase 2 is removed. A user who wants the services gone sends them STOP
 directly (`weft task stop <tid>`) or waits out the idle clock.
 **Confirm.**
 
-### 10.3 TaskMonitor families awaiting a lifetime report
+### 10.3 TaskMonitor retained work with a future expiry
 
-Not counted as work in this plan: a family awaiting a future report is
-retained store state that the next TaskMonitor resumes; counting it would
-need a store census the cycle does not produce today. **Confirm, or ask
-for the census (for owner decision, not a blocker).**
+**Ruled by the owner, 2026-11-04:** counted. "I want to make sure that
+if there is cleanup at the next expiration date that the Monitor would
+handle, it stays active. The net result is that the Monitor may stay
+active for a while (absent STOP), until everything has timed out and
+been deleted." Task 2 defines `retained_work_pending` accordingly; the
+open-family presence check is the one store read added, inside the
+cycle worker.
 
 ### 10.4 Which mappings count as LivenessMonitor work
 
@@ -979,6 +996,8 @@ into §1 and Task 3. **Confirm.**
 - 2026-11-04: drafted.
 - 2026-11-04: round 1 applied (see Review Log); class 4 to 5; §4c added.
 - 2026-11-04: round 2 applied; §10.5 added; forks reported to the owner.
+- 2026-11-04: §10.3 ruled by the owner (retained work with a future
+  expiry keeps the Monitor alive); Task 2 updated.
 
 ## Execution log
 
