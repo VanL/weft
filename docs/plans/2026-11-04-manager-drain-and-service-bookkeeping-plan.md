@@ -1,6 +1,6 @@
 # Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3], [MA-1] item 7; docs/specifications/07-System_Invariants.md [MANAGER.12]
 Superseded by: none
 
@@ -486,6 +486,22 @@ bin/check-doc-paths
   rule the loop closes here; the completed-work review checks the applied
   text. Review before implementation is complete.
 
+- Completed-work review (codex 0.161.0, 2026-11-04, the landing commit
+  `88305598` against Tasks 1-3): verdict `PASS`, no in-scope findings.
+  Confirmed: every Task 1-3 edit present and nothing else changed in
+  `weft/core/manager.py`; the five reset sites clear one mapping; the four
+  stamp writers and two resets monotonic; no timestamp fallback; the keys
+  helper pure and construction order unchanged, identical across 16
+  flag/scope combinations, with convergence reasons and probe ownership
+  identical across 512 combinations; the leadership branch on the wall
+  clock; zero occurrences of the four retired names; the wall-clock test's
+  causal red at `79ea73d0` reproduced by independent probes (premature
+  timeout and a recorded SIGTERM before, neither after; backward
+  candidates from about 3615 and 3602 s to 15 and 2 s); the keys test
+  passing all eight cases; the host signal recorded, never sent; every
+  `## 7` gate recorded. Closure: class 4, so no [WT-7] probe; the plan
+  closes as `completed` at this commit's successor.
+
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
@@ -587,3 +603,9 @@ files). Gates: `tests/specs/test_plan_metadata.py` 4 passed;
 failed; `mypy` over the CI set: "Success: no issues found in 487 source
 files"; full fast suite: 6488 passed, 0 failed, 25 skipped, exit 0;
 `./bin/pytest-pg --fast`: 6338 passed, 27 skipped in 322.27 s, exit 0.
+
+#### Landing and closeout
+
+Landing commit `88305598`: 5 files, 279 insertions, 100 deletions
+(`weft/core/manager.py` 167 lines changed). Completed-work review PASS
+(`## Review Log`). Status `completed`.
