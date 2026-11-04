@@ -33,6 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) makes internal services context-level singletons: a manager ensures them and never stops them, the STOP drain has no services phase, and `weft system stop` empties a context ([MA-1] item 7, [MA-3]).
 - [System STOP Targets Every Live Task by Snapshot](../plans/2026-11-04-system-stop-snapshot-targets-plan.md) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
 - [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MA-1] item 7).
@@ -293,10 +294,22 @@ Key responsibilities implemented in `weft/core/manager.py`:
    live public managers may supervise built-in internal singleton services;
    correctness is enforced by manager-owned metadata and the singleton reducer,
    not by a global dispatch-owner fence. Scoped managers may still reconcile
-   their own autostart manifests. The canonical manager runs the built-in
-   heartbeat service as a standing internal service, whatever the monitor
-   flags say: started at manager startup, relaunched by ordinary managed-service
-   convergence if it exits, and stopped like the other internal services. The
+   their own autostart manifests. Internal services are context-level singletons. The canonical manager
+   ensures the built-in heartbeat service exists, whatever the monitor flags
+   say: launched at manager startup if no live owner exists, relaunched by
+   ordinary managed-service convergence if it exits, and never stopped,
+   signalled or terminated by any manager stop, supersession, leadership yield,
+   idle exit, late-launch reap or final cleanup. The same holds for TaskMonitor
+   and LivenessMonitor when their flags make them desired. A manager terminates
+   a service on exactly three paths: SIGUSR1 terminates its whole child table,
+   duplicate convergence sends KILL to a non-canonical duplicate owner, and a
+   launch whose result lands after the manager's cleanup deadline is reaped
+   ([IMPL.10]). Each service defines its own work and ends itself after
+   `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
+   manager in the context ([MF-3.2]); checking for work is not work. An
+   explicit STOP on a service's `ctrl_in` stops it as for any task. `weft
+   system stop` stops the manager and then the context's internal services by
+   registry record; it is the one command that empties a context. The
    manager neither reads nor deletes `weft.state.heartbeats`; the heartbeat
    service is its only reader and deleter ([MF-3.2]). The internal `TaskMonitor` is an
    `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
@@ -312,10 +325,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    terminal proof for that TID (terminal envelope or terminal task-log status)
    wins over host process liveness, so a service process still unwinding after
    `control_kill` is not a live singleton owner. Stale non-terminal task-log
-   rows without live proof do not count as a live singleton. The
-   manager enqueues services through its own inbox using manager-owned internal
-   runtime envelopes, tracks these children as supervision rather than user
-   work, and applies bounded restart backoff after TaskMonitor exit. The
+   rows without live proof do not count as a live singleton. The manager enqueues services through its own inbox using manager-owned
+   internal runtime envelopes, tracks a launched service for exit evidence and
+   reaping only (its `manager_tid` on the registry row and in status is
+   provenance, not custody), and applies bounded restart backoff after
+   TaskMonitor exit. The
    manager reduces pending-spawn, live, terminal, and uncertain evidence
    through one pure transition table before applying queue or process side
    effects.
@@ -582,7 +596,7 @@ _Implementation mapping_:
 - [MA-1.4] Registry heartbeat and leadership view — `weft/core/service_convergence.py::build_service_owner_payload`, `weft/core/service_convergence.py::build_manager_service_payload`, `weft/core/service_convergence.py::parse_service_owner_row`, `weft/core/service_convergence.py::project_manager_service_record`, and `weft/core/service_convergence.py::discard_v1_service_registry_rows`; Manager bootstrap plus `Manager._register_manager`, `Manager._unregister_manager`, `Manager._atexit_unregister`, `Manager._update_manager_registry_snapshot`, `Manager._publish_superseded_manager_record`, `Manager._read_active_manager_records`, `Manager._active_manager_records`, `Manager._leader_tid`, `Manager._evaluate_dispatch_ownership`, `Manager._manager_pong_dispatch_proof`, `Manager._advance_manager_pong_probe`, and `Manager._maybe_yield_leadership`; `weft/core/manager_runtime.py::_registry_queue`, `weft/core/manager_runtime.py::_snapshot_registry`, `weft/core/manager_runtime.py::_manager_registry_disposition`, and `weft/core/manager_runtime.py::_retain_latest_included_manager_record`; `weft/commands/system.py::_collect_service_registry_evidence`; and `weft/core/monitor/task_monitor.py::TaskMonitor._latest_service_owner_records`. The one complete PONG dispatch-eligibility gate is `weft/core/control_probe.py::pong_proves_dispatch_eligible`; manager and manager-runtime selection paths delegate to it without adding a second narrowing rule. Registry-record context fallback may help resolve the expected context, but a manager PONG without its own exact matching `weft_context` never proves authority.
 - [MA-1.5] Idle timeout — `Manager.process_once` (idle-timeout check), `Manager._note_control_request_activity` (only canonical control requests reset idle activity), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker`, `Manager._managed_service_convergence_active` (active convergence resets idle activity), `Manager._manager_owned_work_pending`, `Manager._autostart_ensure_obligation_pending`.
 - [MA-1.6] Autostart manifests — `Manager._reconcile_managed_services`, `Manager._tick_autostart`, `Manager._desired_autostart_services`, `Manager._mark_autostart_enqueued`, `Manager._prune_autostart_state`, `Manager._build_autostart_spawn_payload`, `Manager._load_autostart_manifest`, `Manager._load_autostart_taskspec`, `Manager._load_autostart_pipeline`, `Manager._active_autostart_sources`, `Manager._cleanup_children`, plus `weft/core/pipelines.py::compile_linear_pipeline` for stored pipeline targets. `weft/core/manager_services.py::ManagedServiceState` is the sole launch/restart/backoff state owner for autostarts and built-ins; `weft/core/manager.py` retains autostart source identity only, while `reduce_managed_service_state` owns transition selection.
-- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `weft/core/manager.py::Manager._pending_request_reference_is_valid`, `weft/core/manager.py::Manager._recover_pending_service_requests`, `weft/core/manager.py::Manager._tracked_service_terminal_proof_visible`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `weft/core/manager.py::Manager._child_terminal_proof_visible`, `weft/core/manager.py::Manager._write_manager_terminal_envelope`, `weft/core/manager.py::Manager._manager_child_timeouts`, `Manager._drain_child_sentinel_events`, `weft/core/manager.py::Manager._register_child_sentinel`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`.
+- [MA-1.6a] Managed internal service supervision — `Manager._run_managed_service_convergence`, `Manager._reconcile_managed_services`, `Manager._tick_internal_services`, `Manager._tick_managed_service`, `Manager._service_supervision_allowed`, `Manager._build_heartbeat_spawn_payload`, `Manager._build_task_monitor_spawn_payload`, `Manager._build_liveness_monitor_spawn_payload`, `Manager._liveness_monitor_service_spec`, `Manager._pending_service_keys`, `weft/core/manager.py::Manager._pending_request_reference_is_valid`, `weft/core/manager.py::Manager._recover_pending_service_requests`, `weft/core/manager.py::Manager._tracked_service_terminal_proof_visible`, `Manager._trusted_service_key_from_metadata`, `Manager._service_key_for_child`, `Manager._observed_service_candidates_by_key`, `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`, `Manager._advance_service_pong_probe`, `Manager._candidate_force_kill_pids`, `Manager._runtime_handle_force_kill_pids`, `Manager._enqueue_managed_service_request`, `Manager._drain_internal_spawn_requests`, `Manager._cleanup_children`, `weft/core/manager.py::Manager._child_terminal_proof_visible`, `weft/core/manager.py::Manager._write_manager_terminal_envelope`, `weft/core/manager.py::Manager._manager_child_timeouts`, `Manager._drain_child_sentinel_events`, `weft/core/manager.py::Manager._register_child_sentinel`, `Manager._retire_expired_unvisited_probes`, `Manager.next_wait_timeout`, `Manager.wait_for_activity`, and `Manager._user_work_children`; `_ManagerChildSentinelAdapter` is the broker-free local child-exit source; public submission sanitization lives in `weft/core/spawn_requests.py::submit_spawn_request`; shared service models and `reduce_managed_service_state` live in `weft/core/manager_services.py`, runtime TaskMonitor behavior lives in `weft/core/monitor/task_monitor.py`, LivenessMonitor runtime behavior lives in `weft/core/tasks/liveness_monitor.py` with pure evidence and policy in `weft/liveness/`, processor contracts live in `weft/core/monitor/runtime.py`, and ops service status reduction lives in `weft/commands/system.py::_collect_internal_service_snapshots`; a service's own lifetime (`ServiceTask._has_work`, `ServiceTask._work_undetermined`, `ServiceTask._live_manager_present`, `ServiceTask._settle_idle_clock`, the idle clause of `ServiceTask.next_wait_timeout`, and the `_has_work` overrides in `weft/core/tasks/heartbeat.py`, `weft/core/monitor/task_monitor.py` and `weft/core/tasks/liveness_monitor.py`) lives in `weft/core/tasks/service.py`; `weft/commands/system.py::stop_system` stops the context's services by registry record.
 - [MA-1.7] Control channel — inherited from `BaseTask._handle_control_command` (`weft/core/tasks/base.py`) and extended by `Manager._control_snapshot_fields` (`weft/core/manager.py`); structured PING/PONG snapshots, STOP, STATUS, KILL handling.
 - [MA-1.8] Admission: `weft/core/admission.py::AdmissionController` owns pure measured decisions and drain-wait diagnostics; `weft/core/admission.py::AdmissionController.set_max_connections` updates the effective ceiling without resetting that history. `weft/core/manager.py::Manager._read_postgres_connection_stats` resolves automatic backend capacity. `weft/core/manager.py` owns exact-ID selection, frontiers, incremental pending indexes, startup feedback, checkpoint custody, bounded recovery and process probes. `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest` own the bounded notification interest and reactor handoff. `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._ensure_multi_activity_waiter`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._wait_for_activity_body`, and `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_hint_action` own subscription replacement and observation wake filtering. `weft/_constants.py` owns configuration. `weft/core/tasks/base.py` owns task snapshots; `weft/core/runtime_identity.py` owns immutable transport. LivenessMonitor and TaskMonitor retain their cleanup boundaries under [LIVENESS.R3–4], [LIVENESS.R7]. Additional verification: `weft/core/family_scheduling.py`, `tests/core/test_admission.py`, `tests/core/test_connection_admission.py`, `tests/core/test_work_conserving_admission.py`, `tests/core/test_family_scheduling.py`, `tests/core/test_manager_family_maintenance.py`, `tests/helpers/family_workload.py`, `tests/system/test_child_admission.py`, `tests/system/test_family_scheduling.py`, `tests/system/test_measured_admission_pg.py`.
 
@@ -811,8 +825,9 @@ owned non-persistent children while the lower-TID leader remains positively
 proved; if that proof disappears, the manager publishes
 `manager_leadership_resumed`, restores active ownership, and resumes serving.
 `SIGTERM` and `SIGINT` against a Manager enter the same drain path as STOP.
-That drain is a system stop: the Manager stops active user work first, then
-its internal services, then itself.
+That drain is a system stop: the Manager stops active user work, then
+itself. Internal services are context-level singletons and are not drain
+members ([MA-1] item 7).
 
 1. User work. The Manager takes no new intake (a draining Manager launches
    no reserved child) and broadcasts STOP to every tracked child that is not
@@ -823,7 +838,7 @@ its internal services, then itself.
    does not exit after STOP, the Manager sends host SIGTERM after the named
    escalation delay. If the phase's bounded drain window expires, the
    Manager forcefully reaps the remaining user-work process trees. Internal
-   services keep running, unsignalled, throughout this phase.
+   services keep running, unsignalled, throughout the drain and after it.
    Phase 1 lasts until no user-work child remains and no child launch that
    was in flight when the drain began is still unsettled, or until its
    window expires. A launch still unsettled at that expiry is logged and
@@ -850,33 +865,31 @@ its internal services, then itself.
    exited. A system STOP stops the tasks live when it runs; another live
    Manager that is not itself stopped may still restart a service it keeps
    desired or launch new work.
-2. Internal services. Once phase 1 ends, the Manager broadcasts STOP to its
-   internal services, with the same escalation delay and one fresh drain
-   window of the same length, and forcefully reaps any service process tree
-   that remains when that window expires. The drain does not return to
-   phase 1.
-3. The Manager. Once the tracked child table is empty, apart from any
-   child committed by a launch released at the phase-1 window expiry, the
-   Manager publishes its drained terminal event and exits. That event is
-   the last lifecycle event the Manager publishes for the stop, with one
-   bounded exception: a child committed by a launch released at the
-   phase-1 window expiry is terminated by the Manager's final cleanup,
-   which runs after the drained event, so that child's own lifecycle
-   events may follow the Manager's drained event. No other child's event
-   does.
+2. The Manager. Once no tracked user-work child remains, apart from any
+   child committed by a launch released at the window expiry, the Manager
+   detaches any service it launched (the process keeps running; the Manager
+   only stops tracking it), publishes its drained terminal event and exits.
+   That event is the last lifecycle event the Manager publishes for the stop,
+   with two bounded exceptions: a child committed by a launch released at the
+   window expiry is terminated by the Manager's final cleanup, which runs after
+   the drained event, so that child's own lifecycle events may follow it; and a
+   detached internal service publishes its own lifecycle events on its own
+   clock, before or after the Manager's. No other child's event does.
 
-A phase with no members completes at once. Services are not restarted
-during the drain. The Manager applies its own `reserved_policy_on_stop` when
+A phase with no members completes at once. A draining Manager starts no
+service; a service that exits during the drain is relaunched by whichever
+live Manager keeps it desired. The Manager applies its own `reserved_policy_on_stop` when
 the drain begins; each task applies its own policy when it handles STOP. A
 fatal child sentinel observer error is preserved as the cleanup failure, but
 it cannot skip the termination and reap sequence: cleanup on that path
-attempts user-work termination before internal-service termination under
-one absolute cleanup deadline, then raises the original failure. Manager
+attempts user-work termination under one absolute cleanup deadline,
+detaches any internal service it launched, then raises the original
+failure. Manager
 supersession, leadership yield, idle exit, and crash are not system stops
 and never signal running user work.
 `SIGUSR1` retains immediate kill semantics, with no phases. Caller-facing
-manager stop defaults must be materially longer than the sum of the two
-phase windows, because a Manager may use both drain budgets before
+manager stop defaults must be materially longer than the drain window plus
+its forced-reap deadline, because a Manager may use that whole budget before
 publishing its stopped registry record, and slower broker backends can add
 observable registry propagation and scheduler delay under release-load
 parallelism.
@@ -945,10 +958,12 @@ _Implementation mapping_:
 - System STOP phase ordering — `weft/core/manager.py` ::
   `Manager._begin_shutdown_drain` (enters phase 1 and signals user work),
   `Manager._continue_shutdown_drain` and `Manager._drain_user_work_phase_holds`
-  (phase 1, the in-flight-launch hold bounded by the phase-1 window, the
-  fresh phase-2 window, and the drained event once no service remains),
-  `Manager._drain_phase_children` (the active phase's members, from the one
-  `Manager._child_is_supervision_only` split), `Manager._signal_children_to_stop`
+  (phase 1, the in-flight-launch hold bounded by the drain window, and
+  the drained event once no user-work child remains),
+  `Manager._drain_phase_children` (the drain's members, from the one
+  snapshot pass plus this Manager's user-work children),
+  `Manager._detach_launched_services` (services dropped from tracking,
+  never signalled, at the drained event and at final cleanup), `Manager._signal_children_to_stop`
   (the one STOP-then-SIGTERM rung, per phase), `Manager._terminate_children`
   (the forced-reap rung, limited to a phase's TIDs), and
   `Manager._manager_drain_timeouts` (active-phase clocks only). Error-path

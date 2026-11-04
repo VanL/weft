@@ -175,6 +175,7 @@ Client API parity matrix:
 | Spec create/list/show/delete/validate/generate | `namespace` | `client.specs.*` | Uses `weft.commands.specs.validate_spec_source` and the shared command-layer stored-spec helpers. |
 | System status/tidy/dump/load/builtins | `namespace` | `client.system.*` | Public maintenance helpers with typed results. |
 | Foreground task monitor scan | `namespace` | `client.system.task_monitor` | Same scan, checkpoint, and sink behavior as `weft system task-monitor`, on the client's resolved context; returns `TaskMonitorResult`, or `CommandStream[TaskMonitorSummary]` iff `follow=True`. |
+| System stop | `namespace` | `client.system.stop` | Same manager stop plus registry-driven service stop as `weft system stop`, on the client's resolved context; returns a typed result naming what was stopped, escalated and unreachable. |
 | Runtime-state and retention prune | `namespace` | `client.system.prune` | Same family validation, reports, and archive as `weft system prune`, on the client's resolved context; a dry run unless `apply=True`; returns `SystemPruneResult`. |
 | Manager diagnostics | `cli_only` | `weft manager list --diagnostic` | Operator/debug output lacks a stable typed result contract. |
 

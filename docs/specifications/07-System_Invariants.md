@@ -1130,14 +1130,14 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   unreserved messages in `weft.spawn.requests` must not
   prevent a higher-TID manager from yielding to the lower-TID live canonical
   manager.
-- **MANAGER.13**: manager-owned singleton service correctness is enforced at
+- **MANAGER.13**: manager-ensured singleton service correctness is enforced at
   the service boundary, not by a global public dispatch fence. Manager-authored
   service metadata and the service reducer decide when to start, wait, or
   terminate duplicates.
 - **MANAGER.14**: stale or ambiguous manager registry proof must degrade status
   and selection confidence, not halt public spawn dispatch or manager-owned
   service convergence.
-- **MANAGER.15**: manager-owned singleton services reduce all pending-spawn,
+- **MANAGER.15**: manager-ensured singleton services reduce all pending-spawn,
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
@@ -1451,6 +1451,7 @@ doc:
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) renames manager-owned singleton services to manager-ensured in [MANAGER.13] and [MANAGER.15]; the reducer is unchanged.
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) replaces the lossy short form with the 13-character encoded TID under [OBS.4], [OBS.5], [OBS.6], and [OBS.8], and removes title corroboration from host liveness under [LIVENESS.R5].
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([QUEUE.7]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([QUEUE.7]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).

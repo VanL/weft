@@ -444,6 +444,10 @@ same file. Task-monitor derives its default checkpoint and disk-sink
 directory from that same context. A `RunSession.stop` likewise controls the
 task on the context the session was submitted with.
 
+`client.system.stop(*, timeout=MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+force=False)` mirrors `weft system stop` on the client's resolved context and
+returns its typed result ([IP-1]).
+
 `client.system.prune(*, family, apply=False, force=False, queue=None,
 min_age=RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
 keep_recent_per_key=RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
@@ -598,6 +602,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.
 - [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 
