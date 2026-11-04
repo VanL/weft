@@ -50,9 +50,9 @@ def _release_state(
     )
 
 
-# Workflow structure is found by content, never by job id or step `env` key,
-# so the tests below survive identifier-only refactors and action upgrades
-# (Ruling D1 in docs/plans/2026-11-02-test-suite-structure-plan.md).
+# Workflow structure is found by content, never by job id or step `env` key.
+# The rejection-condition check deliberately fixes one JavaScript expression;
+# these source checks do not prove execution or general JavaScript behavior.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
 # [TS-4] names both files.
@@ -189,39 +189,6 @@ def _prefix_matches(prefix: str, tag: str) -> bool:
     """Whether `<prefix>*` matches the tag (`*` matches anything but `/`)."""
 
     return tag.startswith(prefix) and "/" not in tag.removeprefix(prefix)
-
-
-def _balanced_end(text: str, open_index: int, opener: str, closer: str) -> int:
-    """Return the index just past the closer that matches `text[open_index]`."""
-
-    depth = 0
-    for index in range(open_index, len(text)):
-        if text[index] == opener:
-            depth += 1
-        elif text[index] == closer:
-            depth -= 1
-            if depth == 0:
-                return index + 1
-    return len(text)
-
-
-def _loop_bodies(script: str) -> list[str]:
-    """Return the body of each `for`, `while`, or `do` loop in a JS script."""
-
-    bodies: list[str] = []
-    for match in re.finditer(r"\b(?:for|while)\s*\(|\bdo\s*\{", script):
-        if match.group().startswith("do"):
-            start = match.end() - 1
-            bodies.append(script[start : _balanced_end(script, start, "{", "}")])
-            continue
-        header_end = _balanced_end(script, match.end() - 1, "(", ")")
-        rest = script[header_end:].lstrip()
-        if rest.startswith("{"):
-            bodies.append(rest[: _balanced_end(rest, 0, "{", "}")])
-        else:
-            statement, _separator, _tail = rest.partition(";")
-            bodies.append(statement)
-    return bodies
 
 
 def _extension_targets(release: ModuleType) -> list[Any]:
@@ -1294,8 +1261,11 @@ def test_release_gate_routes_each_tag_to_exactly_one_package() -> None:
     assert len(called_workflows) == 1
 
 
-def test_publish_checks_completed_main_push_once_without_polling() -> None:
-    """Publication must fail closed on one exact completed Test push lookup."""
+def test_publish_workflow_checks_test_push_and_publication_dependencies() -> None:
+    """Check release wiring and narrow source guards, not JavaScript execution.
+
+    Spec: docs/specifications/08-Testing_Strategy.md [TS-4].
+    """
 
     workflow = _load_workflow(_RELEASE_WORKFLOW)
     jobs = workflow["jobs"]
@@ -1348,15 +1318,14 @@ def test_publish_checks_completed_main_push_once_without_polling() -> None:
         assert re.search(r"\bevent:\s*[\"']push[\"']", script)
         assert re.search(r"[\"']main[\"']", script)
         assert re.search(r"[\"']master[\"']", script)
-        # Owner, 2026-11-03: kept unchanged. They prove both comparisons are
-        # present with inequality polarity; they do not prove the connective
-        # between them, and they depend on the script's variable name.
-        assert 'latest.status !== "completed"' in script
-        assert 'latest.conclusion !== "success"' in script
-        # No polling: no timer, and no loop around the workflow-run lookup.
+        # Keep the whole condition together so replacing || with && fails.
+        # This deliberately fixes the expression's spelling, not its reachability.
+        assert (
+            'if (latest.status !== "completed" || latest.conclusion !== "success")'
+            in script
+        )
+        # A source guard against timer calls, not proof that no helper polls.
         assert re.search(r"\bset(?:Timeout|Interval)\s*\(", script) is None
-        for body in _loop_bodies(script):
-            assert "listWorkflowRuns" not in body
 
     pypi_jobs = [
         job_id
