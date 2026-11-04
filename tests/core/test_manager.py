@@ -23,7 +23,7 @@ import threading
 import time
 import traceback
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import closing
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -1055,6 +1055,24 @@ def _process_running(pid: int | None) -> bool:
         return bool(process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
     except psutil.NoSuchProcess:
         return False
+
+
+def _start_service_stand_in() -> BaseProcess:
+    """Start a real spawn-context child to stand in for a launched service."""
+
+    process = multiprocessing.get_context("spawn").Process(
+        target=time.sleep, args=(120.0,), daemon=False
+    )
+    process.start()
+    return process
+
+
+def _kill_detached_service(process: BaseProcess) -> None:
+    """Reap a service process a Manager left running (test teardown only)."""
+
+    if isinstance(process.pid, int) and process.is_alive():
+        manager_mod.kill_process_tree(process.pid, timeout=5.0)
+    process.join(timeout=10.0)
 
 
 def _write_descendant_process_scripts(tmp_path: Path) -> tuple[Path, Path]:
@@ -4187,12 +4205,14 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fatal sentinel error still reaps user work, then services [MA-3].
+    """A fatal sentinel error still reaps user work and detaches services.
 
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
     The error path in ``Manager._cleanup_task_resources`` terminates user
-    work before internal services under one deadline and re-raises the
-    original failure. The service child is inserted first so one unfiltered
-    termination pass, in table order, kills it first.
+    work under one deadline, detaches the internal service without
+    signalling it, and re-raises the original failure. The service child is
+    inserted first so an unfiltered termination pass, in table order, would
+    kill it first.
     """
 
     manager, _make_queue = manager_setup
@@ -4257,7 +4277,8 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     assert exc_info.value is failure
     assert process.kill_calls == 1
     assert manager._child_processes == {}
-    assert kill_order == ["child", "service"]
+    assert kill_order == ["child"]
+    assert service_process.kill_calls == 0
 
 
 def test_manager_sentinel_failure_without_children_is_not_dropped(
@@ -4350,6 +4371,7 @@ def test_manager_cleanup_attempts_every_phase_and_raises_first_failure(
             "_drain_active_child_launches_for_cleanup",
             phase("launches", first),
         )
+        patcher.setattr(manager, "_detach_launched_services", phase("detach"))
         patcher.setattr(manager, "_terminate_children", phase("children"))
         patcher.setattr(
             manager,
@@ -4378,9 +4400,11 @@ def test_manager_cleanup_attempts_every_phase_and_raises_first_failure(
 
     manager._draining = False
     assert exc_info.value is first
+    # Services are detached before the one user-work termination pass
+    # [MA-1] item 7, [MA-3].
     assert calls == [
         "launches",
-        "children",
+        "detach",
         "children",
         "reserved",
         "registry",
@@ -6769,6 +6793,57 @@ def test_internal_task_monitor_child_does_not_block_idle_shutdown(
         manager.cleanup()
 
 
+def test_manager_idle_exit_detaches_launched_service(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An idle exit leaves a launched service running, untracked.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]. Plan 2026-11-04-context-level-service-singletons Task 3 (d).
+    Named mutation: final cleanup terminating everything still tracked
+    kills the service after an idle exit.
+    """
+
+    db_path, make_queue = broker_env
+    spec = make_manager_spec(
+        unique_tid,
+        f"manager.{unique_tid}.inbox",
+        f"manager.{unique_tid}.ctrl_in",
+        f"manager.{unique_tid}.ctrl_out",
+        idle_timeout=0.01,
+    )
+    manager = Manager(db_path, spec)
+    service = _start_service_stand_in()
+    service_tid = "monitor-service"
+    try:
+        manager._child_processes[service_tid] = ManagedChild(
+            process=service,
+            ctrl_queue=f"T{service_tid}.ctrl_in",
+            persistent=True,
+            internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        )
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
+        monkeypatch.setattr(
+            manager,
+            "_update_idle_activity_from_broker",
+            lambda *, force=False: None,
+        )
+
+        manager.process_once()
+        assert manager.should_stop is True
+        manager.cleanup()
+
+        assert service.is_alive()
+        assert service not in multiprocessing.active_children()
+        assert service_tid not in manager._child_processes
+        assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
+    finally:
+        manager.cleanup()
+        _kill_detached_service(service)
+
+
 def test_manager_idle_shutdown_waits_for_missing_internal_service(
     broker_env: BrokerEnv,
     unique_tid: str,
@@ -7072,7 +7147,10 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
 
     monkeypatch.setattr(manager_mod, "kill_process_tree", record_tree_kill)
 
-    def block_termination(_deadline: float) -> None:
+    def block_termination(
+        _deadline: float, *, tids: Collection[str] | None = None
+    ) -> None:
+        del tids
         termination_entered.set()
         allow_termination.wait()
 
@@ -7177,6 +7255,160 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
     assert not locked_dir.exists()
     with pytest.raises(RuntimeError, match="closed"), broker_session.connection():
         pass
+
+
+def _active_service_owner_rows(
+    make_queue: Callable[[str], Queue], *, service_key: str, tid: str
+) -> list[dict[str, Any]]:
+    """Return the registry's active owner rows for one service TID."""
+
+    rows: list[dict[str, Any]] = []
+    for body in make_queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_many(limit=1000):
+        payload = json.loads(body)
+        if (
+            isinstance(payload, dict)
+            and payload.get("service_key") == service_key
+            and payload.get("owner_tid") == tid
+            and payload.get("status") == SERVICE_STATUS_ACTIVE
+        ):
+            rows.append(payload)
+    return rows
+
+
+def _start_blocked_service_launch(
+    manager: Manager, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TaskSpec, FakeLaunchProcess, threading.Event, threading.Event]:
+    """Submit one heartbeat launch whose process creation waits for a release."""
+
+    child_spec = manager._build_child_spec(
+        manager._build_heartbeat_spawn_payload(), time.time_ns()
+    )
+    assert child_spec is not None and child_spec.tid is not None
+    process = FakeLaunchProcess(pid=None)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_launch(*args: object, **kwargs: object) -> FakeLaunchProcess:
+        del args, kwargs
+        entered.set()
+        release.wait()
+        return process
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", blocked_launch)
+    assert (
+        manager._launch_child_task(
+            child_spec, None, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT
+        )
+        is True
+    )
+    assert entered.wait(timeout=10.0)
+    return child_spec, process, entered, release
+
+
+def test_manager_late_service_launch_before_cleanup_deadline_is_detached(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service launch landing during cleanup is registered and left running.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7;
+    docs/specifications/07-System_Invariants.md [IMPL.10]. Plan
+    2026-11-04-context-level-service-singletons Task 3 (e), difference A8.
+    The result lands while ``_drain_active_child_launches_for_cleanup``
+    waits, before the deadline and before any stop request: the reactor
+    commits it (registry row written) and cleanup detaches it. Named
+    mutation: the worker reaping any result that lands once cleanup has
+    begun kills the service and writes no registry row.
+    """
+
+    manager, make_queue = manager_setup
+    child_spec, process, _entered, release = _start_blocked_service_launch(
+        manager, monkeypatch
+    )
+    assert child_spec.tid is not None
+    # Finalize directly: ``stop()`` and ``cleanup()`` set the task stop event,
+    # which is the worker's stop request, not the case under test.
+    cleanup_thread = threading.Thread(
+        target=lambda: manager._finalize_task_once(time.monotonic() + 10.0),
+        daemon=True,
+    )
+    drain_wait_entered = _witness_event_wait(
+        monkeypatch, manager._worker_result_event, cleanup_thread
+    )
+    try:
+        cleanup_thread.start()
+        assert drain_wait_entered.wait(timeout=10.0)
+        release.set()
+        cleanup_thread.join(timeout=15.0)
+        assert not cleanup_thread.is_alive()
+    finally:
+        release.set()
+        cleanup_thread.join(timeout=15.0)
+
+    assert manager._cleanup_errors == ()
+    assert process.is_alive()
+    assert child_spec.tid not in manager._child_processes
+    assert _active_service_owner_rows(
+        make_queue, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, tid=child_spec.tid
+    )
+
+
+def test_manager_late_service_launch_after_cleanup_deadline_is_reaped(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service launch landing after the cleanup deadline is undone.
+
+    Spec: docs/specifications/07-System_Invariants.md [IMPL.10]; plan
+    2026-11-04-context-level-service-singletons owner ruling 10.5. Once the
+    deadline has passed the reactor no longer consumes launch results, so
+    the worker reaps the process whatever its role and no registry row is
+    written. Named mutation: exempting service-role results from the
+    after-deadline reap leaves an unregistered, undiscoverable service.
+    """
+
+    manager, make_queue = manager_setup
+    child_spec, process, _entered, release = _start_blocked_service_launch(
+        manager, monkeypatch
+    )
+    assert child_spec.tid is not None
+    termination_entered = threading.Event()
+    allow_termination = threading.Event()
+    real_terminate_children = manager._terminate_children
+
+    def block_termination(
+        deadline: float, *, tids: Collection[str] | None = None
+    ) -> None:
+        termination_entered.set()
+        allow_termination.wait()
+        real_terminate_children(deadline, tids=tids)
+
+    monkeypatch.setattr(manager, "_terminate_children", block_termination)
+
+    cleanup_thread = threading.Thread(
+        target=lambda: manager._finalize_task_once(time.monotonic() + 0.05),
+        daemon=True,
+    )
+    try:
+        cleanup_thread.start()
+        assert termination_entered.wait(timeout=10.0)
+        assert process.is_alive()
+        release.set()
+        reap_deadline = time.monotonic() + 10.0
+        while process.is_alive() and time.monotonic() < reap_deadline:
+            time.sleep(0.01)
+        assert not process.is_alive()
+    finally:
+        release.set()
+        allow_termination.set()
+        cleanup_thread.join(timeout=15.0)
+
+    assert not cleanup_thread.is_alive()
+    assert manager._cleanup_errors == ()
+    assert child_spec.tid not in manager._child_processes
+    assert not _active_service_owner_rows(
+        make_queue, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, tid=child_spec.tid
+    )
 
 
 def test_manager_terminal_envelope_does_not_cache_child_ctrl_out_queue(
@@ -8622,40 +8854,29 @@ def _first_event_log_id(
     )
 
 
-def test_manager_stop_orders_user_work_then_services_then_manager(
+def test_manager_stop_drains_user_work_then_manager_leaving_services(
     broker_env: BrokerEnv,
     unique_tid: str,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A system STOP drains user work, then internal services, then the Manager.
+    """A system STOP drains user work, then the Manager; services run on.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
-    docs/program-theory.md [WT-2a.13].
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]; docs/program-theory.md [WT-2a.13] (owner, 2026-11-04).
 
-    Check 1 (RED before the phased drain): while the user task is still a
-    tracked child, every retained service process stays alive, and no
-    retained service has a ``control_stop`` event before the user task's
-    terminal event.
-    Check 2 (guard): at ``should_stop`` no retained service process is alive
-    and each service's first ``control_stop`` follows the user task's
-    terminal event. Fires on the mutation "finish the drain once user work is
-    empty" (services left running at ``should_stop``).
-    Check 3 (guard): the Manager's ``manager_stop_drained`` event has the
-    greatest message ID among the stop's lifecycle events for the Manager,
-    the user task and every retained service. Fires on the mutation
-    "publish the drained event before the services are reaped". It guards
-    publication order only; check 2's liveness assertion covers exit order.
+    Check 1: STOP goes to user work only. While the drain runs and at
+    ``should_stop``, every service process this Manager launched is alive,
+    and no service has a ``control_stop`` event. Fires on the mutation
+    "keep phase 2" (services signalled once user work is gone).
+    Check 2: the drained event follows the user task's terminal event and
+    is the last event of the Manager and the user task after the STOP.
+    Check 3: final cleanup detaches the services: still alive, no longer
+    tracked, and no longer in ``multiprocessing.active_children()``. Fires
+    on the mutation "final cleanup terminates everything still tracked".
     """
 
     pytest.importorskip("psutil")
     db_path, make_queue = broker_env
-    # Keep the production window: TaskMonitor's STOP handler cancels its
-    # heartbeat through ``ensure_heartbeat_service``, which can wait up to
-    # MANAGER_STARTUP_TIMEOUT_SECONDS (10 s) when the heartbeat stops in the
-    # same phase. A shorter window would force-reap it and drop its
-    # ``control_stop`` event.
-    monkeypatch.setattr(manager_mod, "MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS", 15.0)
     _parent_script, term_trapping_script = _write_term_trapping_descendant_scripts(
         tmp_path
     )
@@ -8670,6 +8891,7 @@ def test_manager_stop_orders_user_work_then_services_then_manager(
             }
         ),
     )
+    services: dict[str, BaseProcess] = {}
     try:
         log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
         make_queue(manager._queue_names["inbox"]).write(
@@ -8723,47 +8945,53 @@ def test_manager_stop_orders_user_work_then_services_then_manager(
             manager.process_once()
             if user_tid in manager._child_processes:
                 user_tracked_turns += 1
-                for service_tid, process in services.items():
-                    assert _process_running(process.pid), (
-                        f"service {service_tid} exited while user work "
-                        f"{user_tid} was still tracked"
-                    )
+            for service_tid, process in services.items():
+                assert _process_running(process.pid), (
+                    f"service {service_tid} exited during the Manager drain"
+                )
             time.sleep(0.05)
         assert manager.should_stop
         assert user_tracked_turns > 0
 
+        # Check 1: user work stopped; services alive and never stopped.
         entries = _task_log_entries(log_queue)
-        user_terminal_id = _first_terminal_log_id(entries, user_tid)
-        assert user_terminal_id is not None
-        for service_tid in services:
-            service_stop_id = _first_event_log_id(entries, service_tid, "control_stop")
-            assert service_stop_id is None or service_stop_id > user_terminal_id, (
-                f"service {service_tid} control_stop preceded the user terminal event"
-            )
-
-        # Check 2 (guard): services stopped after user work.
         assert not _process_running(user_process.pid)
         for service_tid, process in services.items():
-            assert not _process_running(process.pid), (
-                f"service {service_tid} still alive at should_stop"
+            assert _process_running(process.pid), (
+                f"service {service_tid} not alive at should_stop"
             )
-            service_stop_id = _first_event_log_id(entries, service_tid, "control_stop")
-            assert service_stop_id is not None
-            assert service_stop_id > user_terminal_id
+            assert _first_event_log_id(entries, service_tid, "control_stop") is None
 
-        # Check 3 (guard): the Manager's drained event is the stop's last.
+        # Check 2: the drained event follows user work and ends the stop.
+        user_terminal_id = _first_terminal_log_id(entries, user_tid)
+        assert user_terminal_id is not None
         drained_id = _first_event_log_id(entries, manager.tid, "manager_stop_drained")
         assert drained_id is not None
-        cohort = {manager.tid, user_tid, *services}
+        assert user_terminal_id < drained_id
         stop_ids = [
             timestamp
             for payload, timestamp in entries
-            if timestamp > stop_id and payload.get("tid") in cohort
+            if timestamp > stop_id and payload.get("tid") in {manager.tid, user_tid}
         ]
         assert max(stop_ids) == drained_id
+
+        # Check 3: final cleanup detaches the services, unsignalled.
+        manager.cleanup()
+        tracked = multiprocessing.active_children()
+        for service_tid, process in services.items():
+            assert _process_running(process.pid), (
+                f"service {service_tid} not alive after Manager cleanup"
+            )
+            assert service_tid not in manager._child_processes
+            assert process not in tracked
+        entries = _task_log_entries(log_queue)
+        for service_tid in services:
+            assert _first_event_log_id(entries, service_tid, "control_stop") is None
     finally:
         manager.stop(join=False)
         manager.cleanup()
+        for process in services.values():
+            _kill_detached_service(process)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals required")
@@ -9255,10 +9483,10 @@ def test_manager_stop_keeps_target_whose_identity_probe_fails(
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. A
     non-terminal target whose live process denies its creation-time probe
-    stays in phase 1, and phase 1 does not advance. Named mutation:
+    stays a drain member, and the drain does not end. Named mutation:
     settling exit with ``pid_matches_create_time`` (False on a failed
     probe) instead of the tri-state ``inspect_host_process`` releases the
-    target and starts phase 2.
+    target and ends the drain.
     """
 
     psutil = pytest.importorskip("psutil")
@@ -9286,7 +9514,7 @@ def test_manager_stop_keeps_target_whose_identity_probe_fails(
 
         assert manager._drain_user_work_phase_holds() is True
         assert tid in manager._drain_stop_targets
-        assert manager._drain_services_phase is False
+        assert manager.should_stop is False
     finally:
         manager._drain_stop_targets.clear()
         manager._scheduler_residents.clear()
@@ -10683,6 +10911,102 @@ def test_manager_superseded_self_record_drains_children_without_stopping(
     assert manager._drain_stops_children is False
     assert manager.should_stop is False
     assert manager.taskspec.state.status == "running"
+
+
+def test_manager_superseded_without_user_work_exits_leaving_service_running(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """A superseded Manager with only a service exits; the service runs on.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]; docs/program-theory.md [ALT-WT-007]. Plan
+    2026-11-04-context-level-service-singletons Task 3 (a). Named mutation:
+    final cleanup terminating every tracked child kills the heartbeat; not
+    removing it from the ``multiprocessing`` children set leaves it listed
+    in ``active_children()`` (the Windows exit-join hazard, plan section 6b).
+    """
+
+    manager, make_queue = manager_setup
+    service = _start_service_stand_in()
+    service_tid = "heartbeat-service"
+    try:
+        manager._child_processes[service_tid] = ManagedChild(
+            process=service,
+            ctrl_queue=f"T{service_tid}.ctrl_in",
+            internal_role=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+            service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        )
+
+        manager._begin_superseded_shutdown()
+
+        assert manager.should_stop is True
+        assert manager._draining is False
+        manager.cleanup()
+
+        assert service.is_alive()
+        assert service not in multiprocessing.active_children()
+        assert service_tid not in manager._child_processes
+        assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
+    finally:
+        _kill_detached_service(service)
+
+
+def test_manager_superseded_drain_waits_on_user_work_not_services(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-stopping drain ends when user work ends, services or not.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
+    [MA-3]; docs/program-theory.md [ALT-WT-007]. Plan
+    2026-11-04-context-level-service-singletons Task 3 (b); the CI defect of
+    2026-11-04 (run 41917203345). Named mutation: finishing the drain only
+    when ``_child_processes`` is empty keeps the Manager draining for as
+    long as the heartbeat lives.
+    """
+
+    manager, make_queue = manager_setup
+    service = _start_service_stand_in()
+    service_tid = "heartbeat-service"
+    user = FakeLaunchProcess(pid=None)
+    monkeypatch.setattr(
+        manager, "_child_terminal_proof_still_within_grace", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        manager, "_write_manager_terminal_envelope", lambda *_args, **_kw: True
+    )
+    try:
+        manager._child_processes["user-work"] = ManagedChild(
+            process=cast(BaseProcess, user),
+            ctrl_queue="Tuser-work.ctrl_in",
+        )
+        manager._child_processes[service_tid] = ManagedChild(
+            process=service,
+            ctrl_queue=f"T{service_tid}.ctrl_in",
+            internal_role=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+            service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        )
+
+        manager._begin_superseded_shutdown()
+        assert manager._draining is True
+        assert manager._drain_stops_children is False
+
+        manager._continue_shutdown_drain()
+        assert manager.should_stop is False
+
+        user._alive = False
+        user.exitcode = 0
+        manager._continue_shutdown_drain()
+
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "cancelled"
+        assert service.is_alive()
+        assert service not in multiprocessing.active_children()
+        assert manager._child_processes == {}
+        assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
+        assert make_queue("Tuser-work.ctrl_in").peek_one() is None
+    finally:
+        _kill_detached_service(service)
 
 
 def test_manager_leadership_observes_superseded_services_row_without_spawn_probe(

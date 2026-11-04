@@ -712,7 +712,6 @@ class Manager(ServiceTask):
         self._drain_reason: str | None = None
         self._drain_completion_event = "manager_stop_drained"
         self._drain_stops_children = True
-        self._drain_services_phase = False
         self._drain_stop_targets: dict[str, _ManagerDrainStopTarget] = {}
         # Terminal-event interest in weft.log.tasks for the targets above:
         # ``_drain_stop_log_cursor`` is the settled position and
@@ -1628,10 +1627,19 @@ class Manager(ServiceTask):
                 raise TypeError("manager child-launch worker received invalid work")
             result = self._run_child_launch_worker(item)
             process = result.process
+            cleanup_deadline = self._active_cleanup_deadline
             if process is not None and (
-                context.stop_requested() or self._active_cleanup_deadline is not None
+                context.stop_requested()
+                or (
+                    cleanup_deadline is not None
+                    and self._remaining_deadline(cleanup_deadline) <= 0
+                )
             ):
-                deadline = self._active_cleanup_deadline or time.monotonic()
+                # A result before the cleanup deadline is the reactor's to
+                # commit (a service detached, user work then terminated); after
+                # it, or after the stop request, nothing can register it, so
+                # the launch is undone for either role [IMPL.10].
+                deadline = cleanup_deadline or time.monotonic()
                 remaining = self._remaining_deadline(deadline)
                 pid = process.pid
                 if isinstance(pid, int) and pid > 0:
@@ -2227,32 +2235,56 @@ class Manager(ServiceTask):
             if not self._child_is_supervision_only(child)
         }
 
-    def _drain_phase_children(self) -> dict[str, ManagedChild]:
-        """Return the stopping drain's active-phase children.
+    def _detach_launched_services(self) -> None:
+        """Stop tracking every internal service this Manager launched.
 
-        Phase 1 is user work; phase 2 is the supervision-only services.
+        A launched service is a context-level singleton with a lifetime of its
+        own; the Manager tracked it for exit evidence and reaping only. Each
+        service leaves the child table and the sentinel observer unsignalled,
+        and no terminal envelope is written for it: the process keeps running
+        and the next Manager's ensure finds it through the service registry.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
+        """
+
+        for tid, child in tuple(self._child_processes.items()):
+            if not self._child_is_supervision_only(child):
+                continue
+            self._child_processes.pop(tid)
+            self._child_sentinel_adapter.remove(tid)
+            # Plan 2026-11-04-context-level-service-singletons section 6b:
+            # multiprocessing joins every live non-daemon child it still
+            # tracks at interpreter exit, so a Windows Manager (no POSIX hard
+            # exit) would hang for as long as the service lives. No public
+            # API detaches a started live Process; drop it from the private
+            # children set instead.
+            multiprocessing.process._children.discard(child.process)  # type: ignore[attr-defined]
+
+    def _drain_phase_children(self) -> dict[str, ManagedChild]:
+        """Return this Manager's user-work children that the drain stops.
+
+        The drain's members are the one snapshot pass's targets plus these
+        children. Internal services are context-level singletons and are
+        never drain members.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
+        """
+
+        return self._user_work_children()
+
+    def _drain_phase_members(self) -> dict[str, bool]:
+        """Map each drain member to whether it gets an escalation clock.
+
+        The members are this Manager's user-work children plus the system-STOP
+        targets outside the child table; only an escalation-eligible target
+        gets a clock.
+
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
-        if not self._drain_services_phase:
-            return self._user_work_children()
-        return {
-            tid: child
-            for tid, child in self._child_processes.items()
-            if self._child_is_supervision_only(child)
-        }
-
-    def _drain_phase_members(self) -> dict[str, bool]:
-        """Map each active-phase member to whether it gets an escalation clock.
-
-        Phase 1 adds the system-STOP targets outside the child table; only an
-        escalation-eligible target gets a clock.
-        """
-
         members = dict.fromkeys(self._drain_phase_children(), True)
-        if not self._drain_services_phase:
-            for tid, target in self._drain_stop_targets.items():
-                members[tid] = target.escalate
+        for tid, target in self._drain_stop_targets.items():
+            members[tid] = target.escalate
         return members
 
     def _admission_enabled(self) -> bool:
@@ -4713,7 +4745,8 @@ class Manager(ServiceTask):
         """Stop tracked children under one absolute monotonic deadline.
 
         ``tids`` limits every step to those tracked children; ``None`` covers
-        every tracked child (the ``SIGUSR1`` and final-cleanup passes).
+        every tracked child (the ``SIGUSR1`` pass); final cleanup passes
+        user-work TIDs only, after detaching services.
 
         Spec: docs/specifications/07-System_Invariants.md [IMPL.10];
         docs/specifications/03-Manager_Architecture.md [MA-3]
@@ -4871,13 +4904,13 @@ class Manager(ServiceTask):
             self._child_sentinel_adapter.wait(self._remaining_deadline(deadline))
 
     def _signal_children_to_stop(self, children: Mapping[str, ManagedChild]) -> None:
-        """Best-effort STOP, then host SIGTERM, for one drain phase's children.
+        """Best-effort STOP, then host SIGTERM, for the drain's user work.
 
-        The caller passes the active phase's members: user work in phase 1,
-        internal services in phase 2. One rung serves both phases. The first
-        rung goes to every member not yet signalled as one exact-name
-        broadcast; a rung is marked signalled whether or not the write
-        succeeded, as a per-target write was.
+        The caller passes this Manager's user-work children; the drain's
+        system-STOP targets outside the child table join them. Internal
+        services are never members. The first rung goes to every member not
+        yet signalled as one exact-name broadcast; a rung is marked signalled
+        whether or not the write succeeded, as a per-target write was.
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
         [SB-BCAST-2], [SB-BCAST-4]
@@ -4891,12 +4924,11 @@ class Manager(ServiceTask):
             )
             for tid, child in children.items()
         ]
-        if not self._drain_services_phase:
-            # Phase 1 also covers live user work outside the child table.
-            rungs.extend(
-                (tid, target.ctrl_in, partial(self._drain_target_live_pids, target))
-                for tid, target in self._drain_stop_targets.items()
-            )
+        # The drain also covers live user work outside the child table.
+        rungs.extend(
+            (tid, target.ctrl_in, partial(self._drain_target_live_pids, target))
+            for tid, target in self._drain_stop_targets.items()
+        )
         pending: list[tuple[str, str]] = []
         for tid, ctrl_queue, escalation_pids in rungs:
             progress = self._drain_progress.get(tid)
@@ -5269,7 +5301,6 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._drain_progress.clear()
-        self._drain_services_phase = False
         self._drain_started_monotonic_ns = time.monotonic_ns()
         self._drain_immediate_work_pending = True
         self._drain_reason = reason
@@ -5307,7 +5338,6 @@ class Manager(ServiceTask):
 
         self._draining = True
         self._drain_progress.clear()
-        self._drain_services_phase = False
         self._drain_started_monotonic_ns = time.monotonic_ns()
         self._drain_immediate_work_pending = True
         self._drain_reason = f"Superseded by lower-TID manager {leader_tid}"
@@ -5333,7 +5363,6 @@ class Manager(ServiceTask):
         if self._user_work_children():
             self._draining = True
             self._drain_progress.clear()
-            self._drain_services_phase = False
             self._drain_started_monotonic_ns = time.monotonic_ns()
             self._drain_immediate_work_pending = True
             self._drain_reason = "Superseded by replacement manager"
@@ -5354,7 +5383,13 @@ class Manager(ServiceTask):
         self.should_stop = True
 
     def _finish_graceful_shutdown(self) -> None:
+        """End a drain: detach launched services, publish the drained event.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
+        """
+
         self._clear_drain_stop_targets()
+        self._detach_launched_services()
         if self.taskspec.state.status not in {"completed", "cancelled"}:
             self.taskspec.mark_cancelled(reason=self._drain_reason)
             self._report_state_change(event=self._drain_completion_event)
@@ -5362,7 +5397,6 @@ class Manager(ServiceTask):
         self._drain_started_monotonic_ns = None
         self._drain_immediate_work_pending = False
         self._drain_progress.clear()
-        self._drain_services_phase = False
         self._drain_stops_children = True
         self.should_stop = True
 
@@ -8554,7 +8588,11 @@ class Manager(ServiceTask):
     def _cleanup_task_resources(self, deadline: float) -> None:
         """Release Manager-owned children and registrations by the deadline.
 
-        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        Launched internal services are detached before any terminate call;
+        only user work is terminated.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10];
+        docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
         """
 
         self._draining = True
@@ -8570,14 +8608,14 @@ class Manager(ServiceTask):
                 failures.append(exc)
 
         attempt(lambda: self._drain_active_child_launches_for_cleanup(deadline))
-        # User work first, then everything still tracked, services included,
-        # under the same absolute deadline [MA-3].
+        # Services are detached, never signalled; only user work is
+        # terminated, under the one absolute deadline [MA-1] item 7, [MA-3].
+        attempt(self._detach_launched_services)
         attempt(
             lambda: self._terminate_children(
                 deadline, tids=tuple(self._user_work_children())
             )
         )
-        attempt(lambda: self._terminate_children(deadline))
         attempt(self._cleanup_own_internal_reserved_queue)
         attempt(self._unregister_manager)
         attempt(
@@ -8728,9 +8766,7 @@ class Manager(ServiceTask):
         timeouts: list[float] = []
         if self._drain_stops_children:
             members = self._drain_phase_members()
-            phase_active = bool(members) or (
-                not self._drain_services_phase and self._has_active_child_launches()
-            )
+            phase_active = bool(members) or self._has_active_child_launches()
             # Drain windows measure elapsed time on the monotonic clock; a
             # wall-clock step neither shortens nor stretches them.
             monotonic_now = time.monotonic_ns()
@@ -9113,7 +9149,6 @@ class Manager(ServiceTask):
         leader_tid = self._drain_leader_tid
         self._draining = False
         self._drain_progress.clear()
-        self._drain_services_phase = False
         self._drain_started_monotonic_ns = None
         self._drain_immediate_work_pending = False
         self._drain_reason = None
@@ -9157,14 +9192,15 @@ class Manager(ServiceTask):
         return False
 
     def _continue_shutdown_drain(self) -> None:
-        """Advance the drain one turn; a stopping drain runs in phases.
+        """Advance the drain one turn; it waits on user work only.
 
-        Phase 1 drains user work (and holds for launches in flight until its
-        window expires), phase 2 drains the internal services under a fresh
-        window, and then the Manager publishes its drained event. The drain
-        never returns from phase 2 to phase 1.
+        A stopping drain stops user work (and holds for launches in flight
+        until its window expires), then the Manager detaches its services and
+        publishes its drained event. A non-stopping drain (supersession,
+        leadership yield) lets user work finish, then does the same. Internal
+        services are never drain members.
 
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
         """
 
         self._drain_immediate_work_pending = False
@@ -9172,35 +9208,19 @@ class Manager(ServiceTask):
             return
         if not self._drain_stops_children:
             self._cleanup_children(retain_managed_survivors=False)
-            if not self._child_processes:
+            if not self._user_work_children():
                 self._finish_graceful_shutdown()
             return
-        if not self._drain_services_phase and self._drain_user_work_phase_holds():
-            return
-        self._signal_children_to_stop(self._drain_phase_children())
-        self._cleanup_children(retain_managed_survivors=True)
-        services = self._drain_phase_children()
-        if services and self._shutdown_drain_timed_out():
-            logger.warning(
-                "Manager %s drain timed out with %s internal service(s); terminating",
-                self.tid,
-                len(services),
-            )
-            self._terminate_children(
-                time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
-                tids=tuple(services),
-            )
-            self._cleanup_children()
-        if not self._drain_phase_children():
-            self._finish_graceful_shutdown()
+        self._drain_user_work_phase_holds()
 
     def _drain_user_work_phase_holds(self) -> bool:
-        """Advance phase 1; return whether it still holds the drain.
+        """Advance the stopping drain; return whether it still holds.
 
-        Phase 1 ends when no user-work child and no in-flight launch remains,
-        or when its window expires: remaining user work is then force-reaped
-        and an unsettled launch is logged and released to final cleanup. On
-        ending it starts phase 2 with a fresh window.
+        The drain ends when no user-work child, no system-STOP target and no
+        in-flight launch remains, or when its window expires: remaining user
+        work is then force-reaped and an unsettled launch is logged and
+        released to final cleanup. On ending it publishes the drained event
+        once no user-work child remains (``_finish_graceful_shutdown``).
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
@@ -9213,7 +9233,7 @@ class Manager(ServiceTask):
         if members or launches or self._drain_stop_targets:
             if not self._shutdown_drain_timed_out():
                 return True
-            # One forced-reap deadline for the whole phase [MA-3].
+            # One forced-reap deadline for the whole drain [MA-3].
             deadline = time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
             if members:
                 logger.warning(
@@ -9232,9 +9252,7 @@ class Manager(ServiceTask):
                     self.tid,
                     sorted(self._active_child_launches),
                 )
-        self._drain_services_phase = True
-        self._drain_started_monotonic_ns = time.monotonic_ns()
-        self._drain_immediate_work_pending = True
+        self._finish_graceful_shutdown()
         return False
 
     def _shutdown_drain_timed_out(self) -> bool:
