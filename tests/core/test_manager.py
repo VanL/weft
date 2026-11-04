@@ -16,6 +16,7 @@ import multiprocessing
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -8847,6 +8848,139 @@ def test_manager_stop_does_not_hold_past_window_for_stuck_launch(
         )
     finally:
         release.set()
+
+
+def _drain_snapshot_payload(
+    tid: str,
+    *,
+    pid: int | None = None,
+    created: float | None = None,
+    terminal: bool = False,
+    runtime_class: str | None = None,
+    role: str | None = None,
+    resolvable: bool = True,
+    residents: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a task-owned snapshot row in the shape BaseTask publishes [OBS.6]."""
+
+    processes = [{"pid": pid, "create_time": created}] if pid is not None else []
+    payload: dict[str, object] = {
+        "short": tid[-10:],
+        "full": tid,
+        "runner": "host",
+        "runtime_handle": {
+            "runner": "host",
+            "kind": "process",
+            "id": str(pid or 0),
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [pid] if pid is not None else [],
+                "host_processes": processes,
+            },
+            "metadata": {},
+        },
+        "terminal": terminal,
+        "name": "drain-target",
+        "role": role,
+        "hostname": socket.gethostname(),
+        "projection": {
+            "version": 1,
+            "status": "cancelled" if terminal else "running",
+            "event": "control_stop" if terminal else "work_started",
+            "metadata": (
+                {INTERNAL_RUNTIME_TASK_CLASS_KEY: runtime_class}
+                if runtime_class is not None
+                else {}
+            ),
+        },
+        "observation": (
+            {
+                "version": 1,
+                "mode": "one_shot",
+                "stream_output": False,
+                "routes": {
+                    "inbox": f"T{tid}.inbox",
+                    "outbox": f"T{tid}.outbox",
+                    "ctrl_in": f"T{tid}.ctrl_in",
+                    "ctrl_out": f"T{tid}.ctrl_out",
+                    "pipeline_status": None,
+                },
+            }
+            if resolvable
+            else None
+        ),
+        "host_processes": processes,
+    }
+    if residents is not None:
+        payload["scheduler_frontiers"] = {"residents": residents}
+    return payload
+
+
+def test_manager_stop_skips_terminal_and_internal_adopted_snapshots(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """System STOP coverage reads task-owned snapshots at the real seam [MA-3].
+
+    Members: a live uncovered user task, a pipeline stage, and a resident of
+    another live Manager's checkpoint. Excluded: a terminal snapshot, an
+    internal service, and a snapshot without a resolvable control route.
+    The covered resident and the uncovered task share one verified,
+    same-host, ``host-pid`` identity shape; only the uncovered task may be
+    escalated. Named mutation: dropping the covered-member exclusion from
+    the escalation predicate fails the covered resident's assertion.
+    """
+
+    manager, make_queue = manager_setup
+    base = time.time_ns()
+    uncovered, stage, covered, terminal, service, unresolved, peer = (
+        str(base + offset * 4096) for offset in range(1, 8)
+    )
+    worker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    try:
+        created = process_create_time(worker.pid)
+        assert created is not None
+        own_created = process_create_time(os.getpid())
+        rows = {
+            uncovered: _drain_snapshot_payload(
+                uncovered, pid=worker.pid, created=created
+            ),
+            stage: _drain_snapshot_payload(
+                stage, runtime_class=INTERNAL_RUNTIME_TASK_CLASS_PIPELINE
+            ),
+            covered: _drain_snapshot_payload(covered, pid=worker.pid, created=created),
+            terminal: _drain_snapshot_payload(terminal, terminal=True),
+            service: _drain_snapshot_payload(
+                service, runtime_class=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+            ),
+            unresolved: _drain_snapshot_payload(unresolved, resolvable=False),
+            peer: _drain_snapshot_payload(
+                peer,
+                pid=os.getpid(),
+                created=own_created,
+                role="manager",
+                residents={covered: {}},
+            ),
+        }
+        for tid, payload in rows.items():
+            make_queue(task_state_queue_name(tid)).write(json.dumps(payload))
+        for tid in (uncovered, stage, terminal, service, unresolved):
+            manager._scheduler_residents[tid] = {}
+
+        targets = manager._collect_drain_stop_targets()
+
+        assert set(targets) == {uncovered, stage, covered}
+        assert targets[uncovered].ctrl_in == f"T{uncovered}.ctrl_in"
+        assert targets[uncovered].escalate is True
+        assert targets[covered].covered is True
+        assert targets[covered].escalate is False
+        assert targets[covered].identity == targets[uncovered].identity
+        assert covered not in manager._scheduler_residents
+        assert targets[stage].escalate is False
+    finally:
+        worker.kill()
+        worker.wait(timeout=10.0)
 
 
 @pytest.mark.skipif(

@@ -24,8 +24,12 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
 from weft.context import WeftContext, build_context
+from weft.core.launcher import launch_task_process
+from weft.core.manager import Manager
+from weft.core.manager_runtime import build_manager_spec, generate_tid
 from weft.core.service_convergence import build_manager_service_payload
-from weft.core.task_state import task_state_queue_name
+from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
+from weft.core.taskspec import TaskSpec
 from weft.helpers import iter_queue_json_entries, process_create_time
 
 pytestmark = [pytest.mark.shared]
@@ -351,6 +355,300 @@ def test_manager_stop_orders_user_work_before_internal_services(
         assert service_terminal[1]["projection"]["event"] == "control_stop"
         assert user_terminal[0] < service_terminal[0] < drained[0]
         assert service_terminal[0] < manager_terminal[0]
+
+
+_LONG_WORK_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function_target": "tests.tasks.sample_targets:simulate_work",
+    "keyword_args": {"duration": 120.0},
+}
+
+
+def _wait_until(
+    predicate: Any, *, timeout: float = 60.0, message: str = "condition"
+) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise AssertionError(f"Timed out waiting for {message}")
+
+
+def _running_snapshot(context: WeftContext, tid: str) -> dict[str, Any] | None:
+    snapshot = read_task_state_snapshot(context, tid)
+    if snapshot is None:
+        return None
+    payload = snapshot[1]
+    projection = payload.get("projection")
+    if isinstance(projection, dict) and projection.get("status") == "running":
+        return payload
+    return None
+
+
+def _checkpoint_residents(context: WeftContext, manager_tid: str) -> set[str]:
+    snapshot = read_task_state_snapshot(context, manager_tid)
+    if snapshot is None:
+        return set()
+    residents = snapshot[1].get("scheduler_frontiers", {}).get("residents", {})
+    return set(residents) if isinstance(residents, dict) else set()
+
+
+def _snapshot_pids(payload: dict[str, Any]) -> set[int]:
+    return {
+        entry["pid"]
+        for entry in payload.get("host_processes", [])
+        if isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+    }
+
+
+def _pid_running(pid: int) -> bool:
+    psutil = pytest.importorskip("psutil")
+    try:
+        process = psutil.Process(pid)
+        return bool(process.is_running() and process.status() != psutil.STATUS_ZOMBIE)
+    except psutil.Error:
+        return False
+
+
+def _first_log_id(context: WeftContext, tid: str, events: set[str]) -> int | None:
+    return next(
+        (
+            timestamp
+            for payload, timestamp in _queue_rows(context, WEFT_GLOBAL_LOG_QUEUE)
+            if payload.get("tid") == tid and payload.get("event") in events
+        ),
+        None,
+    )
+
+
+def _manager_pid(weft_harness: WeftTestHarness, manager_tid: str) -> int:
+    def lookup() -> int | None:
+        rc, out, err = run_cli(
+            "manager",
+            "status",
+            manager_tid,
+            "--json",
+            "--context",
+            weft_harness.root,
+            cwd=weft_harness.root,
+            harness=weft_harness,
+        )
+        assert rc == 0, (rc, out, err)
+        return _host_pid_from_handle(json.loads(out))
+
+    return int(_wait_until(lookup, message=f"Manager {manager_tid} pid"))
+
+
+def test_manager_stop_reaches_earlier_manager_detached_task(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """A system STOP reaches a live task an earlier, dead Manager launched.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (Reading B).
+    The task's own ``control_stop`` is the delivery oracle: the Manager's
+    host SIGTERM rescue would publish ``task_signal_stop`` instead, and a
+    ``T*.ctrl_in`` pattern broadcast reaches no queue for a task that was
+    never controlled (its ``ctrl_in`` is absent before the STOP).
+    """
+
+    psutil = pytest.importorskip("psutil")
+    context_root = weft_harness.root
+    context = weft_harness.context
+
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    manager_a, _started = _parse_manager_start_output(out)
+    weft_harness.register_manager_tid(manager_a)
+
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--context",
+        context_root,
+        sys.executable,
+        "-c",
+        "import time; time.sleep(120)",
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    task_tid = out.strip()
+    weft_harness.register_tid(task_tid)
+    snapshot = _wait_until(
+        lambda: _running_snapshot(context, task_tid), message="task running"
+    )
+    task_pids = _snapshot_pids(snapshot)
+    assert task_pids
+
+    psutil.Process(_manager_pid(weft_harness, manager_a)).kill()
+
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    manager_b, started = _parse_manager_start_output(out)
+    assert started and manager_b != manager_a
+    weft_harness.register_manager_tid(manager_b)
+    _wait_until(
+        lambda: task_tid in _checkpoint_residents(context, manager_b),
+        message="Manager B adopting the detached task",
+    )
+    assert _running_snapshot(context, task_tid) is not None
+    ctrl_in = f"T{task_tid}.ctrl_in"
+    with context.broker() as broker:
+        assert ctrl_in not in set(broker.list_queues())
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        manager_b,
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+
+    weft_harness.wait_for_terminal_state(task_tid, expected_status="cancelled")
+    control_stop = _first_log_id(context, task_tid, {"control_stop"})
+    drained = _first_log_id(context, manager_b, {"manager_stop_drained"})
+    assert control_stop is not None, "task never handled a delivered STOP"
+    assert drained is not None
+    assert control_stop < drained
+    _wait_until(
+        lambda: not any(_pid_running(pid) for pid in task_pids),
+        timeout=30.0,
+        message="task process exit",
+    )
+
+
+def _non_canonical_manager_spec(context: WeftContext, tid: str, inbox: str) -> TaskSpec:
+    payload = build_manager_spec(context, tid, idle_timeout_override=0.0).model_dump(
+        mode="json"
+    )
+    payload["io"]["inputs"]["inbox"] = inbox
+    return TaskSpec.model_validate(payload, context={"auto_expand": False})
+
+
+def test_manager_stop_reaches_task_under_another_live_manager(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """A STOP-drain member another live Manager covers is stopped, not adopted.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3] (Reading B,
+    sub-question (a)). Two non-canonical Managers share one context; neither
+    yields leadership or runs services. Stopping B reaches A's task through
+    its resolved route; A keeps custody, reaps it, and stays alive.
+    """
+
+    context = weft_harness.context
+    suffix = generate_tid(context)
+    managers: dict[str, tuple[str, str]] = {}
+    processes: dict[str, Any] = {}
+    for label in ("a", "b"):
+        inbox = f"test.stop-cover.{suffix}.{label}.requests"
+        with context.queue(inbox, persistent=True) as queue:
+            queue.write(json.dumps({"name": f"cover-{label}", "spec": _LONG_WORK_SPEC}))
+            peeked = queue.peek_one(with_timestamps=True)
+        assert isinstance(peeked, tuple)
+        task_tid = str(peeked[1])
+        weft_harness.register_tid(task_tid)
+        manager_tid = generate_tid(context)
+        process = launch_task_process(
+            Manager,
+            context.broker_target,
+            _non_canonical_manager_spec(context, manager_tid, inbox),
+            config=context.config,
+        )
+        assert process.pid is not None
+        weft_harness.register_manager_tid(manager_tid)
+        weft_harness.register_pid(process.pid, manager_tid)
+        managers[label] = (manager_tid, task_tid)
+        processes[label] = process
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    for label, (manager_tid, task_tid) in managers.items():
+        snapshots[label] = _wait_until(
+            lambda tid=task_tid: _running_snapshot(context, tid),
+            message=f"task {label} running",
+        )
+        _wait_until(
+            lambda m=manager_tid, tid=task_tid: (
+                tid in _checkpoint_residents(context, m)
+            ),
+            message=f"Manager {label} checkpoint listing its task",
+        )
+    manager_a, task_a = managers["a"]
+    manager_b, task_b = managers["b"]
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        manager_b,
+        "--context",
+        weft_harness.root,
+        cwd=weft_harness.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+
+    weft_harness.wait_for_terminal_state(task_a, expected_status="cancelled")
+    weft_harness.wait_for_terminal_state(task_b, expected_status="cancelled")
+    assert _first_log_id(context, task_a, {"control_stop"}) is not None
+    terminal_a = _first_log_id(context, task_a, {"control_stop"})
+    terminal_b = _first_log_id(context, task_b, {"control_stop", "task_signal_stop"})
+    drained_b = _first_log_id(context, manager_b, {"manager_stop_drained"})
+    assert terminal_a is not None and terminal_b is not None
+    assert drained_b is not None
+    assert terminal_a < drained_b and terminal_b < drained_b
+    _wait_until(
+        lambda: (
+            not any(_pid_running(pid) for pid in _snapshot_pids(snapshots["a"]))
+            and task_a not in _checkpoint_residents(context, manager_a)
+        ),
+        timeout=30.0,
+        message="Manager A reaping its stopped task",
+    )
+    assert processes["a"].is_alive()
+    rc, out, err = run_cli(
+        "manager",
+        "status",
+        manager_a,
+        "--json",
+        "--context",
+        weft_harness.root,
+        cwd=weft_harness.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    assert json.loads(out).get("status") == "active"
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        manager_a,
+        "--context",
+        weft_harness.root,
+        cwd=weft_harness.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    processes["a"].join(timeout=30.0)
+    processes["b"].join(timeout=30.0)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

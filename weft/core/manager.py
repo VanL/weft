@@ -68,6 +68,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
+    INTERNAL_SERVICE_RUNTIME_CLASSES,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
     MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
@@ -139,6 +140,7 @@ from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
+from weft.core.task_evidence import parse_task_observation
 from weft.core.task_state import (
     latest_task_state_rows,
     read_task_state_snapshot,
@@ -155,6 +157,7 @@ from weft.helpers import (
     kill_process_tree,
     live_host_processes_from_handle,
     pid_is_live,
+    pid_matches_create_time,
     process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
@@ -342,6 +345,24 @@ class _ManagerStartupFeedback:
     queue: Queue | None = None
     publication_id: int | None = None
     publication_pending: bool = False
+
+
+@dataclass(slots=True)
+class _ManagerDrainStopTarget:
+    """One phase-1 STOP-drain member outside this Manager's child table [MA-3].
+
+    ``identity`` holds the same-host ``(pid, create_time)`` pairs verified when
+    the drain began; ``escalate`` is true only for an uncovered ``host-pid``
+    target with such an identity. ``queue`` and ``publication_id`` are the
+    wake interest on the task's own snapshot queue.
+    """
+
+    ctrl_in: str
+    covered: bool
+    identity: tuple[tuple[int, float], ...]
+    escalate: bool
+    queue: Queue | None = None
+    publication_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +696,7 @@ class Manager(ServiceTask):
         self._drain_completion_event = "manager_stop_drained"
         self._drain_stops_children = True
         self._drain_services_phase = False
+        self._drain_stop_targets: dict[str, _ManagerDrainStopTarget] = {}
         self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
         self._drain_escalated_children: set[str] = set()
@@ -1896,6 +1918,8 @@ class Manager(ServiceTask):
     def _activity_wait_queues(self) -> list[Queue]:
         """Include startup observation without adding a delivery route [MA-1.8]."""
         queues = super()._activity_wait_queues()
+        # System-STOP drain targets wake the reactor on their own snapshots [MA-3].
+        queues.extend(self._drain_stop_target_queues())
         for tid, record in getattr(self, "_startup_feedback", {}).items():
             if tid in self._active_child_launches:
                 continue
@@ -1911,6 +1935,9 @@ class Manager(ServiceTask):
         advances only the cursor, retaining interest in subsequent evidence.
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
         """
+        # System-STOP drain targets: a new snapshot row is a pending turn [MA-3].
+        if self._has_pending_drain_stop_observation():
+            return True
         records = getattr(self, "_startup_feedback", {})
         if any(record.publication_pending for record in records.values()):
             return True
@@ -2203,6 +2230,19 @@ class Manager(ServiceTask):
             for tid, child in self._child_processes.items()
             if self._child_is_supervision_only(child)
         }
+
+    def _drain_phase_members(self) -> dict[str, bool]:
+        """Map each active-phase member to whether it gets an escalation clock.
+
+        Phase 1 adds the system-STOP targets outside the child table; only an
+        escalation-eligible target gets a clock.
+        """
+
+        members = dict.fromkeys(self._drain_phase_children(), True)
+        if not self._drain_services_phase:
+            for tid, target in self._drain_stop_targets.items():
+                members[tid] = target.escalate
+        return members
 
     def _admission_enabled(self) -> bool:
         """Return whether backend-specific admission is enabled."""
@@ -2549,16 +2589,8 @@ class Manager(ServiceTask):
     ) -> None:
         """Adopt orphan paths from task snapshots and reservation checkpoints [MF-5]."""
         covered: set[str] = set()
-        for manager_tid, (_stamp, payload) in snapshots.items():
-            checkpoint = payload.get("scheduler_frontiers")
-            if payload.get("role") != "manager" or not isinstance(checkpoint, Mapping):
-                continue
-            residents = checkpoint.get("residents", {})
-            if not isinstance(residents, Mapping):
-                raise TypeError("invalid Manager resident checkpoint")
-            if manager_tid != self.tid and self._admission_mapping_is_live(
-                manager_tid, payload
-            ):
+        for live_peer, residents in self._manager_checkpoint_residents(snapshots):
+            if live_peer:
                 covered.update(residents)
                 continue
             for tid, evidence in residents.items():
@@ -2572,6 +2604,30 @@ class Manager(ServiceTask):
         self._recover_unlaunched_reservations(snapshots, broker)
         if not self._publish_scheduler_checkpoint():
             raise RuntimeError("unable to checkpoint adopted scheduler responsibility")
+
+    def _manager_checkpoint_residents(
+        self, snapshots: Mapping[str, tuple[int, dict[str, Any]]]
+    ) -> Iterator[tuple[bool, Mapping[str, Any]]]:
+        """Yield each Manager checkpoint's residents and its ``covered`` verdict.
+
+        The verdict is true when another, live Manager's checkpoint holds the
+        residents. Bootstrap adoption and the system-STOP drain share this one
+        ``covered`` rule [MF-5].
+        """
+        for manager_tid, (_stamp, payload) in snapshots.items():
+            checkpoint = payload.get("scheduler_frontiers")
+            if payload.get("role") != "manager" or not isinstance(checkpoint, Mapping):
+                continue
+            residents = checkpoint.get("residents", {})
+            if not isinstance(residents, Mapping):
+                raise TypeError("invalid Manager resident checkpoint")
+            yield (
+                (
+                    manager_tid != self.tid
+                    and self._admission_mapping_is_live(manager_tid, payload)
+                ),
+                residents,
+            )
 
     def _recover_unlaunched_reservations(
         self,
@@ -4826,7 +4882,21 @@ class Manager(ServiceTask):
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
 
-        for tid, child in list(children.items()):
+        rungs: list[tuple[str, str, Callable[[], tuple[int, ...]]]] = [
+            (
+                tid,
+                child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
+                partial(self._child_stop_escalation_pids, child),
+            )
+            for tid, child in children.items()
+        ]
+        if not self._drain_services_phase:
+            # Phase 1 also covers live user work outside the child table.
+            rungs.extend(
+                (tid, target.ctrl_in, partial(self._drain_target_live_pids, target))
+                for tid, target in self._drain_stop_targets.items()
+            )
+        for tid, ctrl_queue, escalation_pids in rungs:
             if tid in self._drain_signaled_children:
                 if tid in self._drain_escalated_children:
                     continue
@@ -4835,8 +4905,7 @@ class Manager(ServiceTask):
                     MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000
                 )
                 if time.time_ns() - started_ns >= escalation_ns:
-                    pid = child.process.pid
-                    if isinstance(pid, int) and pid > 0:
+                    for pid in escalation_pids():
                         # SIGTERM only at this rung. Task processes defer
                         # signal handling to their run loop's next bounded
                         # wait turn (see launcher._install_signal_handlers),
@@ -4848,10 +4917,239 @@ class Manager(ServiceTask):
                         terminate_process_tree(pid, timeout=0.2, kill_after=False)
                     self._drain_escalated_children.add(tid)
                 continue
-            ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_stop_command(ctrl_queue)
             self._drain_signaled_children.add(tid)
             self._drain_signal_started_ns[tid] = time.time_ns()
+
+    @staticmethod
+    def _child_stop_escalation_pids(child: ManagedChild) -> tuple[int, ...]:
+        pid = child.process.pid
+        return (pid,) if isinstance(pid, int) and pid > 0 else ()
+
+    @staticmethod
+    def _drain_target_live_pids(target: _ManagerDrainStopTarget) -> tuple[int, ...]:
+        """Re-verify an escalation-eligible target's identity before signalling."""
+
+        if not target.escalate:
+            return ()
+        return tuple(
+            pid
+            for pid, created in target.identity
+            if pid_is_live(pid) and pid_matches_create_time(pid, created)
+        )
+
+    def _collect_drain_stop_targets(self) -> dict[str, _ManagerDrainStopTarget]:
+        """Name phase-1 members outside the child table from task evidence.
+
+        Members are the adopted residents and the residents another live
+        Manager's checkpoint covers, read from one fresh snapshot pass with
+        the bootstrap's ``covered`` rule. The Manager only reads snapshots
+        here ([LIVENESS.R3]).
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+        """
+
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                snapshots = latest_task_state_rows(
+                    self._manager_context(), broker=broker
+                )
+            covered: set[str] = set()
+            for live_peer, residents in self._manager_checkpoint_residents(snapshots):
+                if live_peer:
+                    covered.update(tid for tid in residents if isinstance(tid, str))
+        except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
+            logger.warning(
+                "Manager %s could not read task evidence for system STOP; "
+                "phase 1 covers tracked children only",
+                self.tid,
+                exc_info=True,
+            )
+            return {}
+        candidates = {tid: tid in covered for tid in self._scheduler_residents}
+        candidates.update(dict.fromkeys(covered, True))
+        targets: dict[str, _ManagerDrainStopTarget] = {}
+        unresolved: list[str] = []
+        for tid, is_covered in candidates.items():
+            if (
+                tid == self.tid
+                or tid in self._child_processes
+                or tid in self._active_child_launches
+            ):
+                continue
+            snapshot = snapshots.get(tid)
+            if snapshot is None:
+                unresolved.append(tid)
+                continue
+            stamp, payload = snapshot
+            if not self._is_live_user_work_snapshot(payload):
+                continue
+            observation = parse_task_observation(payload.get("observation"))
+            if observation is None:
+                unresolved.append(tid)
+                continue
+            identity = self._verified_host_identity(payload)
+            targets[tid] = _ManagerDrainStopTarget(
+                ctrl_in=observation.ctrl_in,
+                covered=is_covered,
+                identity=identity,
+                escalate=(
+                    bool(identity)
+                    and not is_covered
+                    and self._snapshot_control_authority(payload) == "host-pid"
+                ),
+                publication_id=stamp,
+            )
+        if unresolved:
+            logger.warning(
+                "Manager %s system STOP cannot resolve a control route for %s; "
+                "released from the drain without a guessed route",
+                self.tid,
+                sorted(unresolved),
+            )
+        return targets
+
+    @staticmethod
+    def _is_live_user_work_snapshot(payload: Mapping[str, Any]) -> bool:
+        """Return whether a task-owned snapshot names live, non-service work."""
+
+        if payload.get("terminal") is True or payload.get("role") == "manager":
+            return False
+        projection = payload.get("projection")
+        if not isinstance(projection, Mapping):
+            return False
+        if projection.get("status") in TERMINAL_TASK_STATUSES:
+            return False
+        metadata = projection.get("metadata")
+        runtime_class = (
+            metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        return runtime_class not in INTERNAL_SERVICE_RUNTIME_CLASSES
+
+    @staticmethod
+    def _verified_host_identity(
+        payload: Mapping[str, Any],
+    ) -> tuple[tuple[int, float], ...]:
+        """Return same-host ``(pid, create_time)`` pairs that still match (LIVENESS.R5)."""
+
+        if payload.get("hostname") != socket.gethostname():
+            return ()
+        entries = payload.get("host_processes")
+        if not isinstance(entries, list):
+            return ()
+        verified: list[tuple[int, float]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            pid = entry.get("pid")
+            created = entry.get("create_time")
+            if (
+                isinstance(pid, int)
+                and isinstance(created, int | float)
+                and pid_is_live(pid)
+                and pid_matches_create_time(pid, float(created))
+            ):
+                verified.append((pid, float(created)))
+        return tuple(verified)
+
+    @staticmethod
+    def _snapshot_control_authority(payload: Mapping[str, Any]) -> str | None:
+        handle = payload.get("runtime_handle")
+        if not isinstance(handle, Mapping):
+            return None
+        try:
+            authority = RunnerHandle.from_dict(handle).control.get("authority")
+        except (TypeError, ValueError, KeyError):
+            return None
+        return authority if isinstance(authority, str) else None
+
+    def _settle_drain_stop_targets(self) -> None:
+        """Release targets with task-owned terminal proof or verified exit.
+
+        Liveness that cannot be read stays unknown and keeps the target in
+        the phase ([WT-2a.13]).
+        """
+
+        if not self._drain_stop_targets:
+            return
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                for tid, target in tuple(self._drain_stop_targets.items()):
+                    latest = read_task_state_snapshot(
+                        self._manager_context(), tid, broker=broker
+                    )
+                    terminal = latest is not None and latest[1].get("terminal") is True
+                    exited = bool(target.identity) and not any(
+                        pid_is_live(pid) and pid_matches_create_time(pid, created)
+                        for pid, created in target.identity
+                    )
+                    if terminal or exited:
+                        self._release_drain_stop_target(tid)
+        except (BrokerError, OSError, RuntimeError, ValueError):
+            logger.debug("System STOP target observation deferred", exc_info=True)
+
+    def _release_drain_stop_target(self, tid: str) -> None:
+        target = self._drain_stop_targets.pop(tid, None)
+        if target is not None and target.queue is not None:
+            target.queue.close()
+            target.queue = None
+
+    def _release_drain_stop_targets_at_expiry(self) -> None:
+        """Force-reap eligible targets, then report and release the rest."""
+
+        deadline = time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
+        for target in self._drain_stop_targets.values():
+            for pid in self._drain_target_live_pids(target):
+                remaining = self._remaining_deadline(deadline)
+                if remaining <= 0:
+                    break
+                terminate_process_tree(pid, timeout=remaining / 2.0, kill_after=True)
+        self._settle_drain_stop_targets()
+        if self._drain_stop_targets:
+            logger.warning(
+                "Manager %s drain window expired with unconfirmed system STOP "
+                "target(s) %s; released with liveness unknown",
+                self.tid,
+                sorted(self._drain_stop_targets),
+            )
+        self._clear_drain_stop_targets()
+
+    def _clear_drain_stop_targets(self) -> None:
+        for tid in tuple(self._drain_stop_targets):
+            self._release_drain_stop_target(tid)
+
+    def _drain_stop_target_queues(self) -> list[Queue]:
+        queues: list[Queue] = []
+        for tid, target in getattr(self, "_drain_stop_targets", {}).items():
+            if target.queue is None:
+                target.queue = self._manager_context().queue(task_state_queue_name(tid))
+            queues.append(target.queue)
+        return queues
+
+    def _has_pending_drain_stop_observation(self) -> bool:
+        """Advance a publication cursor per target; never consume task state."""
+
+        targets = getattr(self, "_drain_stop_targets", {})
+        if not targets:
+            return False
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                for tid, target in targets.items():
+                    rows = broker.peek_many(
+                        task_state_queue_name(tid),
+                        limit=1,
+                        order="newest",
+                        with_timestamps=True,
+                        after_timestamp=target.publication_id,
+                    )
+                    if rows:
+                        target.publication_id = int(rows[0][1])
+                        return True
+        except (BrokerError, OSError, RuntimeError, ValueError):
+            logger.debug("System STOP target wake deferred", exc_info=True)
+        return False
 
     def _begin_graceful_shutdown(self, *, message_id: int | None) -> None:
         self._begin_shutdown_drain(
@@ -4894,6 +5192,9 @@ class Manager(ServiceTask):
         policy = self.taskspec.spec.reserved_policy_on_stop
         self._apply_reserved_policy(policy)
 
+        if not self._admission_bootstrapped:
+            self._refresh_scheduler_evidence()
+        self._drain_stop_targets = self._collect_drain_stop_targets()
         self._signal_children_to_stop(self._user_work_children())
 
     def _begin_leadership_drain(self, *, leader_tid: str) -> None:
@@ -4962,6 +5263,7 @@ class Manager(ServiceTask):
         self.should_stop = True
 
     def _finish_graceful_shutdown(self) -> None:
+        self._clear_drain_stop_targets()
         if self.taskspec.state.status not in {"completed", "cancelled"}:
             self.taskspec.mark_cancelled(reason=self._drain_reason)
             self._report_state_change(event=self._drain_completion_event)
@@ -8152,6 +8454,7 @@ class Manager(ServiceTask):
         self._draining = True
         self._active_cleanup_deadline = deadline
         self._clear_startup_notification_interest()
+        self._clear_drain_stop_targets()
         failures: list[BaseException] = []
 
         def attempt(operation: Callable[[], None]) -> None:
@@ -8322,7 +8625,7 @@ class Manager(ServiceTask):
 
         timeouts: list[float] = []
         if self._drain_stops_children:
-            members = self._drain_phase_children()
+            members = self._drain_phase_members()
             phase_active = bool(members) or (
                 not self._drain_services_phase and self._has_active_child_launches()
             )
@@ -8337,8 +8640,8 @@ class Manager(ServiceTask):
                     )
                 )
             escalation_ns = int(MANAGER_CHILD_STOP_ESCALATION_SECONDS * 1_000_000_000)
-            for tid in members:
-                if tid in self._drain_escalated_children:
+            for tid, escalates in members.items():
+                if not escalates or tid in self._drain_escalated_children:
                     continue
                 started_ns = self._drain_signal_started_ns.get(tid)
                 if started_ns is None:
@@ -8811,11 +9114,14 @@ class Manager(ServiceTask):
 
         self._signal_children_to_stop(self._drain_phase_children())
         self._cleanup_children(retain_managed_survivors=True)
+        self._settle_drain_stop_targets()
         members = self._drain_phase_children()
         launches = self._has_active_child_launches()
-        if members or launches:
+        if members or launches or self._drain_stop_targets:
             if not self._shutdown_drain_timed_out():
                 return True
+            if self._drain_stop_targets:
+                self._release_drain_stop_targets_at_expiry()
             if members:
                 logger.warning(
                     "Manager %s drain timed out with %s user-work task(s); terminating",

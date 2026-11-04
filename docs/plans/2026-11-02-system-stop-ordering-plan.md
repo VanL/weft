@@ -1834,3 +1834,100 @@ Task 5, end-to-end ordering at the CLI seam:
   it failed twice in two runs on `assert user_terminal[0] <
   service_terminal[0]` (for example `assert 1793752575788134400 <
   1793752575540375552`), so it is a real ordering check, not a guard.
+
+Task 4 commit: `444a74bd`. Task 5 commit: `a1472d98` (the fast suite before
+both exited 0: 6,381 passed, 47 skipped; mypy clean on 484 files; ruff
+clean).
+
+Task 7 (Reading B), RED first (`-n 0`, before any task 7 production edit):
+
+```
+./.venv/bin/python -m pytest tests/cli/test_cli_manager.py -k "reaches_earlier_manager or reaches_task_under_another" -n 0
+E   TimeoutError: Timed out waiting for task 1793753041121116160 terminal state 'cancelled'
+E   TimeoutError: Timed out waiting for task 1793753113767510016 terminal state 'cancelled'
+FAILED tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task
+FAILED tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager
+```
+
+Both fail on the named RED (the task keeps running: its latest snapshot
+stays at `work_started`), not on setup: Manager B adopted the detached task
+into its checkpoint before the stop, the task's `ctrl_in` was absent from
+`list_queues()`, and in the second test both non-canonical Managers
+launched, listed their tasks under `scheduler_frontiers.residents`, and
+neither yielded, stopped, or started a service; `weft manager stop <B tid>`
+returned 0. No test-only production seam was needed (`build_manager_spec`
+output re-validated with the custom inbox).
+
+GREEN (`weft/core/manager.py`):
+
+- `_begin_shutdown_drain` runs `_refresh_scheduler_evidence()` once when
+  `_admission_bootstrapped` is false, then `_collect_drain_stop_targets()`.
+  Neither trap fired: the refresh's rate gate only makes the call a no-op
+  after a recent failed attempt, and its bootstrap side effects (restoring a
+  dead Manager's reserved rows to the inbox, publishing a checkpoint) launch
+  nothing, so [MANAGER.10] holds.
+- `_collect_drain_stop_targets` reads one fresh `latest_task_state_rows`
+  pass and computes `covered` by the bootstrap's rule, now shared through
+  `_manager_checkpoint_residents` (a mechanical extraction from
+  `_bootstrap_scheduler_evidence`, same behavior). Members are adopted
+  residents (`_scheduler_residents`) and covered residents, excluding this
+  Manager, its tracked children and in-flight launches, Manager rows,
+  terminal snapshots, and the three service runtime classes read from
+  `projection.metadata[INTERNAL_RUNTIME_TASK_CLASS_KEY]` (a probe on the
+  task 7 working tree: a real heartbeat and TaskMonitor snapshot carry
+  `heartbeat` and `task_monitor` there, so the stop gate did not fire).
+  Pipeline stages and edges are members. A member with no snapshot or no
+  `parse_task_observation` route is logged as unresolved and gets no STOP.
+  Covered residents are never written to `_scheduler_residents` or the
+  checkpoint.
+- Host escalation (`_ManagerDrainStopTarget.escalate`): same hostname, a
+  `host_processes` entry whose `(pid, create_time)` is live and matches,
+  `runtime_handle` control authority `host-pid`, and not covered. The
+  identity is re-verified before each SIGTERM and forced reap.
+- `_signal_children_to_stop` keeps one loop: it builds one rung list from
+  the phase's children and, in phase 1, the targets (STOP to the resolved
+  `ctrl_in`; SIGTERM only to re-verified pids of eligible targets).
+- `_drain_user_work_phase_holds` settles targets each turn
+  (`_settle_drain_stop_targets`: terminal snapshot or verified exit) and
+  holds phase 1 while any remains; at window expiry
+  `_release_drain_stop_targets_at_expiry` force-reaps eligible targets,
+  settles once more, and logs the rest as released with liveness unknown.
+- `_manager_drain_timeouts` publishes the phase-1 window while a target
+  remains and escalation clocks only for eligible targets, through
+  `_drain_phase_members` (extracted to keep the method under ruff's C901
+  limit).
+- Wake interest: `_activity_wait_queues` adds each target's
+  `weft.state.tasks.<tid>` queue and `_has_pending_observation` reads a
+  publication cursor on it (one delimited line each, so plan 6 can add its
+  `weft.state.heartbeats` interest beside them). Queues close on release,
+  at `_finish_graceful_shutdown`, and in `_cleanup_task_resources`.
+- Unit test `test_manager_stop_skips_terminal_and_internal_adopted_snapshots`
+  writes real snapshot rows (a live user task, a pipeline stage, a covered
+  resident of a live peer Manager checkpoint with the same verified
+  same-host `host-pid` identity, a terminal row, a TaskMonitor row, an
+  unresolvable row). Named mutation run: deleting `and not is_covered` from
+  the escalation predicate fails it with `assert True is False` on the
+  covered target's `escalate`.
+- GREEN: both CLI tests pass (three further consecutive runs of the three
+  CLI ordering and coverage tests: 3 passed each time); the unit test and
+  the drain anchors pass; mypy clean; ruff clean.
+
+Deviations in task 7:
+
+4. Wake interest covers each target's snapshot queue only, not
+   `weft.log.tasks`. The terminal snapshot is the task-owned proof the drain
+   releases on, and `BaseTask._publish_projection_edge` publishes it before
+   the terminal log event; a `weft.log.tasks` interest would wake the
+   Manager on every row in the context and finding a target's terminal
+   event there would be the shared-log scan [ALT-WT-009] rejects. A task
+   killed without a terminal snapshot is released on verified PID exit at
+   the next turn or at the window.
+5. The first CLI test's detached task is a `command` task (`python -c
+   "import time; time.sleep(120)"`) rather than a function task: the CLI
+   `--kw` passes strings.
+6. In-flight launches are excluded from targets (they settle as tracked
+   children through task 3's hold), and a resident with no snapshot is
+   reported with the unresolved-route TIDs.
+- Gates before the task 7 commit: fast suite exit 0 (6,384 passed, 47
+  skipped); mypy `Success: no issues found in 484 source files`; ruff
+  `All checks passed!`; `pgrep -fl weft` showed no leftover process.
