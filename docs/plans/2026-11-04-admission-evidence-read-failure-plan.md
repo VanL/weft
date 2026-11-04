@@ -454,7 +454,7 @@ wrapper, not a failed read, and is unchanged.
 Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```text
-- [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; failed checkpoint publication keeps gating dispatch through the undurable set.
+- [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
 ```
 
 ### Spans audited and unchanged
@@ -707,8 +707,10 @@ def test_failed_bootstrap_checkpoint_keeps_restored_work_undispatched(
   longer enters an admission-evidence mode when a task-state snapshot read
   fails during reconciliation or reap: the failure is logged and nothing
   else changes, since launch custody is held by the retained reservation
-  and checkpoint, not by a dispatch halt ([MA-1.8]). Failed checkpoint
-  publication still gates dispatch through the undurable set."
+  and checkpoint, not by a dispatch halt ([MA-1.8]). A failed post-launch
+  checkpoint publication still gates dispatch through the undurable set,
+  and a successor still dispatches nothing until its bootstrap, including
+  its first checkpoint publication, completes."
 - In the same landing commit, set this plan's `Status:` and its
   `docs/plans/README.md` row to `promoted`. Record the landing commit SHA
   as the promotion baseline identifier in `## Spec Baseline` in the
@@ -861,14 +863,33 @@ re-litigated.
   no path exists on which the flag prevents a deletion without proof or a
   duplicate launch; the spec sentence is verbatim at line 478 and both
   Replacement blocks are single lines; class 5 with a risky trigger and
-  strategy B are justified. Cross-family round 2 (scoped to the F1
-  resolution and the second test): pending.
+  strategy B are justified.
+- Cross-family round 2 (codex 0.161.0, 2026-11-04, scoped to the F1
+  resolution and the second test, on the committed draft `d4241946`):
+  verdict `no blocker`. One new finding, F6 (P3): the backlink bullet and
+  the CHANGELOG bullet attributed the publication gate to the undurable
+  set alone, which after F1 is only the post-launch half. Fixed in plan:
+  both now name the bootstrap wait as the other half. Round 2 confirmed by
+  code trace: the `not _admission_bootstrapped` gate is sufficient for
+  MANAGER.11 and reruns the bootstrap as today; the six production readers
+  of `_admission_bootstrapped` are complete (a test helper at
+  `tests/core/test_manager.py:2840` also reads it); the declined
+  alternative has a sharper gap than the plan stated (restored pending
+  work with no adopted residents leaves nothing to mark undurable, which
+  is exactly the second test's shape); the second test's reset reaches the
+  real pending-label restore, publisher, and dispatch gate and proves the
+  publication gate, not a full process restart; no assertion is a
+  tautology; the bootstrap spec sentence is true after Task 3, conflicts
+  with nothing in [MA-1.8] or MANAGER.18, and is at spec altitude; rows 5a
+  and 5b are correctly N. The reviewer did not rerun the scratch
+  experiments. Review before implementation is complete; Task 1 is done.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-04 | `c857e10b` (draft, uncommitted) | `## 1`, `## 2`, `## 3`, `## 4`, register, spec delta, Tasks 2-3, `## 6`, `## 7`, `## 10` | Round-1 F1-F5: the bootstrap publication failure is kept gated through `not _admission_bootstrapped`; a second firing test; custody deletion sites and coupling text corrected; the spec delta gains the bootstrap clause. | Yes: round 2, scoped to the F1 resolution and the second test. |
+| 2026-11-04 | `d4241946` | spec delta backlink, Task 4 | Round-2 F6: the backlink and CHANGELOG bullets name the bootstrap wait beside the undurable set. Wording only. | No. |
 
 ## Execution log
 
