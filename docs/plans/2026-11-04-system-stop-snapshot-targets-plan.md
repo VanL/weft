@@ -176,7 +176,7 @@ checkpoints; the candidate construction in step 3 delivers neither.
 - `weft/core/manager.py` (`_collect_drain_stop_targets`,
   `_signal_children_to_stop`; no other function)
 - `tests/cli/test_cli_manager.py` (one new process-backed test)
-- `tests/core/test_manager.py` (one new in-process test)
+- `tests/core/test_manager.py` (two new in-process tests)
 - `docs/specifications/03-Manager_Architecture.md` (the mapping sentence;
   `## Related Plans` backlink)
 - `CHANGELOG.md` (`## [Unreleased]` / `### Changed`, one bullet)
@@ -269,9 +269,9 @@ Error-path priorities:
 
 - Fatal: nothing new. A failed collection read still logs a warning and
   falls back to the child table, as today (`return {}`); a failed broadcast
-  logs at debug and the rung is retried on the next drain turn exactly as a
-  failed per-target write is today (the rung is marked signalled only after
-  the write succeeds).
+  logs at debug and every rung in it is still marked signalled with its
+  escalation clock started, exactly as a failed per-target write is today.
+  No retry of the write; escalation and the drain window carry on.
 - Best-effort: the broadcast write and the escalation signals.
 
 Theory check: the change moves the code toward [WT-2a.2] (the task's own
@@ -301,7 +301,7 @@ One-way doors: none.
 | 1 | A live user-work task whose launching Manager was alive at the stopping Manager's bootstrap and is dead at STOP time is not a phase-1 member. | It is a member: STOP on its route; escalation allowed (uncovered). | C, closes the defect |
 | 2 | A task launched by a live peer after the stopping Manager's bootstrap is a member only while the peer is judged live. | A member regardless; covered while the peer is live (no escalation), uncovered once it is not. | C, closes the defect |
 | 3 | A STOP issued inside the one-second liveness memo after a peer's death still covers the peer's residents. | Membership no longer depends on the memo. | N (the memo still governs the covered flag) |
-| 4 | First-rung STOP writes: one `broker.write` per target. | One `broadcast(queue_names=..., create_missing=True)` per drain turn over the rungs not yet signalled; atomic across the set. | C, mechanism only; no ordering among targets was promised |
+| 4 | First-rung STOP writes: one `broker.write` per target; a failed write is logged and the rung is marked signalled anyway. | One `broadcast(queue_names=..., create_missing=True)` per drain turn over the rungs not yet signalled; atomic across the set; a failed broadcast is logged and every rung in it is marked signalled anyway. | C, mechanism only; no ordering among targets was promised; failure bookkeeping identical |
 | 5 | A never-controlled task's `ctrl_in` is created by the per-target write. | Created by the broadcast (`create_missing=True`). | N |
 | 6 | Covered targets: STOP, no host signal. Uncovered: STOP, then SIGTERM after the escalation window if identity re-verifies. | Unchanged. | N |
 | 7 | Services, Managers, terminal tasks, internal classes: never members. | Unchanged (same filters). | N |
@@ -400,36 +400,56 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
   `task_signal_stop` instead and does not count.
   RED at `e0290792`: fails at the `control_stop` wait (verified by the
   series lead on 2026-11-04: no `control_stop`, empty `ctrl_in`).
-- `tests/core/test_manager.py`, in-process, using the file's Manager
-  fixture pattern (see `make_manager_spec` and the broker-backed Manager
-  the stop tests use): `test_collect_drain_stop_targets_names_dead_peer_resident`.
-  Write a task snapshot for a fabricated TID (role absent, `projection.status`
-  `running`, an `observation` with `ctrl_in`, a `runtime_handle` with no
-  scoped host processes so identity is empty and escalation is false) and a
-  Manager checkpoint row for a fabricated peer TID whose `runtime_handle`
-  names a PID that does not exist (a dead peer) and whose
-  `scheduler_frontiers.residents` lists the task. Call
-  `manager._collect_drain_stop_targets()` and assert the task is a target
-  with `covered is False`. Then rewrite the peer checkpoint so its
-  `runtime_handle` names the test process's own PID and creation time (a
-  live peer) and assert the task is a target with `covered is True`. RED at
-  `e0290792`: the first assertion fails (not a target). Use the helpers the
-  file already has for writing state rows; if none fits, write the JSON row
-  directly with `context.queue(task_state_queue_name(tid))`.
-- Verify: `./.venv/bin/python -m pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m "" -k "died_after_bootstrap or dead_peer_resident"`
-  reports 2 failed before Task 3.
+- `tests/core/test_manager.py`, in-process, next to the existing collection
+  test at lines 9020-9062 and with its fixtures: `manager_setup` (line
+  922), `_drain_snapshot_payload` (8925; it builds the full snapshot shape,
+  both the runtime handle and the top-level identity fields that
+  `_verified_host_identity` reads, and takes `residents=` for a Manager
+  checkpoint row) and `_remove_drain_snapshots` (8991) for cleanup:
+  `test_collect_drain_stop_targets_names_snapshot_only_task`. Write one
+  task snapshot with `_drain_snapshot_payload(tid, pid=..., created=...)`
+  for a fabricated TID that is in no checkpoint and not in
+  `manager._scheduler_residents`; call `_collect_drain_stop_targets()`;
+  assert the task is a target with `covered is False` and `escalate is
+  True`. RED at `e0290792`: not a target. The dead-peer case is the
+  process-backed test's; the covered case is already pinned at lines
+  9056-9059 (round-1 F2).
+- `tests/core/test_manager.py`, same fixtures:
+  `test_first_stop_rung_is_one_broadcast_over_pending_targets`. Two
+  snapshot-only tasks with distinct `ctrl_in` routes; begin the drain
+  (`manager._begin_shutdown_drain(...)` as the existing stop-order tests
+  call it, or `_collect_drain_stop_targets()` followed by
+  `_signal_children_to_stop({})`); then assert, by reading the two control
+  queues, that each holds exactly one STOP envelope
+  (`encode_control_message(CONTROL_STOP)`), that both TIDs are in
+  `manager._drain_signaled_children` with equal
+  `_drain_signal_started_ns` values, and that a second
+  `_signal_children_to_stop({})` call before the escalation window writes
+  nothing more (each queue still holds one row). RED at `e0290792`: the
+  timestamps differ (two writes) and, after Task 3 is applied with the old
+  loop left in place, the test would still fail on the equal-timestamp
+  assertion, which is what makes it the broadcast's proof (round-1 F2).
+  Do not test SimpleBroker's atomicity; [SB-BCAST-4] owns it.
+- Verify: `./.venv/bin/python -m pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m "" -k "died_after_bootstrap or snapshot_only_task or one_broadcast"`
+  reports 3 failed before Task 3.
 - Stop if: either test wants to patch the Manager's collection or
   signalling methods, or to disable liveness probing; the real paths are
   the proof.
 
 ### Task 3. GREEN: snapshot-keyed candidates and the broadcast rung
 
-- `_collect_drain_stop_targets`: replace the two candidate lines with
-  `candidates = {tid: tid in covered for tid in snapshots}` followed by
-  `candidates.update({tid: tid in covered for tid in self._scheduler_residents if tid not in candidates})`.
-  Everything after (the filters, `unresolved`, targets, cursor) is
-  unchanged: Manager rows fail `_is_live_user_work_snapshot`, services fail
-  the class filter, terminal rows fail the terminal filter. Update the
+- `_collect_drain_stop_targets`: replace the two candidate lines so the
+  candidate set is the union of three sources, each tagged with the
+  covered verdict: every TID in `snapshots`, every TID in
+  `self._scheduler_residents`, and every TID in `covered`:
+  `candidates = {tid: tid in covered for tid in (*snapshots, *self._scheduler_residents, *covered)}`.
+  Keeping `covered` and the residents as sources preserves today's
+  diagnostic for a live peer's resident that has no snapshot yet (it still
+  reaches `unresolved` and its warning) instead of silently vanishing
+  before the filters (round-1 F3). Everything after (the filters,
+  `unresolved`, targets, cursor) is unchanged: Manager rows fail
+  `_is_live_user_work_snapshot`, services fail the class filter, terminal
+  rows fail the terminal filter. Update the
   docstring's first two sentences to: "Name phase-1 members from task
   evidence. Members are every live user-work task a snapshot names,
   whichever Manager launched it, plus this Manager's residents; a task
@@ -438,12 +458,18 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 - `_signal_children_to_stop`: collect the rungs that are not yet signalled
   (`tid not in self._drain_signaled_children`) into a list; send one
   `broker.broadcast(encode_control_message(CONTROL_STOP), queue_names=tuple(unique ctrl queues), create_missing=True)`
-  through `self._get_connected_queue().get_connection()`; on success mark
-  every one of those rungs signalled with the same timestamp; on
-  `(BrokerError, OSError, RuntimeError)` log at debug and mark none (the
-  next drain turn retries, as a failed per-target write does today). The
-  escalation branch is unchanged. Keep `_send_stop_command` for its other
-  callers. Add `Spec: [MA-3]; [SB-BCAST-2], [SB-BCAST-4]` to the docstring.
+  through `self._get_connected_queue().get_connection()`, catching
+  `(BrokerError, OSError, RuntimeError)` with a debug log exactly as
+  `_send_child_control_command` does; then, whether or not the write
+  raised, mark every one of those rungs signalled with one timestamp. That
+  is today's bookkeeping: the per-target loop marks a rung signalled and
+  starts its escalation clock regardless of the write's outcome (round-1
+  F1), and a failed STOP write is a best-effort failure under the owner's
+  2026-11-04 ruling (do nothing further; escalation still runs on the
+  clock). The same method serves phase 2, so the service rungs keep the
+  same semantics. The escalation branch is unchanged. Keep
+  `_send_stop_command` for its other callers. Add
+  `Spec: [MA-3]; [SB-BCAST-2], [SB-BCAST-4]` to the docstring.
 - Constraints: no other function edited; no change to settlement,
   escalation, bootstrap, or the memo.
 - Verify: the two Task 2 tests pass; the two existing coverage tests pass
@@ -486,7 +512,8 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 - Guards that stay unchanged: the earlier-dead-Manager test (adoption path),
   the live-peer test (covered path: STOP, no escalation, A reaps), and the
   phase-ordering tests.
-- Red-green: both Task 2 tests are red at `e0290792` and green after Task 3.
+- Red-green: all three Task 2 tests are red at `e0290792` and green after
+  Task 3; the broadcast test stays red if only the candidate change lands.
 - Edge case out: a task with a non-default `io.control` route under a dead
   peer. The route comes from the snapshot in both the old and new code;
   nothing in this plan touches route resolution.
@@ -496,7 +523,7 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 Per task:
 
 ```bash
-./.venv/bin/python -m pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m "" -k "died_after_bootstrap or dead_peer_resident or earlier_manager_detached_task or under_another_live_manager or stop_orders"
+./.venv/bin/python -m pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m "" -k "died_after_bootstrap or snapshot_only_task or one_broadcast or earlier_manager_detached_task or under_another_live_manager or stop_orders"
 ```
 
 Final gates:
@@ -547,12 +574,36 @@ write, so the choice is mechanism, not semantics (register row 4).
   (2576-2595), and the mapping Replacement block's indentation (the bullet's
   two-space continuation, so the block is contained verbatim after
   promotion); every other path, symbol, line, test name and constant
-  resolved by lookup. Cross-family round 1: pending.
+  resolved by lookup.
+- Cross-family round 1 (codex 0.161.0, 2026-11-04, the plan at `423b31a3`):
+  verdict `blocker: F1, F2`. F1 (P2): the broadcast rung as drafted marked
+  no rung signalled on a failed write, which is not today's bookkeeping
+  (the per-target loop marks the rung and starts its escalation clock
+  regardless) and would have added a retry and delayed escalation, in
+  phase 2 as well; fixed in plan: Task 3, `## 4` error paths and register
+  row 4 now keep today's bookkeeping. F2 (P2): neither test proved the
+  broadcast, and the collection test's dead-peer state duplicated the
+  process test; fixed in plan: the collection test is now the
+  snapshot-only case, a first-rung broadcast test is added (one envelope
+  per route, equal timestamps, no repeat), and both name the file's
+  fixtures `manager_setup`, `_drain_snapshot_payload`, `_remove_drain_snapshots`
+  and the existing covered-case pins at 9056-9059. F3 (P3): the two-line
+  candidate change would have dropped a live peer's resident that has no
+  snapshot before the `unresolved` diagnostic; fixed in plan: candidates
+  are the union of snapshots, residents and covered. Round 1 confirmed the
+  premise (a snapshot-only or dead-peer-only task is not a candidate today),
+  the broadcast semantics against the installed broker (exact names
+  deduplicated, `create_missing` selects the full set, atomic commit, an
+  empty tuple a no-op), that `covered` feeds `escalate` only, the spec
+  delta verbatim at lines 960-962 with its continuation indentation, and
+  class 5 with a risky trigger under strategy B. Cross-family round 2
+  (scoped to F1-F3): pending.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
+| 2026-11-04 | `423b31a3` | Task 2, Task 3, `## 4` error paths, register row 4, `## 6`, `## 7` | Round-1 F1-F3: failure bookkeeping kept as today; candidates from snapshots, residents and covered; a broadcast proof test; fixture names. | Yes: round 2, scoped to F1-F3. |
 
 ## Execution log
 
