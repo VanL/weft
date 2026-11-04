@@ -272,9 +272,9 @@ theory revision, not a spec edit.
   broker's timestamp generator, used as the spawn-request message ID for
   spawned work, and carried unchanged for the task's whole life. Every
   rendering of it, in a queue name, a process title, a log line, or a CLI
-  argument, decodes back to the same TID ([IMMUT.3], [SB-0.2]). (Owner
-  decision, 2026-11-02; the ten-character form in [OBS.5] is retired by the
-  TID display-encoding plan.)
+  argument, decodes back to the same TID ([IMMUT.3], [SB-0.2], [OBS.5]).
+  (Owner decision, 2026-11-02; the lossy ten-character form is refused in
+  [ALT-WT-022].)
 - **[WT-2a.2] Queues are the only durable truth.** A Weft lifecycle or
   coordination fact is durable only as a SimpleBroker queue row; process
   memory holds hints. A task's private working state exists only to do
@@ -960,6 +960,35 @@ alternative. An agent must not propose the alternative again unless the
   commit `4c490043` (adapter introduction) and commit `d4381877` (adapter
   replacement); `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`,
   which records the polling adapter's measured idle-child cost.
+
+### [ALT-WT-022] A lossy TID short form
+
+- Kind: tried and discarded (the ten-digit folded short form shipped under `2026-08-31-short-tid-derivation-plan`, retired, and was removed by `2026-11-02-tid-display-encoding-plan.md`)
+- Disposition: rejected
+- Candidate: A display form of the TID that cannot be decoded back to it,
+  such as the TID's last ten decimal digits or the ten-digit fold
+  `(grain + counter × 2_441_406) mod 10¹⁰`, together with a search over
+  retained `weft.state.tasks.<tid>` names and an ambiguity error when one
+  short form matches more than one task.
+- Why plausible: Process titles have a fixed length budget, and a
+  ten-character segment left more room for the task name than the
+  nineteen-digit TID did.
+- Reason: A rendering that is not an identity. A lossy form cannot decode
+  back to its TID, so every reader needs a search to recover the identity it
+  was shown. The search depends on which state queues retention has kept,
+  and its answer can be ambiguous. That breaks [WT-2a.1] and "Keep an
+  identity you already have" ([WT-4]): a title or a log line should carry
+  the identity, not a pointer that must be resolved. The 13-character
+  encoded TID fits the title budget without loss.
+- Current consequence: Lossless display encoding defined by [OBS.5].
+- Reconsider when: Never while [WT-2a.1] stands.
+- Evidence: Owner, 2026-11-02: "the old lossy encoding is going away, as
+  should its tests, associated search code, etc."; [OBS.5] history: the
+  last-ten-digit form collided whenever two TIDs differed by a multiple of
+  10¹⁰ nanoseconds, and the 2026-08-31 fold removed that collision but stayed
+  non-unique and kept the [CLI-1.2.3] ambiguity error;
+  `2026-11-02-program-theory-reconciliation-plan.md` §9 fork 2 (b) and
+  audit row I-1.
 
 ## Tensions and falsifiers [WT-7]
 

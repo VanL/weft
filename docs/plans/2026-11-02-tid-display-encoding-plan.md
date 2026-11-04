@@ -1,6 +1,6 @@
 # TID Display Encoding: Lossless Rendering Everywhere
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/07-System_Invariants.md [OBS.4], [OBS.5], [OBS.6], [OBS.8], [IMMUT.3], [LIVENESS.R5]; docs/specifications/01-Core_Components.md [CC-3.2]; docs/specifications/10-CLI_Interface.md [CLI-1.2.3]; docs/specifications/14-Python_API_Surfaces.md [PY-2]; docs/program-theory.md [WT-2a.1], [WT-6]
 Superseded by: none
 
@@ -2342,3 +2342,16 @@ plan; neither is available to the implementer, so `Status:` stays
 `promoted`, not `completed`, until the probe key and result are in the
 Review Log. The completed-work different-family review (§10) is also owed
 to the series lead.
+
+**Theory commit, 2026-11-03.** The landing commit is `309dc2b4` ("Render
+every TID losslessly as a 13-character encoded TID"); it is the promotion
+baseline identifier. The owner accepted the series' theory edits on
+2026-11-03 ("I accept the theory edits"), which covers this plan's
+[WT-2a.1] parenthetical and the new [ALT-WT-022] entry as drafted (owner
+item 6 closed). Both Replacement blocks were applied verbatim to
+`docs/program-theory.md` ([ALT-WT-022] directly after [ALT-WT-021], before
+"## Tensions and falsifiers [WT-7]") and committed alone as a `Theory:`
+commit, which also moves `Status:` and the index row to `promoted`.
+`bin/check-doc-paths` (which checks every Replacement block of a `promoted`
+plan against its target) reports OK. `completed` waits on the [WT-7] keyed
+possession probe and the different-family review of the completed work.
