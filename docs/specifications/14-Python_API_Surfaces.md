@@ -419,16 +419,33 @@ Interactive run only changes session capabilities. Task monitor returns
 `TaskMonitorResult`; sink does not alter the branch. `cmd_manager_serve` is the
 sole blocking non-stream exception and emits no process output.
 
-Client system dump, load, and tidy preserve the supplied resolved
-context, including its broker target and artifact directory. Without an
-explicit output, the export is `weft_export.jsonl` in that context's
-Weft directory; without an explicit input, load reads that same file.
-A `RunSession.stop` likewise controls the task on the context the
-session was submitted with.
+Client system dump, load, tidy, prune, and task-monitor preserve the
+supplied resolved context, including its broker target and artifact
+directory. Without an explicit output, the export is `weft_export.jsonl` in
+that context's Weft directory; without an explicit input, load reads that
+same file. Task-monitor derives its default checkpoint and disk-sink
+directory from that same context. A `RunSession.stop` likewise controls the
+task on the context the session was submitted with.
+
+`client.system.prune(*, family, apply=False, force=False, queue=None,
+min_age=RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+keep_recent_per_key=RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+keep_recent_per_task=RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
+task=None, retention_class=None, archive=None, limit=None, report=None)`
+and `client.system.task_monitor(*, follow=False, sink="stdout",
+log_dir=None, checkpoint=None, no_checkpoint=False, since=None,
+limit=None)` take exactly the parameters, defaults, validation, typed
+errors, and return branches of `cmd_system_prune` and
+`cmd_system_task_monitor`, except `context`, which the client supplies.
+`weft.client.__all__` is unchanged: these result types remain importable
+from `weft.commands`, as `SystemTidyResult` is.
 
 Implementation: `weft/commands/dump.py::dump_system` and `cmd_system_dump`
 share the resolved-context materializer; `weft/commands/load.py` and
-`weft/commands/tidy.py` share theirs the same way, and
+`weft/commands/tidy.py` share theirs the same way;
+`weft/commands/prune.py::prune_system` and `cmd_system_prune` share
+`_prune_families`; `weft/commands/task_monitor.py::task_monitor_system` and
+`cmd_system_task_monitor` share `_task_monitor_outcome`; and
 `weft/commands/run.py::_LiveRunSession.stop` passes its session context
 to the task-control owner.
 Correction plan: `2026-09-08-complexity-review-corrections-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
@@ -564,6 +581,8 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
+
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) is superseded by primary-source lineage under [PY-1].
@@ -593,7 +612,5 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-12-public-api-surface-remediation — source 396c3b85; see docs/plans/README.md
 - retired: 2026-09-08-django-override-normalization-seam-plan — source 396c3b85; see docs/plans/README.md
-
-- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 
 Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).

@@ -1104,6 +1104,106 @@ def test_cli_verb_names_are_a_bijection_with_command_exports() -> None:
     assert {name for name in commands.__all__ if name.startswith("cmd_")} == derived
 
 
+CLIENT_COUNTERPARTS: dict[str, tuple[str, ...]] = {
+    "cmd_status": ("SystemNamespace.status",),
+    "cmd_result": ("Task.result",),
+    "cmd_run": (
+        "WeftClient.submit",
+        "WeftClient.submit_spec",
+        "WeftClient.submit_pipeline",
+        "WeftClient.submit_command",
+    ),
+    **{
+        f"cmd_queue_{verb}": (f"QueuesNamespace.{verb}",)
+        for verb in (
+            "read",
+            "write",
+            "peek",
+            "move",
+            "list",
+            "exists",
+            "stats",
+            "resolve",
+            "watch",
+            "delete",
+            "broadcast",
+        )
+    },
+    **{
+        f"cmd_queue_alias_{verb}": (f"QueueAliasesNamespace.{verb}",)
+        for verb in ("add", "list", "remove")
+    },
+    **{
+        f"cmd_spec_{verb}": (f"SpecsNamespace.{verb}",)
+        for verb in ("create", "list", "show", "delete", "validate", "generate")
+    },
+    **{
+        f"cmd_task_{verb}": (f"TasksNamespace.{verb}",)
+        for verb in ("list", "status", "ping", "stop", "kill")
+    },
+    "cmd_task_tid": ("TasksNamespace.resolve_tid",),
+    **{
+        f"cmd_manager_{verb}": (f"ManagersNamespace.{verb}",)
+        for verb in ("start", "serve", "stop", "list", "status")
+    },
+    **{
+        f"cmd_system_{verb}": (f"SystemNamespace.{verb}",)
+        for verb in ("tidy", "task_monitor", "prune", "dump", "builtins", "load")
+    },
+}
+"""CLI verb to `weft.client` counterpart, per the [IP-1] client API parity matrix."""
+
+CLI_ONLY_VERBS: dict[str, str] = {
+    "cmd_init": (
+        "Creates the project a client binds to; embedders call "
+        "`weft.commands.cmd_init`, which returns `InitResult`."
+    ),
+}
+"""Declared `cli_only` verbs with their [IP-1] reasons ([WT-4] section 4.4)."""
+
+
+def test_every_cli_verb_has_a_client_counterpart() -> None:
+    """Every registered CLI verb has a client counterpart or a `cli_only` row.
+
+    The verb list is derived from the Typer app, never hand-written, so a new
+    CLI verb fails here until it gains a counterpart or a declared exception.
+
+    Spec: docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X1];
+    docs/specifications/09-Implementation_Plan.md [IP-1].
+    """
+
+    from weft.cli.app import app
+    from weft.client import Task, WeftClient
+    from weft.client import _namespaces as namespaces
+
+    paths = _leaf_paths(typer.main.get_command(app))
+    derived = {
+        "cmd_" + "_".join(part.replace("-", "_") for part in path) for path in paths
+    }
+    assert not set(CLIENT_COUNTERPARTS) & set(CLI_ONLY_VERBS)
+    assert set(CLIENT_COUNTERPARTS) | set(CLI_ONLY_VERBS) == derived
+
+    roots: dict[str, object] = {
+        "WeftClient": WeftClient,
+        "Task": Task,
+        "TasksNamespace": namespaces.TasksNamespace,
+        "QueuesNamespace": namespaces.QueuesNamespace,
+        "QueueAliasesNamespace": namespaces.QueueAliasesNamespace,
+        "SpecsNamespace": namespaces.SpecsNamespace,
+        "ManagersNamespace": namespaces.ManagersNamespace,
+        "SystemNamespace": namespaces.SystemNamespace,
+    }
+    empty = sorted(verb for verb, paths in CLIENT_COUNTERPARTS.items() if not paths)
+    assert not empty
+    unresolved = sorted(
+        dotted
+        for counterparts in CLIENT_COUNTERPARTS.values()
+        for dotted in counterparts
+        if not hasattr(roots[dotted.split(".", 1)[0]], dotted.split(".", 1)[1])
+    )
+    assert not unresolved
+
+
 def test_commands_never_read_process_stdin() -> None:
     """Command capabilities receive decoded input from their adapters [PY-2]."""
 

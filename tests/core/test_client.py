@@ -235,7 +235,7 @@ CLIENT_API_PARITY_EXPECTATIONS = {
     ),
     "system": (
         SystemNamespace,
-        {"builtins", "dump", "load", "status", "tidy"},
+        {"builtins", "dump", "load", "prune", "status", "task_monitor", "tidy"},
     ),
 }
 
@@ -2013,3 +2013,133 @@ def test_inventory_namespaces_share_snapshot_and_history_selection(
         task.status for task in client.system.status(include_log_history=True).tasks
     } == {"completed", "failed"}
     assert client.tasks.stats(include_log_history=True) == {"completed": 1, "failed": 1}
+
+
+def _client_task_log_row(client: WeftClient, tid: str) -> None:
+    queue = client.context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        queue.write(json.dumps({"tid": tid, "status": "completed"}))
+    finally:
+        queue.close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"family": "bogus"}, "unknown prune family"),
+        ({"family": "runtime-state", "force": True, "apply": True}, "--force"),
+        ({"family": "task-log", "apply": True}, "--archive is required"),
+    ],
+)
+def test_client_system_prune_probe_raises_typed_usage_errors(
+    tmp_path: Path, kwargs: dict[str, object], match: str
+) -> None:
+    """P1/P2: invalid prune options raise the CLI's exit-2 class [PY-2]."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path))
+
+    with pytest.raises(exception_types.CommandUsageError, match=match):
+        client.system.prune(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"sink": "bogus"}, {"limit": -1}],
+)
+def test_client_system_task_monitor_probe_raises_typed_usage_errors(
+    tmp_path: Path, kwargs: dict[str, object]
+) -> None:
+    """P1/P2: invalid task-monitor options raise `CommandUsageError` [PY-2]."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path))
+
+    with pytest.raises(exception_types.CommandUsageError):
+        client.system.task_monitor(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("content", ["{}", '{"schema_version":'])
+def test_client_system_task_monitor_probe_rejects_malformed_checkpoint(
+    tmp_path: Path, content: str
+) -> None:
+    """P3: a malformed checkpoint is a typed execution error naming its path."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path / "project"))
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(content, encoding="utf-8")
+
+    with pytest.raises(exception_types.CommandExecutionError) as excinfo:
+        client.system.task_monitor(checkpoint=checkpoint)
+    assert str(checkpoint) in str(excinfo.value)
+
+
+def test_client_system_probe_unwritable_outputs(tmp_path: Path) -> None:
+    """P4: an unwritable sink raises; an unwritable prune report is reported."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path / "project"))
+    blocker = tmp_path / "regular-file"
+    blocker.write_text("", encoding="utf-8")
+
+    with pytest.raises(exception_types.CommandExecutionError):
+        client.system.task_monitor(sink="disk", log_dir=blocker)
+    assert list(tmp_path.rglob("*.jsonl")) == []
+
+    result = client.system.prune(
+        family="task-log", min_age=0, report=blocker / "sub" / "report.json"
+    )
+    assert any(
+        "failed to write report" in error
+        for error in result.details["retention"]["errors"]
+    )
+
+
+def test_client_system_task_monitor_probe_creates_missing_checkpoint_dir(
+    tmp_path: Path,
+) -> None:
+    """P5: a missing checkpoint means "no prior run"; the path is created."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path / "project"))
+    _client_task_log_row(client, "1778084345905438731")
+    checkpoint = tmp_path / "missing" / "cp.json"
+
+    client.system.task_monitor(checkpoint=checkpoint, since=0)
+
+    assert checkpoint.exists()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "command"),
+    [
+        ("prune", commands.cmd_system_prune),
+        ("task_monitor", commands.cmd_system_task_monitor),
+    ],
+)
+def test_client_system_methods_mirror_command_signatures(
+    method_name: str, command: object
+) -> None:
+    """P6: the client methods take exactly the command's parameters [PY-2]."""
+
+    def shape(params: list[inspect.Parameter]) -> list[tuple[str, object, object]]:
+        return [(param.name, param.kind, param.default) for param in params]
+
+    method = getattr(SystemNamespace, method_name)
+    method_params = list(inspect.signature(method).parameters.values())[1:]
+    command_params = [
+        param
+        for param in inspect.signature(command).parameters.values()  # type: ignore[arg-type]
+        if param.name != "context"
+    ]
+    assert shape(method_params) == shape(command_params)
+    assert all(
+        param.kind is not inspect.Parameter.VAR_KEYWORD for param in method_params
+    )
+
+
+def test_client_system_methods_probe_reject_unknown_keyword(tmp_path: Path) -> None:
+    """P6: no `**kwargs`, so an unknown keyword is a `TypeError` [PY-2]."""
+
+    client = WeftClient(path=prepare_project_root(tmp_path))
+
+    with pytest.raises(TypeError):
+        client.system.prune(family="task-log", bogus=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        client.system.task_monitor(bogus=True)  # type: ignore[call-arg]

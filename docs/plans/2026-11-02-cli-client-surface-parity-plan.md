@@ -1,6 +1,6 @@
 # CLI and Client Surface Parity, and the Shell Refusal Test
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/09-Implementation_Plan.md [IP-1]; docs/specifications/11-CLI_Architecture_Crosswalk.md [CLI-X1]; docs/specifications/14-Python_API_Surfaces.md [PY-1], [PY-2], [PY-3], [PY-4]; docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-6]; docs/program-theory.md [WT-4] §4.4
 Superseded by: none
 
@@ -1073,7 +1073,8 @@ optional simplification.)
   docs/specifications/14-Python_API_Surfaces.md, and
   docs/specifications/10-CLI_Interface.md, at plan authoring time.
   Plan type: implementation with spec revision.
-- Promotion baseline identifier: pending (slice S commit; slice C commit).
+- Promotion baseline identifier: slice S `6054aea1`; slice C is the commit that
+  flips this plan to `promoted` (the commit after `6054aea1`).
 
 ## Review Log
 
@@ -1082,13 +1083,14 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - Cross-family review round 1 (codex 0.161.0, 2026-11-02, whole plan after the fresh-eyes pass): BLOCKED on question 1. F1 (runtime-prune context branch untested), F2 (ignored `autostart=False` undetected), F3 (contradictory gate tables and scratch-script acceptance), F5 (shell test does not reach the TaskSpec boundary), F6 ([WT-7] class-5 closeout obligations omitted), F7 (`testpaths` scope overstated): all P2, accepted and applied. F4 (P2): F2(b) now states the theory-exception consequence, RECONSIDERATION REQUESTED for the owner; fork unchanged. Round 2 (codex 0.161.0, 2026-11-02, scoped to the applied dispositions of F1–F3 and F5–F7, F4 wording only): no blocker; all six closed with live-code evidence (runtime-prune branch isolated by the streaming marker; `cmd_init` persists the supplied `autostart`; the 41-verb partitions are disjoint under all four fork combinations; `SpecSection(shell=True)` yields exactly `extra_forbidden` at `("shell",)`; [WT-7] obligations named; `testpaths` scope stated). F2(b) states RECONSIDERATION REQUESTED; the owner forks F1–F3 remain open. Review loop closed; the plan waits on the owner's rulings.
 - owner rulings applied 2026-11-03: F1 (a) promote `task_monitor` and `prune`; F2 (b) `weft init` stays CLI-only with the declared [WT-4] §4.4 exception granted as a theory Replacement block (class 5); F3 (a) the derived parity gate, applied as the recommended default under the parity ruling, +P. Cross-family round 1 on the change (codex 0.161.0, 2026-11-03): PASS, two P2 applied without a further round (F1: the derived gate accepted an empty counterpart tuple; it now asserts every tuple is non-empty before resolving paths. F2: the hand-written guard's cited client-only example was wrong; corrected to `TasksNamespace.stats` and `QueuesNamespace.write_endpoint`, and the guard is kept, not deleted). The round confirmed the deferral premise ([IP-1]'s "until promoted with typed result contracts" is met by [PY-2]), the byte-exact theory and spec quotes, the 41-verb enumeration with 40 counterparts and `cmd_init` as the sole verb-level exception, class 5+P, and that the slice C approval line is satisfied by the recorded F1 ruling rather than a renewed request.
 - owner confirmation applied 2026-11-03: F3 (a), the derived parity gate, confirmed ("You can use the derived parity gate"); the provisional wording is withdrawn; no item of this plan waits on the owner beyond the §12 observations routed to later plans and the [WT-7] closeout requirements. Reviewed baseline: `b7eed9f9` + worktree (the plan text closed by cross-family round 2, 2026-11-02).
+- implementation 2026-11-03 (base `4372e20e`): slice S landed as `6054aea1`; slice C landed in the commit that promotes this plan. The [WT-4] §4.4 theory Replacement block was applied verbatim inside the slice C commit, atomically with its [IP-1] `cli_only` row as §7 requires; the owner accepted the series' theory edits on 2026-11-03 ("I accept the theory edits"), and the owner's 2026-11-03 ruling "Init is an exception" is the edit's source. Evidence and deviations: `## Execution log`. The [WT-7] keyed possession probe (Task 9) waits on the owner's key; the plan stays `promoted` until it is recorded.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer): `_prune_families` is the shared prune capability where series plan 12's `task` selector normalization lives, whichever plan lands first; the extraction carries or receives it, and neither adapter normalizes on its own; plan 12's client-path selection case un-skips once `client.system.prune` exists. Recorded in Task 4 and the hidden couplings. Plan metadata gate and `bin/check-doc-paths` re-run.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
-| 2026-11-03 | `b7eed9f9` + worktree | Header class line; §1; §3; §5; §6 register; §7 delta ([IP-1] row 1, [PY-2], [CLI-X1] note, new [WT-4] §4.4 block, strategy table); §8; §9 Tasks 2, 3, 6, 7, 8, 9; §10; §11; §13; Execution log | Owner rulings 2026-11-03 applied. F2 changed from the drafted assumption (a) to (b): `WeftClient.init` removed; the [IP-1] `weft init` `cli_only` row and a [WT-4] §4.4 theory Replacement block added, landing atomically. Class raised from 5 to 5+P because the F3 (a) derived gate changes how future CLI verbs are verified. Unchosen variants deleted from the delta with one sentence of history each. | Yes: cross-family round on the change pending |
+| 2026-11-03 | `b7eed9f9` + worktree | Header class line; §1; §3; §5; §6 register; §7 delta ([IP-1] row 1, [PY-2], [CLI-X1] note, new [WT-4] §4.4 block, strategy table); §8; §9 Tasks 2, 3, 6, 7, 8, 9; §10; §11; §13; Execution log | Owner rulings 2026-11-03 applied. F2 changed from the drafted assumption (a) to (b): `WeftClient.init` removed; the [IP-1] `weft init` `cli_only` row and a [WT-4] §4.4 theory Replacement block added, landing atomically. Class raised from 5 to 5+P because the F3 (a) derived gate changes how future CLI verbs are verified. Unchosen variants deleted from the delta with one sentence of history each. | Yes: done, cross-family round 1 on the change (codex 0.161.0, 2026-11-03): PASS, recorded in `## Review Log` (corrected 2026-11-03 at implementation; the cell had still said "pending") |
 
 ## Execution log
 
@@ -1278,3 +1280,134 @@ tests/specs/taskspec/test_process_target.py:27: Failed
 
 The installed pytest prints the class name without the plan's
 `<class '...'>` wrapper; the failure lines are otherwise as the plan predicted.
+
+Task 2 (RED). `CLIENT_API_PARITY_EXPECTATIONS["system"]` gained `prune` and
+`task_monitor`; `tests/architecture/test_import_boundaries.py` gained the
+module-level `CLIENT_COUNTERPARTS` (40 rows) and `CLI_ONLY_VERBS`
+(`cmd_init` with the [IP-1] reason) tables and
+`test_every_cli_verb_has_a_client_counterpart`, inserted after
+`test_cli_verb_names_are_a_bijection_with_command_exports` without reordering
+the file. The gate resolves each dotted path with `hasattr` against a root
+table of `WeftClient`, `Task`, and the six namespace classes.
+
+```text
+E       AssertionError: assert not ['system.prune', 'system.task_monitor']
+E       AssertionError: assert not ['SystemNamespace.prune', 'SystemNamespace.task_monitor']
+```
+
+Task 3. Applied verbatim: the two [IP-1] Replacement blocks, the [PY-2]
+block, the [CLI-X1] block, and the [WT-4] §4.4 theory row; backlinks added to
+specs 09 and 11 at the top of each `## Related Plans` list (both lists run
+newest first), and the spec 14 backlink placed by slice S at the end of its
+list was moved to the top for the same reason.
+
+Task 4. RED before the namespace method existed:
+
+```text
+E       AttributeError: 'SystemNamespace' object has no attribute 'prune'
+```
+
+`run_runtime_prune` and `run_retention_prune` gained keyword-only
+`resolved_context: WeftContext | None = None`; the body of `cmd_system_prune`
+moved unchanged into `_prune_families` (the two run-helper calls gain
+`resolved_context=`; nothing else changed, and no `normalize_tid`, which
+series plan 12 adds); `prune_system` and `SystemNamespace.prune` added. GREEN
+`1 passed`. Mutations, each restored from a byte copy:
+
+```text
+# resolved_context= dropped from the run_retention_prune call in _prune_families
+>       assert result.candidates == 2
+E       AssertionError: assert 0 == 2
+# resolved_context= dropped from the run_runtime_prune call in _prune_families
+>       assert runtime.candidates == 1
+E       AssertionError: assert 0 == 1
+```
+
+Task 5. `SystemNamespace.task_monitor` was added together with
+`SystemNamespace.prune`, so the RED landed one layer lower than the plan
+predicted:
+
+```text
+E       AttributeError: module 'weft.commands.task_monitor' has no attribute 'task_monitor_system'
+```
+
+`run_task_monitor` and `_TaskMonitorSummaryStream` gained the keyword
+(passed on every poll), plus `_task_monitor_outcome` and
+`task_monitor_system`. GREEN `2 passed`. Deviation: the plan's
+`result.tids_seen == 1` cannot hold, because the scan's own `TaskMonitor`
+writes a `task_initialized` row for itself into `weft.log.tasks` before
+scanning (probe on an empty project: `tids_seen == 1` with no seed). The test
+instead asserts `summaries_emitted == 1` and that the one `task_summary` record
+carries the seeded TID; the log-path and checkpoint assertions are as planned.
+Mutations:
+
+```text
+# resolved_context= dropped from the __next__ poll in _TaskMonitorSummaryStream
+E       AssertionError: assert '1778084345905438729' == '1778084345905438721'   (the decoy, no hang)
+# resolved_context= dropped from the non-follow branch of _task_monitor_outcome
+E       AssertionError: assert 0 == 1   (summaries_emitted)
+```
+
+Task 7. Probes in `tests/core/test_client.py`:
+`test_client_system_prune_probe_raises_typed_usage_errors` (P1/P2, three
+cases), `test_client_system_task_monitor_probe_raises_typed_usage_errors`
+(P1/P2, two cases), `test_client_system_task_monitor_probe_rejects_malformed_checkpoint`
+(P3, two cases), `test_client_system_probe_unwritable_outputs` (P4),
+`test_client_system_task_monitor_probe_creates_missing_checkpoint_dir` (P5),
+`test_client_system_methods_mirror_command_signatures` (P6, two cases), and
+`test_client_system_methods_probe_reject_unknown_keyword` (P6 `TypeError`).
+All pass on first run; none was weakened. §11 `-k "parity_guard or shell or
+system_methods or probe"`: `14 passed`.
+
+Task 8. Method docstrings carry the [PY-2] `Spec:` line and [IP-1]; the
+module docstring already cited [IP-1] (line 5). CHANGELOG `### Added` entry
+added under `## [Unreleased]`. `bin/check-doc-paths` OK;
+`bin/check-dom15-fixtures` OK. Backstitch against a rerun at `4372e20e`:
+errors 36 -> 36; warnings 1206 -> 1210; infos 720 -> 735 (after dropping two
+optional test-docstring [IP-1] citations). The four new warnings are all
+BSC003 "code backlink cites [IP-1] / [CLI-X1] but that section declares no
+implementation mapping": `SystemNamespace.prune` and
+`SystemNamespace.task_monitor` (Task 8 requires the [IP-1] citation; the
+baseline already carries eight such [IP-1] warnings) and
+`test_every_cli_verb_has_a_client_counterpart` ([IP-1], [CLI-X1], the
+sections the gate enforces). The infos are BSC008 (new symbols cite [PY-2]).
+Clearing the warnings needs an `Implementation:` mapping in [IP-1] and
+[CLI-X1], which no Replacement block drafts; reported, not invented.
+
+Task 9 ([WT-7]). Audit refresh, re-audited against the landed tree; every
+other row of
+`docs/plans/2026-11-02-program-theory-reconciliation-plan.md` "### Audit
+table" is carried forward by reference:
+
+| Row | Claim | Contract | Evidence (landed) | Status |
+|-----|-------|----------|-------------------|--------|
+| I-10 → [WT-2a.10] | Weft is a Unix citizen: argv not shell, stdin is data, exit codes are the status API | [CLI-1.1.1]; [PY-3] | `weft/commands/submission.py::_prepare_command` (`shell=True` refused before `shlex.split` and TaskSpec construction); `tests/core/test_client.py::test_submit_command_rejects_shell_before_any_spawn_write`; `tests/specs/taskspec/test_process_target.py::test_spec_section_rejects_shell_as_unsupported_field`; `tests/specs/taskspec/test_process_target.py::test_command_args_appended_to_process_target`; the two exit-code tests the table already lists | aligned |
+| 4.4-j The client mirrors the CLI | The client and the CLI expose the same verbs over shared `weft/commands/` capabilities, except `weft init` | [PY-1]; [PY-2]; [IP-1]; [CLI-X1] | `SystemNamespace.prune` / `SystemNamespace.task_monitor` over `prune_system` / `task_monitor_system`, sharing `_prune_families` / `_task_monitor_outcome` with the `cmd_*` exports; `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart` (40 counterparts, `cmd_init` the one `cli_only` entry, matching the [IP-1] row and the [WT-4] §4.4 exception landed in the same commit) | aligned |
+
+Keyed possession probe: not run. It needs the owner's key written first and
+a different-family answerer; neither is available to the implementer, who may
+not grade it. Open for the owner's closeout; the plan stays `promoted` until
+the key and graded result are recorded in `## Review Log`.
+
+Owner decisions: F1 to F3 were ruled before implementation (§3); no item
+was open for the implement instruction to close. The theory edit was accepted
+by the owner on 2026-11-03 ("I accept the theory edits").
+
+Deviations from the plan text: (1) Task 5 `tids_seen` assertion replaced, as
+above; (2) Task 5 RED is on `task_monitor_system`, not on the namespace
+attribute; (3) backlink placement as in Task 3; (4) the theory row lands in
+the slice C commit (the plan's atomic rule) rather than a separate
+"Theory:" commit; (5) backstitch adds four BSC003 warnings, as in Task 8.
+
+Slice C gates (worktree before the slice C commit): fast suite
+`./.venv/bin/python -m pytest -q -p no:cacheprovider` exit 0; mypy "Success:
+no issues found in 484 source files"; `ruff check .` "All checks passed!";
+`ruff format --check weft tests bin` clean; `bin/check-doc-paths` OK (the
+promoted-plan Replacement-sync check now covers this plan);
+`bin/check-dom15-fixtures` OK; `tests/specs/test_plan_metadata.py` passed;
+the four integration and extension roots (`integrations/weft_django/tests`,
+`extensions/weft_docker/tests`, `extensions/weft_macos_sandbox/tests`,
+`extensions/weft_microsandbox/tests`) each exit 0 with `-n 0`;
+`grep -rn "shell=True" tests/` now returns lines (the slice S test).
+`weft.client.__all__` and `weft.commands.__all__` are unchanged (pinned by
+`tests/architecture/test_import_boundaries.py::test_official_python_surface_inventories_are_exact`).

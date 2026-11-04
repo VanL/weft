@@ -9,6 +9,8 @@ Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/07-System_Invariants.md [OBS.1], [OBS.2], [OBS.3]
 - docs/specifications/10-CLI_Interface.md [CLI-6]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2] (client task-monitor on
+  a resolved context through the shared `_task_monitor_outcome`)
 """
 
 from __future__ import annotations
@@ -502,8 +504,16 @@ def _resolve_since(
     return None
 
 
-def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
-    """Run one task-monitor pass and return pre-serialization records."""
+def run_task_monitor(
+    config: TaskMonitorConfig,
+    *,
+    resolved_context: WeftContext | None = None,
+) -> TaskMonitorResult:
+    """Run one task-monitor pass and return pre-serialization records.
+
+    A supplied ``resolved_context`` is used as-is ([PY-2]); otherwise the
+    context is built from ``config.context_path``.
+    """
 
     if config.sink not in {"stdout", "disk"}:
         raise CommandUsageError(f"Invalid sink: {config.sink}")
@@ -511,7 +521,11 @@ def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
         raise CommandUsageError("--limit must be non-negative")
 
     try:
-        ctx = build_context(spec_context=config.context_path)
+        ctx = (
+            resolved_context
+            if resolved_context is not None
+            else build_context(spec_context=config.context_path)
+        )
         checkpoint_path = config.checkpoint_path or default_checkpoint_path(ctx)
         checkpoint = (
             None
@@ -588,8 +602,14 @@ def run_task_monitor(config: TaskMonitorConfig) -> TaskMonitorResult:
 class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
     """Closable polling stream over newly emitted task summaries."""
 
-    def __init__(self, config: TaskMonitorConfig) -> None:
+    def __init__(
+        self,
+        config: TaskMonitorConfig,
+        *,
+        resolved_context: WeftContext | None = None,
+    ) -> None:
         self._config = config
+        self._resolved_context = resolved_context
         self._high_water = config.since
         self._buffer: list[TaskMonitorSummary] = []
         self._closed = False
@@ -601,7 +621,10 @@ class _TaskMonitorSummaryStream(Iterator[TaskMonitorSummary]):
         while not self._closed:
             if self._buffer:
                 return self._buffer.pop(0)
-            result = run_task_monitor(replace(self._config, since=self._high_water))
+            result = run_task_monitor(
+                replace(self._config, since=self._high_water),
+                resolved_context=self._resolved_context,
+            )
             if result.checkpoint_timestamp is not None:
                 self._high_water = result.checkpoint_timestamp
             self._buffer.extend(
@@ -647,6 +670,50 @@ def cmd_system_task_monitor(
         since=since,
         limit=limit,
     )
-    if follow:
-        return _TaskMonitorSummaryStream(config)
-    return run_task_monitor(config)
+    return _task_monitor_outcome(config, resolved_context=None)
+
+
+@typed_command_errors
+def task_monitor_system(
+    context: WeftContext,
+    *,
+    follow: bool = False,
+    sink: TaskMonitorSinkName = "stdout",
+    log_dir: Path | None = None,
+    checkpoint: Path | None = None,
+    no_checkpoint: bool = False,
+    since: int | None = None,
+    limit: int | None = None,
+) -> TaskMonitorResult | CommandStream[TaskMonitorSummary]:
+    """Run once or follow task-monitor summaries on a caller-resolved context.
+
+    The client mirror of `cmd_system_task_monitor`: same scan, checkpoint,
+    sink, and return branches, on the supplied context instead of one
+    rebuilt from its root.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    config = TaskMonitorConfig(
+        context=context.root,
+        follow=follow,
+        sink=sink,
+        log_dir=log_dir,
+        checkpoint=checkpoint,
+        no_checkpoint=no_checkpoint,
+        since=since,
+        limit=limit,
+    )
+    return _task_monitor_outcome(config, resolved_context=context)
+
+
+def _task_monitor_outcome(
+    config: TaskMonitorConfig,
+    *,
+    resolved_context: WeftContext | None,
+) -> TaskMonitorResult | CommandStream[TaskMonitorSummary]:
+    """Return the follow stream iff ``config.follow``, else one pass [PY-2]."""
+
+    if config.follow:
+        return _TaskMonitorSummaryStream(config, resolved_context=resolved_context)
+    return run_task_monitor(config, resolved_context=resolved_context)

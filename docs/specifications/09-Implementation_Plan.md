@@ -157,6 +157,7 @@ Client API parity matrix:
 | Capability | Client status | Owner | Notes |
 | --- | --- | --- | --- |
 | Connect to a Weft context | `client` | `weft.client.connect`, `WeftClient.from_context`, `WeftClient.from_weft_context` | Thin context resolution over `WeftContext`; no alternate runtime. |
+| Initialize a project | `cli_only` | `weft init` | Creates the project a client binds to; embedders call `weft.commands.cmd_init`, which returns `InitResult`. |
 | Submit/prepare TaskSpec payloads | `client` | `WeftClient.submit`, `WeftClient.prepare` | Delegates to `weft.commands.submission`. |
 | Submit/prepare stored specs | `client` | `WeftClient.submit_spec`, `WeftClient.prepare_spec` | Uses command-layer spec resolution. |
 | Submit/prepare pipelines | `client` | `WeftClient.submit_pipeline`, `WeftClient.prepare_pipeline` | Uses the same pipeline compilation path as `weft run --spec`/stored pipelines. |
@@ -171,9 +172,9 @@ Client API parity matrix:
 | Manager start/serve/stop/list/status | `namespace` | `client.managers.*` | `stop()` may target a TID or the active manager; diagnostics remain CLI-only. |
 | Spec create/list/show/delete/validate/generate | `namespace` | `client.specs.*` | Uses `weft.commands.specs.validate_spec_source` and the shared command-layer stored-spec helpers. |
 | System status/tidy/dump/load/builtins | `namespace` | `client.system.*` | Public maintenance helpers with typed results. |
+| Foreground task monitor scan | `namespace` | `client.system.task_monitor` | Same scan, checkpoint, and sink behavior as `weft system task-monitor`, on the client's resolved context; returns `TaskMonitorResult`, or `CommandStream[TaskMonitorSummary]` iff `follow=True`. |
+| Runtime-state and retention prune | `namespace` | `client.system.prune` | Same family validation, reports, and archive as `weft system prune`, on the client's resolved context; a dry run unless `apply=True`; returns `SystemPruneResult`. |
 | Manager diagnostics | `cli_only` | `weft manager list --diagnostic` | Operator/debug output lacks a stable typed result contract. |
-| Foreground task monitor scan | `cli_only` | `weft system task-monitor` | Operator maintenance and cleanup diagnostics, not a stable task-client API. |
-| Runtime-state and retention prune commands | `cli_only` | `weft system prune` | Destructive/report/archive maintenance remains scoped to CLI until promoted with typed result contracts. |
 
 ## Why This Shape Exists [IP-2]
 
@@ -218,6 +219,8 @@ That index is intentionally lightweight:
   unimplemented plans do not read like current project direction
 
 ## Related Plans
+
+- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 
 - retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 

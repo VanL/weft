@@ -16,12 +16,31 @@ from typing import Any
 from weft._constants import (
     LIVENESS_RUNTIME_PROBE_TIMEOUT_SECONDS,
     MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
+    RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+    RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
     TASK_PING_TIMEOUT_SECONDS,
 )
-from weft.commands import builtins, dump, load, specs, system, tasks, tidy
+from weft.commands import (
+    builtins,
+    dump,
+    load,
+    prune,
+    specs,
+    system,
+    task_monitor,
+    tasks,
+    tidy,
+)
 from weft.commands import manager as managers
 from weft.commands import queue as queues
+from weft.commands.task_monitor import (
+    TaskMonitorResult,
+    TaskMonitorSinkName,
+    TaskMonitorSummary,
+)
 from weft.commands.types import (
+    CommandStream,
     EndpointResolution,
     ManagerSnapshot,
     QueueAliasRecord,
@@ -35,6 +54,7 @@ from weft.commands.types import (
     SpecRecord,
     SpecValidationResult,
     SystemLoadResult,
+    SystemPruneResult,
     SystemStatusSnapshot,
     SystemTidyResult,
     TaskControlResult,
@@ -479,4 +499,74 @@ class SystemNamespace:
             self.client.context,
             input_file=input_file,
             dry_run=dry_run,
+        )
+
+    def prune(
+        self,
+        *,
+        family: str,
+        apply: bool = False,
+        force: bool = False,
+        queue: Sequence[str] | None = None,
+        min_age: float = RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+        keep_recent_per_key: int = RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+        keep_recent_per_task: int = RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
+        task: Sequence[str] | None = None,
+        retention_class: Sequence[str] | None = None,
+        archive: Path | None = None,
+        limit: int | None = None,
+        report: Path | None = None,
+    ) -> SystemPruneResult:
+        """Mirror `weft system prune` on the client's resolved context.
+
+        A dry run unless ``apply=True``.
+
+        Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2];
+        docs/specifications/09-Implementation_Plan.md [IP-1].
+        """
+
+        return prune.prune_system(
+            self.client.context,
+            family=family,
+            apply=apply,
+            force=force,
+            queue=queue,
+            min_age=min_age,
+            keep_recent_per_key=keep_recent_per_key,
+            keep_recent_per_task=keep_recent_per_task,
+            task=task,
+            retention_class=retention_class,
+            archive=archive,
+            limit=limit,
+            report=report,
+        )
+
+    def task_monitor(
+        self,
+        *,
+        follow: bool = False,
+        sink: TaskMonitorSinkName = "stdout",
+        log_dir: Path | None = None,
+        checkpoint: Path | None = None,
+        no_checkpoint: bool = False,
+        since: int | None = None,
+        limit: int | None = None,
+    ) -> TaskMonitorResult | CommandStream[TaskMonitorSummary]:
+        """Mirror `weft system task-monitor` on the client's resolved context.
+
+        Returns `CommandStream[TaskMonitorSummary]` iff ``follow=True``.
+
+        Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2];
+        docs/specifications/09-Implementation_Plan.md [IP-1].
+        """
+
+        return task_monitor.task_monitor_system(
+            self.client.context,
+            follow=follow,
+            sink=sink,
+            log_dir=log_dir,
+            checkpoint=checkpoint,
+            no_checkpoint=no_checkpoint,
+            since=since,
+            limit=limit,
         )

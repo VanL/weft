@@ -7,23 +7,28 @@ import os
 import stat
 import time
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self
 
 import pytest
 
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from tests.helpers.test_backend import prepare_project_root
+from weft._constants import TASK_MONITOR_LOG_SUBDIR, WEFT_GLOBAL_LOG_QUEUE, load_config
 from weft._exceptions import CommandExecutionError
+from weft.client import WeftClient
 from weft.commands.task_monitor import (
     DiskJsonlTaskMonitorSink,
     ReducedTaskLog,
     StdoutTaskMonitorSink,
     TaskMonitorConfig,
     TaskMonitorResult,
+    TaskMonitorSummary,
     _build_summary_record,
     _load_checkpoint,
     _reduce_task_log,
     cmd_system_task_monitor,
+    default_checkpoint_path,
     run_task_monitor,
 )
 from weft.context import WeftContext, build_context
@@ -643,3 +648,84 @@ def test_wrapper_lost_and_result_without_terminal_do_not_consume_queues(
     finally:
         ctrl_out.close()
         outbox.close()
+
+
+def _replaced_client_context(tmp_path: Path) -> tuple[WeftContext, WeftContext]:
+    """Return (root default context, alternate-broker client context) [PY-2]."""
+
+    root = prepare_project_root(tmp_path / "project")
+    default_context = build_context(root)
+    alternate = build_context(prepare_project_root(tmp_path / "alternate"))
+    configured = build_context(
+        root, config=load_config({"WEFT_DIRECTORY_NAME": ".client-state"})
+    )
+    context = replace(
+        configured,
+        broker_target=alternate.broker_target,
+        broker_config=alternate.broker_config,
+        database_path=alternate.database_path,
+    )
+    return default_context, context
+
+
+def _completed_row(tid: str) -> dict[str, Any]:
+    return {
+        "event": "work_completed",
+        "status": "completed",
+        "tid": tid,
+        "taskspec": _taskspec_payload(tid),
+    }
+
+
+def test_client_task_monitor_preserves_resolved_directory_and_broker(
+    tmp_path: Path,
+) -> None:
+    """Client task-monitor scans and writes on its resolved context [PY-2]."""
+
+    _default_context, context = _replaced_client_context(tmp_path)
+    tid = "1778084345905438711"
+    _write_log(context, _completed_row(tid))
+
+    result = WeftClient.from_weft_context(context).system.task_monitor(
+        sink="disk", since=0
+    )
+
+    assert isinstance(result, TaskMonitorResult)
+    # The scan's own TaskMonitor logs one non-terminal row, so only the seeded
+    # completed task yields a summary.
+    assert result.summaries_emitted == 1
+    assert [
+        item.record["tid"]
+        for item in result.records
+        if item.record.get("record_type") == "task_summary"
+    ] == [tid]
+    assert result.log_path is not None
+    assert result.log_path.parent == context.logs_dir / TASK_MONITOR_LOG_SUBDIR
+    assert ".client-state" in result.log_path.parts
+    assert default_checkpoint_path(context).exists()
+
+
+def test_client_task_monitor_follow_returns_closable_summary_stream(
+    tmp_path: Path,
+) -> None:
+    """Every follow poll keeps the client's resolved context [PY-2]."""
+
+    default_context, context = _replaced_client_context(tmp_path)
+    first_tid = "1778084345905438721"
+    second_tid = "1778084345905438722"
+    _write_log(context, _completed_row(first_tid))
+    _write_log(default_context, _completed_row("1778084345905438729"))
+
+    stream = WeftClient.from_weft_context(context).system.task_monitor(
+        follow=True, no_checkpoint=True, since=0
+    )
+    assert not isinstance(stream, TaskMonitorResult)
+
+    first = next(stream)
+    assert isinstance(first, TaskMonitorSummary)
+    assert first.record["tid"] == first_tid
+    _write_log(context, _completed_row(second_tid))
+    second = next(stream)
+    assert second.record["tid"] == second_tid
+    stream.close()
+    stream.close()

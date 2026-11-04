@@ -39,6 +39,12 @@ command function contains semantic validation and orchestration; Typer
 callbacks contain only input parsing, formatting, stream routing, and exit
 adaptation.
 
+Every registered CLI verb also has a `weft.client` counterpart over the
+same command capability, listed in the client API parity matrix in
+`09-Implementation_Plan.md` [IP-1]; a verb without one appears there as
+`cli_only` with its reason. `tests/architecture/test_import_boundaries.py`
+derives the verb list from the Typer app and fails when a verb has neither.
+
 ## Current Helper Boundaries [CLI-X2]
 
 The command-family table above is only the top layer. Several shared helpers
@@ -88,6 +94,7 @@ stays separate.
 
 ## Related Plans
 
+- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-04-14-builtin-taskspecs-and-spec-resolution-plan — source 396c3b85; see docs/plans/README.md

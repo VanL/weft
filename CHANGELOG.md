@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `client.system.prune` and `client.system.task_monitor` mirror `weft
+  system prune` and `weft system task-monitor` on the client's resolved
+  context ([IP-1], [PY-2]).
+
 ### Changed
 
 - TaskMonitor no longer registers with the built-in heartbeat service; its

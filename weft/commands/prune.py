@@ -7,6 +7,8 @@ The CLI adapter owns human rendering and exit classification.
 Spec references:
 - docs/specifications/05-Message_Flow_and_State.md [MF-5]
 - docs/specifications/10-CLI_Interface.md [CLI-6]
+- docs/specifications/14-Python_API_Surfaces.md [PY-2] (client prune on a
+  resolved context through the shared `_prune_families`)
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from weft._constants import (
 )
 from weft._exceptions import CommandExecutionError, CommandUsageError
 from weft.commands.types import SystemPruneResult
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core.pruning import retention as _retention
 from weft.core.pruning import runtime as _runtime
 
@@ -41,10 +43,19 @@ def run_runtime_prune(
     config: _runtime.RuntimePruneConfig,
     *,
     report_path: Path | None = None,
+    resolved_context: WeftContext | None = None,
 ) -> _runtime.RuntimePruneResult:
-    """Run runtime-state pruning against the configured project context."""
+    """Run runtime-state pruning against the configured project context.
 
-    context = build_context(spec_context=config.context_path)
+    A supplied ``resolved_context`` is used as-is ([PY-2]); otherwise the
+    context is built from ``config.context_path``.
+    """
+
+    context = (
+        resolved_context
+        if resolved_context is not None
+        else build_context(spec_context=config.context_path)
+    )
     result = _runtime.run_runtime_prune_for_context(context, config)
     # Preserve the two families' established report boundaries. Runtime-state
     # reports start only after a successful initial scan, while retention
@@ -66,10 +77,19 @@ def run_retention_prune(
     config: _retention.RetentionPruneConfig,
     *,
     report_path: Path | None = None,
+    resolved_context: WeftContext | None = None,
 ) -> _retention.RetentionPruneResult:
-    """Run retention pruning against the configured project context."""
+    """Run retention pruning against the configured project context.
 
-    context = build_context(spec_context=config.context_path)
+    A supplied ``resolved_context`` is used as-is ([PY-2]); otherwise the
+    context is built from ``config.context_path``.
+    """
+
+    context = (
+        resolved_context
+        if resolved_context is not None
+        else build_context(spec_context=config.context_path)
+    )
     result = _retention.run_retention_prune_for_context(context, config)
     if report_path is None or result.halted_at == "validation":
         return result
@@ -153,6 +173,91 @@ def cmd_system_prune(
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
     """
 
+    return _prune_families(
+        resolved_context=None,
+        context=context,
+        family=family,
+        apply=apply,
+        force=force,
+        queue=queue,
+        min_age=min_age,
+        keep_recent_per_key=keep_recent_per_key,
+        keep_recent_per_task=keep_recent_per_task,
+        task=task,
+        retention_class=retention_class,
+        archive=archive,
+        limit=limit,
+        report=report,
+    )
+
+
+@typed_command_errors
+def prune_system(
+    context: WeftContext,
+    *,
+    family: str,
+    apply: bool = False,
+    force: bool = False,
+    queue: Sequence[str] | None = None,
+    min_age: float = RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
+    keep_recent_per_key: int = RUNTIME_PRUNE_DEFAULT_KEEP_RECENT_PER_KEY,
+    keep_recent_per_task: int = RETENTION_PRUNE_DEFAULT_KEEP_RECENT_PER_TASK,
+    task: Sequence[str] | None = None,
+    retention_class: Sequence[str] | None = None,
+    archive: Path | None = None,
+    limit: int | None = None,
+    report: Path | None = None,
+) -> SystemPruneResult:
+    """Prune state families on a caller-resolved context.
+
+    The client mirror of `cmd_system_prune`: same validation, reports, and
+    typed outcome, scanning the supplied context's broker instead of one
+    rebuilt from its root.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    return _prune_families(
+        resolved_context=context,
+        context=context.root,
+        family=family,
+        apply=apply,
+        force=force,
+        queue=queue,
+        min_age=min_age,
+        keep_recent_per_key=keep_recent_per_key,
+        keep_recent_per_task=keep_recent_per_task,
+        task=task,
+        retention_class=retention_class,
+        archive=archive,
+        limit=limit,
+        report=report,
+    )
+
+
+def _prune_families(
+    *,
+    resolved_context: WeftContext | None,
+    context: Path | None,
+    family: str,
+    apply: bool,
+    force: bool,
+    queue: Sequence[str] | None,
+    min_age: float,
+    keep_recent_per_key: int,
+    keep_recent_per_task: int,
+    task: Sequence[str] | None,
+    retention_class: Sequence[str] | None,
+    archive: Path | None,
+    limit: int | None,
+    report: Path | None,
+) -> SystemPruneResult:
+    """Validate, dispatch, and summarize prune families for both adapters.
+
+    `cmd_system_prune` passes ``resolved_context=None`` (context built from
+    ``context``); `prune_system` passes its resolved context ([PY-2]).
+    """
+
     normalized = _validate_public_prune_options(
         family=family,
         apply=apply,
@@ -179,6 +284,7 @@ def cmd_system_prune(
                     limit=limit,
                 ),
                 report_path=report if normalized == "runtime-state" else None,
+                resolved_context=resolved_context,
             )
             details["runtime_state"] = {
                 **runtime_prune_summary(runtime_result),
@@ -212,6 +318,7 @@ def cmd_system_prune(
                     archive_path=archive,
                 ),
                 report_path=report,
+                resolved_context=resolved_context,
             )
             details["retention"] = {
                 **retention_prune_summary(retention_result),

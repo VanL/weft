@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,8 +24,12 @@ from weft._constants import (
     RETENTION_PRUNE_CLASS_TERMINAL_TASK_LOG_SUPERSEDED,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_STREAMING_SESSIONS_QUEUE,
+    load_config,
 )
+from weft.client import WeftClient
 from weft.commands.prune import cmd_system_prune, run_retention_prune
+from weft.commands.types import SystemPruneResult
 from weft.context import WeftContext, build_context
 from weft.core.pruning import retention as retention_pruning
 from weft.core.pruning.retention import (
@@ -898,3 +903,71 @@ def test_force_deletes_active_ping_in_selected_scope(tmp_path: Path) -> None:
     assert result.deleted == 1
     assert ping_id not in _read_ids(ctx, f"T{tid}.ctrl_in")
     assert result.candidates[0].overridden_protections == ("nonterminal_task",)
+
+
+def test_client_prune_preserves_resolved_directory_and_broker(
+    tmp_path: Path,
+) -> None:
+    """Client prune scans its resolved context, not a context rebuilt from root.
+
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    """
+
+    root = prepare_project_root(tmp_path / "project")
+    alternate = build_context(prepare_project_root(tmp_path / "alternate"))
+    configured = build_context(
+        root, config=load_config({"WEFT_DIRECTORY_NAME": ".client-state"})
+    )
+    context = replace(
+        configured,
+        broker_target=alternate.broker_target,
+        broker_config=alternate.broker_config,
+        database_path=alternate.database_path,
+    )
+    tid = "1770000000000001101"
+    seeded = {
+        _write_json(context, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "created"}),
+        _write_json(
+            context, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"}
+        ),
+        _write_json(
+            context,
+            WEFT_GLOBAL_LOG_QUEUE,
+            {"tid": tid, "status": "completed", "event": "task_completed"},
+        ),
+    }
+    client = WeftClient.from_weft_context(context)
+
+    result = client.system.prune(family="task-log", min_age=0)
+
+    assert isinstance(result, SystemPruneResult)
+    assert result.applied is False
+    assert result.families == ("task-log",)
+    assert result.candidates == 2
+    assert _read_ids(context, WEFT_GLOBAL_LOG_QUEUE) >= seeded
+    assert cmd_system_prune(family="task-log", context=root, min_age=0).candidates == 0
+
+    # The runtime-state branch resolves its context separately.
+    stream_tid = "1770000000000001120"
+    marker_id = _write_json(
+        context,
+        WEFT_STREAMING_SESSIONS_QUEUE,
+        {"tid": stream_tid, "session_id": "stale", "queue": "T1.outbox"},
+    )
+    _write_json(
+        context, WEFT_GLOBAL_LOG_QUEUE, {"tid": stream_tid, "status": "completed"}
+    )
+
+    runtime = client.system.prune(
+        family="runtime-state", queue=["streaming"], min_age=0
+    )
+
+    assert runtime.families == ("runtime-state",)
+    assert runtime.candidates == 1
+    assert marker_id in _read_ids(context, WEFT_STREAMING_SESSIONS_QUEUE)
+    assert (
+        cmd_system_prune(
+            family="runtime-state", queue=["streaming"], context=root, min_age=0
+        ).candidates
+        == 0
+    )
