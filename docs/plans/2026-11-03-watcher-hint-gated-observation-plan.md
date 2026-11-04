@@ -110,7 +110,7 @@ This section comes first because the owner's instruction for this fix is
 - [WT-2a.2] "Queues are the only durable truth": the queue is still read for
   every decision the overriders make.
 
-### Theory check of the withdrawn remedies
+### Theory check of the declined remedies
 
 The round-1 remedies (`## Owner Decisions` item 2) were not only unneeded;
 they were against the theory, and this plan's 2026-11-03 revision was wrong
@@ -563,7 +563,7 @@ scan on a healthy hint-free persistent SQLite return (it falls through to
 the strategy are untouched. The cross-family round 1 asked for three pieces
 of failure handling (a flag-first callback, a strategy subclass reporting
 detector silence, and a retry flag for a failed observation read); the
-owner withdrew all three on 2026-11-04 (`## Owner Decisions` item 2): those
+author declined all three under the owner's 2026-11-04 rulings (`## Owner Decisions` item 2): those
 reads fail only on a database that is no longer readable, and the correct
 response then is to do nothing.
 
@@ -853,16 +853,16 @@ Firing coverage is in
    release and a Weft-side strategy subclass); "Refesh last ts is also not
    going to fail on a reasonable sqlite"; "If those underlying reads fail,
    do nothing is the correct response"; "And the proposal is against the
-   theory also" (see `## Theory`, "Theory check of the withdrawn remedies":
+   theory also" (see `## Theory`, "Theory check of the declined remedies":
    [WT-4] 4.4 no over-armoring, [WT-2a.8], [ALT-WT-010]).
    Consequences, applied in this revision: no flag-first callback, no
    strategy subclass, no `_create_strategy` override, no detector query, no
    retry flag, no `_defer_pending_observation`, no edit to
    `weft/core/manager.py` or `weft/core/tasks/heartbeat.py`; tests R3, R4,
    R5, R6, R8 and R9 withdrawn; register rows 9 and 10 recorded as A; the
-   SimpleBroker upstream item withdrawn (item 3). The overriders' existing
+   SimpleBroker upstream item declined (item 3). The overriders' existing
    `except` blocks, which log and return `False`, are the "do nothing".
-3. **SimpleBroker upstream item: withdrawn (2026-11-04).** The round-1
+3. **SimpleBroker upstream item: declined (2026-11-04).** The round-1
    proposal (report detector unavailability as uncertainty, keep a change
    whose callback raised, reset the failure counter on success) described
    SimpleBroker behaviors that are not defects in operation: a suppressed
@@ -1084,7 +1084,7 @@ next.
 
 The retry flag for a failed observation read, its `_defer_pending_observation`
 method, the three overrider `except`-block lines, and tests R3, R4, R8 and R9
-were withdrawn on the owner's ruling of 2026-11-04 (`## Owner Decisions`
+were declined under the owner's ruling of 2026-11-04 (`## Owner Decisions`
 item 2): "If those underlying reads fail, do nothing is the correct
 response". `weft/core/manager.py` and `weft/core/tasks/heartbeat.py` are not
 edited. The task number is kept so round-1 findings F5 and the register
@@ -1265,11 +1265,12 @@ data migration exists. The [CC-2.1] text and the code revert together.
 | Date | Change | Reason |
 |------|--------|--------|
 | 2026-11-03 | Round 1 (codex 0.161.0, 2026-11-03): F1–F8 accepted and applied; see Review Log | Cross-family plan review round 1 |
-| 2026-11-04 | Owner ruling on the underlying reads: F1's flag-first callback, F2's reporting strategy subclass and the round-0 retry flag (Task 3) withdrawn; the SimpleBroker upstream item withdrawn; R3–R6, R8, R9 removed; register rows 9, 10, 14 rewritten and 15, 16 removed; [CC-2.1] delta shortened; Manager and heartbeat files out of the edit set | "Neither"; "Refesh last ts is also not going to fail on a reasonable sqlite"; "If those underlying reads fail, do nothing is the correct response" (Owner Decisions item 2) |
+| 2026-11-04 | Owner ruling on the underlying reads: F1's flag-first callback, F2's reporting strategy subclass and the round-0 retry flag (Task 3) declined; the SimpleBroker upstream item declined; R3–R6, R8, R9 removed; register rows 9, 10, 14 rewritten and 15, 16 removed; [CC-2.1] delta shortened; Manager and heartbeat files out of the edit set | "Neither"; "Refesh last ts is also not going to fail on a reasonable sqlite"; "If those underlying reads fail, do nothing is the correct response" (Owner Decisions item 2) |
+| 2026-11-04 | `3c7c6add` | Task 2 note, Task 3, Owner Decisions, Review Log, Revision Log | Attribution corrected: the owner ruled on the underlying reads; the author declined the round-1 remedies under those rulings. Wording only. | No. |
 
 ## Review Log
 
-Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner withdrew the F1 and F2 remedies and the Task 3 retry flag (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 pending on this revision.
+Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted and applied in the 2026-11-03 revision. 2026-11-04: the owner ruled on the underlying reads, and the author declined the F1 and F2 remedies and the Task 3 retry flag under that ruling (Owner Decisions item 2); F1 and F2 stand as accurate observations of SimpleBroker whose remedies are declined because the failure they describe is not a reachable state on a readable database. Scoped round 2 pending on this revision.
 
 - Cross-family round 1 (codex 0.161.0, 2026-11-03, plan text at `b85b798b`):
   BLOCKED on F1 (P1: SimpleBroker advances its data-version baseline before
