@@ -176,7 +176,7 @@ checkpoints; the candidate construction in step 3 delivers neither.
 - `weft/core/manager.py` (`_collect_drain_stop_targets`,
   `_signal_children_to_stop`; no other function)
 - `tests/cli/test_cli_manager.py` (one new process-backed test)
-- `tests/core/test_manager.py` (two new in-process tests)
+- `tests/core/test_manager.py` (two new in-process tests; one assertion removed)
 - `docs/specifications/03-Manager_Architecture.md` (the mapping sentence;
   `## Related Plans` backlink)
 - `CHANGELOG.md` (`## [Unreleased]` / `### Changed`, one bullet)
@@ -306,6 +306,7 @@ One-way doors: none.
 | 6 | Covered targets: STOP, no host signal. Uncovered: STOP, then SIGTERM after the escalation window if identity re-verifies. | Unchanged. | N |
 | 7 | Services, Managers, terminal tasks, internal classes: never members. | Unchanged (same filters). | N |
 | 8 | Collection read failure: warning, child table only. | Unchanged. | N |
+| 9 | `_ManagerDrainStopTarget.covered` stored; read by one test only. | Field removed; `escalate` carries the decision; the test asserts `escalate`. | N (no production reader) |
 
 No D row.
 
@@ -345,6 +346,10 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
   service-role, terminal and host-escalation filters), `Manager._signal_children_to_stop`
   (the first STOP rung as one exact-name broadcast with `create_missing`, [SB-BCAST-2], [SB-BCAST-4]),
 ```
+
+(In the block above, "marked covered for escalation only" names the
+decision, not a stored field: after Task 3 the target record carries
+`escalate` and no `covered` attribute.)
 
 Carried forward: the fresh pass, the four filters, the covered concept.
 Changed: membership comes from snapshots, coverage decides escalation only,
@@ -416,20 +421,30 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
   9056-9059 (round-1 F2).
 - `tests/core/test_manager.py`, same fixtures:
   `test_first_stop_rung_is_one_broadcast_over_pending_targets`. Two
-  snapshot-only tasks with distinct `ctrl_in` routes; begin the drain
-  (`manager._begin_shutdown_drain(...)` as the existing stop-order tests
-  call it, or `_collect_drain_stop_targets()` followed by
-  `_signal_children_to_stop({})`); then assert, by reading the two control
-  queues, that each holds exactly one STOP envelope
-  (`encode_control_message(CONTROL_STOP)`), that both TIDs are in
-  `manager._drain_signaled_children` with equal
-  `_drain_signal_started_ns` values, and that a second
-  `_signal_children_to_stop({})` call before the escalation window writes
-  nothing more (each queue still holds one row). RED at `e0290792`: the
-  timestamps differ (two writes) and, after Task 3 is applied with the old
-  loop left in place, the test would still fail on the equal-timestamp
-  assertion, which is what makes it the broadcast's proof (round-1 F2).
-  Do not test SimpleBroker's atomicity; [SB-BCAST-4] owns it.
+  snapshot-only tasks with distinct `ctrl_in` routes. Observe the real
+  broker call: find the broker class from a live connection's MRO (the
+  pattern `tests/core/test_manager_family_maintenance.py` uses for
+  `write`) and wrap `broadcast` with a forwarding counter that records
+  `(queue_names, create_missing)` and calls the original; wrap `write` the
+  same way to record queue names. Begin the drain through
+  `manager._begin_shutdown_drain(...)` with the arguments the existing
+  stop-order tests pass (it collects the targets into
+  `self._drain_stop_targets` and signals them; do not call
+  `_collect_drain_stop_targets()` and discard its result, round-2 F6).
+  Assert: exactly one `broadcast` call, whose `queue_names` is the set of
+  the two routes and whose `create_missing` is `True`; no `write` call
+  naming either route; by reading the two control queues, each holds
+  exactly one STOP envelope (`encode_control_message(CONTROL_STOP)`); both
+  TIDs are in `manager._drain_signaled_children` with equal
+  `_drain_signal_started_ns` values; and a second
+  `_signal_children_to_stop({})` before the escalation window makes no
+  further `broadcast` or `write` call and leaves one row per queue. RED at
+  `e0290792`: neither task is a member, so there is no envelope and no
+  bookkeeping entry (round-2 F5). With only the candidate change landed
+  and the old per-target loop kept, it fails on the broadcast count (zero
+  calls, two `write` calls) and on the timestamps; that is the broadcast's
+  proof (round-1 F2, round-2 F4). Do not test SimpleBroker's atomicity;
+  [SB-BCAST-4] owns it.
 - Verify: `./.venv/bin/python -m pytest tests/cli/test_cli_manager.py tests/core/test_manager.py -q -m "" -k "died_after_bootstrap or snapshot_only_task or one_broadcast"`
   reports 3 failed before Task 3.
 - Stop if: either test wants to patch the Manager's collection or
@@ -470,6 +485,19 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
   same semantics. The escalation branch is unchanged. Keep
   `_send_stop_command` for its other callers. Add
   `Spec: [MA-3]; [SB-BCAST-2], [SB-BCAST-4]` to the docstring.
+- `_ManagerDrainStopTarget` (line 355): remove the `covered` field. It is
+  written at one site and read by no production code (`escalate`, computed
+  from the local `is_covered`, carries the decision; `_drain_phase_members`
+  and settlement read `escalate`, `identity`, `ctrl_in`, `publication_id`).
+  Drop `covered=is_covered` from the constructor call; keep `is_covered` as
+  the local that feeds `escalate`; update the class docstring to say that
+  escalation is the only consequence of peer coverage. In
+  `test_manager_stop_skips_terminal_and_internal_adopted_snapshots`
+  (line 9000), the assertion `targets[covered].covered is True` (line
+  9056) goes; `targets[covered].escalate is False` and the identity
+  equality on the next lines already pin the observable consequence. The
+  owner folded this in on 2026-11-04 from an outside review's finding that
+  the field "stores a fact that production code never reads".
 - Constraints: no other function edited; no change to settlement,
   escalation, bootstrap, or the memo.
 - Verify: the two Task 2 tests pass; the two existing coverage tests pass
@@ -596,14 +624,35 @@ write, so the choice is mechanism, not semantics (register row 4).
   deduplicated, `create_missing` selects the full set, atomic commit, an
   empty tuple a no-op), that `covered` feeds `escalate` only, the spec
   delta verbatim at lines 960-962 with its continuation indentation, and
-  class 5 with a risky trigger under strategy B. Cross-family round 2
-  (scoped to F1-F3): pending.
+  class 5 with a risky trigger under strategy B.
+- Cross-family scoped round 2 (codex 0.161.0, 2026-11-04, the plan at
+  `c287660c`): verdict `blocker: F4`. F1 and F3 confirmed resolved (the
+  bookkeeping follows `_send_stop_command` unconditionally in both phases;
+  a live peer's resident without a snapshot still reaches `unresolved`).
+  F4 (P2): equal timestamps do not prove one broadcast, since per-route
+  writes with shared bookkeeping would pass; fixed in plan: the test now
+  observes the real broker `broadcast` call through a forwarding wrapper
+  on the broker class (one call, the two routes, `create_missing=True`, no
+  `write` to those routes) and keeps the queue assertions. F5 (P3): the
+  stated baseline failure was wrong (at `e0290792` the two tasks are not
+  members, so nothing is written); fixed, both RED expectations restated.
+  F6 (P3): the alternative setup discarded the collection's return value;
+  fixed, the test uses `_begin_shutdown_drain`. Under the one-scoped-round
+  rule the loop closes here; the completed-work review checks the applied
+  text. Review before implementation is complete.
+- Owner fold, 2026-11-04 ("Yes, fold it in"): the removal of the unread
+  `_ManagerDrainStopTarget.covered` field, from an outside review's
+  suggestion 1, is added to Task 3 with register row 9; the field is
+  written once and read only by the test at line 9056, which asserts
+  `escalate` instead. Blast radius: the dataclass, the constructor call,
+  one assertion.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-04 | `423b31a3` | Task 2, Task 3, `## 4` error paths, register row 4, `## 6`, `## 7` | Round-1 F1-F3: failure bookkeeping kept as today; candidates from snapshots, residents and covered; a broadcast proof test; fixture names. | Yes: round 2, scoped to F1-F3. |
+| 2026-11-04 | `c287660c` | Task 2 (broadcast test), Task 3 (`covered` field), register row 9, spec-delta note | Round-2 F4-F6 (real broadcast call observed; RED expectations restated; `_begin_shutdown_drain` setup) and the owner's fold of the `covered` field removal. | No: one scoped round spent; the completed-work review covers it. |
 
 ## Execution log
 
