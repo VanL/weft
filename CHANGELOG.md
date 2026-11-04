@@ -10,6 +10,12 @@
 
 ### Changed
 
+- A task's reactor wait no longer reads its notification-only observation
+  queues on every idle strategy return: on persistent SQLite it reads them
+  only at wait entry and on returns that carry a local, native or
+  data-version hint or reach a deadline, so the always-on heartbeat service
+  with nothing to do makes no broker reads. PostgreSQL native-waiter returns
+  and the degraded and nonpersistent fallbacks keep their checks.
 - The Manager no longer enters an admission-evidence mode when a task-state
   snapshot read fails during reconciliation or reap: the failure is logged
   and nothing else changes, since launch custody is held by the retained

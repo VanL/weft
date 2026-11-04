@@ -177,7 +177,9 @@ _Implementation mapping_: `weft/core/tasks/multiqueue_watcher.py` —
 `MultiQueueWatcher`, `QueueMode`, `QueueMessageContext`, owner reservation in
 `run_in_thread()` / `run_forever()`, synchronous request handoff in
 `_submit_topology_mutation()`, and owner-confined replacement in
-`_apply_topology_mutation_on_owner()`. Firing coverage is in
+`_apply_topology_mutation_on_owner()`. `_activity_hint_action()` owns the
+return gate for observation and readiness checks.
+Firing coverage is in
 `tests/tasks/test_multiqueue_watcher.py`; BaseTask ownership preservation is in
 `tests/tasks/test_task_execution.py`. Displaced waiter close uses the
 SimpleBroker resource's terminal, idempotent close contract in
@@ -200,6 +202,25 @@ queue state before dispatch. Consuming a local notification also performs one
 live watched-queue check so a same-connection self-write can activate an
 inactive queue even though SQLite `data_version` does not change. Empty,
 unrelated and deadline wakes do not reset useful-activity state.
+Notification-only observation checks ([QUEUE.7]) read the broker only when a
+return can carry new evidence. One check runs at wait entry, after the waiter
+is registered, so a publication committed before the wait is found without a
+strategy return. After that, a check runs on a strategy return that carries a
+local, native or data-version hint; on a return at the owner's deadline; on
+every native-waiter return, including the strategy's slow safety recheck; and
+on every return of the degraded and nonpersistent polling fallbacks,
+which have no durable change detector. A persistent SQLite return with none
+of these reads nothing: an unchanged `data_version` means no other connection
+committed since the last check, and the owner's own writes are made in turns
+and found by the next wait-entry check. The gate adds no retry of its own:
+a failed detector check, cache refresh or observation read opens no later
+check, SimpleBroker's own polling continues unchanged, and on a database
+that is not readable nothing is done. The readiness scan
+keeps its rule: it runs on returns with a local, native or data-version hint
+(before any deadline test), on native-waiter returns before the deadline and
+on fallback returns, and not on a hint-free return at or past the owner's
+deadline (the deadline is evaluated after the observation read), which hands
+the turn to the owner.
 `MultiQueueWatcher` owns strategy start, restart and final-close state across
 inherited background driving, manual waits and `BaseTask`; no entry path owns a
 parallel started flag. `BaseTask` invokes the same protected wait under its
@@ -1316,6 +1337,7 @@ observations, apply effects, and own cleanup.
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) removes process-title corroboration from host-pid liveness evidence under [CC-3.2]; a title is observability only.
 - [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
 - [Reactor edge timer floors](../plans/2026-11-02-reactor-edge-timer-floors-plan.md) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).
+- [Reactor wait observation gate](../plans/2026-11-03-watcher-hint-gated-observation-plan.md) reads notification-only observation evidence only on strategy returns that can carry it ([CC-2.1], [QUEUE.7]).
 
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md

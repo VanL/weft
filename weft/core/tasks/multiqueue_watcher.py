@@ -1135,9 +1135,11 @@ class MultiQueueWatcher(BaseWatcher):
 
         Strategy returns are readiness hints. Backend hints are confirmed with
         live queue state before dispatch, while a consumed local hint always
-        returns to the owner so broker-free source state can run.
+        returns to the owner so broker-free source state can run. The
+        observation check runs at entry and then only on returns that can
+        carry evidence.
 
-        Spec: [CC-2.1], [SB-0.4]
+        Spec: [CC-2.1], [QUEUE.7], [SB-0.4]
         """
         if self._stop_event.is_set() or (timeout is not None and timeout <= 0):
             return
@@ -1146,6 +1148,7 @@ class MultiQueueWatcher(BaseWatcher):
 
         # Register before reading: an earlier publication is found here, while
         # later publication wakes the retained waiter. No delivery is implied.
+        # Later checks run only on returns that can carry evidence.
         if self._has_pending_observation():
             return
 
@@ -1191,14 +1194,48 @@ class MultiQueueWatcher(BaseWatcher):
         *,
         deadline: float | None,
     ) -> Literal["return", "continue"]:
-        """Validate strategy hints and decide whether the owner gets a turn."""
+        """Validate strategy hints and decide whether the owner gets a turn.
+
+        Observation and readiness checks run only on a return that can carry
+        evidence: a local, native or data-version hint, the owner's deadline,
+        any native-waiter return (including the strategy's slow safety
+        recheck), and every return of the degraded and nonpersistent polling
+        fallbacks. A healthy persistent SQLite return with none of these reads
+        nothing: no other connection committed since the last check, and the
+        owner's own writes are made in turns and read at the next wait entry.
+        The readiness deadline is evaluated after the observation read.
+
+        Spec: [CC-2.1], [QUEUE.7]
+        """
 
         local_hint = self._strategy.consume_local_activity_hint()
         native_hint = self._strategy.consume_native_activity_hint()
         data_version_hint = self._data_version_activity_pending
         self._data_version_activity_pending = False
+        uses_native_activity = self._strategy.uses_native_activity()
+        # A nonpersistent SQLite queue opens a fresh connection for each
+        # operation, so its connection-local PRAGMA data_version cannot be a
+        # durable change detector across strategy turns. Confirm readiness at
+        # the end of each fallback turn. PostgreSQL still uses its native
+        # activity waiter, and persistent SQLite tasks retain data_version as
+        # their quiet-path filter.
+        transient_fallback = not self._persistent and not uses_native_activity
 
-        if self._has_pending_observation():
+        # Read only on a return that can carry evidence [CC-2.1], [QUEUE.7].
+        # A healthy persistent SQLite return with no hint before the deadline
+        # means no other connection committed since the last check; the
+        # owner's own writes are made in turns and read at the next wait entry.
+        # Such a return also skips every readiness scan below.
+        can_carry_evidence = (
+            local_hint
+            or native_hint
+            or data_version_hint
+            or (deadline is not None and time.monotonic() >= deadline)
+            or uses_native_activity
+            or self._native_activity_degraded
+            or transient_fallback
+        )
+        if can_carry_evidence and self._has_pending_observation():
             return "return"
 
         if local_hint:
@@ -1213,22 +1250,13 @@ class MultiQueueWatcher(BaseWatcher):
             return "continue"
 
         deadline_reached = deadline is not None and time.monotonic() >= deadline
-        if self._strategy.uses_native_activity() and not deadline_reached:
+        if uses_native_activity and not deadline_reached:
             if self._has_pending_messages():
                 self._mark_pending_messages_prechecked()
                 return "return"
             return "continue"
         if deadline_reached:
             return "return"
-        # A nonpersistent SQLite queue opens a fresh connection for each
-        # operation, so its connection-local PRAGMA data_version cannot be a
-        # durable change detector across strategy turns. Confirm readiness at
-        # the end of each fallback turn. PostgreSQL still uses its native
-        # activity waiter, and persistent SQLite tasks retain data_version as
-        # their quiet-path filter.
-        transient_fallback = (
-            not self._persistent and not self._strategy.uses_native_activity()
-        )
         if (
             self._native_activity_degraded or transient_fallback
         ) and self._has_pending_messages():

@@ -21,7 +21,12 @@ import pytest
 
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.heartbeat as heartbeat_module
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.broker_reads import count_queue_calls
+from tests.helpers.test_backend import (
+    POSTGRES_TEST_BACKEND,
+    active_test_backend,
+    prepare_project_root,
+)
 from weft._constants import (
     CONTROL_PAUSE,
     CONTROL_PING,
@@ -785,6 +790,97 @@ def test_heartbeat_with_empty_table_runs_zero_timer_turns_and_wakes_on_upsert(
         task.cleanup()
         destination.close()
         ctrl_in.close()
+
+
+HEARTBEAT_READ_QUIET_WINDOW_SECONDS = 5.0
+# The quiet window is the measured quantity (broker reads counted inside it),
+# not a synchronization sleep.
+
+
+@pytest.mark.parametrize("rows", [0, 1, 10])
+def test_resident_heartbeat_reads_no_registrations_while_quiet(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[Any],
+    rows: int,
+) -> None:
+    """A quiet resident heartbeat makes no broker reads on persistent SQLite.
+
+    Counts, at the broker boundary (``tests/helpers/broker_reads.py``), every
+    read of ``weft.state.heartbeats`` and every whole-database read over a
+    quiet window with 0, 1 and 10 rows, then proves an upsert still wakes the
+    service. This is plan 6's round-2 obligation: the always-on service idles
+    when not needed, counted rather than asserted in prose. Mutation caught:
+    an observation read on every hint-free strategy return.
+
+    Spec: [CC-2.1], [QUEUE.7], [MF-3.2]
+    """
+
+    if active_test_backend() == POSTGRES_TEST_BACKEND:
+        pytest.skip("native waiter returns keep their check (plan 13 owner decision 1)")
+    del thread_exception_guard
+    context = build_context(spec_context=workdir)
+    for index in range(rows):
+        upsert_heartbeat(
+            context,
+            registrant_tid=str(time.time_ns()),
+            heartbeat_id=f"quiet-{index}",
+            interval_seconds=3600,
+            lease_seconds=7200,
+            destination_queue=f"quiet.dest.{index}",
+            message="tick",
+        )
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    counts = count_queue_calls(
+        monkeypatch,
+        context.queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE),
+        WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+    )
+    turns: list[float] = []
+    original_turn = task._process_reactor_turn
+
+    def counted() -> None:
+        turns.append(time.monotonic())
+        original_turn()
+
+    monkeypatch.setattr(task, "_process_reactor_turn", counted)
+    thread = threading.Thread(target=task.run_until_stopped)
+    thread.start()
+    try:
+        settle_deadline = time.monotonic() + 20.0
+        while not turns or time.monotonic() - turns[-1] < 4.0:
+            assert time.monotonic() < settle_deadline, "heartbeat did not settle"
+            time.sleep(0.05)
+        for key in counts:
+            counts[key] = 0
+        baseline = len(turns)
+
+        time.sleep(HEARTBEAT_READ_QUIET_WINDOW_SECONDS)
+
+        assert thread.is_alive(), "heartbeat driver exited during the quiet window"
+        assert counts["reads"] == 0, counts
+        assert counts["whole_database_reads"] == 0, counts
+        assert len(turns) == baseline, len(turns) - baseline
+
+        upsert_heartbeat(
+            context,
+            registrant_tid=str(time.time_ns()),
+            heartbeat_id="quiet-wake",
+            interval_seconds=3600,
+            lease_seconds=7200,
+            destination_queue="quiet.dest.wake",
+            message="tick",
+        )
+        wake_deadline = time.monotonic() + 5.0
+        while "quiet-wake" not in task._registrations:
+            assert time.monotonic() < wake_deadline, "upsert did not wake the service"
+            time.sleep(0.05)
+    finally:
+        task.stop(join=False)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+        task.cleanup()
 
 
 def test_heartbeat_cancel_before_due_turn_suppresses_emission(workdir: Path) -> None:

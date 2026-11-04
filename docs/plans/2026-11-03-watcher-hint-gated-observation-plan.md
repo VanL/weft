@@ -1,6 +1,6 @@
 # Reactor Wait: Observation Checks Only on Evidence
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/01-Core_Components.md [CC-2.1] (one paragraph and the implementation mapping extended), [CC-2.5] (constraint, unchanged); docs/specifications/07-System_Invariants.md [QUEUE.7], [QUEUE.8], [IMPL.10], [IMPL.11] (constraints, unchanged); docs/specifications/04-SimpleBroker_Integration.md [SB-0.4] (constraint, unchanged); docs/specifications/03-Manager_Architecture.md [MA-1.8], [MA-3] (constraints, unchanged); docs/specifications/05-Message_Flow_and_State.md [MF-3.2] (constraint, unchanged)
 Superseded by: none
 
@@ -703,7 +703,8 @@ No D row remains. Rows 9 and 10 are owner-decided (A).
   `docs/specifications/07-System_Invariants.md` at plan authoring time (the
   cited spans of 01 and 07 are identical at `4372e20e`).
 - Plan type: implementation with spec revision ([CC-2.1] only).
-- Promotion baseline: recorded here at Task 5 (the landing commit, strategy B).
+- Promotion baseline: `1049f452` (the parent of the landing commit, strategy B;
+  the landing commit applies the [CC-2.1] delta with the code).
 
 ## Proposed Spec Delta
 
@@ -1340,3 +1341,554 @@ Draft, 2026-11-03; cross-family round 1: blocker F1–F3, F4–F8; all accepted 
   for a working detector and the own-commit premise.
 
 ## Execution log
+
+### Task 0 (2026-11-04, implementer, baseline `1049f452`)
+
+Reading done before the first edit: `CLAUDE.md`; `docs/program-theory.md`
+[WT-0], [WT-2] item 4, [WT-2a], [WT-4] 4.3 and 4.4, [ALT-WT-002],
+[ALT-WT-010], [WT-7]; `docs/agent-context/engineering-principles.md`;
+`docs/specifications/07-System_Invariants.md` [QUEUE.7];
+`docs/specifications/01-Core_Components.md` [CC-2.1]; the code under "Read
+first"; this plan in full.
+
+Comprehension answers:
+
+1. A hint-free persistent SQLite return before the deadline: the strategy's
+   data-version getter reads `PRAGMA data_version` on the drive thread's own
+   connection at the top of every pass and between the 20 ms sleep chunks
+   (`simplebroker/watcher.py` 1416–1423, 1466–1473). Any commit by another
+   connection (another thread or process) changes that counter, and the
+   strategy then runs the change callback, which sets
+   `_data_version_activity_pending` (`multiqueue_watcher.py` 977–981). So a
+   foreign publication cannot sit unseen behind a hint-free return, except a
+   commit that lands in the final chunk of a pass: that return carries no
+   hint, and the next strategy call's first check returns at once with it.
+   Worst case: one extra strategy return, no extra sleep.
+2. The Manager's own `weft.log.tasks` write during a drain is made on the
+   drive thread's connection, so `data_version` does not change and no hint
+   arrives. It does not matter: the write happens inside a turn, the drive
+   loop then waits (`base.py` 1250–1252) and the wait-entry check (1149)
+   reads; and the Manager's own row is not a target's terminal evidence.
+3. Every PostgreSQL native-waiter return keeps its observation check and
+   readiness scan because an exact delete (`DELETE_MESSAGE_IDS_COUNT`,
+   `simplebroker_pg/_sql.py` 82–94) sends no notification, so a heartbeat
+   cancel is never hinted, and a listener connection broken without an
+   error delivers nothing; the native idle return (watcher.py 1447–1449,
+   interval at 1386, jitter 1636–1648) is SimpleBroker's slow safety recheck
+   ([CC-2.1]) for exactly those cases. Owner Decisions item 1, default (a).
+4. The wait-entry check finds a publication committed before the waiter
+   registered (the PostgreSQL listener drops notifications for unregistered
+   queues, `simplebroker_pg/runner.py` 297) or before the call, and the
+   drive thread's own same-connection writes from the preceding turn, none
+   of which the strategy reports.
+5. The gate neither keeps nor repeats a read after a failed provider,
+   `refresh_last_ts()` or observation read: on a reasonable SQLite in WAL
+   mode those calls fail only on a database that is no longer readable, on
+   which the observation read fails too, so a repeat recovers nothing; the
+   owner ruled that the correct response is to do nothing (Owner Decisions
+   item 2). The overriders' `except` blocks (now `manager.py` 1970–1972 and
+   5222–5224; `heartbeat.py` 224–226) log and return `False` and stay
+   unchanged.
+
+Line-number re-verification (`grep -n`):
+
+- `weft/core/tasks/multiqueue_watcher.py` (last changed `4a8884cb`): every
+  cited line holds (`_activity_wait_queues` 876, `_has_pending_observation`
+  881, `_ensure_multi_activity_waiter` 917, `_start_strategy` 969,
+  `_on_data_version_change` 977, `_wait_for_activity_body` 1133, entry check
+  1149, `_activity_hint_action` 1189, unconditional call 1201, transient
+  comment 1223–1228, `_has_pending_messages` 1299; flags 231–233; constructor
+  registration 251).
+- `weft/core/tasks/base.py`: 333, 1214, 1250–1252, 1358, 1508, 1554 hold.
+- `weft/core/tasks/heartbeat.py`: 189, 199, 224–226, 548, 693 hold.
+- `weft/core/manager.py` shifted after `e3817033`: `_ManagerStartupFeedback`
+  343 → 346; `_queue_counts_as_wait_activity` 1234 → 1236;
+  `_activity_wait_queues` 1925 → 1927 (the `_active_child_launches` skip
+  1930–1931 → 1932–1933); `_has_pending_observation` 1938 → 1940
+  (`publication_pending` short-circuit 1949 → 1951; `except` 1968–1970 →
+  1970–1972); `_drain_stop_target_queues` 5196 → 5172;
+  `_has_pending_drain_stop_observation` 5211 → 5187 (`except` 5246–5248 →
+  5222–5224).
+- `weft/_constants.py`: `MANAGER_ADMISSION_RECHECK_SECONDS` 823 → 822.
+- `tests/core/test_manager.py`: `_HEARTBEAT_READ_METHODS` 5478–5493 →
+  5479–5494; `_HEARTBEAT_DELETE_METHODS` 5494 → 5495; the test 5500; the
+  MRO lookup 5517–5520 and the inline wrapper 5531–5547 hold within one line.
+- `tests/tasks/test_multiqueue_watcher.py`: `ObservationWatcher` 119–150,
+  the replaced test 154–193 (direct call 181, membership 182),
+  `polling_strategy=` injections 1195 and 1484, the stub pattern 3194–3229
+  hold; `test_postgres_dynamic_membership_rebinds_native_waiter` starts at
+  2377 (its backend gate near 2384–2385).
+- Installed SimpleBroker 8.7.2 / simplebroker-pg 4.7.2: watcher.py 102, 450,
+  496, 500, 1386, 1390, 1647, 1653, 1690 hold; `BrokerCore.get_data_version`
+  at `db.py` 3960; `sqlite/maintenance.py` `get_data_version` 141;
+  `sbqueue.py::create_activity_waiter_for_queues` starts at 2125;
+  `_sql.py` 82 and 196 hold.
+- `docs/specifications/01-Core_Components.md`: [CC-2.1] current-role
+  sentences 201–202 and the mapping 180–182 match the plan's "Current text"
+  verbatim; `## Related Plans` is at 1314 with the "Reactor edge timer
+  floors" bullet at 1318 (as round 2 recorded).
+- `docs/program-theory.md`: [WT-7] is now `## Tensions and falsifiers
+  [WT-7]` at line 993 (the plan cites 966–977; the file grew). The id
+  [ALT-WT-022] in `docs/program-theory.md` (line 964) is now "A lossy TID
+  short form"; the plan's "draft [ALT-WT-022]" refers to plan 6's
+  unapplied draft text of that id and is not the applied entry. No theory
+  edit is made.
+- `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+  `### Audit table` at 5409 holds.
+
+Baseline measurements (Task 0 items 1–4), production code at `1049f452`
+(the working tree held only uncommitted test and plan edits, which the
+scripts do not exercise except `make_heartbeat_taskspec`). Runner
+`run_all.sh` ran each item in sequence per backend, nothing else running.
+PostgreSQL: the container `./bin/pytest-pg --keep-container` provisioned
+(`postgres:18`, DSN `postgresql://postgres:<password>@127.0.0.1:33375/weft_test`),
+with `BROKER_TEST_BACKEND=postgres`, `WEFT_PG_TEST_DSN`, and
+`BROKER_BACKEND_PASSWORD`/`WEFT_BACKEND_PASSWORD` (the project config
+`prepare_project_root` writes is passwordless; the first PostgreSQL attempt
+without the password variables failed to authenticate and was re-run).
+
+SQLite, `1049f452`:
+
+```text
+=== sqlite item1 idle_tree
+pid=51065 vcs_delta=2418 cpu_delta_s=0.448 weft-plan2-id-1HS74VD77WM00:manager:running
+pid=51066 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51067 vcs_delta=2818 cpu_delta_s=0.327 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51068 vcs_delta=2934 cpu_delta_s=0.304 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51069 vcs_delta=3811 cpu_delta_s=0.374 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=11981 (399.4/s) cpu_delta_s=1.454
+=== sqlite item2 rows=0
+backend=sqlite mode=reads rows=0 window=30.0s alive=True
+  reads: 248
+  whole: 0
+  returns: 248
+  observations: 248
+  turns: 0
+=== sqlite item2 rows=1
+backend=sqlite mode=reads rows=1 window=30.0s alive=True
+  reads: 500
+  whole: 0
+  returns: 250
+  observations: 250
+  turns: 0
+=== sqlite item2 rows=10
+backend=sqlite mode=reads rows=10 window=30.0s alive=True
+  reads: 496
+  whole: 0
+  returns: 248
+  observations: 248
+  turns: 0
+=== sqlite item3 latency
+backend=sqlite mode=latency samples=20
+  latency_s median=0.0135 max=0.0239
+  strategy_returns median=1.0 max=2
+  latencies=[0.0205, 0.0069, 0.0069, 0.0069, 0.014, 0.0219, 0.0035, 0.016, 0.0204, 0.0104, 0.015, 0.0072, 0.0196, 0.0127, 0.0231, 0.0159, 0.0039, 0.0239, 0.013, 0.0117]
+  returns=[1, 1, 2, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+=== sqlite item4 quiet_task
+backend=sqlite window=30.0s (after 2 s settle)
+  turns: 0 in window (total incl. startup 2)
+  pending_probes: 0 in window (total incl. startup 1)
+  strategy_returns: 258 in window (total incl. startup 416)
+```
+
+PostgreSQL, `1049f452`:
+
+```text
+=== postgres item1 idle_tree
+pid=51688 vcs_delta=4660 cpu_delta_s=0.700 weft-plan2-id-1HS754BQ3Q400:manager:running
+pid=51689 vcs_delta=0 cpu_delta_s=0.000 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51690 vcs_delta=3245 cpu_delta_s=0.089 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51691 vcs_delta=3126 cpu_delta_s=0.075 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+pid=51692 vcs_delta=9831 cpu_delta_s=0.143 /Users/van/Developer/weft/.venv/bin/python -B -c from multip
+TOTAL window=30.0s vcs_delta=20862 (695.4/s) cpu_delta_s=1.007
+=== postgres item2 rows=0
+backend=postgres mode=reads rows=0 window=30.0s alive=True
+  reads: 19
+  whole: 0
+  returns: 19
+  observations: 19
+  turns: 0
+=== postgres item2 rows=1
+backend=postgres mode=reads rows=1 window=30.0s alive=True
+  reads: 36
+  whole: 0
+  returns: 18
+  observations: 18
+  turns: 0
+=== postgres item2 rows=10
+backend=postgres mode=reads rows=10 window=30.0s alive=True
+  reads: 38
+  whole: 0
+  returns: 19
+  observations: 19
+  turns: 0
+=== postgres item3 latency
+backend=postgres mode=latency samples=20
+  latency_s median=0.0046 max=0.0069
+  strategy_returns median=0.0 max=0
+  latencies=[0.0034, 0.0035, 0.0035, 0.0045, 0.0023, 0.0046, 0.0045, 0.0046, 0.0057, 0.0068, 0.0068, 0.0024, 0.0046, 0.0057, 0.0046, 0.0044, 0.0069, 0.0057, 0.0034, 0.0035]
+  returns=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+=== postgres item4 quiet_task
+backend=postgres window=30.0s (after 2 s settle)
+  turns: 0 in window (total incl. startup 2)
+  pending_probes: 19 in window (total incl. startup 20)
+  strategy_returns: 19 in window (total incl. startup 21)
+```
+
+Notes on the baseline: item 1's per-process labels come from
+`ps -o command=`, which shows the interpreter command line for the three
+spawned service children (TaskMonitor, LivenessMonitor, heartbeat), so the
+unchanged script cannot name which PID is the heartbeat; the deviation is
+recorded and the tree totals are compared. Item 2's "reads" counts every
+named-queue read of `weft.state.heartbeats` (two per check with rows: the
+`has_pending` and the row-ID peek); "returns" counts
+`PollingStrategy.wait_for_activity` returns; "observations" counts
+`_has_pending_observation` calls. Item 3's "strategy_returns" counts returns
+between the upsert's return and the membership check's first success; a
+return that completed while `upsert_heartbeat` was still deleting older
+rows is not counted, which is why PostgreSQL shows 0.
+
+Item 5, installed `BrokerCore` (SimpleBroker 8.7.2, `simplebroker/db.py`):
+the public methods taking one named queue as first argument and reading it
+are exactly the 15 of `NAMED_QUEUE_READ_METHODS` (`peek_one` 2802,
+`peek_many` 2849, `peek_generator` 2902, `claim_one` 2634, `claim_many`
+2674, `claim_generator` 2726, `move_one` 2972, `move_many` 3022,
+`move_generator` 3084, `queue_exists` 3329, `get_queue_stat` 3343,
+`find_message_ids` 3542, `queue_exists_and_has_messages` 3860,
+`has_pending_messages` 3886, `latest_pending_timestamp` 3926); the
+whole-database reads are exactly the 6 of `WHOLE_DATABASE_READ_METHODS`
+(`list_queues` 3247, `get_queue_stats` 3311, `list_queue_stats` 3366,
+`get_overall_stats` 3410, `count_claimed_messages` 3423, `status` 3436).
+Differences recorded, none a read of one named queue: `delete_from_queues`
+(3576, a delete over a list of queues), `rename_queue` (3628) and
+`broadcast` (3747) are writes; alias methods (`resolve_alias`,
+`canonicalize_queue`, `has_alias`, `list_aliases`, `aliases_for_target`)
+read the alias table, not a queue; `get_meta`, `get_data_version` and the
+timestamp methods read metadata.
+
+Measurement scripts (sources; plan 2's `idle_tree.py` and `quiet_task.py`
+were used unchanged from plan 2's execution log and are not repeated):
+
+`heartbeat_probe.py` (items 2 and 3):
+
+```python
+"""Plan 13 Task 0 items 2 and 3: resident heartbeat reads and observation latency.
+
+MODE=reads ROWS=<n>: rows written before start, 5 s settle, then a 30 s count of
+BrokerCore read calls naming weft.state.heartbeats, strategy returns and
+_has_pending_observation calls.
+MODE=latency: 0 rows, 5 s settle, then 20 upserts 1 s apart with distinct ids;
+per upsert, seconds from the write's return to membership in
+task._registrations and strategy returns in between.
+"""
+
+from __future__ import annotations
+
+import os
+import statistics
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+REPO = Path("/Users/van/Developer/weft")
+sys.path.insert(0, str(REPO))
+import simplebroker.watcher as sbw  # noqa: E402
+
+from tests.helpers.weft_harness import WeftTestHarness  # noqa: E402
+from tests.tasks.test_heartbeat import make_heartbeat_taskspec  # noqa: E402
+from weft._constants import WEFT_HEARTBEAT_REGISTRATIONS_QUEUE  # noqa: E402
+from weft.core.heartbeat import upsert_heartbeat  # noqa: E402
+from weft.core.tasks import HeartbeatTask  # noqa: E402
+
+# Identical to tests/helpers/broker_reads.py (plan 13 Task 1).
+NAMED = (
+    "peek_one",
+    "peek_many",
+    "peek_generator",
+    "claim_one",
+    "claim_many",
+    "claim_generator",
+    "move_one",
+    "move_many",
+    "move_generator",
+    "has_pending_messages",
+    "latest_pending_timestamp",
+    "queue_exists_and_has_messages",
+    "get_queue_stat",
+    "find_message_ids",
+    "queue_exists",
+)
+WHOLE = (
+    "list_queues",
+    "get_queue_stats",
+    "list_queue_stats",
+    "get_overall_stats",
+    "count_claimed_messages",
+    "status",
+)
+MODE = os.environ.get("MODE", "reads")
+ROWS = int(os.environ.get("ROWS", "0"))
+WINDOW = float(os.environ.get("WINDOW", "30"))
+counts = {"reads": 0, "whole": 0, "returns": 0, "observations": 0, "turns": 0}
+
+orig_wait = sbw.PollingStrategy.wait_for_activity
+
+
+def wait(self: Any, *a: Any, **k: Any) -> Any:
+    try:
+        return orig_wait(self, *a, **k)
+    finally:
+        counts["returns"] += 1
+
+
+sbw.PollingStrategy.wait_for_activity = wait  # type: ignore[method-assign]
+
+
+def install_counters(sample: Any) -> None:
+    with sample.get_connection() as conn:
+        klass = next(c for c in type(conn).__mro__ if "peek_many" in vars(c))
+    for name in NAMED + WHOLE:
+        original = getattr(klass, name)
+
+        def wrapper(
+            self: Any, *a: Any, _o: Any = original, _n: str = name, **k: Any
+        ) -> Any:
+            if _n in WHOLE:
+                counts["whole"] += 1
+            elif (a[0] if a else k.get("queue")) == WEFT_HEARTBEAT_REGISTRATIONS_QUEUE:
+                counts["reads"] += 1
+            return _o(self, *a, **k)
+
+        setattr(klass, name, wrapper)
+
+
+def main() -> None:
+    with WeftTestHarness() as harness:
+        context = harness.context
+        for index in range(ROWS):
+            upsert_heartbeat(
+                context,
+                registrant_tid=str(time.time_ns()),
+                heartbeat_id=f"quiet-{index}",
+                interval_seconds=3600,
+                lease_seconds=7200,
+                destination_queue=f"quiet.dest.{index}",
+                message="tick",
+            )
+        tid = str(time.time_ns())
+        task = HeartbeatTask(
+            context.broker_target, make_heartbeat_taskspec(tid, harness.root)
+        )
+        orig_obs = task._has_pending_observation
+        orig_turn = task._process_reactor_turn
+        turn_times: list[float] = []
+
+        def obs() -> bool:
+            counts["observations"] += 1
+            return orig_obs()
+
+        def turn() -> None:
+            counts["turns"] += 1
+            turn_times.append(time.monotonic())
+            orig_turn()
+
+        task._has_pending_observation = obs  # type: ignore[method-assign]
+        task._process_reactor_turn = turn  # type: ignore[method-assign]
+        install_counters(context.queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE))
+        thread = threading.Thread(target=task.run_until_stopped, daemon=True)
+        thread.start()
+        backend = os.environ.get("BROKER_TEST_BACKEND", "sqlite")
+        try:
+            time.sleep(5.0)
+            if MODE == "reads":
+                base = dict(counts)
+                time.sleep(WINDOW)
+                after = dict(counts)
+                print(
+                    f"backend={backend} mode=reads rows={ROWS} window={WINDOW}s alive={thread.is_alive()}"
+                )
+                for key in counts:
+                    print(f"  {key}: {after[key] - base[key]}")
+            else:
+                latencies: list[float] = []
+                returns: list[int] = []
+                for index in range(20):
+                    hid = f"lat-{index}"
+                    upsert_heartbeat(
+                        context,
+                        registrant_tid=str(time.time_ns()),
+                        heartbeat_id=hid,
+                        interval_seconds=3600,
+                        lease_seconds=7200,
+                        destination_queue=f"lat.dest.{index}",
+                        message="tick",
+                    )
+                    start = time.monotonic()
+                    start_returns = counts["returns"]
+                    while hid not in task._registrations:
+                        if time.monotonic() - start > 10.0:
+                            raise SystemExit(f"{hid} not observed in 10 s")
+                        time.sleep(0.001)
+                    latencies.append(time.monotonic() - start)
+                    returns.append(counts["returns"] - start_returns)
+                    time.sleep(1.0)
+                print(f"backend={backend} mode=latency samples=20")
+                print(
+                    f"  latency_s median={statistics.median(latencies):.4f} max={max(latencies):.4f}"
+                )
+                print(
+                    f"  strategy_returns median={statistics.median(returns)} max={max(returns)}"
+                )
+                print(f"  latencies={[round(x, 4) for x in latencies]}")
+                print(f"  returns={returns}")
+        finally:
+            task.stop(join=False)
+            thread.join(timeout=10.0)
+            task.cleanup()
+
+
+main()
+```
+
+`run_all.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Usage: run_all.sh <label>   (label: before|after); runs SQLite then PostgreSQL.
+set -u
+M=/private/tmp/claude-501/-Users-van-Developer-weft/ac65a238-5c84-4ce8-8e8e-2287e7f6299f/scratchpad/series/impl/plan13/measure
+cd /Users/van/Developer/weft
+. ./.envrc >/dev/null 2>&1
+PY=./.venv/bin/python
+OUT=$M/$1.txt
+BACKENDS=${2:-sqlite postgres}
+: > $OUT
+echo "commit $(git rev-parse --short HEAD)" >> $OUT
+for backend in $BACKENDS; do
+  if [ $backend = postgres ]; then
+    # The project config written by prepare_project_root is passwordless.
+    export BROKER_TEST_BACKEND=postgres WEFT_PG_TEST_DSN=postgresql://postgres:postgres@127.0.0.1:33375/weft_test
+    export BROKER_BACKEND_PASSWORD=postgres WEFT_BACKEND_PASSWORD=postgres
+  else
+    unset BROKER_TEST_BACKEND WEFT_PG_TEST_DSN BROKER_BACKEND_PASSWORD WEFT_BACKEND_PASSWORD
+  fi
+  echo "=== $backend item1 idle_tree" >> $OUT; $PY -B $M/idle_tree.py >> $OUT 2>&1
+  for rows in 0 1 10; do
+    echo "=== $backend item2 rows=$rows" >> $OUT; MODE=reads ROWS=$rows $PY -B $M/heartbeat_probe.py >> $OUT 2>&1
+  done
+  echo "=== $backend item3 latency" >> $OUT; MODE=latency $PY -B $M/heartbeat_probe.py >> $OUT 2>&1
+  echo "=== $backend item4 quiet_task" >> $OUT; $PY -B $M/quiet_task.py >> $OUT 2>&1
+done
+echo DONE >> $OUT
+```
+
+### Task 1 RED (2026-11-04)
+
+- `tests/helpers/broker_reads.py` added (15 named-queue reads, 6
+  whole-database reads, 2 deletes, `count_queue_calls`);
+  `tests/core/test_manager.py` now uses it, its assertion
+  `counts["reads"] == 0 and counts["deletes"] == 0`.
+- R1 and R2 written; `ObservationWatcher` gained `persistent: bool = True`.
+- RED, `./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py -k hint_free_persistent -q`:
+  `AssertionError: (26, 25)` / `assert 26 <= 2` (26 observation calls over
+  25 strategy returns).
+- RED, `./.venv/bin/python -m pytest tests/tasks/test_heartbeat.py -k reads_no_registrations -q`:
+  all three parameters failed on the read count:
+  `{'reads': 42, 'whole_database_reads': 0, 'deletes': 0}` for `[0]` and
+  `{'reads': 84, ...}` for `[1]` and `[10]` (a second run: 41, 82, 84).
+  No turn in the window and the thread alive (the read assertion is the
+  first that fails).
+- `tests/core/test_manager.py -k never_reads_or_deletes -m ""`: 3 passed
+  in 31.67 s.
+
+### Task 2 GREEN and guards (2026-11-04)
+
+- `_activity_hint_action` gate and the two docstrings applied. Deviation
+  (form only): the design's `if not (...): return "continue"` followed by
+  `if self._has_pending_observation()` is written as
+  `can_carry_evidence = (...)` and
+  `if can_carry_evidence and self._has_pending_observation(): return "return"`,
+  because the separate `if` raised `_activity_hint_action` to McCabe 11 and
+  failed `ruff check` (C901, limit 10); an approved suppression would need a
+  registry edit outside this plan's files. Behavior is the same: on a
+  return that cannot carry evidence every later branch is false (no local,
+  native or data-version hint; not native; not degraded; not transient),
+  so the tail reads nothing and continues, or returns to the owner if the
+  deadline passed in between, exactly as the loop's own deadline check
+  would. A comment says so.
+- G1, G2 `[True]`/`[False]`, G3 and R7 written; the old
+  `test_notification_only_publication_returns_owner_without_delivery`
+  removed; its factory wrapper is `_record_registrations`, its delivery
+  assertions `_assert_retained_evidence_not_delivered`.
+- GREEN: `./.venv/bin/python -m pytest tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py`:
+  130 passed, 2 skipped (the PostgreSQL-only cases) in 38.62 s; R1, R2
+  `[0]`, `[1]`, `[10]`, G1, G2 `[True]`, `[False]`, G3, R7 all PASSED.
+  `./bin/pytest-pg tests/tasks/test_multiqueue_watcher.py tests/tasks/test_heartbeat.py`:
+  129 passed, 3 skipped (R2's three parameters, by design) in 40.88 s.
+- G2 strategy returns counted from the write's return to the observation,
+  five runs each: SQLite persistent 1, 1, 1, 1, 1 (elapsed about 0.012 s);
+  SQLite nonpersistent 0 (about 0.06 s); PostgreSQL persistent 0 and
+  nonpersistent 0 (about 0.005 s).
+- Mutations, each applied to the file, its test run, the file restored
+  from the saved GREEN copy (no git checkout), with
+  `PYTHONDONTWRITEBYTECODE=1`:
+  - unconditional observation call restored → R1
+    `AssertionError: (26, 25)`; R2 `[0]` `{'reads': 41, ...}` / `assert 41 == 0`.
+  - wait-entry check removed → G1 `assert 1 == 0` (one strategy call).
+  - wait-entry check moved above `_ensure_wait_strategy_started()` → G1
+    `assert [[['observation.first']]] == [[['observation.first'], ['observation.second']]]`.
+  - `data_version_hint` dropped from the gate → G2 `[True]`
+    `assert 20.08428395818919 < 10.0` (found only at the 20 s deadline).
+  - `transient_fallback` dropped → G2 `[False]` `assert 20.05552183324471 < 10.0`.
+    The first run of this mutation under xdist passed once, unexplained
+    (a direct `-n 0` run with a trace showed 303 closed-gate returns and the
+    deadline failure); every later run, including the recorded one with
+    bytecode writing off, failed as above.
+  - `_native_activity_degraded` dropped → G3 `assert 412 == 1` (strategy
+    calls until the deadline).
+  - tail deadline computed before the observation read → R7 `assert 1 == 0`
+    (one readiness scan).
+  - `native_hint` and `uses_native_activity` dropped, PostgreSQL
+    (`./bin/pytest-pg`) → G2 `[True]` `assert 20.00586499972269 < 10.0`.
+
+### Task 4 guards (2026-11-04)
+
+- SQLite, `./.venv/bin/python -m pytest -m "" <the Task 4 node IDs>`:
+  60 passed in 62.76 s.
+- PostgreSQL, `./bin/pytest-pg <the same node IDs> tests/system/test_measured_admission_pg.py::test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage`:
+  57 passed, 3 skipped (R2), 1 failed:
+  `test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage`
+  at `tests/system/test_measured_admission_pg.py:438`,
+  `assert not started[2].is_set()` (the third startup began while startup
+  pressure should hold it). It fails three times out of three with the
+  gate, and also fails with `weft/core/tasks/multiqueue_watcher.py`
+  temporarily restored to `1049f452` (`git show HEAD:...` into the file,
+  then the GREEN copy put back), so it is not caused by this plan: the
+  gate never closes on PostgreSQL native-waiter returns, which is the only
+  path this test drives. The Stop-if's premise (a Manager observation
+  arriving without a hint) is therefore not what failed; the failure is
+  recorded and reported to the series lead, not investigated or tuned here.
+
+### Task 5 spec, docstrings, CHANGELOG (2026-11-04)
+
+- The three `## Proposed Spec Delta` blocks applied verbatim to
+  `docs/specifications/01-Core_Components.md`; `grep -F` finds each of
+  "return can carry new evidence. One check runs at wait entry, after the
+  waiter", "that is not readable nothing is done. The readiness scan",
+  "return gate for observation and readiness checks." and the new
+  `## Related Plans` bullet exactly once. `./bin/check-doc-paths`: OK.
+- `CHANGELOG.md` `## [Unreleased]` / `### Changed`: the bullet as written in
+  Task 5.
+- Docstrings: `_activity_hint_action` and `_wait_for_activity_body` carry
+  `Spec:` lines with [CC-2.1] and [QUEUE.7]; the module docstring already
+  cites [CC-2.1] and is unchanged.
+- Spec Baseline promotion: the landing commit (this commit).
+- `Status:` and the `docs/plans/README.md` row: `draft` → `promoted`.
+- Landing-commit gates: full fast suite exit 0 (no failures);
+  mypy "Success: no issues found in 487 source files"; `ruff check .` "All
+  checks passed!"; `ruff format --check .` "655 files already formatted"
+  (the `heartbeat_probe.py` block above is ruff-formatted, otherwise
+  identical to the script run); `./bin/check-doc-paths` OK;
+  `tests/specs/test_plan_metadata.py` passed.

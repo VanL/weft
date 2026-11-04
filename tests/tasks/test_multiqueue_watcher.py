@@ -119,7 +119,7 @@ class TimeoutWaiter(FakeWaiter):
 class ObservationWatcher(MultiQueueWatcher):
     """Use real queue publications without adding a delivery route [QUEUE.7]."""
 
-    def __init__(self, db: Any, observation: Queue) -> None:
+    def __init__(self, db: Any, observation: Queue, *, persistent: bool = True) -> None:
         self.observation: Queue | None = observation
         self.observed_timestamp = 0
         super().__init__(
@@ -127,6 +127,7 @@ class ObservationWatcher(MultiQueueWatcher):
                 "observation.delivery": {"handler": self._unexpected_delivery}
             },
             db=db,
+            persistent=persistent,
         )
 
     @staticmethod
@@ -150,14 +151,11 @@ class ObservationWatcher(MultiQueueWatcher):
         return True
 
 
-@pytest.mark.parametrize("publish_before_registration", [False, True])
-def test_notification_only_publication_returns_owner_without_delivery(
-    broker_env: BrokerEnv,
+def _record_registrations(
     monkeypatch: pytest.MonkeyPatch,
-    publish_before_registration: bool,
-) -> None:
-    db, make_queue = broker_env
-    observation = make_queue("observation.state")
+) -> list[list[str]]:
+    """Record each registered interest list, delegating to the real factory."""
+
     registrations: list[list[str]] = []
 
     def create(
@@ -169,27 +167,283 @@ def test_notification_only_publication_returns_owner_without_delivery(
     monkeypatch.setattr(
         "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues", create
     )
-    if publish_before_registration:
-        observation.write("snapshot")
-    watcher = ObservationWatcher(db, observation)
+    return registrations
+
+
+def _stub_hint_free_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    watcher: MultiQueueWatcher,
+    one_pass: Callable[..., None],
+    *,
+    native: bool = False,
+) -> None:
+    """Force strategy returns that carry no local, native or data-version hint."""
+
+    monkeypatch.setattr(watcher._strategy, "wait_for_activity", one_pass)
+    monkeypatch.setattr(watcher._strategy, "consume_local_activity_hint", lambda: False)
+    monkeypatch.setattr(
+        watcher._strategy, "consume_native_activity_hint", lambda: False
+    )
+    monkeypatch.setattr(watcher._strategy, "uses_native_activity", lambda: native)
+
+
+def _assert_retained_evidence_not_delivered(
+    watcher: ObservationWatcher, observation: Queue
+) -> None:
+    assert observation.peek_one() == "snapshot"
+    assert observation.name not in watcher._queues
+    assert not watcher._has_pending_messages()
+    # The retained row is evidence, not recurring work.
+    watcher.wait_for_activity(timeout=0.01)
+    assert not watcher._has_pending_observation()
+
+
+def test_notification_publication_before_wait_is_found_without_a_strategy_return(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait-entry check reads after registration, before any strategy call.
+
+    Spec: [CC-2.1], [QUEUE.7]. Mutations caught: removing the wait-entry
+    check (the strategy runs); moving it above the strategy start (the first
+    read sees only the old registration).
+    """
+
+    db, make_queue = broker_env
+    first, second = make_queue("observation.first"), make_queue("observation.second")
+    registrations = _record_registrations(monkeypatch)
+    watcher = ObservationWatcher(db, first)
+    seen_at_first_read: list[list[list[str]]] = []
+    strategy_calls = 0
+    original_observation = watcher._has_pending_observation
+    original_wait = watcher._strategy.wait_for_activity
+
+    def observe() -> bool:
+        if not seen_at_first_read:
+            seen_at_first_read.append([list(names) for names in registrations])
+        return original_observation()
+
+    def counted_wait(*, timeout: float | None = None) -> None:
+        nonlocal strategy_calls
+        strategy_calls += 1
+        original_wait(timeout=timeout)
+
     try:
-        if publish_before_registration:
-            watcher.wait_for_activity(timeout=0.1)
-        else:
-            watcher._ensure_wait_strategy_started()
-            observation.write("snapshot")
-            assert watcher._activity_hint_action(deadline=None) == "return"
+        watcher.observation = second
+        message_id = second.write("snapshot")
+        monkeypatch.setattr(watcher, "_has_pending_observation", observe)
+        monkeypatch.setattr(watcher._strategy, "wait_for_activity", counted_wait)
+
+        watcher.wait_for_activity(timeout=5.0)
+
+        assert seen_at_first_read == [[[first.name], [second.name]]]
+        assert watcher.observed_timestamp == message_id
+        assert strategy_calls == 0
+        _assert_retained_evidence_not_delivered(watcher, second)
+    finally:
+        watcher.stop(join=False)
+        first.close()
+        second.close()
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_notification_publication_during_wait_is_found_on_the_hinted_return(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent: bool,
+) -> None:
+    """A publication from another connection is found within two strategy returns.
+
+    Spec: [CC-2.1], [QUEUE.7]. The write is deliberately not aligned with a
+    detector check; the bound of two returns covers every alignment. On
+    PostgreSQL the persistent case uses the real native waiter. Mutations
+    caught: dropping the data-version hint (persistent SQLite), the
+    transient fallback (nonpersistent) or the native terms (PostgreSQL) from
+    the gate.
+    """
+
+    db, make_queue = broker_env
+    observation = make_queue("observation.during")
+    registrations = _record_registrations(monkeypatch)
+    watcher = ObservationWatcher(db, observation, persistent=persistent)
+    entered = threading.Event()
+    strategy_calls = 0
+    calls_at_write: list[int] = []
+    written: list[int] = []
+
+    def write_after_entry() -> None:
+        if entered.wait(timeout=10.0):
+            written.append(observation.write("snapshot"))
+            calls_at_write.append(strategy_calls)
+
+    try:
+        # Start the strategy, take its data-version baseline, consume its hint.
+        watcher.wait_for_activity(timeout=0.05)
+        assert watcher._data_version_activity_pending is False
+        original_wait = watcher._strategy.wait_for_activity
+
+        def counted_wait(*, timeout: float | None = None) -> None:
+            nonlocal strategy_calls
+            strategy_calls += 1
+            entered.set()
+            original_wait(timeout=timeout)
+
+        monkeypatch.setattr(watcher._strategy, "wait_for_activity", counted_wait)
+        writer = threading.Thread(target=write_after_entry)
+        writer.start()
+        started = time.monotonic()
+        watcher.wait_for_activity(timeout=20.0)
+        elapsed = time.monotonic() - started
+        writer.join(timeout=10.0)
+
+        assert written, "the writer never ran"
         assert registrations == [[observation.name]]
-        assert watcher.observed_timestamp > 0
-        assert observation.peek_one() == "snapshot"
-        assert observation.name not in watcher._queues
-        assert not watcher._has_pending_messages()
-        # The retained row is evidence, not recurring work.
-        watcher.wait_for_activity(timeout=0.01)
-        assert not watcher._has_pending_observation()
+        assert watcher.observed_timestamp == written[0]
+        assert elapsed < 10.0, elapsed
+        returns_after_write = strategy_calls - calls_at_write[0]
+        assert returns_after_write <= 2, returns_after_write
+        _assert_retained_evidence_not_delivered(watcher, observation)
     finally:
         watcher.stop(join=False)
         observation.close()
+
+
+def test_hint_free_persistent_return_reads_no_observation(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hint-free persistent return before the deadline reads nothing.
+
+    Spec: [CC-2.1], [QUEUE.7]. Observation runs at wait entry and at most
+    once more on the deadline return. Mutation caught: an unconditional
+    observation call on every strategy return.
+    """
+
+    db, make_queue = broker_env
+    observation = make_queue("observation.quiet")
+    watcher = ObservationWatcher(db, observation)
+    observation_calls = 0
+    strategy_calls = 0
+    original_observation = watcher._has_pending_observation
+
+    def counted_observation() -> bool:
+        nonlocal observation_calls
+        observation_calls += 1
+        return original_observation()
+
+    def one_pass(*, timeout: float | None = None) -> None:
+        nonlocal strategy_calls
+        del timeout
+        strategy_calls += 1
+        threading.Event().wait(timeout=0.01)
+
+    monkeypatch.setattr(watcher, "_has_pending_observation", counted_observation)
+    _stub_hint_free_strategy(monkeypatch, watcher, one_pass)
+    try:
+        watcher.wait_for_activity(timeout=0.3)
+    finally:
+        watcher.stop(join=False)
+        observation.close()
+
+    assert strategy_calls >= 5, strategy_calls
+    assert observation_calls <= 2, (observation_calls, strategy_calls)
+
+
+def test_notification_publication_on_degraded_fallback_is_found_without_a_hint(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded watcher keeps its observation check on every return.
+
+    Spec: [CC-2.1], [QUEUE.7]. Mutation caught: dropping the degraded
+    fallback from the gate (the stub runs until the deadline).
+    """
+
+    db, make_queue = broker_env
+    observation = make_queue("observation.degraded")
+
+    def failing_create(
+        queues: Sequence[Queue], *, stop_event: threading.Event
+    ) -> ActivityWaiter | None:
+        del queues, stop_event
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(
+        "weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues",
+        failing_create,
+    )
+    watcher = ObservationWatcher(db, observation)
+    strategy_calls = 0
+
+    def publish_on_first_pass(*, timeout: float | None = None) -> None:
+        nonlocal strategy_calls
+        del timeout
+        strategy_calls += 1
+        if strategy_calls == 1:
+            writer = threading.Thread(target=observation.write, args=("snapshot",))
+            writer.start()
+            writer.join(timeout=10.0)
+        threading.Event().wait(timeout=0.01)
+
+    try:
+        assert watcher._native_activity_degraded is True
+        assert watcher._multi_activity_waiter is None
+        _stub_hint_free_strategy(monkeypatch, watcher, publish_on_first_pass)
+        watcher.wait_for_activity(timeout=5.0)
+        assert strategy_calls == 1, strategy_calls
+        assert watcher.observed_timestamp > 0
+        assert observation.peek_one() == "snapshot"
+    finally:
+        watcher.stop(join=False)
+        observation.close()
+
+
+def test_slow_observation_crossing_the_deadline_skips_readiness(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tail's deadline is evaluated after a slow observation read.
+
+    Spec: [CC-2.1]. A native-waiter return with no hint whose observation
+    read crosses the deadline hands the turn to the owner without a
+    readiness scan. Mutation caught: reusing a deadline computed before the
+    observation read in the tail.
+    """
+
+    db, make_queue = broker_env
+    observation = make_queue("observation.slow")
+    watcher = ObservationWatcher(db, observation)
+    observation_calls = 0
+    readiness_calls = 0
+    original_readiness = watcher._has_pending_messages
+
+    def slow_second_observation() -> bool:
+        nonlocal observation_calls
+        observation_calls += 1
+        if observation_calls == 2:
+            threading.Event().wait(timeout=0.2)
+        return False
+
+    def counted_readiness() -> bool:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return original_readiness()
+
+    def one_pass(*, timeout: float | None = None) -> None:
+        del timeout
+        threading.Event().wait(timeout=0.01)
+
+    monkeypatch.setattr(watcher, "_has_pending_observation", slow_second_observation)
+    monkeypatch.setattr(watcher, "_has_pending_messages", counted_readiness)
+    _stub_hint_free_strategy(monkeypatch, watcher, one_pass, native=True)
+    try:
+        watcher.wait_for_activity(timeout=0.1)
+    finally:
+        watcher.stop(join=False)
+        observation.close()
+
+    assert observation_calls == 2, observation_calls
+    assert readiness_calls == 0, readiness_calls
 
 
 @pytest.mark.parametrize("replacement", ["success", "failure", "empty"])

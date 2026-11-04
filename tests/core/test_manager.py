@@ -38,6 +38,7 @@ import weft.core.manager_runtime as manager_runtime_mod
 import weft.core.tasks.base as base_task_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
+from tests.helpers.broker_reads import count_queue_calls
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.typing import BrokerEnv, record_and_return
@@ -5476,24 +5477,6 @@ def test_missing_heartbeat_keeps_convergence_active(
 MANAGER_HEARTBEAT_QUIET_WINDOW_SECONDS = 30.0
 # The quiet window is the measured quantity, not a synchronization sleep.
 
-_HEARTBEAT_READ_METHODS = (
-    "peek_one",
-    "peek_many",
-    "peek_generator",
-    "claim_one",
-    "claim_many",
-    "claim_generator",
-    "move_one",
-    "move_many",
-    "move_generator",
-    "has_pending_messages",
-    "latest_pending_timestamp",
-    "queue_exists_and_has_messages",
-    "get_queue_stat",
-    "find_message_ids",
-)
-_HEARTBEAT_DELETE_METHODS = ("delete", "delete_message_ids")
-
 
 @pytest.mark.slow
 @pytest.mark.parametrize("rows", [0, 1, 10])
@@ -5515,10 +5498,6 @@ def test_manager_never_reads_or_deletes_heartbeat_registrations(
 
     db_path, make_queue = broker_env
     context = build_context(spec_context=workdir)
-    with make_queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE).get_connection() as conn:
-        broker_class = next(
-            klass for klass in type(conn).__mro__ if "peek_many" in vars(klass)
-        )
     for index in range(rows):
         upsert_heartbeat(
             context,
@@ -5529,23 +5508,11 @@ def test_manager_never_reads_or_deletes_heartbeat_registrations(
             destination_queue=f"probe.dest.{index}",
             message="tick",
         )
-    counts = {"reads": 0, "deletes": 0}
-
-    def counting(name: str, kind: str) -> None:
-        original = getattr(broker_class, name)
-
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            queue = args[0] if args else kwargs.get("queue")
-            if queue == WEFT_HEARTBEAT_REGISTRATIONS_QUEUE:
-                counts[kind] += 1
-            return original(self, *args, **kwargs)
-
-        monkeypatch.setattr(broker_class, name, wrapper)
-
-    for name in _HEARTBEAT_READ_METHODS:
-        counting(name, "reads")
-    for name in _HEARTBEAT_DELETE_METHODS:
-        counting(name, "deletes")
+    counts = count_queue_calls(
+        monkeypatch,
+        make_queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE),
+        WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+    )
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=0.0),
@@ -5558,7 +5525,7 @@ def test_manager_never_reads_or_deletes_heartbeat_registrations(
     try:
         time.sleep(MANAGER_HEARTBEAT_QUIET_WINDOW_SECONDS)
         assert thread.is_alive()
-        assert counts == {"reads": 0, "deletes": 0}, counts
+        assert counts["reads"] == 0 and counts["deletes"] == 0, counts
     finally:
         manager.stop(join=False)
         thread.join(timeout=30.0)
