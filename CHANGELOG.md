@@ -10,6 +10,13 @@
 
 ### Changed
 
+- Dependency floors across weft, weft-docker, weft-macos-sandbox,
+  weft-microsandbox and weft-django now match the versions proven in the
+  development environment (llm 0.37.1, pydantic 2.14.2, processtitle 1.3,
+  simplebroker-pg 4.7.2, pytest 9.2.0, mypy 2.4.1, ruff 0.17.3, hypothesis
+  6.170.14, django 6.1.3, microsandbox 0.7.13, the type-stub packages, the
+  uv constraint block, and hatchling 1.33.0 as the build backend); the lock
+  file is refreshed to the same versions. No dependency is pinned.
 - The Manager's shutdown window and per-task escalation delays are
   measured on the monotonic clock, so a wall-clock step during a drain no
   longer shortens or stretches them; published timestamps are unchanged

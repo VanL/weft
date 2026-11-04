@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.32.4"]
+requires = ["hatchling>=1.33.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.1.1",
+    "pytest>=9.2.0",
 ]
 
 [project.entry-points."weft.runners"]
