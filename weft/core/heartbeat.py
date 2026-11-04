@@ -39,7 +39,9 @@ def _delete_rows_for_id(
                 continue
             try:
                 payload = json.loads(str(body))
-            except json.JSONDecodeError:
+            except ValueError:
+                # JSONDecodeError, or an integer past the conversion digit
+                # limit: not a readable row of this id; the build rejects it.
                 continue
             row_id = payload.get("heartbeat_id") if isinstance(payload, dict) else None
             if isinstance(row_id, str) and row_id.strip() == heartbeat_id:

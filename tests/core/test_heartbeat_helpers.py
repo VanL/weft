@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -292,15 +293,20 @@ def test_upsert_heartbeat_writes_one_row_and_returns_without_manager(
         pytest.fail("helper must not start a manager")
 
     monkeypatch.setattr(core_manager_runtime, "ensure_manager", fail)
+    # Typed as returning object so the literal None check is expressible.
+    write_and_return: Callable[..., object] = upsert_heartbeat
 
-    upsert_heartbeat(
-        context,
-        registrant_tid=tid,
-        heartbeat_id="probe",
-        interval_seconds=60,
-        lease_seconds=3600,
-        destination_queue="probe.dest",
-        message="tick",
+    assert (
+        write_and_return(
+            context,
+            registrant_tid=tid,
+            heartbeat_id="probe",
+            interval_seconds=60,
+            lease_seconds=3600,
+            destination_queue="probe.dest",
+            message="tick",
+        )
+        is None
     )
 
     rows = _registration_rows(context)
@@ -398,9 +404,11 @@ def test_cancel_heartbeat_deletes_every_row_for_its_id(
         writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, row("a"))
         writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, row("b"))
 
-    cancel_heartbeat(context, heartbeat_id="a")
+    # Typed as returning object so the literal None check is expressible.
+    delete_and_return: Callable[..., object] = cancel_heartbeat
+    assert delete_and_return(context, heartbeat_id="a") is None
     assert [row["heartbeat_id"] for row, _ in _registration_rows(context)] == ["b"]
-    cancel_heartbeat(context, heartbeat_id="unknown")
+    assert delete_and_return(context, heartbeat_id="unknown") is None
     assert [row["heartbeat_id"] for row, _ in _registration_rows(context)] == ["b"]
 
     upsert_heartbeat(

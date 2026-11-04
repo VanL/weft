@@ -789,13 +789,25 @@ def test_heartbeat_invalid_registration_row_is_deleted_and_reported(
                 WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
                 _row_text(tid, "oversized-lease", lease_seconds=10**400),
             )
+            # Past Python's 4,300-digit int conversion limit: json.loads raises
+            # plain ValueError, not JSONDecodeError (mutation: catching only
+            # JSONDecodeError lets the decoder error escape the build).
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "digit-limit-lease", lease_seconds=0).replace(
+                    '"lease_seconds": 0', '"lease_seconds": ' + "9" * 5000
+                ),
+            )
+        # An unrelated upsert and cancel still progress past the bad rows.
+        _upsert(context, tid, "unrelated")
+        cancel_heartbeat(context, heartbeat_id="unrelated")
         _upsert(context, tid, "valid")
         valid_id = max(_raw_registration_ids(context))
 
         task.process_once()
 
         assert _raw_registration_ids(context) == [valid_id]
-        assert len(_task_events(context, tid, "heartbeat_request_invalid")) == 5
+        assert len(_task_events(context, tid, "heartbeat_request_invalid")) == 6
         assert set(task._registrations) == {"valid"}
         assert task.should_stop is False
     finally:
@@ -849,6 +861,8 @@ def test_heartbeat_cancel_while_paused_arms_idle_exit(
         assert "build" in task._registrations
         ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause"))
         task.process_once()
+        # PAUSE's observable outcome since plan 3 is its lifecycle event.
+        assert len(_task_events(context, tid, "control_pause")) == 1
         assert task._paused is True
         assert task._has_pending_observation() is False
 
@@ -903,6 +917,8 @@ def test_heartbeat_expired_registration_is_deleted_at_its_deadline(
 
         ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause"))
         task.process_once()
+        # PAUSE's observable outcome since plan 3 is its lifecycle event.
+        assert len(_task_events(context, tid, "control_pause")) == 1
         assert task._paused is True
 
         advance(89.7)
@@ -997,9 +1013,8 @@ def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
             assert {row["heartbeat_id"] for row, _ in _registration_rows(context)} == {
                 "y"
             }
-            assert (
-                len(_task_events(context, tid, "heartbeat_registration_expired")) == 1
-            )
+            expired = _task_events(context, tid, "heartbeat_registration_expired")
+            assert [event["message_id"] for event in expired] == [row_b]
             assert "y" in task._registrations
             return
 
@@ -1007,7 +1022,8 @@ def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
 
         assert _raw_registration_ids(context) == []
         assert task._registrations == {}
-        assert len(_task_events(context, tid, "heartbeat_registration_expired")) == 1
+        expired = _task_events(context, tid, "heartbeat_registration_expired")
+        assert [event["message_id"] for event in expired] == [row_b]
         assert destination.peek_one() is None
     finally:
         task.stop(join=False)

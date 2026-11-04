@@ -442,7 +442,9 @@ class HeartbeatTask(ServiceTask):
         for body, message_id in rows:
             try:
                 payload = json.loads(body)
-            except json.JSONDecodeError:
+            except ValueError:
+                # JSONDecodeError, or an integer past the conversion digit
+                # limit: a malformed row, rejected below like any other.
                 payload = None
             heartbeat_id = (
                 payload.get("heartbeat_id") if isinstance(payload, dict) else None
