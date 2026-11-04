@@ -66,13 +66,12 @@ def apply_exact_prune_candidates[  # noqa: C901 approved [TS-3.1] [RUFF-SUP-031]
         reconcile_missing: Treat rows verified missing as already deleted.
             When the batch delete reports fewer deletions than requested,
             every batched candidate is re-verified with a per-ID exact
-            delete: ``True`` means the row was physically deleted now,
-            ``False`` means the backend verified the row is absent
-            (idempotent-complete), and an exception is reported as that
-            candidate's error. A row that is still present can therefore
-            never be reported ``deleted=True``. Use this only for
-            idempotent cleanup paths where missing rows mean the work is
-            already complete.
+            delete: a delete count ``> 0`` means the row was physically
+            deleted now and ``0`` means the backend verified the row is
+            already absent, so ``apply_result`` reports ``deleted=True`` for
+            both. An exception is reported as ``deleted=False`` with that
+            candidate's error. Use this only for idempotent cleanup paths
+            where missing rows mean the work is already complete.
         broker: Borrowed task-owned broker. The caller retains its connection
             scope; standalone calls own a bounded persistent queue instead.
 
