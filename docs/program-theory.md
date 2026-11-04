@@ -579,7 +579,7 @@ alternative. An agent must not propose the alternative again unless the
 
 ### [ALT-WT-004] A heartbeat as the TaskMonitor clock
 
-- Kind: tried and discarded (built and still registered today; decided by the owner on 2026-09-08; removal plan `2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md` is a draft)
+- Kind: tried and discarded (built, then removed by `2026-11-02-task-monitor-heartbeat-clock-plan.md`; decided by the owner on 2026-09-08)
 - Disposition: rejected
 - Candidate: The built-in heartbeat service sends a message on each interval,
   and TaskMonitor cycles when it receives one.
@@ -588,13 +588,14 @@ alternative. An agent must not propose the alternative again unless the
   clock is a timer, not a message. Each service keeps its own clock through
   `next_wait_timeout()`. The heartbeat is an emitter for consumers that want
   one.
-- Current consequence: The decision is made. The implementation is not. The
-  plan is a draft. TaskMonitor still registers with the heartbeat service.
-  The landed part is commit `da5fa0f6`: the Manager wants the heartbeat
-  service only when TaskMonitor is enabled.
+- Current consequence: TaskMonitor's only clock is its cycle deadline
+  through `next_wait_timeout()`; it registers nothing. The heartbeat service
+  runs only while `weft.state.heartbeats` holds a row that is unexpired or
+  not yet rejected ([MA-1] item 7), so with no consumer no heartbeat process
+  runs (this supersedes the `da5fa0f6` gate).
 - Reconsider when: Never for a clock. A consumer that wants a periodic
   message can still register.
-- Evidence: Owner decision, 2026-09-08; `2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md` (draft).
+- Evidence: Owner decision, 2026-09-08; `2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md` (draft); `2026-11-02-task-monitor-heartbeat-clock-plan.md`.
 
 ### [ALT-WT-005] A shallow copy of a task as a maintenance worker
 
