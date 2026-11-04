@@ -3,14 +3,21 @@
 This module intentionally stays below service policy. It provides common
 mechanics used by long-lived tasks while leaving queue ordering, cleanup,
 manager leadership, and service-specific scheduling in the concrete task.
+It also owns the one lifecycle rule every internal service shares: the idle
+clock. A service defines its own work (``_has_work``); with no work and no
+live Manager in its context for ``SERVICE_IDLE_EXIT_SECONDS`` it ends itself.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.5]
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
 - docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.9]
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import queue as thread_queue
 import threading
@@ -20,13 +27,50 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from weft._constants import LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS
+from simplebroker.ext import BrokerError
+from weft._constants import (
+    LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS,
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
+    SERVICE_IDLE_EXIT_SECONDS,
+    SERVICE_STATUS_ACTIVE,
+    SERVICE_TYPE_MANAGER,
+    TERMINAL_TASK_STATUSES,
+    WEFT_SERVICES_REGISTRY_QUEUE,
+)
+from weft.core.service_convergence import (
+    ServiceOwnerRecord,
+    collect_service_owner_records,
+    manager_service_key,
+    reduce_latest_by_service_owner,
+    timestamp_is_expired,
+)
 from weft.core.taskspec import TaskSpec
+from weft.ext import RunnerHandle
+from weft.helpers import closing_queue_iterator, handle_has_live_host_process
 
 from .base import BaseTask, TaskWorkerResult
 
+logger = logging.getLogger(__name__)
+
 _service_worker_stop = object()
 _service_worker_thread_done = object()
+
+_SERVICE_IDLE_EXIT_NS = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+_MANAGER_RECORD_UNVERIFIED_TTL_NS = int(
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
+)
+
+
+def _service_monotonic_ns() -> int:
+    """Return the monotonic clock the service idle rule reads.
+
+    One module-level seam so tests can freeze the idle clock without patching
+    the process-wide ``time`` module.
+
+    Spec: [MF-3.2]
+    """
+
+    return time.monotonic_ns()
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +200,8 @@ class ServiceTask(BaseTask):
         self._service_lane_work_items: dict[str, Any] = {}
         self._service_worker_registrations: dict[str, _ServiceWorkerRegistration] = {}
         self._service_worker_lock = threading.Lock()
+        # Start of the current no-work window; None while the service has work.
+        self._idle_since_monotonic_ns: int | None = None
         super().__init__(
             db=db,
             taskspec=taskspec,
@@ -191,9 +237,184 @@ class ServiceTask(BaseTask):
         return
 
     def next_wait_timeout(self) -> float | None:
-        """Suppress the BaseTask poll-report timer that services do not emit."""
+        """Return the idle-clock remainder; services emit no poll-report timer.
 
-        return None
+        With the idle clock set, no work, and no observation in progress, this
+        is the time left in the ``SERVICE_IDLE_EXIT_SECONDS`` window; a
+        subclass merges it into its own deadlines with ``min``. With work, or
+        while work is undetermined, there is no idle timeout: the pending
+        result wakes the reactor, so an expired window never spins.
+
+        Spec: [CC-2.5], [MA-1] item 7, [MF-3.2]
+        """
+
+        idle_since = self._idle_since_monotonic_ns
+        if idle_since is None or self._has_work() or self._work_undetermined():
+            return None
+        remaining_ns = _SERVICE_IDLE_EXIT_NS - (_service_monotonic_ns() - idle_since)
+        return max(0.0, remaining_ns / 1_000_000_000)
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Declare the service registry read by the idle rule [QUEUE.7].
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        routes = super()._reactor_support_routes()
+        routes["services_registry"] = WEFT_SERVICES_REGISTRY_QUEUE
+        return routes
+
+    def _process_reactor_turn(self) -> None:
+        """Run the service's own turn, then settle the idle clock last.
+
+        Controls, worker results and the service's own work reconcile first in
+        ``_service_reactor_turn``; the idle check runs after them, so it reads
+        the state the turn just updated.
+
+        Spec: [CC-2.2.1], [MA-1] item 7, [MF-3.2]
+        """
+
+        self._service_reactor_turn()
+        self._settle_idle_clock()
+
+    def _service_reactor_turn(self) -> None:
+        """Run one concrete service turn; the default is the BaseTask turn.
+
+        Spec: [CC-2.2.1], [CC-2.5]
+        """
+
+        super()._process_reactor_turn()
+
+    def _has_work(self) -> bool:
+        """Return whether this service has substantive outstanding work.
+
+        Each built-in service overrides this from state it already keeps.
+        Checking for work is never itself work. The default is ``True``: a
+        service that does not define its work never idle-exits.
+
+        Spec: [MA-1] item 7, [MF-3.2]
+        """
+
+        return True
+
+    def _work_undetermined(self) -> bool:
+        """Return whether an observation has started whose result is unapplied.
+
+        While true the idle decision is deferred: the clock neither resets nor
+        advances toward an exit. The default is ``False``.
+
+        Spec: [MA-1] item 7, [MF-3.2]
+        """
+
+        return False
+
+    def _settle_idle_clock(self) -> None:
+        """Apply the service idle rule once, at the end of a reactor turn.
+
+        Order: a stopping or terminal task does nothing (a STOP handled earlier
+        in the turn owns the terminal transition). With work the clock is
+        cleared. With no work and a live non-superseded Manager in the context
+        the window restarts at now, so the service stays and re-checks at the
+        next deadline (owner ruling 10.1). An observation in progress leaves
+        the clock exactly as it is. Otherwise the first idle turn starts the
+        clock, and a turn at or past ``SERVICE_IDLE_EXIT_SECONDS`` marks the
+        task completed, reports ``service_idle_exit`` and stops. The registry
+        is read only when ``_has_work()`` is false, at most once per turn.
+
+        Spec: [MA-1] item 7, [MF-3.2]
+        """
+
+        if self.should_stop or self.taskspec.state.status in TERMINAL_TASK_STATUSES:
+            return
+        if self._has_work():
+            self._idle_since_monotonic_ns = None
+            return
+        if self._live_manager_present():
+            self._idle_since_monotonic_ns = _service_monotonic_ns()
+            return
+        if self._work_undetermined():
+            return
+        now_ns = _service_monotonic_ns()
+        idle_since = self._idle_since_monotonic_ns
+        if idle_since is None:
+            self._idle_since_monotonic_ns = now_ns
+            return
+        idle_ns = now_ns - idle_since
+        if idle_ns < _SERVICE_IDLE_EXIT_NS:
+            return
+        self.taskspec.mark_completed(return_code=0)
+        self._report_state_change(
+            event="service_idle_exit",
+            idle_seconds=idle_ns / 1_000_000_000,
+        )
+        self._update_process_title("completed")
+        self.should_stop = True
+
+    def _live_manager_present(self) -> bool:
+        """Return whether a live non-superseded Manager serves this context.
+
+        Reads ``weft.state.services`` once, keeps the canonical manager key
+        through the shared ``service_convergence`` readers, reduces to the
+        latest row per Manager owner, and reports whether any ``active`` row is
+        live: a ``host-pid`` handle must name a process whose identity still
+        matches; a row without one counts while it is younger than the
+        unverified-record TTL. A registry that cannot be read reports ``True``:
+        absence is not proof ([WT-2a.13]), and the next wake re-checks.
+
+        Spec: [MA-1] item 7, [MA-1.6], [MF-3.2]
+        """
+
+        entries: list[tuple[Mapping[str, Any], int]] = []
+        try:
+            rows = self._queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_generator(
+                with_timestamps=True
+            )
+            with closing_queue_iterator(rows) as iterator:
+                for body, timestamp in iterator:
+                    try:
+                        payload = json.loads(body)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(payload, Mapping):
+                        entries.append((payload, int(timestamp)))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Service registry read deferred", exc_info=True)
+            return True
+        read = collect_service_owner_records(
+            entries,
+            service_key=manager_service_key(self._task_context()),
+            service_type=SERVICE_TYPE_MANAGER,
+        )
+        now_ns = time.time_ns()
+        return any(
+            record.status == SERVICE_STATUS_ACTIVE
+            and self._manager_owner_record_live(record, now_ns=now_ns)
+            for record in reduce_latest_by_service_owner(read.records)
+        )
+
+    @staticmethod
+    def _manager_owner_record_live(record: ServiceOwnerRecord, *, now_ns: int) -> bool:
+        """Return whether one active Manager owner row has live evidence.
+
+        Spec: [MA-1.6], [LIVENESS.R3]
+        """
+
+        payload = record.payload.get("runtime_handle")
+        handle: RunnerHandle | None = None
+        if isinstance(payload, Mapping):
+            try:
+                handle = RunnerHandle.from_dict(payload)
+            except ValueError:
+                handle = None
+        if (
+            handle is not None
+            and handle.control.get("authority") == "host-pid"
+            and handle.scoped_host_processes()
+        ):
+            return handle_has_live_host_process(handle)
+        return not timestamp_is_expired(
+            record.timestamp, now_ns, _MANAGER_RECORD_UNVERIFIED_TTL_NS
+        )
 
     def _emit_activity_event(self) -> None:
         """Keep service activity live-only instead of writing task-log rows.
