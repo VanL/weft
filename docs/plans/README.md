@@ -34,7 +34,7 @@ There are currently 63 plan files in this directory.
 | [`2026-11-02-python-craft-late-imports-plan.md`](./2026-11-02-python-craft-late-imports-plan.md) | Python Craft: Late Imports and the Expert-Developer Test (owner decision first) | `draft` | none |
 | [`2026-11-02-reactor-edge-timer-floors-plan.md`](./2026-11-02-reactor-edge-timer-floors-plan.md) | Reactor Edges: Replace Timer Floors with Readiness Waits | `completed` | none |
 | [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `promoted` | none |
-| [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `draft` | none |
+| [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `promoted` | none |
 | [`2026-11-02-test-suite-structure-plan.md`](./2026-11-02-test-suite-structure-plan.md) | Test Suite: Release-Tool Tests and Structural Flakiness (owner decision first) | `draft` | none |
 | [`2026-11-02-tid-display-encoding-plan.md`](./2026-11-02-tid-display-encoding-plan.md) | TID Display Encoding: Lossless Rendering Everywhere | `draft` | none |
 | [`2026-11-02-program-theory-reconciliation-plan.md`](./2026-11-02-program-theory-reconciliation-plan.md) | Program Theory Reconciliation: Hub Propagation, Four-Way Balance, and Adoption | `completed` | none |

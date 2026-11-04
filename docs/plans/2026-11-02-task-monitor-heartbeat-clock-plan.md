@@ -1,6 +1,6 @@
 # TaskMonitor: One Clock, Not Two
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-5]; docs/specifications/01-Core_Components.md [CC-2.3], [CC-2.5] (unchanged, constraint); docs/specifications/03-Manager_Architecture.md [MA-1] item 7; docs/specifications/00-Quick_Reference.md (environment table, global queue table); docs/specifications/07-System_Invariants.md [QUEUE.7] (one sentence added), [IMPL.8]–[IMPL.11], [OBS.13], [MANAGER.15]–[MANAGER.18] (constraints, unchanged)
 Superseded by: none
 
@@ -933,8 +933,8 @@ lease bounds every registration where no bound existed).
   `docs/specifications/00-Quick_Reference.md`, and
   `docs/specifications/07-System_Invariants.md` at plan authoring time
   (2026-11-02; 07 re-read for the F1 extension the same day). Plan type: implementation with spec revision.
-- Promotion baseline identifier: pending (recorded by Task 3 as the landing
-  commit SHA; strategy B lands spec and code together).
+- Promotion baseline identifier: `4e082fd8` (the landing commit; strategy B
+  landed spec and code together).
 
 ## Proposed Spec Delta
 
@@ -3353,3 +3353,66 @@ Verify: spec hygiene and plan metadata → pass; `bin/check-doc-paths` →
 `check-doc-paths: OK`; backlink grep → one line in each of the five files;
 05 mapping grep → 2 lines (588, 655); 07 mapping grep → 1 line; retired-phrase
 grep → no output.
+
+Task 5 (after the landing commit `4e082fd8`).
+
+Idle-turn table, R1 (`test_task_monitor_quiet_interval_runs_zero_turns_with_heartbeat_emitting`,
+2.5 s quiet window), before = the Task 2 RED run, after = the run at
+`4e082fd8`:
+
+| Backend | Case | Before (Task 2 RED) | After |
+|---------|------|---------------------|-------|
+| SQLite | unavailable | 2 | 0 (PASSED) |
+| SQLite | emitting | 2 | 0 (PASSED) |
+| PostgreSQL | unavailable | 3 | 0 (PASSED) |
+| PostgreSQL | emitting | 2 | 0 (PASSED) |
+
+Manager desire-predicate cost: scratch probe (not a repository file) with a
+delegating counter on `Manager._heartbeat_registrations_present` (counts the
+call and the rows its peek yields, then runs the real method); canonical
+Manager with both monitors disabled, driven by `run_until_stopped` on a
+thread, 5 s settle, then a 30 s quiet window; SQLite.
+
+| Registrations | Predicate calls in 30 s | Rows scanned |
+|---------------|-------------------------|--------------|
+| 0 | 117 | 0 |
+| 1 | 114 | 114 |
+| 10 | 120 | 120 |
+
+The early return at the first unexpired row keeps each call at one row
+with live registrations. The call rate (about 4 per second) is the idle
+Manager's own turn rate: a 10 s caller count at zero registrations
+attributed 57 of 61 calls to `_pending_service_probes_for_scope` (each
+turn) and 4 to `_reconcile_managed_services`; with an empty queue each call
+is one empty peek, where the old gate read a boolean. Recorded as the
+measured cost; no cache or registry is added ([ALT-WT-010]).
+
+Theory edit (F4): [ALT-WT-004] Kind, Current consequence, and Evidence
+applied verbatim as Task 5 words them, accepted by the owner on 2026-11-03
+("I accept the theory edits"), committed alone as the "Theory:" commit `e92dac94`.
+
+[WT-7] completion items: the keyed possession probe needs an owner-written
+key and a different-family answerer; it is not run here and stays with the
+owner (so the plan is `promoted`, not `completed`). Audit-table refresh, by
+reference to `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+`### Audit table` (not edited):
+
+- Row 4.3-a: the TaskMonitor heartbeat-clock evidence
+  (`TaskMonitor._ensure_heartbeat_registered`,
+  `test_task_monitor_heartbeat_failure_records_health_but_still_cycles`)
+  leaves the drift list; both are deleted, and R1 pins zero quiet turns on
+  both backends. The row's other sites belong to plan 2.
+- Row I-2 ([WT-2a.2]): strengthened, still aligned: heartbeat registrations
+  are queue rows and the heartbeat's table and the Manager's desire are
+  rebuilt from them.
+- Row I-13 ([WT-2a.13]): still aligned: a registration ends by cancel or by
+  its own declared lease; no reader consults registrant liveness.
+- Rows 4.1-c, 4.3-f, 4.4-c, [ALT-WT-007] name `weft/core/manager.py` or
+  `task_monitor.py` for evidence this plan did not touch: unchanged, carried
+  forward by reference.
+
+Independent completed-work review (one scoped cross-family round): not run
+by the implementer (the dispatch forbids delegation); left to the series
+lead.
+
+Final gates at the bookkeeping commit: recorded in the implementer's report.
