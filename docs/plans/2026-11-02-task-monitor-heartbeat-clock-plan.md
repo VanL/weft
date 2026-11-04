@@ -2802,8 +2802,11 @@ F2 default is what the tasks implement; F3 and F4 carry no default.
   rule; then C1–C4 and Task 3 items 9–11 drop, item 2 drops its two new
   fields, and the [MF-5], catch-up-sentence, and Quick Reference
   replacements revert to finish-anchored wording before review closes.
-  Default flipped at round 1 disposition on the no-diminution rule; owner
-  decision still open.
+  Default flipped at round 1 disposition on the no-diminution rule.
+  CLOSED: closed on the owner's implement instruction (2026-11-03) with the
+  recommended option: (a), the local grid anchored at the first cycle start
+  with one owed follow-up after an overrun (Task 3 items 9–11, cases C1–C4,
+  as implemented).
 - **F3 — the older draft's overlap.**
   `2026-09-08-service-wake-model-and-heartbeat-decoupling-plan.md` (draft)
   covers this TaskMonitor slice and more. This plan neither edits it nor
@@ -2813,9 +2816,14 @@ F2 default is what the tasks implement; F3 and F4 carry no default.
   further: what remains there is the interval floor (its Q2), its [CC-2.5]
   wake-model paragraph, and its other launch options L2/L2f, which the F1
   ruling makes moot; its grid cadence is carried here as F2's default.
+  CLOSED: closed on the owner's implement instruction (2026-11-03) with the
+  recommended option: the overlap is recorded here; the older draft is not
+  touched by this plan.
 - **F4 — acceptance of the Task 5 theory edit.** The [ALT-WT-004] Kind,
   Current consequence, and Evidence wording in Task 5 lands only with the
-  owner's acceptance, as for any [ALT-WT-*] change.
+  owner's acceptance, as for any [ALT-WT-*] change. CLOSED: accepted by the
+  owner (2026-11-03: "I accept the theory edits"); applied verbatim as its
+  own "Theory:" commit after the code and spec commit.
 - **F5 — evidence-free registrants. CLOSED (owner, 2026-11-03).** Raised
   at the cross-family round on the on-demand addition (its finding F9,
   RECONSIDERATION REQUESTED): a retirement rule copied from the streaming
@@ -2850,7 +2858,10 @@ F2 default is what the tasks implement; F3 and F4 carry no default.
   guaranteed first emission is not promised; if the owner wants one, the
   floor would become a multiple of the interval or the lease would be
   measured from the build, both owner decisions (raised by the cross-family
-  round of 2026-11-03).
+  round of 2026-11-03). First-emission note: closed on the owner's implement
+  instruction (2026-11-03) with the recommended option: as the plan states,
+  no first emission is guaranteed; a registrant resubmits whenever it likes;
+  there is no renewal protocol.
 
 ## Review Log
 
@@ -2863,6 +2874,8 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - Cross-family review round 1 on the lease change (codex 0.161.0, 2026-11-03, scoped to the F5 ruling as applied): BLOCKED. F1 (P1, a failed older-row delete followed by a successful newest-row delete revives the older row): accepted, both deleters delete older rows first and stop at the first failure, newest row kept. F2 (T9 did not isolate the expiry wake; rewritten with lease 90, a paused phase, and the 0.3 s timeout assertion), F3 (the floor does not guarantee a first tick; rationale corrected, floor kept, first-emission guarantee noted for the owner), F4 (message-ID bounds: quantization, regression carry-forward, allocation before commit, same generator on PostgreSQL, cross-host skew), F5 (one launch predicate everywhere; expiry sentence qualified by the rebuild boundary), F6 (T6 gains lease rejection at the build): all P2, accepted and applied. Manager predicate cost recorded as bounded by registration count with a Task 5 measurement. One residual found while applying F1 and corrected before round 2: holding the rebuild flag after a failed delete would make `_has_pending_observation` report a change at every wait (the Stop-if spin); a failed delete is now best-effort and retried at the next build, and T10's third case asserts the flag is clear. Round 2 (codex 0.161.0, 2026-11-03, scoped to F1–F6 and the residual): F3, F4, F5, F6 closed with live evidence (`monotonic() + interval` at heartbeat.py:254 for the first-tick gap; `_next_components` carry-forward at _timestamp.py:297 and allocation before commit at db.py:2211; destination writes after registration selection at heartbeat.py:340; the rejection path at heartbeat.py:221). F1 and F2 returned one residual each inside their applied spans, applied here without a further round under the one-scoped-round rule: the §4 error-path summary still said a failed delete leaves the rebuild pending (now: best-effort, flag cleared, retried at the next build, as Task 7 item 4 a says); T9 asserted the 0.3 s expiry timeout while the audit deadline armed by the 61 s turn was stale (`next_wait_timeout` would return 0.0; T9 now runs one paused turn at 89.7 s to re-arm it before the assertion). Review loop on the lease change closed; the plan waits on the owner's F2, F3 and F4 rulings and the first-emission note under F5.
 - owner ruling applied 2026-11-03 (after the lease round): `HEARTBEAT_MAX_LEASE_SECONDS` is seven days (604,800 s), a policy value the owner may change, not intrinsic to Weft; the separate `HEARTBEAT_MAX_INTERVAL_SECONDS` (2**53, a float-safety bound) is dropped because the chain `interval <= lease <= maximum` bounds the interval; H4 and T6 cases restated through the chain. A value change inside bounds the rounds already checked; no further round.
 - owner correction applied 2026-11-03: the tension with [ALT-WT-019] (queues as unconsumed tables or event logs) made explicit in §4, the Source Documents, the read-first list, and the [MF-3.2] rule: a registration row is an active leased request, one token per live `heartbeat_id`, consumed at the moment the request ends (cancel or lease expiry); the reader is not the consumer; no row outlives its request, no tombstone or expired-marker record exists, no sweep runs; the upsert's older-row delete is the second half of a replacement finished by the next build, not a history collection. Plan metadata gate and `bin/check-doc-paths` re-run.
+
+- owner closures recorded 2026-11-03 at implementation: F2 closed on the owner's implement instruction (2026-11-03) with the recommended option: (a), the grid anchored at the first cycle start; F3 closed on the owner's implement instruction (2026-11-03) with the recommended option: overlap recorded, the older draft not touched; the F5 first-emission note closed on the owner's implement instruction (2026-11-03) with the recommended option: no first emission is guaranteed, a registrant resubmits whenever it likes, no renewal protocol; F4 accepted by the owner (2026-11-03: "I accept the theory edits").
 
 ## Execution log
 
@@ -3082,3 +3095,261 @@ line: lookup → finding.
   result too large for a float`; `(2**53 * 1_000_000_000) / 1_000_000_000`
   is `9007199254740992.0`; the policy value 604,800 is far inside that
   range.
+
+### Implementer (2026-11-03, at `ecf7ad42`)
+
+Task 0, comprehension answers (written before the first edit).
+
+1. After the change the TaskMonitor reactor wakes only on rows on its own
+   `T{tid}.inbox` and `T{tid}.ctrl_in` (through the shared
+   `MultiQueueWatcher` wait), on local worker-result notifications from its
+   registered worker groups (built-in cycle, processor, control cleanup), and
+   on the one deadline `TaskMonitor.next_wait_timeout()` returns:
+   `_next_cycle_due_monotonic` (0.0 while the first cycle is pending, a wake
+   is requested, or worker results are pending). That deadline is set only
+   by `TaskMonitor._arm_next_cycle_deadline`, called from
+   `_finish_monitor_cycle` and `_handle_control_cleanup_worker_result`: the
+   next grid tick (anchored at the first cycle start, advanced at each cycle
+   start in `_run_monitor_cycle`), or now when an overrun follow-up is owed,
+   capped at now plus the catch-up interval while `progress_requires_catchup`
+   reports backlog. Self-maintenance keeps its own monotonic deadline but is
+   checked only inside a cycle, so it adds no wake.
+2. After Task 3 and before Task 8, `Manager._reconcile_managed_services`
+   still desires the heartbeat service whenever `_task_monitor_enabled` is
+   true (launch policy), and `_build_heartbeat_spawn_payload` sets
+   `heartbeat_idle_timeout: 0.0`, so the service never idles out.
+   `WEFT_TASK_MONITOR_ENABLED=0` removes the launch and restart desire, but
+   convergence never sends STOP to a live service merely because it left the
+   desired set; a running heartbeat runs until STOP/KILL on its control
+   queue or supersession.
+3. After Tasks 6–8: `upsert_heartbeat` validates the row with
+   `HeartbeatRegistrationRow`, writes it to `weft.state.heartbeats`, deletes
+   the older rows of the same `heartbeat_id`, and returns; the registrant
+   waits for nothing. The write wakes the canonical Manager through its
+   notification-only interest (`Manager._activity_wait_queues` plus the
+   strict cursor in `Manager._has_pending_observation`, never a delivery
+   config); the next turn forces one convergence pass whose predicate
+   `Manager._heartbeat_registrations_present` (a row that is unexpired or
+   invalid) adds the heartbeat service and enqueues its spawn on
+   `weft.spawn.internal`. The heartbeat starts, peeks the queue in
+   `_rebuild_registrations`, and first emits one interval after that build.
+   A dead registrant's row stays, desired and emitted to, until its lease
+   ends at the row's message ID plus `lease_seconds`; the heartbeat publishes
+   that instant through `next_wait_timeout()`, and the turn at or after it
+   rebuilds, deletes older same-id rows first (stopping at a failed delete),
+   and deletes the expired newest row with a `heartbeat_registration_expired`
+   event. Nobody consults the registrant's liveness. When the last row is
+   deleted, the heartbeat's observation sees a table row gone at its next
+   wait entry (paused or not), rebuilds to an empty table, and exits after
+   `HEARTBEAT_IDLE_TIMEOUT_SECONDS`; a turn whose pre-emission rebuild saw
+   the delete emits nothing, and a delete after that rebuild may be followed
+   by at most one emission. The Manager, seeing an empty queue (or only
+   expired rows, which it deletes oldest first), does not restart it.
+
+Task 1 (independent review of plan and delta): already done before this
+dispatch; the Review Log above records the cross-family rounds on the
+original plan, the on-demand addition, and the lease change, each closed.
+No further round was run by the implementer.
+
+Task 2 (RED), `tests/tasks/test_task_monitor.py` only. Added R1 (both
+`heartbeat_mode` cases), C1, C2 (with the module-level
+`overrunning_processor` and its `OVERRUN_PROCESSOR_CLOCK` binding), C3 (11
+matrix rows), C4, G1, and the R2 replacement. Test-arrangement deviation,
+recorded: C1's inbox poke is driven with `drive_task_monitor_until_observed`
+(the real wait, then `process_once()`) instead of a bare `process_once()`,
+because a bare `process_once()` does not observe an inbox row written after
+the previous wait (the first attempt failed with `assert 1 == 2` on the
+request count, a broken test, not RED). C3 also carries the two
+`raising=False` stand-ins, as C1, C2, and C4 do.
+
+- SQLite, the Task 2 Verify `-k` set: 17 failed, 1 passed (G1). Failure
+  reasons, each the named one: R1 `unavailable` "monitor ran 2 turns over
+  2.5s"; R1 `emitting` "monitor ran 2 turns over 2.5s"; C1 `assert 1110.0 ==
+  1060.0`; C2 and C4 `assert 60.0 == 0.0` on `next_wait_timeout()`; C3
+  `AttributeError: 'TaskMonitor' object has no attribute
+  '_arm_next_cycle_deadline'` (all 11 rows); R2 `assert 'heartbeat' not in
+  {...}`.
+- PostgreSQL, `bin/pytest-pg ".../test_task_monitor_quiet_interval_runs_zero_turns_with_heartbeat_emitting"`:
+  2 failed; `unavailable` "monitor ran 3 turns over 2.5s", `emitting`
+  "monitor ran 2 turns over 2.5s".
+
+Task 3 (GREEN), as written in items 1–12, with two test-arrangement
+deviations recorded here:
+
+- C2 and C4 commit the overrunning cycle's worker results through a new
+  test-local helper, `_drain_task_monitor_workers_without_turns` (real
+  `wait_for_activity` plus `_drain_worker_results`, no reactor turn).
+  `drive_task_monitor_until_idle` runs reactor turns, and once the owed
+  follow-up is armed (`next_wait_timeout() == 0.0`), its next turn starts
+  the follow-up cycle inside the drive; C2 first failed GREEN with `assert 2
+  == 1` on the request count for that reason. RED was re-confirmed after the
+  change by reverse-applying the production diff: C2 and C4 both fail with
+  `assert 60.0 == 0.0`.
+- `send_keyed_ping_probe` and the `CONTROL_STOP`, `CONTROL_KILL`,
+  `ControlRequest` imports went with the deleted code (item 5; the test-side
+  import was used only by the deleted blocking-probe test).
+
+Verify: `./.venv/bin/python -m pytest tests/tasks/test_task_monitor.py
+tests/specs/test_reactor_architecture.py -q` → exit 0 (2 PostgreSQL-only
+skips). Grep gates after Task 3: G-1 → 8 lines, all in
+`weft/core/heartbeat.py`; G-2 → `5`; G-3 → only the `raising=False`
+stand-ins (the `_patch_no_op_heartbeat_registration` helper used by C1–C4
+and G1, and the two R1 patches; every one of the 119 pre-existing sites is
+gone); G-4 → no output. Stand-in verification (test edit 3): with the
+stand-in lines deleted in the working tree, R1 (2), C1, C2, C3 (11), C4, and
+G1 → 17 passed; the file was then restored from the saved copy and the
+stand-ins are committed.
+
+Tasks 6–7 (one GREEN gate, as the preamble requires).
+
+- Ordering note: the two new constants (`WEFT_HEARTBEAT_REGISTRATIONS_QUEUE`,
+  `HEARTBEAT_MAX_LEASE_SECONDS`) were added to `weft/_constants.py` before
+  the RED run so the new tests could import them; they are inert alone, so
+  the RED reasons below are about the helpers and the task, not imports.
+- Task 6 RED (H1–H4, 14 cases): 13 failed with `TypeError: upsert_heartbeat()
+  got an unexpected keyword argument 'registrant_tid'` (H1, H2, H4 × 11); H3
+  failed with `Failed: helper must not start a manager` (the old
+  `cancel_heartbeat` reached `ensure_heartbeat_service` →
+  `manager_runtime.ensure_manager`). Deviation: H3 carries the same
+  `ensure_manager` guard as H1, because the old cancel path would otherwise
+  start a real manager from the RED run; the guard also catches a restored
+  call in cancel.
+- Task 7 RED (T1–T10, 12 cases): all 12 failed. T1, T2, T3, T4, T7, T8, T9:
+  the same `TypeError` on `registrant_tid`; T5 `assert 0 == 1` on the
+  `heartbeat_request_invalid` count (the old inbox path accepted the
+  mutation); T6 the bad rows were still in the queue; T10 `expired-newest`
+  and `unexpired` left both rows (`[A, B] != [B]`), `failed-delete`
+  `AttributeError: ... '_registrations_rebuild_pending'`.
+- GREEN as items 1–8, with these deviations:
+  1. Item 5 says a pending rebuild runs "and return (one bounded turn)". The
+     rebuild runs and the turn continues to the supersession check, the due
+     emission, and the idle check. With an early return, the first turn of
+     every heartbeat (the flag starts `True`) skipped `_exit_if_superseded`,
+     and four tests the plan requires to stay green without edits failed
+     (`test_duplicate_heartbeat_services_converge_by_loser_exit`,
+     `test_heartbeat_owner_resolution_is_endpoint_registry_version_gated`,
+     `test_heartbeat_run_until_stopped_uses_next_wait_timeout`,
+     `test_heartbeat_ping_while_waiting_is_handled_promptly`). The turn is
+     still bounded (one peek of the registrations queue).
+  2. Ruff C901 flagged `_rebuild_registrations` (19 > 10). Rather than add a
+     new approved suppression, the build is split into
+     `_rebuild_registrations` (table assembly, idle anchor),
+     `_peek_registration_rows` (one peek, cursor advance, grouping, rows
+     without a readable id) and `_current_registration_row` (the per-id
+     rule a–c with the failure barrier); `_delete_registration_row` is the
+     one best-effort exact delete all of them use. These four private
+     methods go beyond the review gate's list; the behavior is item 4's.
+  3. `weft/core/heartbeat.py` has one private helper, `_delete_rows_for_id`,
+     shared by `upsert_heartbeat` (older rows of the id) and
+     `cancel_heartbeat` (every row of the id), instead of two copies of the
+     peek-and-delete loop. `cancel_heartbeat` canonicalizes through the row
+     model's own validator (`HeartbeatRegistrationRow._validate_heartbeat_id`).
+  4. The inbox-path lifecycle events `heartbeat_upserted` and
+     `heartbeat_cancelled` are not re-created at table build (no reader in
+     the repository; noted in CHANGELOG). `_delete_reserved_message` lost
+     its only callers and is deleted.
+  5. `HEARTBEAT_ENDPOINT_PROBE_TIMEOUT` is deleted from `_constants.py`: after
+     Task 6 no module uses it (grep), as item 3 directs.
+- Test migration dispositions: `test_heartbeat_service_accepts_upsert_and_cancel`,
+  `test_heartbeat_duplicate_upsert_replaces_existing_registration`,
+  `test_heartbeat_late_wake_coalesces_to_one_emit`,
+  `test_heartbeat_serializes_structured_payloads_on_emit`,
+  `test_heartbeat_pending_input_wakes_through_reactor_wait`,
+  `test_heartbeat_next_wait_timeout_returns_zero_for_due_registration`:
+  migrated to `upsert_heartbeat` / `cancel_heartbeat` and the manual-driver
+  rule. `test_heartbeat_rejects_unsafe_destination_and_later_input_progresses`:
+  the unsafe row is a direct row write (the writer rejects every `weft.`
+  case first, asserted), the build deletes it and reports one
+  `heartbeat_request_invalid`, and a later valid row still registers and
+  emits. `test_heartbeat_failed_exact_ack_preserves_reserved_row`: its
+  subject (the exact ack of an accepted mutation) is retired; retargeted
+  into T5, which now also asserts the rejected inbox row is retained in
+  reserved under the default keep policy. `make_heartbeat_taskspec` gained
+  an optional `idle_timeout` keyword for T3, T8, and T9.
+  `tests/core/test_heartbeat_helpers.py`: deleted the five
+  `ensure_heartbeat_service` / endpoint-liveness tests the plan names; kept
+  the `weft.core.endpoints` tests (`test_endpoint_owner_*`,
+  `test_external_supervisor_endpoint_owner_*`) and both internal-submit
+  tests. `tests/core/test_service_helper_connections.py`: dropped the
+  `"heartbeat"` operation and the `_heartbeat_runtime_handle_is_live`
+  assertion; rewrote the commit-without-closing test for the new signatures
+  (connection count checked around each helper call separately, since the
+  reader that proves the row opens its own connection); retargeted the
+  failed-write test at a failing broker `write` inside `upsert_heartbeat`
+  (the local facade is still closed, the owner still usable); migrated the
+  destination-churn test. `tests/core/test_manager_runtime_connections.py`:
+  dropped the `heartbeat_fallback=True` case. R1 `emitting` migrated as
+  Task 7 states (one `process_once()` build, registrations queue unchanged).
+- Mechanical consequences outside the plan's file list:
+  `tests/commands/test_tid_mapping_contracts.py` imported the deleted
+  `_heartbeat_runtime_handle_is_live` (an E15 grep miss); its one assertion
+  and the import are removed. `docs/ruff-suppression-registry.md` and
+  `tests/specs/test_ruff_policy.py`: the `PLR0402` directive on the old
+  `manager_runtime` import in `weft/core/heartbeat.py` is gone with that
+  import, so the RUFF-SUP-251 registry row, its index row, and the pinned
+  counts (193 groups, 323 directives, `PLR0402=2`) go with it, as plan 2 did
+  for RUFF-SUP-046.
+- GREEN gate: `./.venv/bin/python -m pytest tests/core/test_heartbeat_helpers.py
+  tests/core/test_service_helper_connections.py
+  tests/core/test_manager_runtime_connections.py -q` → exit 0;
+  `./.venv/bin/python -m pytest tests/tasks/test_heartbeat.py
+  tests/core/test_service_helper_connections.py tests/tasks/test_task_monitor.py
+  -q -k "heartbeat or quiet_interval"` → exit 0; `bin/pytest-pg` T7 and T8 →
+  `2 passed`; `bin/pytest-pg tests/core/test_service_helper_connections.py
+  tests/core/test_heartbeat_helpers.py` → `46 passed, 1 skipped`.
+- G-5: `grep -rn "ensure_heartbeat_service\|_write_heartbeat_request\|_heartbeat_endpoint_is_live\|HeartbeatMutation" weft tests bin --include=*.py`
+  → no output.
+
+Task 8.
+
+- Ordering deviation: the Manager and `weft status` GREEN edits were
+  written before the Task 8 tests. RED was then taken by reverse-applying
+  that production diff: 8 failed — M1 `empty`, `row-monitors-off`,
+  `expired` (desire still tied to `_task_monitor_enabled`), the modified
+  enqueue test (no heartbeat payload / idle-timeout override present), M2
+  canonical (queue absent from the waiter signature), the convergence
+  inverse (`missing_active_tid` with an empty queue), S1, and the
+  liveness-only status test (`config-disabled` evidence). The diff was then
+  re-applied.
+- `Manager._has_pending_heartbeat_registration` holds the strict cursor and
+  sets `_heartbeat_registration_observed`; it is called from
+  `_has_pending_observation` after plan 4's
+  `_has_pending_drain_stop_observation`, and the queue is appended in
+  `_activity_wait_queues` after plan 4's `_drain_stop_target_queues()`; plan
+  4's entries are unchanged. The handle is the `BaseTask._queue` cache entry
+  (closed by task cleanup), the same handle the desire predicate deletes
+  through and M1 patches. A held flag never makes the observation report a
+  change; only a newer row does, so a draining Manager does not spin.
+- Mechanical consequence, recorded: 13 existing tests in
+  `tests/core/test_manager.py` arranged a heartbeat service through
+  `_task_monitor_enabled` alone (supervision, reconcile, singleton, pending
+  spawn, PONG, stale-log, convergence-reason tests). Each now writes one
+  unexpired row first through the new test helper
+  `_write_heartbeat_registration`; their assertions are unchanged.
+  `tests/commands/test_status.py::test_status_services_prefer_live_duplicate_over_terminal_duplicate`
+  likewise writes one row, and so does
+  `tests/cli/test_cli_serve.py::test_serve_restarts_singleton_services_without_duplicates`
+  (it kills and expects a restart of the heartbeat singleton; found by the
+  full fast suite). The liveness-only status test's evidence
+  assertion changes from `config-disabled` to `no-registrations` (the plan
+  said its assertions hold; this one is the [MF-3.2] evidence change).
+- Verify: `./.venv/bin/python -m pytest tests/core/test_manager.py
+  tests/commands/test_status.py -q` → exit 0; `bin/pytest-pg
+  "tests/core/test_manager.py::test_manager_registration_row_wakes_service_convergence"`
+  → `2 passed`.
+- Plan 4 coupling re-run: `./.venv/bin/python -m pytest tests/core/test_manager.py
+  -q -k "drain_stop or stop_keeps or stop_releases or stop_skips or stuck_launch
+  or orders_user_work"` → exit 0, no failure; `./.venv/bin/python -m pytest
+  tests/cli/test_cli_manager.py -q` → exit 0. No plan 4 test needed a
+  registration row.
+
+Task 4. Every Replacement block in `## Proposed Spec Delta` applied
+verbatim; the four non-block backlinks and the [QUEUE.7] mapping addition
+added; `TaskMonitor._arm_next_cycle_deadline` added to the [MF-5] mapping
+before `TaskMonitor._handle_builtin_cycle_worker_result`. Backlinks were
+inserted at the top of each `## Related Plans` list, as the series' earlier
+plans did. CHANGELOG `[Unreleased]` / `### Changed` carries the two bullets.
+Verify: spec hygiene and plan metadata → pass; `bin/check-doc-paths` →
+`check-doc-paths: OK`; backlink grep → one line in each of the five files;
+05 mapping grep → 2 lines (588, 655); 07 mapping grep → 1 line; retired-phrase
+grep → no output.

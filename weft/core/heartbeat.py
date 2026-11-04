@@ -1,265 +1,99 @@
-"""Heartbeat service helpers.
+"""Heartbeat registration helpers.
+
+A registration is one row on the runtime-state queue
+``weft.state.heartbeats``. The helpers write or delete rows and return; they
+do not look up the heartbeat endpoint, start a manager, or wait for the
+service. The canonical manager launches the heartbeat service while the queue
+holds a row that is unexpired or not yet rejected.
 
 Spec references:
-- docs/specifications/03-Manager_Architecture.md [MA-1.1], [MA-1.2]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
 """
 
 from __future__ import annotations
 
 import json
-import time
-from collections.abc import Mapping
 from typing import Any
 
-import weft.core.manager_runtime as manager_runtime  # noqa: PLR0402 approved [TS-3.1] [RUFF-SUP-251] exception
-from weft._constants import (
-    HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
-    INTERNAL_HEARTBEAT_ENDPOINT_NAME,
-    INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
-    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
-    INTERNAL_RUNTIME_TASK_CLASS_KEY,
-    INTERNAL_SERVICE_KEY_HEARTBEAT,
-    INTERNAL_SERVICE_KEY_METADATA_KEY,
-    MANAGER_REGISTRY_POLL_INTERVAL,
-    MANAGER_STARTUP_TIMEOUT_SECONDS,
-    TERMINAL_TASK_STATUSES,
-    WEFT_GLOBAL_LOG_QUEUE,
-)
+from weft._constants import WEFT_HEARTBEAT_REGISTRATIONS_QUEUE
 from weft.context import WeftContext
-from weft.core.control_probe import send_keyed_ping_probe
-from weft.core.endpoints import (
-    ResolvedEndpoint,
-    resolve_endpoint,
-)
-from weft.core.manager_services import ServiceCandidate, summarize_service_candidates
-from weft.core.queue_window import iter_broker_queue_json_entries, queue_broker
-from weft.core.task_state import read_task_state_snapshot
-from weft.ext import RunnerHandle
-from weft.helpers import (
-    closing_queue_iterator,
-    handle_has_live_host_process,
-)
+from weft.core.queue_window import queue_broker
+from weft.core.tasks.heartbeat import HeartbeatRegistrationRow
+from weft.helpers import closing_queue_iterator
 
 
-def _write_heartbeat_request(
-    context: WeftContext,
+def _delete_rows_for_id(
+    db: Any,
+    heartbeat_id: str,
     *,
-    resolved: ResolvedEndpoint,
-    payload: Mapping[str, Any],
-    broker: Any | None = None,
-) -> int | None:
-    with queue_broker(context, resolved.record.inbox, broker=broker) as db:
-        db.write(resolved.record.inbox, json.dumps(dict(payload), ensure_ascii=False))
-        return None
+    before_message_id: int | None = None,
+) -> None:
+    """Delete, by exact message ID, the rows of one canonical id."""
 
-
-def _latest_heartbeat_task_status(
-    context: WeftContext,
-    *,
-    tid: str,
-    broker: Any | None = None,
-) -> str | None:
-    latest_status: str | None = None
-    latest_timestamp = -1
-    with (
-        queue_broker(context, WEFT_GLOBAL_LOG_QUEUE, broker=broker) as db,
-        closing_queue_iterator(
-            iter_broker_queue_json_entries(db, WEFT_GLOBAL_LOG_QUEUE)
-        ) as rows,
-    ):
-        for payload, timestamp in rows:
-            if payload.get("tid") != tid or timestamp < latest_timestamp:
+    matching: list[int] = []
+    rows = db.peek_generator(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=True)
+    with closing_queue_iterator(rows) as iterator:
+        for body, message_id in iterator:
+            if before_message_id is not None and int(message_id) >= before_message_id:
                 continue
-            taskspec_dump = payload.get("taskspec")
-            if not isinstance(taskspec_dump, dict):
+            try:
+                payload = json.loads(str(body))
+            except json.JSONDecodeError:
                 continue
-            metadata = taskspec_dump.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                continue
-            is_heartbeat = (
-                metadata.get(INTERNAL_SERVICE_KEY_METADATA_KEY)
-                == INTERNAL_SERVICE_KEY_HEARTBEAT
-                or metadata.get(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY)
-                == INTERNAL_HEARTBEAT_ENDPOINT_NAME
-                or metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY)
-                == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-            )
-            if not is_heartbeat:
-                continue
-            status = payload.get("status")
-            if isinstance(status, str):
-                latest_status = status
-                latest_timestamp = timestamp
-    return latest_status
-
-
-def _heartbeat_runtime_handle_is_live(
-    context: WeftContext,
-    *,
-    tid: str,
-    broker: Any | None = None,
-) -> bool:
-    row = read_task_state_snapshot(context, tid, broker=broker)
-    if row is None:
-        return False
-    handle_payload = row[1].get("runtime_handle")
-    if not isinstance(handle_payload, Mapping):
-        return False
-    try:
-        handle = RunnerHandle.from_dict(handle_payload)
-    except ValueError:
-        return False
-    return handle_has_live_host_process(handle)
-
-
-def _heartbeat_endpoint_candidate(
-    context: WeftContext,
-    *,
-    resolved: ResolvedEndpoint,
-    broker: Any | None = None,
-) -> ServiceCandidate:
-    record = resolved.record
-    if record.status != "active":
-        return ServiceCandidate(
-            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-            tid=record.tid,
-            state="terminal",
-            source="endpoint-registry",
-            reason=f"endpoint status {record.status}",
-        )
-
-    latest_status = _latest_heartbeat_task_status(
-        context, tid=record.tid, broker=broker
-    )
-    if latest_status in TERMINAL_TASK_STATUSES:
-        return ServiceCandidate(
-            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-            tid=record.tid,
-            state="terminal",
-            source="task-log",
-            reason=latest_status,
-        )
-
-    if _heartbeat_runtime_handle_is_live(context, tid=record.tid, broker=broker):
-        return ServiceCandidate(
-            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-            tid=record.tid,
-            state="live",
-            source="tid-mapping",
-        )
-
-    if record.ctrl_in and record.ctrl_out:
-        probe = send_keyed_ping_probe(
-            context,
-            tid=record.tid,
-            ctrl_in_name=record.ctrl_in,
-            timeout=HEARTBEAT_ENDPOINT_PROBE_TIMEOUT,
-            broker=broker,
-        )
-        if probe.matched is not None:
-            return ServiceCandidate(
-                key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-                tid=record.tid,
-                state="live",
-                source="control-pong",
-            )
-        if probe.error:
-            return ServiceCandidate(
-                key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-                tid=record.tid,
-                state="uncertain",
-                source="control-pong",
-                reason=probe.error,
-            )
-
-    return ServiceCandidate(
-        key=INTERNAL_SERVICE_KEY_HEARTBEAT,
-        tid=record.tid,
-        state="terminal",
-        source="endpoint-registry",
-        reason="endpoint without live runtime proof or PONG",
-    )
-
-
-def _heartbeat_endpoint_is_live(
-    context: WeftContext,
-    *,
-    resolved: ResolvedEndpoint,
-    broker: Any | None = None,
-) -> bool:
-    summary = summarize_service_candidates(
-        [_heartbeat_endpoint_candidate(context, resolved=resolved, broker=broker)]
-    )
-    return (
-        summary.canonical_live is not None
-        and summary.canonical_live.tid == resolved.record.tid
-    )
-
-
-def ensure_heartbeat_service(
-    context: WeftContext,
-    *,
-    startup_timeout: float = MANAGER_STARTUP_TIMEOUT_SECONDS,
-    broker: Any | None = None,
-) -> ResolvedEndpoint:
-    """Ensure the built-in heartbeat service is live and return its endpoint."""
-
-    resolved = resolve_endpoint(
-        context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
-    )
-    if resolved is not None and _heartbeat_endpoint_is_live(
-        context, resolved=resolved, broker=broker
-    ):
-        return resolved
-
-    manager_runtime.ensure_manager(context, broker=broker)
-
-    deadline = time.monotonic() + startup_timeout
-    while time.monotonic() < deadline:
-        resolved = resolve_endpoint(
-            context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
-        )
-        if resolved is not None and _heartbeat_endpoint_is_live(
-            context,
-            resolved=resolved,
-            broker=broker,
-        ):
-            return resolved
-        time.sleep(MANAGER_REGISTRY_POLL_INTERVAL)
-
-    raise RuntimeError(
-        "heartbeat service did not publish a live endpoint before startup timeout"
-    )
+            row_id = payload.get("heartbeat_id") if isinstance(payload, dict) else None
+            if isinstance(row_id, str) and row_id.strip() == heartbeat_id:
+                matching.append(int(message_id))
+    if matching:
+        db.delete_message_ids(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, matching)
 
 
 def upsert_heartbeat(
     context: WeftContext,
     *,
+    registrant_tid: str,
     heartbeat_id: str,
     interval_seconds: int,
+    lease_seconds: int,
     destination_queue: str,
     message: Any,
-    startup_timeout: float = MANAGER_STARTUP_TIMEOUT_SECONDS,
     broker: Any | None = None,
-) -> int | None:
-    """Register or replace one runtime-scoped heartbeat."""
+) -> None:
+    """Register or replace one heartbeat as a leased row, then return.
 
-    resolved = ensure_heartbeat_service(
-        context, startup_timeout=startup_timeout, broker=broker
-    )
-    return _write_heartbeat_request(
-        context,
-        resolved=resolved,
-        broker=broker,
-        payload={
-            "action": "upsert",
+    The row is validated, written to ``weft.state.heartbeats``, and then the
+    older rows with the same ``heartbeat_id`` are deleted (write before
+    delete keeps the queue non-empty across a replace). The helper waits for
+    nothing: no endpoint lookup, no manager start, no poll.
+
+    The registration lives for its lease and no longer: it expires
+    ``lease_seconds`` after the row's own message timestamp, whether the
+    registrant is alive, dead, or was never a Weft task. Nothing reads the
+    registrant's lifecycle evidence. A registrant that wants the heartbeat to
+    continue resubmits with the same ``heartbeat_id`` whenever it likes; there
+    is no renewal protocol.
+
+    Raises:
+        ValueError: If the row is invalid (interval, lease, destination,
+            registrant TID, id, or message).
+
+    Spec: [MF-3.2]
+    """
+
+    row = HeartbeatRegistrationRow.model_validate(
+        {
             "heartbeat_id": heartbeat_id,
+            "registrant_tid": registrant_tid,
             "interval_seconds": interval_seconds,
+            "lease_seconds": lease_seconds,
             "destination_queue": destination_queue,
             "message": message,
-        },
+        }
     )
+    body = json.dumps(row.model_dump(mode="python"), ensure_ascii=False)
+    with queue_broker(context, WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, broker=broker) as db:
+        message_id = int(db.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, body))
+        _delete_rows_for_id(db, row.heartbeat_id, before_message_id=message_id)
 
 
 def cancel_heartbeat(
@@ -267,23 +101,21 @@ def cancel_heartbeat(
     *,
     heartbeat_id: str,
     broker: Any | None = None,
-) -> int | None:
-    """Cancel one runtime-scoped heartbeat registration."""
+) -> None:
+    """Delete every registration row of one canonical ``heartbeat_id``.
 
-    resolved = ensure_heartbeat_service(context, broker=broker)
-    return _write_heartbeat_request(
-        context,
-        resolved=resolved,
-        broker=broker,
-        payload={
-            "action": "cancel",
-            "heartbeat_id": heartbeat_id,
-        },
-    )
+    The id is canonicalized exactly as the row model does; cancelling an
+    unknown id is a no-op.
+
+    Raises:
+        ValueError: If ``heartbeat_id`` is empty after stripping.
+
+    Spec: [MF-3.2]
+    """
+
+    canonical = HeartbeatRegistrationRow._validate_heartbeat_id(heartbeat_id)
+    with queue_broker(context, WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, broker=broker) as db:
+        _delete_rows_for_id(db, canonical)
 
 
-__all__ = [
-    "cancel_heartbeat",
-    "ensure_heartbeat_service",
-    "upsert_heartbeat",
-]
+__all__ = ["cancel_heartbeat", "upsert_heartbeat"]

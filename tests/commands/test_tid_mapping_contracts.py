@@ -19,7 +19,6 @@ from weft.commands._spawn_submission import (
 )
 from weft.commands._task_snapshot_reducer import reduce_task_event
 from weft.context import WeftContext, build_context
-from weft.core.heartbeat import _heartbeat_runtime_handle_is_live
 from weft.helpers import tid_short_form
 
 pytestmark = pytest.mark.shared
@@ -209,7 +208,6 @@ def test_non_task_selectors_have_no_runtime_state_or_state_subscription(
     mapping_context: WeftContext, tid: str
 ) -> None:
     assert not _mapping_exists_for_tid(mapping_context, tid)
-    assert not _heartbeat_runtime_handle_is_live(mapping_context, tid=tid)
     assert task_cmd.mapping_for_tid(mapping_context, tid) is None
     assert all(
         not name.startswith("weft.state.tasks.")

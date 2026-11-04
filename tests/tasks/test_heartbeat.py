@@ -13,6 +13,7 @@ import os
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.heartbeat as heartbeat_module
 from tests.helpers.test_backend import prepare_project_root
 from weft._constants import (
+    CONTROL_PAUSE,
     CONTROL_PING,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS,
@@ -29,10 +31,13 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
+    WEFT_STREAMING_SESSIONS_QUEUE,
 )
 from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
+from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import HeartbeatTask
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
@@ -47,7 +52,15 @@ def assert_heartbeat_ownership_wait_timeout(timeout: float | None) -> None:
     assert 0.0 < timeout <= HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS
 
 
-def make_heartbeat_taskspec(tid: str, root: Path) -> TaskSpec:
+def make_heartbeat_taskspec(
+    tid: str, root: Path, *, idle_timeout: float | None = None
+) -> TaskSpec:
+    metadata: dict[str, Any] = {
+        INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: INTERNAL_HEARTBEAT_ENDPOINT_NAME,
+    }
+    if idle_timeout is not None:
+        metadata["heartbeat_idle_timeout"] = idle_timeout
     return TaskSpec(
         tid=tid,
         name="heartbeat-service",
@@ -63,10 +76,7 @@ def make_heartbeat_taskspec(tid: str, root: Path) -> TaskSpec:
             control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
         ),
         state=StateSection(),
-        metadata={
-            INTERNAL_RUNTIME_TASK_CLASS_KEY: INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
-            INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: INTERNAL_HEARTBEAT_ENDPOINT_NAME,
-        },
+        metadata=metadata,
     )
 
 
@@ -111,32 +121,21 @@ def test_heartbeat_service_accepts_upsert_and_cancel(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": "build.queue",
-                    "message": "go",
-                }
-            )
-        )
+        _upsert(context, tid, "build")
         task.process_once()
 
         assert "build" in task._registrations
 
-        inbox.write(json.dumps({"action": "cancel", "heartbeat_id": "build"}))
+        cancel_heartbeat(context, heartbeat_id="build")
+        task.wait_for_activity(0.05)
         task.process_once()
 
         assert "build" not in task._registrations
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
 
 
 @pytest.mark.parametrize(
@@ -167,9 +166,6 @@ def test_heartbeat_rejects_unsafe_destination_and_later_input_progresses(
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
-    reserved = context.queue(f"T{tid}.reserved", persistent=False)
-    task_log = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
     task_local_destinations = {
         "inbox": f"T{tid}.inbox",
         "reserved": f"T{tid}.reserved",
@@ -184,53 +180,40 @@ def test_heartbeat_rejects_unsafe_destination_and_later_input_progresses(
     safe_queue = context.queue(safe_destination, persistent=False)
 
     try:
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "unsafe",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": destination_queue,
-                    "message": "unsafe",
-                }
+        if destination_kind.startswith("weft."):
+            assert destination_queue.startswith(WEFT_QUEUE_NAMESPACE_PREFIX)
+            with pytest.raises(ValueError):
+                _upsert(context, tid, "unsafe", destination_queue=destination_queue)
+        with context.broker() as writer:
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(
+                    tid,
+                    "unsafe",
+                    destination_queue=destination_queue,
+                    message="unsafe",
+                ),
             )
-        )
         task.process_once()
 
         assert "unsafe" not in task._registrations
-        assert reserved.peek_one() is not None
-        assert any(
-            json.loads(row).get("event") == "heartbeat_request_invalid"
-            for row in task_log.peek_generator()
-        )
+        assert _raw_registration_ids(context) == []
+        assert len(_task_events(context, tid, "heartbeat_request_invalid")) == 1
 
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "safe",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": safe_destination,
-                    "message": "safe",
-                }
-            )
+        _upsert(
+            context, tid, "safe", destination_queue=safe_destination, message="safe"
         )
+        task.wait_for_activity(0.05)
         task.process_once()
 
         registration = task._registrations["safe"]
         assert registration.destination_queue == safe_destination
-        registration.next_due_at = time.monotonic() - 1.0
-        task._due_heap = [(registration.next_due_at, registration.heartbeat_id)]
+        _force_due(task, "safe", time.monotonic())
         task.process_once()
         assert safe_queue.read_one() == "safe"
-        if destination_kind.startswith("weft."):
-            assert destination_queue.startswith(WEFT_QUEUE_NAMESPACE_PREFIX)
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
-        reserved.close()
-        task_log.close()
         safe_queue.close()
 
 
@@ -240,32 +223,19 @@ def test_heartbeat_duplicate_upsert_replaces_existing_registration(
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": "build.queue",
-                    "message": "go",
-                }
-            )
-        )
+        _upsert(context, tid, "build")
         task.process_once()
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS * 2,
-                    "destination_queue": "build.queue.next",
-                    "message": {"kind": "next"},
-                }
-            )
+        _upsert(
+            context,
+            tid,
+            "build",
+            interval_seconds=HEARTBEAT_MIN_INTERVAL_SECONDS * 2,
+            destination_queue="build.queue.next",
+            message={"kind": "next"},
         )
+        task.wait_for_activity(0.05)
         task.process_once()
 
         registration = task._registrations["build"]
@@ -278,28 +248,16 @@ def test_heartbeat_duplicate_upsert_replaces_existing_registration(
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
 
 
 def test_heartbeat_late_wake_coalesces_to_one_emit(workdir: Path) -> None:
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
     destination = context.queue("build.queue", persistent=False)
 
     try:
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": "build.queue",
-                    "message": "go",
-                }
-            )
-        )
+        _upsert(context, tid, "build")
         task.process_once()
 
         registration = task._registrations["build"]
@@ -317,7 +275,6 @@ def test_heartbeat_late_wake_coalesces_to_one_emit(workdir: Path) -> None:
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
         destination.close()
 
 
@@ -325,28 +282,14 @@ def test_heartbeat_serializes_structured_payloads_on_emit(workdir: Path) -> None
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
     destination = context.queue("build.queue", persistent=False)
 
     try:
         payload = {"kind": "build", "value": 1}
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": "build.queue",
-                    "message": payload,
-                }
-            )
-        )
+        _upsert(context, tid, "build", message=payload)
         task.process_once()
 
-        registration = task._registrations["build"]
-        registration.next_due_at = time.monotonic() - 1
-        task._due_heap.clear()
-        heapq.heappush(task._due_heap, (registration.next_due_at, "build"))
+        _force_due(task, "build", time.monotonic())
 
         task.process_once()
 
@@ -354,7 +297,6 @@ def test_heartbeat_serializes_structured_payloads_on_emit(workdir: Path) -> None
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
         destination.close()
 
 
@@ -500,13 +442,12 @@ def test_heartbeat_pending_input_wakes_through_reactor_wait(
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
         assert task.next_wait_timeout() == 0.0
         task.process_once()
 
-        inbox.write(json.dumps({"action": "cancel", "heartbeat_id": "build"}))
+        _upsert(context, tid, "build")
 
         wait_timeout = task.next_wait_timeout()
         assert_heartbeat_ownership_wait_timeout(wait_timeout)
@@ -516,7 +457,6 @@ def test_heartbeat_pending_input_wakes_through_reactor_wait(
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
 
 
 def test_heartbeat_next_wait_timeout_returns_zero_for_due_registration(
@@ -525,31 +465,16 @@ def test_heartbeat_next_wait_timeout_returns_zero_for_due_registration(
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    inbox = context.queue(f"T{tid}.inbox", persistent=False)
 
     try:
-        inbox.write(
-            json.dumps(
-                {
-                    "action": "upsert",
-                    "heartbeat_id": "build",
-                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                    "destination_queue": "build.queue",
-                    "message": "go",
-                }
-            )
-        )
+        _upsert(context, tid, "build")
         task.process_once()
-        registration = task._registrations["build"]
-        registration.next_due_at = time.monotonic() - 1
-        task._due_heap.clear()
-        heapq.heappush(task._due_heap, (registration.next_due_at, "build"))
+        _force_due(task, "build", time.monotonic())
 
         assert task.next_wait_timeout() == 0.0
     finally:
         task.stop(join=False)
         task.cleanup()
-        inbox.close()
 
 
 def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None:
@@ -591,38 +516,500 @@ def test_heartbeat_ping_while_waiting_is_handled_promptly(workdir: Path) -> None
         reply_queue.close()
 
 
-def test_heartbeat_failed_exact_ack_preserves_reserved_row(
-    workdir: Path, monkeypatch: pytest.MonkeyPatch
+def _upsert(
+    context: WeftContext,
+    registrant_tid: str,
+    heartbeat_id: str,
+    *,
+    interval_seconds: int = HEARTBEAT_MIN_INTERVAL_SECONDS,
+    lease_seconds: int = 3600,
+    destination_queue: str = "build.queue",
+    message: Any = "go",
 ) -> None:
-    """A failed acknowledgement must propagate without a destructive backstop."""
+    upsert_heartbeat(
+        context,
+        registrant_tid=registrant_tid,
+        heartbeat_id=heartbeat_id,
+        interval_seconds=interval_seconds,
+        lease_seconds=lease_seconds,
+        destination_queue=destination_queue,
+        message=message,
+    )
+
+
+def _registration_rows(context: WeftContext) -> list[tuple[dict[str, Any], int]]:
+    with context.broker() as reader:
+        return [
+            (json.loads(body), int(timestamp))
+            for body, timestamp in reader.peek_generator(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=True
+            )
+        ]
+
+
+def _raw_registration_ids(context: WeftContext) -> list[int]:
+    with context.broker() as reader:
+        return [
+            int(timestamp)
+            for _body, timestamp in reader.peek_generator(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=True
+            )
+        ]
+
+
+def _task_events(context: WeftContext, tid: str, event: str) -> list[dict[str, Any]]:
+    with context.broker() as reader:
+        rows = [
+            json.loads(body)
+            for body in reader.peek_generator(
+                WEFT_GLOBAL_LOG_QUEUE, with_timestamps=False
+            )
+        ]
+    return [row for row in rows if row.get("event") == event and row.get("tid") == tid]
+
+
+def _row_text(tid: str, heartbeat_id: str, **overrides: Any) -> str:
+    row: dict[str, Any] = {
+        "heartbeat_id": heartbeat_id,
+        "registrant_tid": tid,
+        "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
+        "lease_seconds": 3600,
+        "destination_queue": "build.queue",
+        "message": "go",
+    }
+    row.update(overrides)
+    return json.dumps(row)
+
+
+def _patch_heartbeat_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        heartbeat_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock["monotonic"],
+            time=time.time,
+            time_ns=lambda: time.time_ns() if clock.get("ns") is None else clock["ns"],
+            sleep=time.sleep,
+        ),
+    )
+
+
+def _force_due(task: HeartbeatTask, heartbeat_id: str, now: float) -> None:
+    registration = task._registrations[heartbeat_id]
+    registration.next_due_at = now - 1.0
+    task._due_heap.clear()
+    heapq.heappush(task._due_heap, (registration.next_due_at, heartbeat_id))
+
+
+def test_heartbeat_table_is_peeked_not_consumed(workdir: Path) -> None:
+    """The service reads registrations by peeking; it consumes no valid row."""
+
     context = build_context(spec_context=workdir)
     tid = str(time.time_ns())
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
-    reserved_name = task._queue_names["reserved"]
-    reserved = task._queue(reserved_name)
-    timestamp = reserved.write("retained")
-    real_queue = task._queue
-    failure = RuntimeError("injected heartbeat acknowledgement failure")
-    calls = []
+    try:
+        _upsert(context, tid, "build")
+        before = _registration_rows(context)
 
-    class AckQueue:
-        def __getattr__(self, name: str) -> Any:
-            return getattr(reserved, name)
+        task.process_once()
 
-        def delete(self, **kwargs: Any) -> bool:
-            calls.append(kwargs)
-            raise failure
+        assert "build" in task._registrations
+        assert _registration_rows(context) == before
+    finally:
+        task.stop(join=False)
+        task.cleanup()
 
-    monkeypatch.setattr(
-        task,
-        "_queue",
-        lambda name: AckQueue() if name == reserved_name else real_queue(name),
+
+def test_heartbeat_restart_rebuilds_table_from_queue(workdir: Path) -> None:
+    """A new heartbeat task rebuilds its table with no re-registration [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    first_tid = str(time.time_ns())
+    first = HeartbeatTask(
+        context.broker_target, make_heartbeat_taskspec(first_tid, workdir)
+    )
+    _upsert(context, first_tid, "build")
+    try:
+        first.process_once()
+        assert "build" in first._registrations
+    finally:
+        first.stop(join=False)
+        first.cleanup()
+
+    second_tid = str(time.time_ns())
+    second = HeartbeatTask(
+        context.broker_target, make_heartbeat_taskspec(second_tid, workdir)
+    )
+    destination = context.queue("build.queue", persistent=False)
+    try:
+        second.process_once()
+        assert "build" in second._registrations
+        _force_due(second, "build", time.monotonic())
+
+        second.process_once()
+
+        assert destination.read_one() == "go"
+        assert destination.read_one() is None
+    finally:
+        second.stop(join=False)
+        second.cleanup()
+        destination.close()
+
+
+def test_heartbeat_idle_exit_requires_empty_table(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle exit waits for an empty table, not for inbox silence [MF-3.2]."""
+
+    clock: dict[str, Any] = {"monotonic": 1000.0, "ns": None}
+    _patch_heartbeat_clock(monkeypatch, clock)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(
+        context.broker_target,
+        make_heartbeat_taskspec(tid, workdir, idle_timeout=5.0),
     )
     try:
-        with pytest.raises(RuntimeError) as exc_info:
-            task._delete_reserved_message(timestamp)
-        assert exc_info.value is failure
-        assert len(calls) == 1
-        assert reserved.peek_one() == "retained"
+        _upsert(context, tid, "build")
+        task.process_once()
+        assert "build" in task._registrations
+
+        for offset in (6.0, 12.0):
+            clock["monotonic"] = 1000.0 + offset
+            task.process_once()
+            assert not task.should_stop
+            assert _task_events(context, tid, "heartbeat_service_idle_shutdown") == []
+
+        cancel_heartbeat(context, heartbeat_id="build")
+        task.wait_for_activity(0.05)
+        task.process_once()
+        assert task._registrations == {}
+
+        clock["monotonic"] = 1017.0
+        task.process_once()
+
+        assert task.should_stop
+        assert len(_task_events(context, tid, "heartbeat_service_idle_shutdown")) == 1
     finally:
+        task.stop(join=False)
         task.cleanup()
+
+
+def test_heartbeat_cancel_before_due_turn_suppresses_emission(workdir: Path) -> None:
+    """A cancel committed before the pre-emission rebuild suppresses the emit."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    destination = context.queue("build.queue", persistent=False)
+    try:
+        _upsert(context, tid, "build")
+        task.process_once()
+        _force_due(task, "build", time.monotonic())
+        cancel_heartbeat(context, heartbeat_id="build")
+
+        task.process_once()
+
+        assert destination.read_one() is None
+        assert "build" not in task._registrations
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        destination.close()
+
+
+def test_heartbeat_inbox_mutation_is_rejected(workdir: Path) -> None:
+    """Inbox rows are not registrations; each is rejected [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    inbox = context.queue(f"T{tid}.inbox", persistent=False)
+    reserved = context.queue(f"T{tid}.reserved", persistent=False)
+    try:
+        inbox.write(
+            json.dumps(
+                {
+                    "action": "upsert",
+                    "heartbeat_id": "build",
+                    "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
+                    "destination_queue": "build.queue",
+                    "message": "go",
+                }
+            )
+        )
+
+        task.process_once()
+
+        assert len(_task_events(context, tid, "heartbeat_request_invalid")) == 1
+        assert task._registrations == {}
+        assert inbox.peek_one() is None
+        # reserved_policy_on_error defaults to keep: the rejected row is retained.
+        assert reserved.peek_one() is not None
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        inbox.close()
+        reserved.close()
+
+
+def test_heartbeat_invalid_registration_row_is_deleted_and_reported(
+    workdir: Path,
+) -> None:
+    """Invalid rows are deleted by exact ID and reported, never fatal [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    try:
+        with context.broker() as writer:
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "self-route", destination_queue=f"T{tid}.inbox"),
+            )
+            writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, "not a json object")
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "unschedulable", interval_seconds=10**400),
+            )
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(
+                    tid,
+                    "short-lease",
+                    interval_seconds=HEARTBEAT_MIN_INTERVAL_SECONDS,
+                    lease_seconds=HEARTBEAT_MIN_INTERVAL_SECONDS - 1,
+                ),
+            )
+            writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "oversized-lease", lease_seconds=10**400),
+            )
+        _upsert(context, tid, "valid")
+        valid_id = max(_raw_registration_ids(context))
+
+        task.process_once()
+
+        assert _raw_registration_ids(context) == [valid_id]
+        assert len(_task_events(context, tid, "heartbeat_request_invalid")) == 5
+        assert set(task._registrations) == {"valid"}
+        assert task.should_stop is False
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+
+
+def test_heartbeat_registrations_queue_joins_reactor_wait(workdir: Path) -> None:
+    """The registrations queue is a notification interest of the wait [QUEUE.7]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    try:
+        task.process_once()
+        task.wait_for_activity(0.05)
+        task.wait_for_activity(0.05)
+
+        signature = task._multi_activity_waiter_signature
+        assert signature is not None
+        assert WEFT_HEARTBEAT_REGISTRATIONS_QUEUE in signature
+        assert WEFT_STREAMING_SESSIONS_QUEUE not in signature
+        assert task._has_pending_observation() is False
+
+        _upsert(context, tid, "build")
+
+        assert task._has_pending_observation() is True
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+
+
+def test_heartbeat_cancel_while_paused_arms_idle_exit(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused service still learns a cancel and idles out [MF-3.2]."""
+
+    clock: dict[str, Any] = {"monotonic": 1000.0, "ns": None}
+    _patch_heartbeat_clock(monkeypatch, clock)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(
+        context.broker_target,
+        make_heartbeat_taskspec(tid, workdir, idle_timeout=5.0),
+    )
+    ctrl_in = context.queue(f"T{tid}.ctrl_in", persistent=False)
+    try:
+        _upsert(context, tid, "build")
+        task.process_once()
+        assert "build" in task._registrations
+        ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause"))
+        task.process_once()
+        assert task._paused is True
+        assert task._has_pending_observation() is False
+
+        cancel_heartbeat(context, heartbeat_id="build")
+        task.wait_for_activity(0.05)
+        task.process_once()
+        assert task._registrations == {}
+
+        clock["monotonic"] = 1005.0
+        task.process_once()
+
+        assert task.should_stop
+        assert len(_task_events(context, tid, "heartbeat_service_idle_shutdown")) == 1
+        assert task._paused is True
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        ctrl_in.close()
+
+
+def test_heartbeat_expired_registration_is_deleted_at_its_deadline(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row is deleted at its own lease deadline, even while paused [MF-3.2]."""
+
+    clock: dict[str, Any] = {"monotonic": 1000.0, "ns": None}
+    _patch_heartbeat_clock(monkeypatch, clock)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(
+        context.broker_target,
+        make_heartbeat_taskspec(tid, workdir, idle_timeout=5.0),
+    )
+    ctrl_in = context.queue(f"T{tid}.ctrl_in", persistent=False)
+    destination = context.queue("build.queue", persistent=False)
+
+    def advance(seconds_since_write: float) -> None:
+        clock["monotonic"] = 1000.0 + seconds_since_write
+        clock["ns"] = row_id + int(seconds_since_write * 1_000_000_000)
+
+    try:
+        _upsert(context, tid, "build", lease_seconds=90)
+        row_id = _raw_registration_ids(context)[0]
+        advance(0.0)
+        task.process_once()
+        assert "build" in task._registrations
+
+        advance(61.0)
+        task.process_once()
+        assert destination.peek_one() == "go"
+
+        ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause"))
+        task.process_once()
+        assert task._paused is True
+
+        advance(89.7)
+        task.process_once()
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert 0.25 <= wait_timeout <= 0.35
+
+        advance(90.1)
+        task.process_once()
+
+        assert _raw_registration_ids(context) == []
+        expired = _task_events(context, tid, "heartbeat_registration_expired")
+        assert len(expired) == 1
+        assert expired[0]["message_id"] == row_id
+        assert expired[0]["heartbeat_id"] == "build"
+        assert expired[0]["registrant_tid"] == tid
+        assert task._registrations == {}
+        assert destination.read_one() == "go"
+        assert destination.read_one() is None
+        assert task._paused is True
+
+        advance(95.2)
+        task.process_once()
+        assert task.should_stop
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        ctrl_in.close()
+        destination.close()
+
+
+@pytest.mark.parametrize("case", ["expired-newest", "unexpired", "failed-delete"])
+def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """The newest row of an id is its registration; older rows are residue."""
+
+    clock: dict[str, Any] = {"monotonic": 1000.0, "ns": None}
+    _patch_heartbeat_clock(monkeypatch, clock)
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    destination = context.queue("build.queue", persistent=False)
+    try:
+        with context.broker() as writer:
+            row_a = writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "x", lease_seconds=3600),
+            )
+            row_b = writer.write(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
+                _row_text(tid, "x", lease_seconds=60),
+            )
+        clock["ns"] = row_b + (0 if case == "unexpired" else 61 * 1_000_000_000)
+
+        if case == "unexpired":
+            task.process_once()
+            assert _raw_registration_ids(context) == [row_b]
+            assert task._registrations["x"].expires_at_ns == (
+                row_b + 60 * 1_000_000_000
+            )
+            return
+
+        if case == "failed-delete":
+            handle = task._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
+            original = handle.delete
+            calls: list[int] = []
+
+            def fail_once(**kwargs: Any) -> bool:
+                calls.append(1)
+                if len(calls) == 1:
+                    raise OSError("injected registration delete failure")
+                return original(**kwargs)
+
+            monkeypatch.setattr(handle, "delete", fail_once)
+            task.process_once()
+
+            assert _raw_registration_ids(context) == [row_a, row_b]
+            assert "x" not in task._registrations
+            assert task._registrations_rebuild_pending is False
+            assert task._has_pending_observation() is False
+            assert _task_events(context, tid, "heartbeat_registration_expired") == []
+
+            monkeypatch.setattr(handle, "delete", original)
+            _upsert(context, tid, "y")
+            task.wait_for_activity(0.05)
+            task.process_once()
+
+            assert {row["heartbeat_id"] for row, _ in _registration_rows(context)} == {
+                "y"
+            }
+            assert (
+                len(_task_events(context, tid, "heartbeat_registration_expired")) == 1
+            )
+            assert "y" in task._registrations
+            return
+
+        task.process_once()
+
+        assert _raw_registration_ids(context) == []
+        assert task._registrations == {}
+        assert len(_task_events(context, tid, "heartbeat_registration_expired")) == 1
+        assert destination.peek_one() is None
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        destination.close()

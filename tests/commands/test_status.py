@@ -9,6 +9,7 @@ from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, Never, cast
 
 import psutil
@@ -32,6 +33,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     SERVICE_TYPE_MANAGED,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -49,6 +51,7 @@ from weft.commands.types import (
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core import task_evidence as core_task_evidence
+from weft.core.heartbeat import upsert_heartbeat
 from weft.core.runners import host as host_runner
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -611,6 +614,16 @@ def test_status_services_prefer_live_duplicate_over_terminal_duplicate(
     live_tid = "1779000000000000301"
     terminal_tid = "1779000000000000302"
     now = time.time_ns()
+    # The heartbeat is desired only while a registration row exists [MA-1] item 7.
+    upsert_heartbeat(
+        ctx,
+        registrant_tid=live_tid,
+        heartbeat_id="status-probe",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="status.probe.destination",
+        message="tick",
+    )
     heartbeat_metadata = {
         "internal": True,
         "role": "heartbeat_service",
@@ -2664,7 +2677,7 @@ def test_status_reports_heartbeat_disabled_when_only_liveness_monitor_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Ops status mirrors the manager desire gate for the heartbeat service."""
+    """With an empty weft.state.heartbeats the heartbeat reports no registrations."""
 
     root = prepare_project_root(tmp_path)
     monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "0")
@@ -2678,27 +2691,63 @@ def test_status_reports_heartbeat_disabled_when_only_liveness_monitor_enabled(
     heartbeat = services[INTERNAL_SERVICE_KEY_HEARTBEAT]
     assert heartbeat["enabled"] is False
     assert heartbeat["status"] == "disabled"
-    assert heartbeat["evidence"] == "config-disabled"
+    assert heartbeat["evidence"] == "no-registrations"
     assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is True
 
 
-def test_status_reports_heartbeat_enabled_when_task_monitor_enabled(
+def test_status_reports_heartbeat_enabled_only_with_registrations(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """TaskMonitor is the heartbeat dependent, so heartbeat stays enabled."""
+    """Status mirrors the manager's heartbeat desire predicate; it reads only."""
 
     root = prepare_project_root(tmp_path)
     monkeypatch.setenv("WEFT_TASK_MONITOR_ENABLED", "1")
     monkeypatch.setenv("WEFT_LIVENESS_MONITOR_ENABLED", "0")
 
-    status_snapshot = status_cmd.cmd_status(context=root)
-    assert isinstance(status_snapshot, SystemStatusSnapshot)
-    payload = asdict(status_snapshot)
+    def heartbeat_service() -> dict[str, Any]:
+        status_snapshot = status_cmd.cmd_status(context=root)
+        assert isinstance(status_snapshot, SystemStatusSnapshot)
+        services = {
+            service["key"]: service for service in asdict(status_snapshot)["services"]
+        }
+        assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is False
+        return cast(dict[str, Any], services[INTERNAL_SERVICE_KEY_HEARTBEAT])
 
-    services = {service["key"]: service for service in payload["services"]}
-    assert services[INTERNAL_SERVICE_KEY_HEARTBEAT]["enabled"] is True
-    assert services[INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]["enabled"] is False
+    heartbeat = heartbeat_service()
+    assert heartbeat["enabled"] is False
+    assert heartbeat["status"] == "disabled"
+    assert heartbeat["evidence"] == "no-registrations"
+
+    ctx = build_context(spec_context=root)
+    lease_seconds = 60
+    upsert_heartbeat(
+        ctx,
+        registrant_tid=str(time.time_ns()),
+        heartbeat_id="probe",
+        interval_seconds=60,
+        lease_seconds=lease_seconds,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+    assert heartbeat_service()["enabled"] is True
+
+    offset_ns = (lease_seconds + 1) * 1_000_000_000
+    monkeypatch.setattr(
+        status_cmd,
+        "time",
+        SimpleNamespace(
+            monotonic=time.monotonic,
+            time=time.time,
+            time_ns=lambda: time.time_ns() + offset_ns,
+            sleep=time.sleep,
+        ),
+    )
+    heartbeat = heartbeat_service()
+    assert heartbeat["enabled"] is False
+    assert heartbeat["evidence"] == "no-registrations"
+    with ctx.broker() as reader:
+        assert reader.peek_one(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE) is not None
 
 
 @pytest.mark.parametrize("selected", [True, False])

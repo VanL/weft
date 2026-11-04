@@ -1,8 +1,14 @@
 """Internal heartbeat service task.
 
+Registrations are rows on ``weft.state.heartbeats``. The service builds its
+in-memory table by peeking that queue, holds a notification-only interest in
+it, and deletes only rows it rejects, rows a newer row of the same id
+supersedes, and rows whose lease has expired.
+
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.3], [CC-2.4.1]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.1], [MF-3.2], [MF-6]
+- docs/specifications/07-System_Invariants.md [QUEUE.7]
 """
 
 from __future__ import annotations
@@ -25,38 +31,49 @@ from pydantic import (
     model_validator,
 )
 
+from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from weft._constants import (
     HEARTBEAT_IDLE_TIMEOUT_SECONDS,
+    HEARTBEAT_MAX_LEASE_SECONDS,
     HEARTBEAT_MIN_INTERVAL_SECONDS,
     HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
 )
 from weft.context import WeftContext
 from weft.core.endpoints import resolve_endpoint
 from weft.core.taskspec import TaskSpec
-from weft.helpers import closing_queue_iterator
+from weft.helpers import closing_queue_iterator, is_task_tid
 
 from .multiqueue_watcher import QueueMessageContext, QueueMode
 from .service import ServiceTask
 
 logger = logging.getLogger(__name__)
 
-HeartbeatAction = Literal["upsert", "cancel"]
 
+class HeartbeatRegistrationRow(BaseModel):
+    """One validated heartbeat registration row on ``weft.state.heartbeats``.
 
-class HeartbeatMutation(BaseModel):
-    """Validated heartbeat registration request."""
+    The same model validates at every reader and writer: the registration
+    helper, the heartbeat table build, the Manager's desire predicate, and
+    ``weft status``. ``HEARTBEAT_MIN_INTERVAL_SECONDS <= interval_seconds <=
+    lease_seconds <= HEARTBEAT_MAX_LEASE_SECONDS`` keeps every accepted row
+    bounded and schedulable.
+
+    Spec: [MF-3.2]
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    action: HeartbeatAction
     heartbeat_id: str
-    interval_seconds: int | None = None
-    destination_queue: str | None = None
-    message: Any = None
+    registrant_tid: str
+    interval_seconds: int
+    lease_seconds: int
+    destination_queue: str
+    message: Any
 
     @field_validator("heartbeat_id")
     @classmethod
@@ -66,20 +83,55 @@ class HeartbeatMutation(BaseModel):
             raise ValueError("heartbeat_id must not be empty")
         return candidate
 
+    @field_validator("registrant_tid")
+    @classmethod
+    def _validate_registrant_tid(cls, value: str) -> str:
+        if not is_task_tid(value):
+            raise ValueError("registrant_tid must be a full task TID")
+        return value
+
+    @field_validator("destination_queue")
+    @classmethod
+    def _validate_destination_namespace(cls, value: str) -> str:
+        if not value:
+            raise ValueError("destination_queue must not be empty")
+        if value.startswith(WEFT_QUEUE_NAMESPACE_PREFIX):
+            raise ValueError(
+                "destination_queue must not use the reserved Weft queue "
+                f"namespace {WEFT_QUEUE_NAMESPACE_PREFIX!r}: {value!r}"
+            )
+        return value
+
+    @field_validator("message")
+    @classmethod
+    def _validate_message(cls, value: Any) -> Any:
+        try:
+            json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("message must be JSON-serializable") from exc
+        return value
+
     @model_validator(mode="after")
-    def _validate_shape(self) -> HeartbeatMutation:
-        if self.action == "cancel":
-            return self
-        if (
-            self.interval_seconds is None
-            or self.interval_seconds < HEARTBEAT_MIN_INTERVAL_SECONDS
-        ):
+    def _validate_lease_chain(self) -> HeartbeatRegistrationRow:
+        if self.interval_seconds < HEARTBEAT_MIN_INTERVAL_SECONDS:
             raise ValueError(
                 f"interval_seconds must be >= {HEARTBEAT_MIN_INTERVAL_SECONDS}"
             )
-        if not isinstance(self.destination_queue, str) or not self.destination_queue:
-            raise ValueError("destination_queue must not be empty")
+        if self.lease_seconds < self.interval_seconds:
+            raise ValueError("lease_seconds must be >= interval_seconds")
+        if self.lease_seconds > HEARTBEAT_MAX_LEASE_SECONDS:
+            raise ValueError(f"lease_seconds must be <= {HEARTBEAT_MAX_LEASE_SECONDS}")
         return self
+
+    def expires_at_ns(self, message_id: int) -> int:
+        """Return the lease end: the row's message ID plus its lease."""
+
+        return message_id + self.lease_seconds * 1_000_000_000
+
+    def expired(self, message_id: int, now_ns: int) -> bool:
+        """Return whether the lease has ended at ``now_ns``."""
+
+        return now_ns >= self.expires_at_ns(message_id)
 
 
 @dataclass(slots=True)
@@ -91,6 +143,7 @@ class HeartbeatRegistration:
     destination_queue: str
     message_text: str
     next_due_at: float
+    expires_at_ns: int
 
 
 class HeartbeatTask(ServiceTask):
@@ -119,6 +172,9 @@ class HeartbeatTask(ServiceTask):
         ] = ("unknown", None)
         self._registrations: dict[str, HeartbeatRegistration] = {}
         self._due_heap: list[tuple[float, str]] = []
+        self._registrations_cursor: int | None = None
+        self._registrations_rebuild_pending = True
+        self._row_ids: dict[str, int] = {}
         self._idle_timeout_seconds = float(
             taskspec.metadata.get(
                 "heartbeat_idle_timeout",
@@ -132,6 +188,55 @@ class HeartbeatTask(ServiceTask):
 
     def _activate_waiter(self) -> None:
         self._activate_service_task()
+
+    def _reactor_support_routes(self) -> dict[str, str]:
+        """Declare the registrations queue as a fixed support route [QUEUE.7]."""
+
+        routes = super()._reactor_support_routes()
+        routes["heartbeat_registrations"] = WEFT_HEARTBEAT_REGISTRATIONS_QUEUE
+        return routes
+
+    def _activity_wait_queues(self) -> list[Queue]:
+        """Add the registrations notification interest, not a delivery route.
+
+        Spec: docs/specifications/07-System_Invariants.md [QUEUE.7]
+        """
+
+        queues = super()._activity_wait_queues()
+        queues.append(self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE))
+        return queues
+
+    def _has_pending_observation(self) -> bool:
+        """Report a new registration row or a removed table row [QUEUE.7].
+
+        A row newer than the publication cursor, or the absence of a row the
+        table holds, sets the rebuild flag. The check ignores ``_paused`` and
+        due times, so a cancel while paused still empties the table. Only the
+        rebuild advances the cursor.
+
+        Spec: [MF-3.2], [QUEUE.7]
+        """
+
+        if self._registrations_rebuild_pending:
+            return True
+        queue = self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
+        try:
+            changed = queue.has_pending(after_timestamp=self._registrations_cursor)
+            if not changed and self._row_ids:
+                present: set[int] = set()
+                rows = queue.peek_generator(with_timestamps=True)
+                with closing_queue_iterator(rows) as iterator:
+                    for _body, message_id in iterator:
+                        present.add(int(message_id))
+                changed = any(
+                    row_id not in present for row_id in self._row_ids.values()
+                )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Heartbeat registration observation deferred", exc_info=True)
+            return False
+        if changed:
+            self._registrations_rebuild_pending = True
+        return changed
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         return {
@@ -167,6 +272,12 @@ class HeartbeatTask(ServiceTask):
         if self.should_stop:
             self._maybe_emit_poll_report()
             return
+        if self._registrations and time.time_ns() >= min(
+            item.expires_at_ns for item in self._registrations.values()
+        ):
+            self._registrations_rebuild_pending = True
+        if self._registrations_rebuild_pending:
+            self._rebuild_registrations()
         if self._exit_if_superseded():
             self._maybe_emit_poll_report()
             return
@@ -217,59 +328,181 @@ class HeartbeatTask(ServiceTask):
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
-        del context
+        """Reject every inbox row: registrations are queue rows [MF-3.2]."""
+
+        del message, context
+        self._report_state_change(
+            event="heartbeat_request_invalid",
+            message_id=timestamp,
+            error="heartbeat registrations are rows on weft.state.heartbeats",
+        )
+        policy = self.taskspec.spec.reserved_policy_on_error
+        self._apply_reserved_policy(policy, message_timestamp=timestamp)
+
+    def _delete_registration_row(self, message_id: int) -> bool:
+        """Delete one registration row by exact ID; best-effort, reported."""
+
         try:
-            mutation = HeartbeatMutation.model_validate_json(message)
-            self._validate_destination_queue(mutation)
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE).delete(
+                message_id=message_id
+            )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to delete heartbeat registration row %s",
+                message_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    def _rebuild_registrations(self) -> None:
+        """Rebuild the registration table by peeking ``weft.state.heartbeats``.
+
+        The registration of a ``heartbeat_id`` is its newest row. Per id, in
+        order: delete every older row (residue of an interrupted replacement)
+        in ascending message-ID order; reject and delete an invalid newest
+        row; delete an expired newest row with a
+        ``heartbeat_registration_expired`` event; otherwise keep it as the
+        registration. Failure barrier: if an older-row delete raises, deletion
+        for that id stops there and its newest row stays in the queue, so no
+        older row can ever become current; the id's rows are retried at the
+        next build. The rebuild flag is cleared either way (a held flag would
+        spin the reactor).
+
+        Spec: [MF-3.2], [QUEUE.7]
+        """
+
+        self._registrations_rebuild_pending = False
+        grouped = self._peek_registration_rows()
+        if grouped is None:
+            return
+        now_ns = time.time_ns()
+        registrations: dict[str, HeartbeatRegistration] = {}
+        row_ids: dict[str, int] = {}
+        for heartbeat_id, id_rows in grouped.items():
+            current_row = self._current_registration_row(id_rows, now_ns=now_ns)
+            if current_row is None:
+                continue
+            message_id, row = current_row
+            row_ids[heartbeat_id] = message_id
+            current = self._registrations.get(heartbeat_id)
+            if current is not None and self._row_ids.get(heartbeat_id) == message_id:
+                registrations[heartbeat_id] = current
+                continue
+            registration = HeartbeatRegistration(
+                heartbeat_id=row.heartbeat_id,
+                interval_seconds=int(row.interval_seconds),
+                destination_queue=row.destination_queue,
+                message_text=self._serialize_message_payload(row.message),
+                next_due_at=time.monotonic() + float(row.interval_seconds),
+                expires_at_ns=row.expires_at_ns(message_id),
+            )
+            registrations[heartbeat_id] = registration
+            heapq.heappush(
+                self._due_heap,
+                (registration.next_due_at, registration.heartbeat_id),
+            )
+
+        was_empty = not self._registrations
+        self._registrations = registrations
+        self._row_ids = row_ids
+        if registrations:
+            self._empty_since_monotonic = None
+        elif not was_empty or self._empty_since_monotonic is None:
+            self._empty_since_monotonic = time.monotonic()
+
+    def _peek_registration_rows(
+        self,
+    ) -> dict[str, list[tuple[dict[str, Any], int]]] | None:
+        """Peek every row, advance the cursor, and group rows by canonical id.
+
+        A row without a readable ``heartbeat_id`` is rejected and deleted here.
+        Returns ``None`` when the queue cannot be read (best-effort).
+        """
+
+        rows: list[tuple[str, int]] = []
+        try:
+            iterator = self._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE).peek_generator(
+                with_timestamps=True
+            )
+            with closing_queue_iterator(iterator) as entries:
+                for body, message_id in entries:
+                    rows.append((str(body), int(message_id)))
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Heartbeat registration rebuild deferred", exc_info=True)
+            return None
+        rows.sort(key=lambda item: item[1])
+        if rows and (
+            self._registrations_cursor is None
+            or rows[-1][1] > self._registrations_cursor
+        ):
+            self._registrations_cursor = rows[-1][1]
+
+        grouped: dict[str, list[tuple[dict[str, Any], int]]] = {}
+        for body, message_id in rows:
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = None
+            heartbeat_id = (
+                payload.get("heartbeat_id") if isinstance(payload, dict) else None
+            )
+            if (
+                isinstance(payload, dict)
+                and isinstance(heartbeat_id, str)
+                and heartbeat_id.strip()
+            ):
+                grouped.setdefault(heartbeat_id.strip(), []).append(
+                    (payload, message_id)
+                )
+                continue
             self._report_state_change(
                 event="heartbeat_request_invalid",
-                message_id=timestamp,
-                error=str(exc),
+                message_id=message_id,
+                error="registration row must be a JSON object with a heartbeat_id",
             )
-            policy = self.taskspec.spec.reserved_policy_on_error
-            self._apply_reserved_policy(policy, message_timestamp=timestamp)
-            return
+            self._delete_registration_row(message_id)
+        return grouped
 
-        if mutation.action == "cancel":
-            removed = self._registrations.pop(mutation.heartbeat_id, None)
-            if removed is not None and not self._registrations:
-                self._empty_since_monotonic = time.monotonic()
-            self._report_state_change(
-                event="heartbeat_cancelled",
-                message_id=timestamp,
-                heartbeat_id=mutation.heartbeat_id,
-                existed=removed is not None,
-            )
-            self._delete_reserved_message(timestamp)
-            return
+    def _current_registration_row(
+        self,
+        id_rows: list[tuple[dict[str, Any], int]],
+        *,
+        now_ns: int,
+    ) -> tuple[int, HeartbeatRegistrationRow] | None:
+        """Apply the per-id newest-row rule; return the registration row, if any."""
 
-        assert mutation.interval_seconds is not None
-        assert mutation.destination_queue is not None
-        registration = HeartbeatRegistration(
-            heartbeat_id=mutation.heartbeat_id,
-            interval_seconds=int(mutation.interval_seconds),
-            destination_queue=mutation.destination_queue,
-            message_text=self._serialize_message_payload(mutation.message),
-            next_due_at=time.monotonic() + float(mutation.interval_seconds),
-        )
-        self._registrations[mutation.heartbeat_id] = registration
-        heapq.heappush(
-            self._due_heap,
-            (registration.next_due_at, registration.heartbeat_id),
-        )
-        self._empty_since_monotonic = None
-        self._report_state_change(
-            event="heartbeat_upserted",
-            message_id=timestamp,
-            heartbeat_id=registration.heartbeat_id,
-            interval_seconds=registration.interval_seconds,
-            destination_queue=registration.destination_queue,
-        )
-        self._delete_reserved_message(timestamp)
+        payload, message_id = id_rows[-1]
+        barrier = False
+        for _older, older_id in id_rows[:-1]:
+            if not self._delete_registration_row(older_id):
+                barrier = True
+                break
+        try:
+            row = HeartbeatRegistrationRow.model_validate(payload)
+            self._validate_destination_queue(row.destination_queue)
+        except (ValidationError, ValueError) as exc:
+            if not barrier:
+                self._report_state_change(
+                    event="heartbeat_request_invalid",
+                    message_id=message_id,
+                    error=str(exc),
+                )
+                self._delete_registration_row(message_id)
+            return None
+        if row.expired(message_id, now_ns):
+            if not barrier and self._delete_registration_row(message_id):
+                self._report_state_change(
+                    event="heartbeat_registration_expired",
+                    message_id=message_id,
+                    heartbeat_id=row.heartbeat_id,
+                    registrant_tid=row.registrant_tid,
+                )
+            return None
+        return message_id, row
 
-    def _validate_destination_queue(self, mutation: HeartbeatMutation) -> None:
-        """Reject unsafe runtime egress before storing a registration.
+    def _validate_destination_queue(self, destination_queue: str) -> None:
+        """Reject unsafe runtime egress when the registration table is built.
 
         Heartbeat destinations are payload-directed rather than construction
         topology. Ordinary application and task-local queues remain valid, but
@@ -281,10 +514,6 @@ class HeartbeatTask(ServiceTask):
         - docs/specifications/07-System_Invariants.md [QUEUE.7]
         """
 
-        if mutation.action == "cancel":
-            return
-        destination_queue = mutation.destination_queue
-        assert destination_queue is not None
         self_routes = {
             self._queue_names["inbox"],
             self._queue_names["reserved"],
@@ -312,15 +541,25 @@ class HeartbeatTask(ServiceTask):
         except (TypeError, ValueError) as exc:
             raise ValueError("message must be JSON-serializable") from exc
 
-    def _delete_reserved_message(self, message_id: int) -> None:
-        """Acknowledge one row without consuming failed-ack residue.
-
-        Spec: docs/specifications/07-System_Invariants.md [QUEUE.6]
-        """
-        self._get_reserved_queue().delete(message_id=message_id)
-
     def _emit_due_registrations(self) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-043] exception
+        """Emit every due registration after a pre-emission table rebuild.
+
+        Linearization boundary: when anything is due, the table is rebuilt
+        first and the due list is taken from the rebuilt table. A cancel
+        committed before that rebuild suppresses this turn's emission; a
+        cancel committed after it may be followed by at most one emission
+        (this turn's). The turn never emits for a row that rebuild found
+        expired; an emission whose rebuild found the row unexpired may land
+        after the expiry instant by at most this turn's duration.
+
+        Spec: [MF-3.2]
+        """
+
         now = time.monotonic()
+        next_due = self._next_due_timeout(now=now)
+        if next_due is None or next_due > 0.0:
+            return False
+        self._rebuild_registrations()
         due_ids: list[str] = []
 
         while self._due_heap:
@@ -499,12 +738,17 @@ class HeartbeatTask(ServiceTask):
         next_due = None if self._paused else self._next_due_timeout(now=now)
         idle_timeout = self._next_idle_timeout(now=now)
         base_timeout = super().next_wait_timeout()
+        expiry_timeout: float | None = None
+        if self._registrations:
+            earliest = min(item.expires_at_ns for item in self._registrations.values())
+            expiry_timeout = max(0.0, (earliest - time.time_ns()) / 1_000_000_000)
         timeouts = [
             value
             for value in (
                 base_timeout,
                 next_due,
                 idle_timeout,
+                expiry_timeout,
                 self._next_ownership_audit_at - now,
             )
             if value is not None
@@ -531,4 +775,4 @@ class HeartbeatTask(ServiceTask):
         return (self._empty_since_monotonic + self._idle_timeout_seconds) - now
 
 
-__all__ = ["HeartbeatTask"]
+__all__ = ["HeartbeatRegistrationRow", "HeartbeatTask"]

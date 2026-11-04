@@ -1106,7 +1106,7 @@ LIVENESS_MONITOR_ENABLED_DEFAULT: Final[bool] = True
 """Default for independent manager supervision of LivenessMonitor."""
 
 WEFT_TASK_MONITOR_INTERVAL_SECONDS_DEFAULT: Final[int] = 300
-"""Default heartbeat wake interval for the supervised task monitor."""
+"""Default cycle grid interval for the supervised task monitor's own deadline."""
 
 WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS_DEFAULT: Final[float] = 2.0
 """Default short wake interval while retained task-log backlog remains."""
@@ -1356,12 +1356,6 @@ MANAGER_SERVE_LOG_COMPONENTS: Final[frozenset[str]] = frozenset(
 )
 """Allowed foreground manager operational-log component labels."""
 
-TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS: Final[float] = 1.0
-"""Delay before TaskMonitor retries a failed heartbeat registration."""
-
-TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS: Final[float] = 0.5
-"""Bounded heartbeat lookup budget used by TaskMonitor before retrying later."""
-
 MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
 """Window where nonterminal service rows without live proof remain uncertain."""
 
@@ -1440,6 +1434,9 @@ INTERNAL_ENDPOINT_NAMESPACE_PREFIX: Final[str] = "_weft."
 
 WEFT_PIPELINES_STATE_QUEUE: Final[str] = "weft.state.pipelines"
 """Queue tracking active first-class pipeline runs."""
+
+WEFT_HEARTBEAT_REGISTRATIONS_QUEUE: Final[str] = "weft.state.heartbeats"
+"""Runtime queue of heartbeat registrations; one row per live registration [MF-3.2]."""
 
 PIPELINE_STATUS_QUEUE_SUFFIX: Final[str] = "status"
 """Suffix for pipeline status queues (P{tid}.status)."""
@@ -1662,14 +1659,18 @@ INTERNAL_SERVICE_RUNTIME_CLASSES: Final[frozenset[str]] = frozenset(
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""
 
+HEARTBEAT_MAX_LEASE_SECONDS: Final[int] = 7 * 24 * 60 * 60
+"""Longest heartbeat registration lease, and so the longest interval (a lease
+is at least its interval). Seven days is the current policy value, set by the
+owner on 2026-11-03; it is not intrinsic to Weft and may be raised or lowered.
+A registrant that wants ticks for longer resubmits before its lease ends
+[MF-3.2]."""
+
 HEARTBEAT_IDLE_TIMEOUT_SECONDS: Final[float] = 60.0
 """Idle timeout after the last registration before the heartbeat service exits."""
 
 HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS: Final[float] = 1.0
 """Clock cadence for HeartbeatTask endpoint-ownership reconciliation."""
-
-HEARTBEAT_ENDPOINT_PROBE_TIMEOUT: Final[float] = 0.25
-"""Bounded PING/PONG probe timeout used when validating a heartbeat endpoint."""
 
 PIPELINE_RUNTIME_METADATA_KEY: Final[str] = "_weft_pipeline_runtime"
 """Reserved metadata key carrying a precompiled pipeline runtime plan."""
@@ -2338,7 +2339,7 @@ def _parse_admission_reserve_fraction(value: str) -> float:
 
 
 def _parse_task_monitor_interval_seconds(value: str) -> int:
-    """Parse the task-monitor heartbeat interval environment variable."""
+    """Parse the task-monitor cycle interval; the floor is `HEARTBEAT_MIN_INTERVAL_SECONDS`."""
 
     parsed = _parse_positive_int(value, name="WEFT_TASK_MONITOR_INTERVAL_SECONDS")
     if parsed < HEARTBEAT_MIN_INTERVAL_SECONDS:

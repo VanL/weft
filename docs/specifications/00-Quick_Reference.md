@@ -40,6 +40,7 @@ Global queues:
 | `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
+| `weft.state.heartbeats` | Heartbeat registrations: one row per live registration, keyed by `heartbeat_id`, naming its registrant TID; each row carries its own lease and expires when it ends; the manager runs the heartbeat service while the queue holds a row that is unexpired or not yet rejected ([MF-3.2]) | No (runtime state) |
 
 Manager spawn reserved queues are `T{manager_tid}.reserved` for all ordinary work,
 `T{manager_tid}.internal_reserved` for internal work. See [MF-6].
@@ -194,7 +195,7 @@ Format rules and sanitization are defined by [OBS.4], [OBS.5], [OBS.7], and
 | `WEFT_AUTOSTART_TASKS` | Whether manager boot should consider autostart manifests under the active Weft metadata directory. |
 | `WEFT_TASK_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `TaskMonitor`. Defaults to true. |
 | `WEFT_LIVENESS_MONITOR_ENABLED` | Whether the canonical manager supervises the internal `LivenessMonitor`. Defaults to true. Disabling it also removes its modeled admission-reserve slot; TID mappings then persist because no other component may delete them. |
-| `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Heartbeat wake interval for the supervised task monitor. Must be at least the heartbeat minimum. |
+| `WEFT_TASK_MONITOR_INTERVAL_SECONDS` | Cycle grid interval, in whole seconds, for the supervised task monitor's own deadline: cycles run on a fixed grid anchored at the monitor's first cycle, with one immediate follow-up after a cycle that overran a tick. Must be at least 60. |
 | `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` | Short wake interval used while retained task-log backlog remains after a batch-limited cycle. Defaults to 2 seconds. |
 | `WEFT_TASK_MONITOR_BATCH_SIZE` | Maximum retained task-log rows or cleanup candidates processed by one supervised monitor cycle. Defaults to 5000. |
 | `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT` | Maximum `weft.log.tasks` rows scanned by one supervised monitor cycle. Defaults to 50000. |
@@ -248,6 +249,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock (the `WEFT_TASK_MONITOR_INTERVAL_SECONDS` row). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected (the `weft.state.heartbeats` row).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` (the Queue Names and Control Messages tables).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 

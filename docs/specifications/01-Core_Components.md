@@ -35,6 +35,7 @@ See also:
 
 ## Related Plans
 
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([CC-2.3]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
 
@@ -641,8 +642,8 @@ Current task families:
   do not appear as TaskMonitor cleanup-policy identities. Private helper phases
   must not create additional policy identities. The persistent
   monitor also calls the configured task-monitor processor. The persistent
-  monitor is a reactor: it owns task-local control, heartbeat registration,
-  scheduling, and commits cached diagnostics from worker results. Custom
+  monitor is a reactor: it owns task-local control, its own cycle deadline,
+  and commits cached diagnostics from worker results. Custom
   processors run from the resulting candidate snapshot through the registered
   `ServiceTask` processor worker group; the reactor commits the processor
   result, checkpoint, and cached diagnostics after the typed worker event
@@ -663,7 +664,7 @@ Current task families:
   diagnostics, and the reactor may launch the next discrete slice only after
   the previous worker result has been applied.
   The launcher asks the persistent monitor for its next wait timeout so the
-  monitor sleeps until heartbeat/local due time or task-local input instead of
+  monitor sleeps until its own cycle deadline or task-local input instead of
   polling at the default task-process interval. The supervised monitor builds
   lifecycle and cleanup
   candidate snapshots, including Weft lifecycle anomalies, domain failures,

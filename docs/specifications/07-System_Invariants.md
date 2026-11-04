@@ -181,6 +181,13 @@ A live task declares every construction-fixed delivery role and
   turns and waits without adding handlers, consumption, or reserve routes.
   The Manager observes each task-state queue awaiting its startup feedback,
   with active notification interests bounded by the [MA-1.8] startup window.
+  The canonical Manager and the heartbeat service each also hold one standing
+  notification interest in `weft.state.heartbeats` ([MF-3.2]); for the
+  heartbeat service that queue is a fixed support route that it peeks, never
+  a delivery role. The heartbeat service deletes from the queue only rows it
+  rejects, rows a newer row of the same `heartbeat_id` supersedes, and rows
+  whose lease has expired; the canonical Manager deletes only when every row
+  has expired.
   Registration precedes the initial read; changed publications
   can return control even without delivery readiness. Rejected evidence retains
   interest with a strict publication cursor; gate release, exit/failure and
@@ -190,7 +197,7 @@ A live task declares every construction-fixed delivery role and
 
 _Implementation mapping_:
 
-- Fixed delivery roles and reactor-owned notification interests are implemented by `weft/core/tasks/base.py::BaseTask._reactor_queue_roles`, `weft/core/tasks/base.py::BaseTask._allowed_reactor_queue_aliases`, `weft/core/tasks/base.py::BaseTask.add_queue`, `weft/core/tasks/base.py::BaseTask.remove_queue`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_wait_queues`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._has_pending_observation`, `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest`. The canonical task-state name is owned by `weft/core/task_state.py::task_state_queue_name`. Other route owners: `weft/core/tasks/heartbeat.py`, `weft/core/tasks/pipeline.py`, `weft/core/tasks/monitor.py`, and `weft/core/monitor/task_monitor.py`. Verification: `tests/tasks/test_task_execution.py`, `tests/core/test_manager.py`, `tests/tasks/test_pipeline_runtime.py`, `tests/tasks/test_task_observer_behavior.py`, `tests/tasks/test_task_monitor.py`, `tests/tasks/test_heartbeat.py`, `tests/tasks/test_multiqueue_watcher.py`, and `tests/core/test_manager_family_maintenance.py`. Heartbeat payload-directed destinations remain governed by [MF-3.2].
+- Fixed delivery roles and reactor-owned notification interests are implemented by `weft/core/tasks/base.py::BaseTask._reactor_queue_roles`, `weft/core/tasks/base.py::BaseTask._allowed_reactor_queue_aliases`, `weft/core/tasks/base.py::BaseTask.add_queue`, `weft/core/tasks/base.py::BaseTask.remove_queue`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._activity_wait_queues`, `weft/core/tasks/multiqueue_watcher.py::MultiQueueWatcher._has_pending_observation`, `weft/core/manager.py::Manager._activity_wait_queues`, `weft/core/manager.py::Manager._has_pending_observation`, `weft/core/tasks/heartbeat.py::HeartbeatTask._activity_wait_queues`, `weft/core/tasks/heartbeat.py::HeartbeatTask._has_pending_observation`, and `weft/core/manager.py::Manager._clear_startup_notification_interest`. The canonical task-state name is owned by `weft/core/task_state.py::task_state_queue_name`. Other route owners: `weft/core/tasks/heartbeat.py`, `weft/core/tasks/pipeline.py`, `weft/core/tasks/monitor.py`, and `weft/core/monitor/task_monitor.py`. Verification: `tests/tasks/test_task_execution.py`, `tests/core/test_manager.py`, `tests/tasks/test_pipeline_runtime.py`, `tests/tasks/test_task_observer_behavior.py`, `tests/tasks/test_task_monitor.py`, `tests/tasks/test_heartbeat.py`, `tests/tasks/test_multiqueue_watcher.py`, and `tests/core/test_manager_family_maintenance.py`. Heartbeat payload-directed destinations remain governed by [MF-3.2].
 
 #### Standalone watcher membership ownership [QUEUE.8]
 
@@ -1394,6 +1401,7 @@ doc:
 
 ## Related Plans
 
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([QUEUE.7]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([QUEUE.7]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MANAGER.18].
 

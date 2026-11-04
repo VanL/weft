@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from weft._constants import (
     WEFT_CONFIG_DEFAULTS,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -111,7 +113,7 @@ def _seed_service(ctx: WeftContext, tid: str) -> None:
         queue.write(json.dumps(record))
 
 
-@pytest.mark.parametrize("operation", ["endpoints", "heartbeat", "terminal"])
+@pytest.mark.parametrize("operation", ["endpoints", "terminal"])
 def test_service_reads_reuse_owner_and_observe_independent_commits(
     counted_service_connections: tuple[WeftContext, list[Any]], operation: str
 ) -> None:
@@ -160,16 +162,6 @@ def test_service_reads_reuse_owner_and_observe_independent_commits(
                     assert (resolved is not None) == (status == "running")
                     if resolved is not None:
                         assert resolved.record.tid == tid
-                elif operation == "heartbeat":
-                    assert (
-                        heartbeat._latest_heartbeat_task_status(
-                            ctx, tid=tid, broker=broker
-                        )
-                        == status
-                    )
-                    assert heartbeat._heartbeat_runtime_handle_is_live(
-                        ctx, tid=tid, broker=broker
-                    )
                 else:
                     snapshot = task_evidence.task_local_terminal_evidence(
                         ctx, tid=tid, taskspec_payload=None, broker=broker
@@ -193,26 +185,30 @@ def test_heartbeat_requests_commit_without_closing_owner(
         owner.get_connection() as broker,
     ):
         owner.has_pending()
-        _seed_service(ctx, tid)
         before = len(connections)
-        assert (
-            heartbeat.upsert_heartbeat(
-                ctx,
-                heartbeat_id="test",
-                interval_seconds=60,
-                destination_queue="test.destination",
-                message="go",
-                broker=broker,
-            )
-            is None
-        )
-        assert (
-            heartbeat.cancel_heartbeat(ctx, heartbeat_id="test", broker=broker) is None
+        heartbeat.upsert_heartbeat(
+            ctx,
+            registrant_tid=tid,
+            heartbeat_id="test",
+            interval_seconds=60,
+            lease_seconds=3600,
+            destination_queue="test.destination",
+            message="go",
+            broker=broker,
         )
         assert len(connections) == before
         with ctx.broker() as reader:
-            rows = list(reader.peek_generator(f"T{tid}.inbox", with_timestamps=False))
-        assert [json.loads(body)["action"] for body in rows] == ["upsert", "cancel"]
+            rows = list(
+                reader.peek_generator(
+                    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=False
+                )
+            )
+        assert [json.loads(body)["heartbeat_id"] for body in rows] == ["test"]
+        before = len(connections)
+        heartbeat.cancel_heartbeat(ctx, heartbeat_id="test", broker=broker)
+        assert len(connections) == before
+        with ctx.broker() as reader:
+            assert reader.peek_one(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE) is None
         owner.write("owner remains usable")
 
 
@@ -228,7 +224,6 @@ def test_empty_service_state_queries_do_not_open_connections(
         endpoints.latest_tid_state_entries_for_endpoint_resolution(ctx, tids=["bad"])
         == {}
     )
-    assert not heartbeat._heartbeat_runtime_handle_is_live(ctx, tid="bad")
     assert not connections
 
 
@@ -676,20 +671,21 @@ def test_heartbeat_destination_churn_does_not_grow_task_cache(
     )
     try:
         task.process_once()
+        task.wait_for_activity(0.05)
+        task.process_once()
         cached = set(task._queue_cache)
         for index in range(4):
             name = f"destination.{index}"
-            task._queue(f"T{tid}.inbox").write(
-                json.dumps(
-                    {
-                        "action": "upsert",
-                        "heartbeat_id": "test",
-                        "interval_seconds": HEARTBEAT_MIN_INTERVAL_SECONDS,
-                        "destination_queue": name,
-                        "message": "tick",
-                    }
-                )
+            heartbeat.upsert_heartbeat(
+                ctx,
+                registrant_tid=tid,
+                heartbeat_id="test",
+                interval_seconds=HEARTBEAT_MIN_INTERVAL_SECONDS,
+                lease_seconds=3600,
+                destination_queue=name,
+                message="tick",
             )
+            task.wait_for_activity(0.05)
             task.process_once()
             registration = task._registrations["test"]
             registration.next_due_at = time.monotonic() - 1
@@ -699,9 +695,8 @@ def test_heartbeat_destination_churn_does_not_grow_task_cache(
             assert len(connections) == before
             with ctx.broker() as reader:
                 assert reader.peek_one(name, with_timestamps=False) == "tick"
-            task._queue(f"T{tid}.inbox").write(
-                json.dumps({"action": "cancel", "heartbeat_id": "test"})
-            )
+            heartbeat.cancel_heartbeat(ctx, heartbeat_id="test")
+            task.wait_for_activity(0.05)
             task.process_once()
             assert not task._registrations
             assert set(task._queue_cache) == cached
@@ -718,9 +713,6 @@ def test_failed_heartbeat_write_closes_local_facade_not_owner(
     tid = str(time.time_ns())
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as owner:
         owner.has_pending()
-        _seed_service(ctx, tid)
-        resolved = endpoints.resolve_endpoint(ctx, INTERNAL_HEARTBEAT_ENDPOINT_NAME)
-        assert resolved is not None
         original_queue = WeftContext.queue
         opened: list[Queue] = []
         closed: list[Queue] = []
@@ -729,18 +721,37 @@ def test_failed_heartbeat_write_closes_local_facade_not_owner(
             result = original_queue(self, name, persistent=persistent)
             opened.append(result)
             original_close = result.close
+            original_connection = result.get_connection
 
             def close() -> None:
                 closed.append(result)
                 original_close()
 
+            @contextmanager
+            def get_connection() -> Iterator[Any]:
+                with original_connection() as connection:
+
+                    def fail_write(*args: Any, **kwargs: Any) -> int:
+                        del args, kwargs
+                        raise OSError("injected registration write failure")
+
+                    monkeypatch.setattr(connection, "write", fail_write)
+                    yield connection
+
             monkeypatch.setattr(result, "close", close)
+            monkeypatch.setattr(result, "get_connection", get_connection)
             return result
 
         monkeypatch.setattr(WeftContext, "queue", queue)
-        with pytest.raises(TypeError):
-            heartbeat._write_heartbeat_request(
-                ctx, resolved=resolved, payload={"bad": object()}
+        with pytest.raises(OSError, match="injected registration write failure"):
+            heartbeat.upsert_heartbeat(
+                ctx,
+                registrant_tid=tid,
+                heartbeat_id="test",
+                interval_seconds=60,
+                lease_seconds=3600,
+                destination_queue="test.destination",
+                message="go",
             )
         assert opened and opened == closed
         owner.write("owner remains usable")

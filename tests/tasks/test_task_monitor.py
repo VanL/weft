@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import gc
+import heapq
 import json
 import os
 import sys
@@ -32,10 +33,12 @@ import weft.core.tasks.service as service_task_mod
 from simplebroker import Queue
 from simplebroker.ext import BrokerConnection, BrokerError
 from tests.helpers.typing import BrokerEnv, TaskFactory
+from tests.tasks.test_heartbeat import make_heartbeat_taskspec
 from weft._constants import (
     CONTROL_PING,
     CONTROL_STATUS,
     CONTROL_STOP,
+    HEARTBEAT_MIN_INTERVAL_SECONDS,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
     INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
@@ -52,11 +55,11 @@ from weft._constants import (
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
     TASK_MONITOR_CLEANUP_POLICY_NAMES,
     TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
-    TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
     TASK_MONITOR_POLICY_TASK_LOG_RETENTION,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_MONITOR_SCHEMA_VERSION,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -65,9 +68,9 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     load_config,
 )
-from weft.context import WeftContext
+from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
-from weft.core.control_probe import send_keyed_ping_probe
+from weft.core.heartbeat import upsert_heartbeat
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.policies.dead_task import DeadTaskLogCoalesceGroup
 from weft.core.monitor.runtime import (
@@ -96,6 +99,7 @@ from weft.core.service_convergence import (
     manager_service_key,
 )
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.liveness_monitor import LivenessMonitor
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import iter_queue_entries, tid_short_form
@@ -998,99 +1002,6 @@ def test_monitor_dead_control_cleanup_accepts_already_empty_family(
             assert result.dead_tids_processed == 1
             assert result.dead_tid_rows_estimated_deleted == 0
     finally:
-        task.stop()
-
-
-def test_task_monitor_stop_survives_blocking_heartbeat_probe(
-    broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A synchronous probe drains only its ephemeral requester ctrl_in."""
-
-    db_path, make_queue = broker_env
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec("1778089999999999399"),
-        observer=lambda _queue, _message, _timestamp: None,
-    )
-    heartbeat_tid = "1778089999999999398"
-    responder_ready = threading.Barrier(2)
-    ping_seen = threading.Event()
-    release_pong = threading.Event()
-    probe_reply_to: list[str] = []
-
-    def respond() -> None:
-        target = make_queue(f"T{heartbeat_tid}.ctrl_in")
-        responder_ready.wait()
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            raw = target.read_one()
-            if raw is None:
-                time.sleep(0.001)
-                continue
-            request = json.loads(str(raw))
-            probe_reply_to.append(str(request["reply_to"]))
-            ping_seen.set()
-            assert release_pong.wait(timeout=5.0)
-            make_queue(probe_reply_to[0]).write(
-                json.dumps(
-                    {
-                        "command": CONTROL_PING,
-                        "status": "ok",
-                        "message": "PONG",
-                        "tid": heartbeat_tid,
-                        "request_id": request["request_id"],
-                        "task_status": "running",
-                    }
-                )
-            )
-            return
-        raise AssertionError("heartbeat probe PING did not arrive")
-
-    def blocking_upsert(
-        context: WeftContext,
-        **kwargs: Any,
-    ) -> None:
-        result = send_keyed_ping_probe(
-            context,
-            tid=heartbeat_tid,
-            ctrl_in_name=f"T{heartbeat_tid}.ctrl_in",
-            timeout=5.0,
-            broker=kwargs["broker"],
-        )
-        assert result.matched is not None
-
-    monkeypatch.setattr(task_monitor_mod, "upsert_heartbeat", blocking_upsert)
-    monkeypatch.setattr(
-        task,
-        "_cancel_heartbeat",
-        lambda: setattr(task, "_heartbeat_registered", False),
-    )
-    responder = threading.Thread(target=respond, daemon=True)
-    registrar = threading.Thread(target=task._ensure_heartbeat_registered, daemon=True)
-    responder.start()
-    responder_ready.wait()
-    registrar.start()
-    try:
-        assert ping_seen.wait(timeout=5.0)
-        task_ctrl_in = task._queue_names["ctrl_in"]
-        assert len(probe_reply_to) == 1
-        assert probe_reply_to[0] != task_ctrl_in
-        make_queue(task_ctrl_in).write(encode_control_message(CONTROL_STOP))
-        assert make_queue(task_ctrl_in).stats().pending == 1
-
-        release_pong.set()
-        registrar.join()
-        responder.join()
-        assert not registrar.is_alive()
-        assert not responder.is_alive()
-        assert make_queue(task_ctrl_in).stats().pending == 1
-
-        task.process_once()
-
-        assert task.should_stop
-    finally:
-        release_pong.set()
         task.stop()
 
 
@@ -2828,9 +2739,6 @@ def test_task_monitor_process_once_calls_processor_without_consuming_task_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -2881,9 +2789,6 @@ def test_task_monitor_public_turn_applies_pending_sources_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     task = TaskMonitor(
         db_path,
         make_task_monitor_taskspec("1778089999999999998"),
@@ -2913,9 +2818,6 @@ def test_task_monitor_builtin_delete_removes_cleanup_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -2951,9 +2853,6 @@ def test_task_monitor_builtin_report_only_keeps_cleanup_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -2990,9 +2889,6 @@ def test_task_monitor_next_wait_timeout_publishes_cycle_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3022,9 +2918,6 @@ def test_task_monitor_pending_wakeup_uses_shared_reactor_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3067,11 +2960,6 @@ def test_task_monitor_disabled_has_no_private_timer_and_still_wakes(
         "build_task_monitor_cycle_snapshot",
         lambda *args, **kwargs: pytest.fail("disabled monitor must not scan"),
     )
-    monkeypatch.setattr(
-        task_monitor_mod,
-        "upsert_heartbeat",
-        lambda *args, **kwargs: pytest.fail("disabled monitor must not heartbeat"),
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": False,
@@ -3101,14 +2989,502 @@ def test_task_monitor_disabled_has_no_private_timer_and_still_wakes(
         task.stop()
 
 
+QUIET_WINDOW_SECONDS = 2.5
+# The quiet window is the measured quantity (turns counted inside it), not a
+# synchronization sleep.
+
+OVERRUN_PROCESSOR_ADVANCE_SECONDS = 90.0
+OVERRUN_PROCESSOR_CLOCK: list[dict[str, float]] = []
+
+
+def overrunning_processor(
+    request: TaskMonitorProcessorRequest,
+) -> TaskMonitorProcessorResult:
+    """Record the request and advance the bound fake clock past a grid tick."""
+
+    for clock in OVERRUN_PROCESSOR_CLOCK:
+        clock["value"] += OVERRUN_PROCESSOR_ADVANCE_SECONDS
+    return recording_processor(request)
+
+
+def _patch_task_monitor_fake_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: dict[str, float],
+) -> None:
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: clock["value"],
+            time_ns=time.time_ns,
+            sleep=time.sleep,
+        ),
+    )
+
+
+def _patch_no_op_heartbeat_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep any restored TaskMonitor registration away from real manager startup."""
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "upsert_heartbeat",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "cancel_heartbeat",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+
+
+def _custom_cadence_config(processor: str = "recording_processor") -> Mapping[str, Any]:
+    return load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "2",
+            "WEFT_TASK_MONITOR_MODE": "custom",
+            "WEFT_TASK_MONITOR_PROCESSOR": f"tests.tasks.test_task_monitor:{processor}",
+        }
+    )
+
+
+def _drain_task_monitor_workers_without_turns(
+    task: TaskMonitor,
+    *,
+    timeout: float = 30.0,
+) -> None:
+    """Commit in-flight worker results without running a reactor turn.
+
+    A reactor turn may start the owed follow-up cycle; the overrun tests must
+    observe the owed state between the overrunning cycle and that follow-up.
+    """
+
+    deadline = time.monotonic() + timeout
+    while (
+        task._builtin_cycle_work_in_flight is not None
+        or task._processor_work_in_flight is not None
+        or task._control_cleanup_work_in_flight is not None
+        or task._has_pending_worker_results()
+    ):
+        assert time.monotonic() < deadline, _task_monitor_idle_diagnostics(task)
+        task.wait_for_activity(timeout=0.05)
+        task._drain_worker_results()
+
+
+def _wait_for_quiet_monitor_settle(turns: list[float]) -> None:
+    """Wait (bounded) for the first cycle and 0.5 s without a turn."""
+
+    settle_deadline = time.monotonic() + 10.0
+    while True:
+        now = time.monotonic()
+        if len(PROCESSOR_REQUESTS) == 1 and bool(turns) and now - turns[-1] >= 0.5:
+            return
+        assert now < settle_deadline, (
+            f"monitor did not settle: requests={len(PROCESSOR_REQUESTS)} "
+            f"turns={len(turns)}"
+        )
+        time.sleep(0.05)
+
+
+def _build_and_emit_heartbeat(heartbeat: HeartbeatTask, registrations: Queue) -> None:
+    """Build the heartbeat table without consuming rows, then emit every entry."""
+
+    before_rows = list(registrations.peek_generator(with_timestamps=True))
+    heartbeat.process_once()
+    assert list(registrations.peek_generator(with_timestamps=True)) == before_rows
+    assert "probe" in heartbeat._registrations
+    heartbeat._due_heap.clear()
+    for key, registration in heartbeat._registrations.items():
+        registration.next_due_at = time.monotonic() - 1.0
+        heapq.heappush(heartbeat._due_heap, (registration.next_due_at, key))
+    heartbeat.process_once()
+
+
+@pytest.mark.parametrize("heartbeat_mode", ["emitting", "unavailable"])
+def test_task_monitor_quiet_interval_runs_zero_turns_with_heartbeat_emitting(
+    broker_env: BrokerEnv,
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_exception_guard: list[threading.ExceptHookArgs],
+    heartbeat_mode: str,
+) -> None:
+    """A quiet TaskMonitor runs zero turns while a heartbeat emits [WT-4] 4.3.
+
+    Verifies:
+    - With a live heartbeat emitting, the Monitor's reactor runs no turn over
+      a fixed quiet window (the Monitor has no heartbeat registration).
+    - With heartbeat registration unavailable, no retry timer wakes it.
+    """
+
+    del thread_exception_guard
+    db_path, make_queue = broker_env
+    registrations_context = build_context(spec_context=workdir)
+    monitor_tid = "1778089999999961991"
+    heartbeat: HeartbeatTask | None = None
+    heartbeat_tid = str(time.time_ns())
+    if heartbeat_mode == "emitting":
+        heartbeat = HeartbeatTask(
+            db_path, make_heartbeat_taskspec(heartbeat_tid, workdir)
+        )
+        upsert_heartbeat(
+            registrations_context,
+            registrant_tid=heartbeat_tid,
+            heartbeat_id="probe",
+            interval_seconds=HEARTBEAT_MIN_INTERVAL_SECONDS,
+            lease_seconds=3600,
+            destination_queue="probe.heartbeat.queue",
+            message="tick",
+        )
+
+    def stand_in(
+        *args: object,
+        heartbeat_id: str,
+        interval_seconds: int,
+        destination_queue: str,
+        message: object,
+        **kwargs: object,
+    ) -> None:
+        if heartbeat_mode == "unavailable":
+            raise RuntimeError("heartbeat unavailable")
+        upsert_heartbeat(
+            registrations_context,
+            registrant_tid=monitor_tid,
+            heartbeat_id=heartbeat_id,
+            interval_seconds=interval_seconds,
+            lease_seconds=3600,
+            destination_queue=destination_queue,
+            message=message,
+        )
+
+    monkeypatch.setattr(
+        task_monitor_mod,
+        "cancel_heartbeat",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(task_monitor_mod, "upsert_heartbeat", stand_in, raising=False)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "custom",
+            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(monitor_tid),
+        config=config,
+    )
+    turns: list[float] = []
+    original_turn = task._process_reactor_turn
+
+    def counted() -> None:
+        turns.append(time.monotonic())
+        original_turn()
+
+    monkeypatch.setattr(task, "_process_reactor_turn", counted)
+    thread = threading.Thread(target=task.run_until_stopped)
+    thread.start()
+    try:
+        _wait_for_quiet_monitor_settle(turns)
+        baseline = len(turns)
+
+        if heartbeat is not None:
+            _build_and_emit_heartbeat(
+                heartbeat, make_queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
+            )
+
+        time.sleep(QUIET_WINDOW_SECONDS)
+        turns_in_window = len(turns) - baseline
+
+        if heartbeat is not None:
+            assert make_queue("probe.heartbeat.queue").read_one() == "tick"
+        assert thread.is_alive(), "monitor driver died during the quiet window"
+        assert turns_in_window == 0, (
+            f"monitor ran {turns_in_window} turns over {QUIET_WINDOW_SECONDS}s"
+        )
+        if heartbeat is not None:
+            assert f"task-monitor:{task.tid}" not in heartbeat._registrations
+    finally:
+        task.stop(join=False)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+        if heartbeat is not None:
+            heartbeat.stop(join=False)
+            heartbeat.cleanup()
+
+
+def test_task_monitor_inbox_poke_does_not_move_cycle_grid(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inbox poke runs a cycle without moving the periodic grid [MF-5]."""
+
+    db_path, make_queue = broker_env
+    _patch_no_op_heartbeat_registration(monkeypatch)
+    clock = {"value": 1000.0}
+    _patch_task_monitor_fake_clock(monkeypatch, clock)
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961992"),
+        config=_custom_cadence_config(),
+    )
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert len(PROCESSOR_REQUESTS) == 1
+
+        clock["value"] = 1050.0
+        make_queue(task.taskspec.io.inputs["inbox"]).write(
+            json.dumps({"type": "task_monitor_wakeup"})
+        )
+        drive_task_monitor_until_observed(task, lambda: len(PROCESSOR_REQUESTS) == 2)
+        drive_task_monitor_until_idle(task)
+        assert len(PROCESSOR_REQUESTS) == 2
+        assert task._next_cycle_due_monotonic == pytest.approx(1060.0)
+
+        clock["value"] = 1059.5
+        assert task.next_wait_timeout() == pytest.approx(0.5)
+
+        clock["value"] = 1060.0
+        assert task.next_wait_timeout() == 0.0
+        assert make_queue(task.taskspec.io.inputs["inbox"]).peek_one() is None
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert len(PROCESSOR_REQUESTS) == 3
+        assert task._next_cycle_due_monotonic == pytest.approx(1120.0)
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > 0.0
+    finally:
+        task.stop()
+
+
+def test_task_monitor_overrun_cycle_is_followed_by_exactly_one_cycle(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle that overruns a tick owes exactly one follow-up cycle [MF-5]."""
+
+    db_path, _make_queue = broker_env
+    _patch_no_op_heartbeat_registration(monkeypatch)
+    clock = {"value": 1000.0}
+    _patch_task_monitor_fake_clock(monkeypatch, clock)
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961993"),
+        config=_custom_cadence_config("overrunning_processor"),
+    )
+    OVERRUN_PROCESSOR_CLOCK.append(clock)
+    try:
+        task.process_once()
+        _drain_task_monitor_workers_without_turns(task)
+        assert len(PROCESSOR_REQUESTS) == 1
+        assert clock["value"] == pytest.approx(1090.0)
+        assert task.next_wait_timeout() == 0.0
+
+        monkeypatch.setattr(
+            sys.modules[__name__], "overrunning_processor", recording_processor
+        )
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        assert clock["value"] == pytest.approx(1090.0)
+        assert len(PROCESSOR_REQUESTS) == 2
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > 0.0
+        assert task._next_cycle_due_monotonic == pytest.approx(1120.0)
+    finally:
+        OVERRUN_PROCESSOR_CLOCK.clear()
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    (
+        "grid_preset",
+        "follow_up_preset",
+        "now",
+        "catchup_pending",
+        "expected_due",
+        "expected_grid_after",
+        "expected_follow_up_after",
+    ),
+    [
+        (60.0, False, 10.0, False, 60.0, 60.0, False),
+        (60.0, False, 90.0, False, 90.0, 120.0, True),
+        (60.0, False, 150.0, False, 150.0, 180.0, True),
+        (60.0, False, 10.0, True, 12.0, 60.0, False),
+        (60.0, False, 59.5, True, 60.0, 60.0, False),
+        (60.0, False, 90.0, True, 90.0, 120.0, True),
+        (120.0, False, 60.1, False, 120.0, 120.0, False),
+        (120.0, False, 90.0, False, 120.0, 120.0, False),
+        (120.0, True, 75.0, False, 75.0, 120.0, True),
+        (120.0, True, 77.0, True, 77.0, 120.0, True),
+        (120.0, False, 75.0, False, 120.0, 120.0, False),
+    ],
+)
+def test_task_monitor_arm_next_cycle_deadline_matrix(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    grid_preset: float,
+    follow_up_preset: bool,
+    now: float,
+    catchup_pending: bool,
+    expected_due: float,
+    expected_grid_after: float,
+    expected_follow_up_after: bool,
+) -> None:
+    """The cycle deadline arithmetic matches the [MF-5] cadence rule."""
+
+    db_path, _make_queue = broker_env
+    _patch_no_op_heartbeat_registration(monkeypatch)
+    base = 1000.0
+    clock = {"value": base}
+    _patch_task_monitor_fake_clock(monkeypatch, clock)
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961994"),
+        config=_custom_cadence_config(),
+    )
+    try:
+        task._cycle_grid_due_monotonic = base + grid_preset
+        task._overrun_follow_up_pending = follow_up_preset
+        clock["value"] = base + now
+
+        returned = task._arm_next_cycle_deadline(catchup_pending=catchup_pending)
+
+        assert returned == pytest.approx(expected_due - now)
+        assert task._next_cycle_due_monotonic == pytest.approx(base + expected_due)
+        assert task._cycle_grid_due_monotonic == pytest.approx(
+            base + expected_grid_after
+        )
+        assert task._overrun_follow_up_pending is expected_follow_up_after
+    finally:
+        task.stop()
+
+
+def test_task_monitor_overrun_builtin_cycle_with_control_cleanup_runs_exactly_one_follow_up(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owed follow-up survives the chained control-cleanup re-arm [MF-5]."""
+
+    db_path, make_queue = broker_env
+    _patch_no_op_heartbeat_registration(monkeypatch)
+    clock = {"value": 1000.0}
+    _patch_task_monitor_fake_clock(monkeypatch, clock)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS": "2",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec("1778089999999961995"),
+        config=config,
+    )
+    inbox = make_queue(task.taskspec.io.inputs["inbox"])
+    try:
+        task.process_once()
+        assert task._builtin_cycle_work_in_flight is not None
+        clock["value"] = 1070.0
+        _drain_task_monitor_workers_without_turns(task)
+        assert task._last_processor_success is True
+
+        clock["value"] = 1075.0
+        task._maybe_start_terminal_control_cleanup_worker(now_ns=time.time_ns())
+        assert task._control_cleanup_work_in_flight is not None
+        _drain_task_monitor_workers_without_turns(task)
+        assert task.next_wait_timeout() == 0.0
+
+        assert inbox.peek_one() is None
+        cycles_before = task._last_cycle_at
+        task.process_once()
+        assert task._builtin_cycle_work_in_flight is not None
+        drive_task_monitor_until_idle(task)
+        assert task._last_cycle_at != cycles_before
+        wait_timeout = task.next_wait_timeout()
+        assert wait_timeout is not None
+        assert wait_timeout > 0.0
+        assert task._next_cycle_due_monotonic == pytest.approx(1120.0)
+    finally:
+        task.stop()
+
+
+def test_task_monitor_maintenance_fires_on_own_cycle_deadline_without_inbox_wake(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kept cycle deadline fires a cycle and self-maintenance [OBS.13.10]."""
+
+    db_path, make_queue = broker_env
+    _patch_no_op_heartbeat_registration(monkeypatch)
+    clock = {"value": 1000.0}
+    monkeypatch.setattr(task_monitor_mod, "_monitor_monotonic", lambda: clock["value"])
+    _patch_task_monitor_fake_clock(monkeypatch, clock)
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "1",
+            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+            "WEFT_TASK_MONITOR_MODE": "delete",
+            "WEFT_TASK_MONITOR_LOG_SINK": "none",
+        }
+    )
+    spec = make_task_monitor_taskspec("1778089999999961996")
+    ctrl_in = make_queue(spec.io.control["ctrl_in"])
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    probe = make_queue("maintenance-own-deadline-probe")
+    task = TaskMonitor(db_path, spec, config=config)
+    try:
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-before",
+            reply_queue=make_queue("test.task-monitor.own-deadline-1.ctrl_in"),
+        )
+        first_run_at_ns = status["maintenance"]["last_run_at_ns"]
+        assert isinstance(first_run_at_ns, int)
+
+        for index in range(2):
+            probe.write(f"claimed-{index}")
+        for _ in range(2):
+            assert probe.read_one() is not None
+        assert probe.stats().total == 2
+
+        clock["value"] = 1000.0 + 3600.0 + 61.0
+        assert make_queue(spec.io.inputs["inbox"]).peek_one() is None
+        assert task.next_wait_timeout() == 0.0
+        task.process_once()
+        drive_task_monitor_until_idle(task)
+
+        assert probe.stats().total == 0
+        status = _read_status_reply(
+            task,
+            ctrl_in,
+            ctrl_out,
+            request_id="status-after",
+            reply_queue=make_queue("test.task-monitor.own-deadline-2.ctrl_in"),
+        )
+        assert status["maintenance"]["last_run_at_ns"] > first_run_at_ns
+    finally:
+        task.stop()
+
+
 def test_task_monitor_ping_includes_health_and_preserves_task_log(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3178,12 +3554,7 @@ def test_task_monitor_ping_includes_health_and_preserves_task_log(
     assert extended["interval_seconds"] == 60
     assert extended["batch_size"] == 10
     assert extended["log_sink"] == "stdout"
-    assert extended["heartbeat"] == {
-        "registered": True,
-        "id": "task-monitor:1778089999999999998",
-        "error": None,
-        "next_registration_attempt_in_seconds": 0.0,
-    }
+    assert "heartbeat" not in extended
     assert extended["schedule"]["first_cycle_pending"] is False
     assert extended["schedule"]["wake_requested"] is False
     assert extended["schedule"]["last_cycle_at"] == pong["last_cycle_at"]
@@ -3230,9 +3601,6 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3320,9 +3688,6 @@ def test_task_monitor_processor_delete_requires_delete_processor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3366,9 +3731,6 @@ def test_task_monitor_processor_delete_removes_exact_task_log_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3415,9 +3777,6 @@ def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3471,9 +3830,6 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     update_batch_sizes: list[int] = []
     original_record_updates = MonitorStore.record_task_log_updates
 
@@ -3560,9 +3916,6 @@ def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monitor_tid = "1778089999999999881"
     other_tid = "1778084345905438881"
     config = load_config(
@@ -3633,9 +3986,6 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3705,9 +4055,6 @@ def test_task_monitor_retained_ingest_batch_limit_counts_valid_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3764,9 +4111,6 @@ def test_task_monitor_retained_ingest_resumes_after_store_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -3828,9 +4172,6 @@ def test_task_monitor_jsonl_then_delete_recovers_precheckpoint_service_rows(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -3960,9 +4301,6 @@ def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
@@ -4039,9 +4377,6 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4132,9 +4467,6 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4211,9 +4543,6 @@ def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4287,9 +4616,6 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4370,9 +4696,6 @@ def test_task_monitor_failed_summary_disposition_blocks_processor_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4433,9 +4756,6 @@ def test_task_monitor_collated_external_log_precedes_processor_delete(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-summary.jsonl"
     config = load_config(
         {
@@ -4494,9 +4814,6 @@ def test_task_monitor_jsonl_then_delete_uses_project_default_log_path(
     tmp_path: Path,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -4528,9 +4845,6 @@ def test_task_monitor_external_log_probe_recovers_on_monitor_cadence(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "external-target"
     external_path.mkdir()
     config = load_config(
@@ -4574,9 +4888,6 @@ def test_task_monitor_external_log_probe_reports_regression_on_monitor_cadence(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -4622,9 +4933,6 @@ def test_task_monitor_jsonl_then_delete_emits_lifetime_report_before_delete(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -4686,9 +4994,6 @@ def test_task_monitor_jsonl_then_delete_defers_external_failure_and_deletes(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "external-target"
     external_path.mkdir()
     config = load_config(
@@ -4767,9 +5072,6 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "external-target"
     external_path.mkdir()
     config = load_config(
@@ -4876,9 +5178,6 @@ def test_task_monitor_deferred_output_retries_on_same_instance_after_transient_f
     """A later public cycle retries deferred output without reconstruction."""
 
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "same-instance.jsonl"
     config = load_config(
         {
@@ -4958,9 +5257,6 @@ def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "external-target"
     external_path.mkdir()
 
@@ -5093,9 +5389,6 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5186,9 +5479,6 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5280,9 +5570,6 @@ def test_task_monitor_terminal_control_cleanup_retains_completion_evidence(
     service_owner: bool,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5384,9 +5671,6 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5486,9 +5770,6 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5570,9 +5851,6 @@ def test_task_monitor_delete_preserves_stale_reserved_queue_without_terminal_pro
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5605,9 +5883,6 @@ def test_task_monitor_preserves_ambiguous_reserved_during_batch_limited_ingest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5663,9 +5938,6 @@ def test_task_monitor_keeps_reserved_queue_for_active_service_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5718,9 +5990,6 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5792,9 +6061,6 @@ def test_task_monitor_reserved_cleanup_retains_launch_custody_until_checkpoint_r
     checkpointed: bool,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -5945,9 +6211,6 @@ def test_task_monitor_reserved_cleanup_respects_min_age_gate(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6033,9 +6296,6 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6122,9 +6382,6 @@ def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
 ) -> None:
     db_path, _make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
         1,
@@ -6196,9 +6453,6 @@ def test_task_monitor_reserved_cleanup_batches_fallback_record_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6264,9 +6518,6 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6324,9 +6575,6 @@ def test_task_monitor_terminal_mapping_holds_completion_but_allows_control_clean
     """Terminal row presence retains completion without holding immediate control."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438860"
     ctrl_in = make_queue(f"T{tid}.ctrl_in")
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
@@ -6367,9 +6615,6 @@ def test_task_monitor_dead_task_cleanup_retains_outbox_and_reserved_before_reten
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6425,9 +6670,6 @@ def test_task_monitor_dead_task_cleanup_defers_result_evidence_until_retention(
     retained_role: str,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6496,9 +6738,6 @@ def test_dead_cleanup_counts_live_data_only_families_before_age_and_retention(
     """Live state wins classification even when no Monitor probe is needed."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     now_ns = time.time_ns()
     tid = str(now_ns - int(age_seconds * 1e9))
     outbox = make_queue(f"T{tid}.outbox")
@@ -6537,9 +6776,6 @@ def test_task_monitor_dead_task_cleanup_skips_monitor_lookup_for_deferred_only_q
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6607,9 +6843,6 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6696,9 +6929,6 @@ def test_task_monitor_dead_task_cleanup_skips_live_service_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6753,9 +6983,6 @@ def test_task_monitor_dead_task_cleanup_is_oldest_first_and_bounded(
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
         1,
@@ -6809,9 +7036,6 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6889,9 +7113,6 @@ def test_task_monitor_skips_ambiguous_old_service_owner_collation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -6963,9 +7184,6 @@ def test_task_monitor_disposes_old_stale_service_owner_collation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -7131,9 +7349,6 @@ def test_task_monitor_jsonl_then_delete_disposes_stale_service_owner(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -7295,9 +7510,6 @@ def test_stale_service_owner_disposes_after_maintenance_prune(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -7465,9 +7677,6 @@ def test_stale_service_owner_disposes_only_after_retention_window(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = load_config(
         {
@@ -7640,9 +7849,6 @@ def test_task_monitor_stale_service_owner_cleanup_deletes_only_control_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -7742,9 +7948,6 @@ def test_task_monitor_stale_service_owner_cleanup_skips_active_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -7846,9 +8049,6 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -7972,9 +8172,6 @@ def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
         2,
@@ -8080,9 +8277,6 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_FAMILY_LIMIT",
         3,
@@ -8177,9 +8371,6 @@ def test_task_monitor_runtime_cleanup_skips_queue_snapshot_when_not_due(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -8233,9 +8424,6 @@ def test_task_monitor_discovery_cadence_survives_frequent_store_cycles(
         SimpleNamespace(
             monotonic=lambda: clock[0], time_ns=time.time_ns, sleep=time.sleep
         ),
-    )
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
     )
     config = load_config(
         {
@@ -8581,9 +8769,6 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -8669,9 +8854,6 @@ def test_task_monitor_runtime_cleanup_starts_after_slow_queue_snapshot(
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
         1.0,
@@ -8736,9 +8918,6 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
     acquisition_seconds: float,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
@@ -8852,9 +9031,6 @@ def test_task_monitor_raw_store_delete_reconciles_ingested_open_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -8929,9 +9105,6 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
@@ -9027,9 +9200,6 @@ def test_task_monitor_trims_manager_task_spawned_rows_without_closing_manager_fa
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
         2,
@@ -9104,9 +9274,6 @@ def test_task_monitor_jsonl_then_delete_reports_manager_task_spawned_before_trim
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
@@ -9192,9 +9359,6 @@ def test_task_monitor_jsonl_then_delete_blocks_manager_task_spawned_trim(
 ) -> None:
     db_path, make_queue = broker_env
     monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
         2,
@@ -9265,9 +9429,6 @@ def test_task_monitor_jsonl_then_delete_reconciles_missing_manager_spawned_ref(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_MANAGER_TASK_SPAWNED_KEEP_RECENT_DEFAULT",
@@ -9346,9 +9507,6 @@ def test_task_monitor_terminal_control_cleanup_worker_does_not_block_control(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9487,9 +9645,6 @@ def test_task_monitor_ignores_service_worker_sentinel_before_cleanup_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9551,9 +9706,6 @@ def test_task_monitor_slow_builtin_cycle_does_not_block_ping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9653,9 +9805,6 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "TASK_MONITOR_RUNTIME_CLEANUP_SLICE_SECONDS",
@@ -9769,9 +9918,6 @@ def test_task_monitor_collated_external_failure_blocks_processor_delete(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9827,9 +9973,6 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
     tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "raw-task-log.jsonl"
     config = load_config(
         {
@@ -9889,9 +10032,6 @@ def test_task_monitor_ping_uses_cached_policy_stats_without_cleanup_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -9965,9 +10105,6 @@ def test_task_monitor_slow_custom_processor_does_not_block_ping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -10052,9 +10189,6 @@ def test_task_monitor_failed_processor_does_not_advance_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -10090,9 +10224,6 @@ def test_task_monitor_custom_processor_exception_is_a_failed_cycle(
     """An open-taxonomy processor failure stays inside its worker cycle."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -10120,65 +10251,6 @@ def test_task_monitor_custom_processor_exception_is_a_failed_cycle(
         assert task.taskspec.state.status == "running"
     finally:
         task.stop()
-
-
-def test_task_monitor_heartbeat_failure_records_health_but_still_cycles(
-    broker_env: BrokerEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, make_queue = broker_env
-
-    def fail_heartbeat(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        raise RuntimeError("heartbeat unavailable")
-
-    monkeypatch.setattr(task_monitor_mod, "upsert_heartbeat", fail_heartbeat)
-    config = load_config(
-        {
-            "WEFT_TASK_MONITOR_ENABLED": "1",
-            "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
-            "WEFT_TASK_MONITOR_BATCH_SIZE": 10,
-            "WEFT_TASK_MONITOR_MODE": "custom",
-            "WEFT_TASK_MONITOR_PROCESSOR": "tests.tasks.test_task_monitor:recording_processor",
-        }
-    )
-    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
-    log_queue.write(json.dumps({"event": "work_started", "tid": "1778084345905438720"}))
-
-    task = TaskMonitor(
-        db_path,
-        make_task_monitor_taskspec("1778089999999999996"),
-        config=config,
-    )
-    try:
-        task.process_once()
-        drive_task_monitor_until_idle(task)
-
-        assert len(PROCESSOR_REQUESTS) == 1
-        assert task._last_processor_success is True
-        assert (
-            task._last_error == "heartbeat registration failed: heartbeat unavailable"
-        )
-        wait_timeout = task.next_wait_timeout()
-        assert wait_timeout is not None
-        assert 0.0 < wait_timeout <= TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS
-    finally:
-        task.stop()
-
-
-# ---------------------------------------------------------------------------
-# WS-A Task A2 escalating-fidelity ladder
-# (docs/plans/2026-06-10-self-healing-runtime-maintenance-plan.md, Task A2)
-#
-# Production defect signature under reproduction (Postgres, weft 0.9.75,
-# mode jsonl_then_delete): collation families marked ``raw_deleted_at_ns``
-# while their raw ``weft.log.tasks`` rows still exist, store refs present
-# for ~all raw rows, zero raw rows ever deleted, and no recorded errors.
-#
-# Every rung drives the REAL ``_run_monitor_store_cycle`` entry point (the
-# same call the builtin cycle worker makes) with injected ``now_ns`` and
-# asserts the raw-deleted oracle at EVERY cycle boundary, not just the end.
-# ---------------------------------------------------------------------------
 
 
 def _jsonl_lifecycle_config(
@@ -10479,9 +10551,6 @@ def test_task_monitor_jsonl_backlog_lifecycle_keeps_raw_deleted_invariant(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -10545,9 +10614,6 @@ def test_task_monitor_jsonl_backlog_lifecycle_survives_monitor_restart(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -10628,9 +10694,6 @@ def test_task_monitor_jsonl_lifecycle_handles_families_older_than_retention(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -10720,9 +10783,6 @@ def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path, batch_size=10, scan_limit=10)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -10802,9 +10862,6 @@ def test_task_monitor_jsonl_lifecycle_with_interleaved_writer_load(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -10926,9 +10983,6 @@ def test_retirement_backlog_identifies_binding_stage(  # noqa: C901 approved [TS
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     # The module autouse fixture widens the slice deadline to 30.0s; restore
     # the production 1.0s so the slice deadline can actually bind.
     monkeypatch.setattr(
@@ -11190,9 +11244,6 @@ def test_task_monitor_never_marks_family_with_uningested_rows(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -11275,9 +11326,6 @@ def test_task_monitor_non_high_water_cycle_marks_nothing(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -11350,9 +11398,6 @@ def test_task_monitor_malformed_row_deletion_does_not_mark_family_with_valid_row
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -11453,9 +11498,6 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     external_path = tmp_path / "task-lifetime.jsonl"
     config = _jsonl_lifecycle_config(external_path)
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -11654,9 +11696,6 @@ def test_task_monitor_maintenance_vacuums_claimed_rows_on_monotonic_deadline(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     current_monotonic = {"value": 1000.0}
     monkeypatch.setattr(
         task_monitor_mod,
@@ -11756,9 +11795,6 @@ def test_task_monitor_maintenance_opt_out_skips_vacuum(
     """D1: WEFT_TASK_MONITOR_MAINTENANCE=0 disables the maintenance slice."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -11819,9 +11855,6 @@ def test_task_monitor_maintenance_prunes_superseded_runtime_state_groups(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(
         task_monitor_mod,
         "RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS",
@@ -11992,9 +12025,6 @@ def test_task_monitor_stale_open_disposal_skips_active_runtime_tid(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -12097,9 +12127,6 @@ def test_task_monitor_stale_open_disposal_waits_for_mapping_row_retirement(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     config = load_config(
         {
             "WEFT_TASK_MONITOR_ENABLED": "1",
@@ -12283,9 +12310,6 @@ def test_task_monitor_stale_open_disposal_skips_undecidable_runtime_owner(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438767"
     taskspec = _quiet_running_taskspec(tid)
     inbox = make_queue(f"T{tid}.inbox")
@@ -12346,9 +12370,6 @@ def test_task_monitor_stale_open_disposal_applies_without_mapping_row(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438769"
     taskspec = _quiet_running_taskspec(tid)
     inbox = make_queue(f"T{tid}.inbox")
@@ -12402,9 +12423,6 @@ def test_task_monitor_delete_recheck_protects_disposed_undecidable_owner(
     """
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438771"
     taskspec = _quiet_running_taskspec(tid)
     inbox = make_queue(f"T{tid}.inbox")
@@ -12456,9 +12474,6 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
     """A nonterminal undecidable owner still protects its whole queue family."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438773"
     taskspec = {
         "tid": tid,
@@ -12534,9 +12549,6 @@ def test_task_monitor_task_local_salvage_is_bounded_and_exact(
     """Salvage orders rows, truncates bytes, and counts overflow by role."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROWS", 2)
     monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROW_BYTES", 1)
     tid = "1778084345905438775"
@@ -12638,9 +12650,6 @@ def test_task_monitor_task_local_salvage_streams_overflow_rows_with_bounded_memo
             return self.value.encode(encoding)
 
     db_path, _make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(task_monitor_mod, "TASK_MONITOR_SALVAGE_MAX_ROWS", 2)
     live_bodies: weakref.WeakSet[TrackedBody] = weakref.WeakSet()
     max_live_bodies = 0
@@ -12689,9 +12698,6 @@ def test_task_monitor_bare_delete_preserves_ambiguous_data_queues(
     """No-record cleanup removes controls but leaves all task data intact."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438777"
     queues = {
         suffix: make_queue(f"T{tid}.{suffix}")
@@ -12738,9 +12744,6 @@ def test_task_monitor_salvage_failure_blocks_ambiguous_family_delete(
     """JSONL mode cannot destroy an ambiguous family if salvage fails."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438779"
     queues = {
         suffix: make_queue(f"T{tid}.{suffix}")
@@ -12787,9 +12790,6 @@ def test_task_monitor_jsonl_salvages_before_ambiguous_family_delete(
     """JSONL mode exports the nested salvage object before whole-family delete."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438781"
     external_path = tmp_path / "salvage.jsonl"
     queues = {
@@ -12842,9 +12842,6 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
     """A live persistent task recreates evidence and reaches terminal cleanup."""
 
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = str(time.time_ns())
     consumer = task_factory(_persistent_consumer_taskspec(tid, str(tmp_path)))
     inbox = make_queue(f"T{tid}.inbox")
@@ -13141,9 +13138,6 @@ def test_recordless_cleanup_uses_only_task_terminal_anchor(
 ) -> None:
     """Fresh task completion renews standard results; supervisor-only evidence does not."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438860"
     ctrl_out = make_queue(f"T{tid}.ctrl_out")
     ctrl_out.write(
@@ -13179,9 +13173,6 @@ def test_recordless_cleanup_reaches_ready_family_after_held_prefix(
 ) -> None:
     """A bounded sweep visits later work and completes a deferred-only full pass."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     base_tid = 1778084345905438860
     for offset in range(5):
         tid = str(base_tid + offset)
@@ -13228,9 +13219,6 @@ def test_snapshot_protection_does_not_starve_later_cleanup(
 ) -> None:
     """A retained result does not pin its record ahead of later ready cleanup."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     base_tid = 1778084345905438860
     held_tids = tuple(str(base_tid + offset) for offset in range(3))
     held_tid, ready_tid = held_tids[0], str(base_tid + 3)
@@ -13352,9 +13340,6 @@ def test_cleanup_rechecks_completion_published_after_selection(
 ) -> None:
     """A candidate selected before completion cannot delete its fresh envelope."""
     db_path, make_queue = broker_env
-    monkeypatch.setattr(
-        task_monitor_mod, "upsert_heartbeat", lambda *args, **kwargs: None
-    )
     tid = "1778084345905438860"
     task = TaskMonitor(
         db_path,

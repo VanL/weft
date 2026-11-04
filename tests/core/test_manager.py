@@ -84,6 +84,7 @@ from weft._constants import (
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -92,8 +93,9 @@ from weft._constants import (
     WRAPPER_LOST_ERROR,
     load_config,
 )
-from weft.context import WeftContext
+from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
+from weft.core.heartbeat import upsert_heartbeat
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
 from weft.core.manager_services import ManagedServiceSpec
 from weft.core.monitor.task_monitor import TaskMonitor
@@ -931,6 +933,23 @@ def manager_setup(
     yield manager, make_queue
     manager.stop(join=False)
     manager.cleanup()
+
+
+def _write_heartbeat_registration(make_queue: Callable[[str], Queue]) -> None:
+    """Make the heartbeat service desired: one unexpired row [MA-1] item 7."""
+
+    make_queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE).write(
+        json.dumps(
+            {
+                "heartbeat_id": "test-desire",
+                "registrant_tid": str(time.time_ns()),
+                "interval_seconds": 60,
+                "lease_seconds": 3600,
+                "destination_queue": "test.heartbeat.destination",
+                "message": "tick",
+            }
+        )
+    )
 
 
 def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
@@ -2040,9 +2059,21 @@ def test_manager_does_not_enqueue_task_monitor_when_disabled(
 
 def test_manager_enqueues_heartbeat_through_service_path(
     broker_env: BrokerEnv,
+    workdir: Path,
     unique_tid: str,
 ) -> None:
+    """A registration written before any Manager launches on the next start."""
+
     db_path, make_queue = broker_env
+    upsert_heartbeat(
+        build_context(spec_context=workdir),
+        registrant_tid=unique_tid,
+        heartbeat_id="probe",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
     config = load_config({"WEFT_TASK_MONITOR_ENABLED": "1"})
     spec = make_manager_spec(unique_tid, idle_timeout=0.0)
 
@@ -2063,10 +2094,8 @@ def test_manager_enqueues_heartbeat_through_service_path(
         == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
     ]
     assert len(heartbeat_payloads) == 1
-    assert (
-        heartbeat_payloads[0]["taskspec"]["metadata"]["heartbeat_idle_timeout"] == 0.0
-    )
     metadata = heartbeat_payloads[0]["taskspec"]["metadata"]
+    assert "heartbeat_idle_timeout" not in metadata
     assert metadata[INTERNAL_SERVICE_KEY_METADATA_KEY] == INTERNAL_SERVICE_KEY_HEARTBEAT
     assert metadata[INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY] == "ensure"
     assert INTERNAL_RUNTIME_TASK_CLASS_KEY not in metadata
@@ -3362,6 +3391,7 @@ def test_manager_task_monitor_supervision_ignores_dispatch_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     monkeypatch.setattr(
@@ -3676,6 +3706,7 @@ def test_managed_service_convergence_active_reasons_are_stable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
+    _write_heartbeat_registration(_make_queue)
     heartbeat = manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT)
     heartbeat.active_tid = None
     task_monitor = manager._service_state(INTERNAL_SERVICE_KEY_TASK_MONITOR)
@@ -4987,6 +5018,7 @@ def test_reconcile_reuses_tracked_service_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
+    _write_heartbeat_registration(_make_queue)
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     manager._task_monitor_enabled = True
     calls: list[str] = []
@@ -5028,6 +5060,7 @@ def test_reconcile_clears_duplicate_scan_after_live_tracked_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, _make_queue = manager_setup
+    _write_heartbeat_registration(_make_queue)
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     manager._task_monitor_enabled = True
     service_keys = {
@@ -5295,6 +5328,7 @@ def test_task_monitor_stale_log_without_liveness_does_not_block_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     old_tid = "1777000000000000100"
@@ -5349,6 +5383,7 @@ def test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     recent_tid = str(time.time_ns())
@@ -5400,7 +5435,7 @@ def test_liveness_monitor_only_does_not_desire_heartbeat(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LivenessMonitor is not a heartbeat dependent, so it must not pull it in."""
+    """With an empty weft.state.heartbeats, LivenessMonitor alone is desired."""
 
     manager, _make_queue = manager_setup
     manager._task_monitor_enabled = False
@@ -5411,27 +5446,93 @@ def test_liveness_monitor_only_does_not_desire_heartbeat(
     ]
 
 
-def test_task_monitor_only_desires_heartbeat_and_task_monitor(
+@pytest.mark.parametrize(
+    ("task_monitor_enabled", "liveness_enabled", "row_present", "expected"),
+    [
+        (True, False, False, [INTERNAL_SERVICE_KEY_TASK_MONITOR]),
+        (
+            True,
+            False,
+            True,
+            [INTERNAL_SERVICE_KEY_HEARTBEAT, INTERNAL_SERVICE_KEY_TASK_MONITOR],
+        ),
+        (False, False, True, [INTERNAL_SERVICE_KEY_HEARTBEAT]),
+        (False, True, False, [INTERNAL_SERVICE_KEY_LIVENESS_MONITOR]),
+        (True, False, "expired", [INTERNAL_SERVICE_KEY_TASK_MONITOR]),
+    ],
+    ids=["empty", "row", "row-monitors-off", "liveness-only", "expired"],
+)
+def test_manager_desires_heartbeat_only_while_registrations_exist(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
+    workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    task_monitor_enabled: bool,
+    liveness_enabled: bool,
+    row_present: bool | str,
+    expected: list[str],
 ) -> None:
-    """TaskMonitor registers with heartbeat, so heartbeat stays desired with it."""
+    """The heartbeat is desired iff an unexpired or invalid row exists [MA-1]."""
 
-    manager, _make_queue = manager_setup
-    manager._task_monitor_enabled = True
-    manager._liveness_monitor_enabled = False
+    manager, make_queue = manager_setup
+    context = build_context(spec_context=workdir)
+    manager._task_monitor_enabled = task_monitor_enabled
+    manager._liveness_monitor_enabled = liveness_enabled
+    registrations = make_queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
 
-    assert _desired_internal_service_keys(manager, monkeypatch) == [
-        INTERNAL_SERVICE_KEY_HEARTBEAT,
-        INTERNAL_SERVICE_KEY_TASK_MONITOR,
-    ]
+    def register(heartbeat_id: str, lease_seconds: int) -> None:
+        upsert_heartbeat(
+            context,
+            registrant_tid=manager.tid,
+            heartbeat_id=heartbeat_id,
+            interval_seconds=60,
+            lease_seconds=lease_seconds,
+            destination_queue="probe.dest",
+            message="tick",
+        )
+
+    if row_present is True:
+        register("probe", 3600)
+    elif row_present == "expired":
+        register("probe", 60)
+        offset_ns = 61 * 1_000_000_000
+        monkeypatch.setattr(
+            manager_mod,
+            "time",
+            SimpleNamespace(
+                monotonic=time.monotonic,
+                time_ns=lambda: time.time_ns() + offset_ns,
+                sleep=time.sleep,
+            ),
+        )
+
+    assert _desired_internal_service_keys(manager, monkeypatch) == expected
+    if row_present != "expired":
+        return
+    assert registrations.peek_one() is None
+
+    register("a", 60)
+    register("b", 60)
+    handle = manager._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
+    original = handle.delete
+    calls: list[int] = []
+
+    def fail_once(**kwargs: Any) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("injected registration delete failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(handle, "delete", fail_once)
+
+    assert _desired_internal_service_keys(manager, monkeypatch) == expected
+    assert len(list(registrations.peek_generator(with_timestamps=True))) == 2
 
 
 def test_both_internal_monitors_disabled_desires_no_internal_service(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no enabled dependent, heartbeat is not run as standalone work."""
+    """With an empty weft.state.heartbeats, no internal service is desired."""
 
     manager, _make_queue = manager_setup
     manager._task_monitor_enabled = False
@@ -5442,9 +5543,10 @@ def test_both_internal_monitors_disabled_desires_no_internal_service(
 
 def test_liveness_monitor_only_convergence_ignores_missing_heartbeat(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
+    workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Idle shutdown must not wait on a heartbeat no enabled dependent needs."""
+    """Idle shutdown must not wait on a heartbeat no registration needs."""
 
     manager, _make_queue = manager_setup
     manager._task_monitor_enabled = False
@@ -5463,9 +5565,85 @@ def test_liveness_monitor_only_convergence_ignores_missing_heartbeat(
 
     manager._task_monitor_enabled = True
 
+    assert (
+        manager._managed_service_convergence_active_reasons(include_autostart=False)
+        == ()
+    )
+
+    upsert_heartbeat(
+        build_context(spec_context=workdir),
+        registrant_tid=manager.tid,
+        heartbeat_id="probe",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+
     assert manager._managed_service_convergence_active_reasons(
         include_autostart=False
     ) == ("missing_active_tid",)
+
+
+@pytest.mark.parametrize("canonical", [True, False])
+def test_manager_registration_row_wakes_service_convergence(
+    broker_env: BrokerEnv,
+    workdir: Path,
+    unique_tid: str,
+    canonical: bool,
+) -> None:
+    """A first registration row wakes the canonical Manager's convergence [MA-1]."""
+
+    db_path, make_queue = broker_env
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
+    if canonical:
+        spec = make_manager_spec(unique_tid, idle_timeout=0.0)
+    else:
+        spec = make_manager_spec(
+            unique_tid,
+            f"manager.{unique_tid}.inbox",
+            f"manager.{unique_tid}.ctrl_in",
+            f"manager.{unique_tid}.ctrl_out",
+            idle_timeout=0.0,
+        )
+    manager = Manager(db_path, spec, config=config)
+    internal = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    try:
+        drain(internal)
+        manager.process_once()
+        drain(internal)
+        manager.wait_for_activity(0.05)
+        signature = manager._multi_activity_waiter_signature
+        assert signature is not None
+        assert (WEFT_HEARTBEAT_REGISTRATIONS_QUEUE in signature) is canonical
+        if not canonical:
+            return
+
+        upsert_heartbeat(
+            build_context(spec_context=workdir),
+            registrant_tid=unique_tid,
+            heartbeat_id="probe",
+            interval_seconds=60,
+            lease_seconds=3600,
+            destination_queue="probe.dest",
+            message="tick",
+        )
+        manager.wait_for_activity(0.05)
+        manager.process_once()
+
+        payloads = [json.loads(item) for item in drain(internal)]
+        heartbeat_payloads = [
+            payload
+            for payload in payloads
+            if payload.get(INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY)
+            == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        ]
+        assert len(heartbeat_payloads) == 1
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
 
 
 def test_managed_service_pong_probe_is_nonblocking(
@@ -6164,6 +6342,7 @@ def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     manager._queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
@@ -6194,6 +6373,7 @@ def test_task_monitor_public_pending_spawn_request_does_not_block_internal_resta
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     manager._queue_names["internal_inbox"] = WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE
@@ -6227,6 +6407,7 @@ def test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_b
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     make_queue(WEFT_SPAWN_REQUESTS_QUEUE).write(
@@ -6422,6 +6603,7 @@ def test_task_monitor_spoofed_public_metadata_does_not_claim_singleton(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     old_tid = "1777000000000000300"
@@ -6475,6 +6657,7 @@ def test_task_monitor_latest_terminal_log_overrides_older_running_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     old_tid = "1777000000000000400"
@@ -6545,6 +6728,7 @@ def test_task_monitor_matching_pong_blocks_duplicate_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager, make_queue = manager_setup
+    _write_heartbeat_registration(make_queue)
     manager._task_monitor_enabled = True
     manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
     old_tid = "1777000000000000200"
@@ -10059,6 +10243,7 @@ def test_manager_service_convergence_advances_without_dispatch_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path, make_queue = broker_env
+    _write_heartbeat_registration(make_queue)
     config = load_config(
         {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
     )

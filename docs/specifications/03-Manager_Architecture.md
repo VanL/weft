@@ -33,6 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([MA-1] item 7).
 - [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) orders a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3].
 
 - [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MA-1.8].
@@ -291,8 +292,12 @@ Key responsibilities implemented in `weft/core/manager.py`:
    correctness is enforced by manager-owned metadata and the singleton reducer,
    not by a global dispatch-owner fence. Scoped managers may still reconcile
    their own autostart manifests. The built-in heartbeat service is desired
-   only when an enabled internal dependent needs it. The internal
-   `TaskMonitor` is an `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
+   while `weft.state.heartbeats` holds a row that is unexpired or not yet
+   rejected ([MF-3.2]), whatever the monitor flags say; otherwise it is
+   neither launched nor restarted. The canonical manager holds a notification interest
+   in that queue, so a first registration starts a service-convergence pass
+   without waiting for the stable audit. The internal `TaskMonitor` is an
+   `ensure` service when `WEFT_TASK_MONITOR_ENABLED` is
    true. `WEFT_LIVENESS_MONITOR_ENABLED` independently makes LivenessMonitor
    desired whether or not TaskMonitor is enabled. The liveness flag is launch
    policy, not active-stop authority. Draining or stopped managers do not start

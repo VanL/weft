@@ -4,6 +4,30 @@
 
 ### Changed
 
+- TaskMonitor no longer registers with the built-in heartbeat service; its
+  cycle deadline is its only clock. Cycles keep the heartbeat-live fixed-rate
+  period on a grid anchored at the monitor's first cycle start (rather than at
+  heartbeat registration), which inbox pokes do not move, with one immediate
+  follow-up after a cycle that overran a tick; this now also holds while no
+  heartbeat is reachable. The 1.0 s registration retry wake is gone. The PONG
+  `extended.task_monitor.heartbeat` block is removed (no compatibility shim),
+  and a successful cycle no longer reports a heartbeat registration error in
+  `last_cycle.error`.
+- The heartbeat service runs on demand. Registrations are rows on
+  `weft.state.heartbeats` that survive heartbeat and Manager restarts; each
+  carries a registrant-declared lease (`lease_seconds`, from its own interval
+  up to seven days) and expires on its own when the lease ends (a registrant
+  that wants more time resubmits). The Manager runs the service only while an
+  unexpired (or not yet rejected) registration exists, whatever
+  `WEFT_TASK_MONITOR_ENABLED` says, and the service exits on its idle timeout
+  when none remains. `upsert_heartbeat` now requires `registrant_tid` and
+  `lease_seconds` and returns without starting a manager, and
+  `ensure_heartbeat_service` is removed (private module, [PY-1]). Rows on the
+  heartbeat task's inbox are rejected, and the inbox-path
+  `heartbeat_upserted` and `heartbeat_cancelled` lifecycle events are gone;
+  an expired registration reports `heartbeat_registration_expired`.
+  `weft system prune` is unchanged. `weft status` reports a heartbeat with no
+  unexpired registration as disabled with evidence `no-registrations`.
 - A system STOP of a Manager (`weft manager stop`, a STOP control, `SIGTERM`,
   `SIGINT`, or parent loss) now stops active user work first, then the
   internal services (heartbeat, TaskMonitor, LivenessMonitor), then the

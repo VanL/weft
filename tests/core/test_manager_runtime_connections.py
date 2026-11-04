@@ -27,7 +27,7 @@ from weft._constants import (
 from weft.client import WeftClient
 from weft.commands import _spawn_submission, submission
 from weft.context import WeftContext, build_context
-from weft.core import control_probe, heartbeat, manager_runtime
+from weft.core import control_probe, manager_runtime
 from weft.core.service_convergence import build_manager_service_payload
 from weft.helpers import process_create_time
 
@@ -182,10 +182,8 @@ def test_mark_manager_stopped_unwinds_session_when_queue_setup_fails(
     assert exited
 
 
-@pytest.mark.parametrize("heartbeat_fallback", [False, True])
 def test_active_manager_fallback_opens_no_connections(
     counted_manager_connections: tuple[WeftContext, list[Any]],
-    heartbeat_fallback: bool,
 ) -> None:
     ctx, connections = counted_manager_connections
     with ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True) as owner:
@@ -193,19 +191,11 @@ def test_active_manager_fallback_opens_no_connections(
         with owner.get_connection() as broker:
             before = len(connections)
             for _ in range(3):
-                if heartbeat_fallback:
-                    with pytest.raises(
-                        RuntimeError, match="did not publish a live endpoint"
-                    ):
-                        heartbeat.ensure_heartbeat_service(
-                            ctx, startup_timeout=0, broker=broker
-                        )
-                else:
-                    result = manager_runtime.ensure_manager(ctx, broker=broker)
-                    assert result.manager_record is not None
-                    assert result.manager_record["tid"] == _TID
-                    assert not result.started_here
-                    assert result.process_handle is None
+                result = manager_runtime.ensure_manager(ctx, broker=broker)
+                assert result.manager_record is not None
+                assert result.manager_record["tid"] == _TID
+                assert not result.started_here
+                assert result.process_handle is None
             assert len(connections) == before
             assert owner.stats().pending == 1
 

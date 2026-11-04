@@ -37,8 +37,6 @@ from typing import Any, cast
 from simplebroker import BrokerSession, Queue
 from simplebroker.ext import BrokerConnection, BrokerError
 from weft._constants import (
-    CONTROL_KILL,
-    CONTROL_STOP,
     DEFAULT_FUNCTION_TARGET,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
@@ -57,8 +55,6 @@ from weft._constants import (
     TASK_MONITOR_BUILTIN_CYCLE_WORKER_LANE,
     TASK_MONITOR_CONTROL_CLEANUP_WORKER_LANE,
     TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
-    TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS,
-    TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
     TASK_MONITOR_LOG_SUBDIR,
     TASK_MONITOR_MAINTENANCE_PARTIAL_BATCH_ERROR_PREFIX,
     TASK_MONITOR_MAINTENANCE_RUNTIME_PRUNE_QUEUE_GROUPS,
@@ -80,8 +76,6 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.context import WeftContext
-from weft.core.control_messages import ControlRequest
-from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.monitor.collation import (
     ControlTerminalObservation,
     MonitorTaskEventUpdate,
@@ -4528,11 +4522,12 @@ class TaskMonitor(ServiceTask):
         self._deferred_task_log_pending = 0
         self._deferred_task_log_last_error: str | None = None
         self._deferred_task_log_last_flush_at: int | None = None
-        self._heartbeat_registered = False
-        self._heartbeat_error: str | None = None
-        self._heartbeat_id = f"task-monitor:{taskspec.tid}"
-        self._next_heartbeat_registration_attempt_monotonic = 0.0
         self._next_cycle_due_monotonic = 0.0
+        # next periodic grid tick; 0.0 until the first cycle starts
+        self._cycle_grid_due_monotonic = 0.0
+        # one immediate follow-up cycle is owed after an overrun; cleared when
+        # a cycle starts
+        self._overrun_follow_up_pending = False
         self._serve_log_config_emitted = False
         self._serve_log_last_emit_ns: dict[str, int] = {}
         self._serve_log_last_state: dict[str, str] = {}
@@ -4949,9 +4944,12 @@ class TaskMonitor(ServiceTask):
     def next_wait_timeout(self) -> float | None:
         """Return the launcher wait timeout for the next monitor turn.
 
-        The monitor is reactive to task-local wakeups and its heartbeat-driven
-        schedule. Queue readiness is owned by the shared MultiQueueWatcher
-        wait path; this method only exposes timer and local worker deadlines.
+        The monitor's only clock is its own cycle deadline,
+        ``_next_cycle_due_monotonic``. Queue readiness is owned by the shared
+        MultiQueueWatcher wait path; this method only exposes that deadline
+        and local worker deadlines.
+
+        Spec: [CC-2.5], [MF-5]
         """
 
         if self._has_pending_worker_results():
@@ -4963,8 +4961,6 @@ class TaskMonitor(ServiceTask):
         if not self._monitor_config.enabled:
             return max(0.0, min(timeouts)) if timeouts else None
         now = time.monotonic()
-        if not self._heartbeat_registered:
-            timeouts.append(self._next_heartbeat_registration_attempt_monotonic - now)
         if (
             self._builtin_cycle_work_in_flight is not None
             or self._processor_work_in_flight is not None
@@ -5029,7 +5025,6 @@ class TaskMonitor(ServiceTask):
             self._maybe_emit_poll_report()
             return
 
-        self._ensure_heartbeat_registered()
         if worker_results_handled:
             self._maybe_emit_poll_report()
             return
@@ -5072,15 +5067,6 @@ class TaskMonitor(ServiceTask):
     ) -> None:
         del message, timestamp, context
         self._wake_requested = True
-
-    def _handle_control_command(
-        self,
-        request: ControlRequest,
-        context: QueueMessageContext,
-    ) -> bool:
-        if request.command in {CONTROL_STOP, CONTROL_KILL}:
-            self._cancel_heartbeat()
-        return super()._handle_control_command(request, context)
 
     def _control_snapshot_fields(self) -> dict[str, Any]:
         payload = super()._control_snapshot_fields()
@@ -5223,10 +5209,6 @@ class TaskMonitor(ServiceTask):
         """Return cached TaskMonitor diagnostics for the extended PONG payload."""
 
         now_monotonic = time.monotonic()
-        next_registration_attempt = max(
-            0.0,
-            self._next_heartbeat_registration_attempt_monotonic - now_monotonic,
-        )
         next_cycle_due = max(0.0, self._next_cycle_due_monotonic - now_monotonic)
         if (
             not self._monitor_config.enabled
@@ -5255,12 +5237,6 @@ class TaskMonitor(ServiceTask):
                 "task_log_external": self._external_task_log_status.to_summary(),
                 "log_sink": self._monitor_config.log_sink,
                 "collation_store": self._store_state.monitor_store_status.to_summary(),
-                "heartbeat": {
-                    "registered": self._heartbeat_registered,
-                    "id": self._heartbeat_id,
-                    "error": self._heartbeat_error,
-                    "next_registration_attempt_in_seconds": (next_registration_attempt),
-                },
                 "schedule": {
                     "first_cycle_pending": self._first_cycle_pending,
                     "wake_requested": self._wake_requested,
@@ -5711,53 +5687,6 @@ class TaskMonitor(ServiceTask):
             close_errors=close_errors,
         )
 
-    def _ensure_heartbeat_registered(self) -> None:
-        if self._heartbeat_registered:
-            return
-        now_monotonic = time.monotonic()
-        if now_monotonic < self._next_heartbeat_registration_attempt_monotonic:
-            return
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                upsert_heartbeat(
-                    self._monitor_context(),
-                    heartbeat_id=self._heartbeat_id,
-                    interval_seconds=self._monitor_config.interval_seconds,
-                    destination_queue=self._queue_names["inbox"],
-                    message={
-                        "type": "task_monitor_wakeup",
-                        "monitor_tid": self.tid,
-                    },
-                    startup_timeout=TASK_MONITOR_HEARTBEAT_STARTUP_TIMEOUT_SECONDS,
-                    broker=broker,
-                )
-        except (BrokerError, OSError, RuntimeError, ValueError) as exc:
-            self._heartbeat_error = f"heartbeat registration failed: {exc}"
-            self._last_error = self._heartbeat_error
-            self._heartbeat_registered = False
-            self._next_heartbeat_registration_attempt_monotonic = (
-                now_monotonic + TASK_MONITOR_HEARTBEAT_REGISTRATION_RETRY_SECONDS
-            )
-            return
-        self._heartbeat_error = None
-        self._heartbeat_registered = True
-        self._next_heartbeat_registration_attempt_monotonic = 0.0
-
-    def _cancel_heartbeat(self) -> None:
-        if not self._heartbeat_registered:
-            return
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                cancel_heartbeat(
-                    self._monitor_context(),
-                    heartbeat_id=self._heartbeat_id,
-                    broker=broker,
-                )
-        except (BrokerError, OSError, RuntimeError, ValueError):
-            return
-        finally:
-            self._heartbeat_registered = False
-
     def _scan_task_log_candidates(
         self,
     ) -> tuple[tuple[TaskMonitorCandidate, ...], int | None, int]:
@@ -5777,6 +5706,14 @@ class TaskMonitor(ServiceTask):
         )
 
     def _run_monitor_cycle(self) -> None:
+        start = time.monotonic()
+        interval = self._monitor_config.interval_seconds
+        if self._cycle_grid_due_monotonic == 0.0:
+            self._cycle_grid_due_monotonic = start + interval
+        else:
+            while self._cycle_grid_due_monotonic <= start:
+                self._cycle_grid_due_monotonic += interval
+        self._overrun_follow_up_pending = False
         now_ns = time.time_ns()
         self._last_policy_progress = ()
         task_log_owner = self._task_log_deletion_owner()
@@ -5953,6 +5890,26 @@ class TaskMonitor(ServiceTask):
             close_errors=close_errors,
         )
 
+    def _arm_next_cycle_deadline(self, *, catchup_pending: bool) -> float:
+        """Arm the next cycle at the next grid tick, or now if a follow-up is owed.
+
+        Catch-up backlog caps the deadline at now plus the catch-up interval.
+
+        Spec: [MF-5]
+        """
+
+        now = time.monotonic()
+        interval = self._monitor_config.interval_seconds
+        if self._cycle_grid_due_monotonic <= now:
+            self._overrun_follow_up_pending = True
+        while self._cycle_grid_due_monotonic <= now:
+            self._cycle_grid_due_monotonic += interval
+        due = now if self._overrun_follow_up_pending else self._cycle_grid_due_monotonic
+        if catchup_pending:
+            due = min(due, now + self._monitor_config.catchup_interval_seconds)
+        self._next_cycle_due_monotonic = due
+        return due - now
+
     def _finish_monitor_cycle(
         self,
         *,
@@ -5972,7 +5929,7 @@ class TaskMonitor(ServiceTask):
         if result.success:
             if last_timestamp is not None:
                 self._last_checkpoint = last_timestamp
-            self._last_error = self._heartbeat_error
+            self._last_error = None
         else:
             self._last_error = "; ".join(result.errors) if result.errors else "failed"
         self._last_policy_progress = _consolidate_task_monitor_policy_progress(
@@ -5981,18 +5938,15 @@ class TaskMonitor(ServiceTask):
         self._last_catchup_pending = result.success and progress_requires_catchup(
             self._last_policy_progress
         )
-        next_interval_seconds = (
-            self._monitor_config.catchup_interval_seconds
-            if self._last_catchup_pending
-            else self._monitor_config.interval_seconds
+        next_interval_seconds = self._arm_next_cycle_deadline(
+            catchup_pending=self._last_catchup_pending
         )
-        self._next_cycle_due_monotonic = time.monotonic() + next_interval_seconds
         self._set_activity(
             "waiting",
             waiting_on=self._queue_names["inbox"],
         )
         if events_scanned == 0 and result.success:
-            self._last_error = self._heartbeat_error
+            self._last_error = None
         cycle_fields = {
             "task_monitor_mode": self._monitor_config.mode,
             "processor": self._monitor_config.processor,
@@ -6374,7 +6328,7 @@ class TaskMonitor(ServiceTask):
             )
 
         if cleanup.success:
-            self._last_error = self._heartbeat_error
+            self._last_error = None
         else:
             self._last_error = "; ".join(cleanup.errors) if cleanup.errors else "failed"
         if cleanup.success and cleanup.next_slice_kind is not None:
@@ -6386,12 +6340,9 @@ class TaskMonitor(ServiceTask):
         self._last_catchup_pending = self._last_catchup_pending or (
             cleanup.success and progress_requires_catchup(cleanup.policy_progress)
         )
-        next_interval_seconds = (
-            self._monitor_config.catchup_interval_seconds
-            if self._last_catchup_pending
-            else self._monitor_config.interval_seconds
+        next_interval_seconds = self._arm_next_cycle_deadline(
+            catchup_pending=self._last_catchup_pending
         )
-        self._next_cycle_due_monotonic = time.monotonic() + next_interval_seconds
         self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
         self._emit_task_monitor_log_rate_limited(
             "task_monitor_control_cleanup",

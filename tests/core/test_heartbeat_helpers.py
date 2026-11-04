@@ -9,17 +9,16 @@ from typing import Any
 
 import pytest
 
-from tests.helpers.typing import record_and_return
 from weft._constants import (
+    HEARTBEAT_MAX_LEASE_SECONDS,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
-    INTERNAL_SERVICE_KEY_HEARTBEAT,
-    INTERNAL_SERVICE_KEY_METADATA_KEY,
-    WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
+    WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
@@ -30,13 +29,8 @@ from weft.core.endpoints import (
     ResolvedEndpoint,
     endpoint_record_owner_is_live,
 )
-from weft.core.heartbeat import (
-    _heartbeat_endpoint_is_live,
-    ensure_heartbeat_service,
-    upsert_heartbeat,
-)
+from weft.core.heartbeat import cancel_heartbeat, upsert_heartbeat
 from weft.core.spawn_requests import submit_spawn_request
-from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 
 pytestmark = [pytest.mark.shared]
@@ -96,150 +90,6 @@ def _heartbeat_service_taskspec(tid: str, root: Path) -> TaskSpec:
     )
 
 
-def test_ensure_heartbeat_service_starts_service_on_first_use(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = build_context(spec_context=tmp_path)
-    calls: dict[str, int] = {"ensure": 0}
-    resolved = _resolved_endpoint("1777000000000000001")
-    responses = iter([None, resolved])
-
-    monkeypatch.setattr(
-        "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name, *, broker=None: next(responses),
-    )
-    monkeypatch.setattr(
-        core_manager_runtime,
-        "ensure_manager",
-        lambda context_arg, *, broker=None: calls.__setitem__(
-            "ensure",
-            calls["ensure"] + 1,
-        ),
-    )
-    monkeypatch.setattr(
-        "weft.core.heartbeat._heartbeat_endpoint_is_live",
-        lambda context_arg, *, resolved, broker=None: True,
-    )
-    monkeypatch.setattr("weft.core.heartbeat.time.sleep", lambda _seconds: None)
-
-    result = ensure_heartbeat_service(context)
-
-    assert result == resolved
-    assert calls == {"ensure": 1}
-
-
-def test_upsert_heartbeat_reuses_live_service_without_second_startup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = build_context(spec_context=tmp_path)
-    resolved = _resolved_endpoint("1777000000000000002")
-    captured: list[dict[str, Any]] = []
-
-    monkeypatch.setattr(
-        "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name, *, broker=None: resolved,
-    )
-    monkeypatch.setattr(
-        core_manager_runtime,
-        "ensure_manager",
-        lambda context_arg, *, broker=None: (_ for _ in ()).throw(
-            AssertionError("unexpected ensure")
-        ),
-    )
-    monkeypatch.setattr(
-        "weft.core.heartbeat._heartbeat_endpoint_is_live",
-        lambda context_arg, *, resolved, broker=None: True,
-    )
-    monkeypatch.setattr(
-        "weft.core.heartbeat._write_heartbeat_request",
-        lambda context_arg, *, resolved, payload, broker=None: record_and_return(
-            captured, dict(payload), 1
-        ),
-    )
-
-    result = upsert_heartbeat(
-        context,
-        heartbeat_id="build",
-        interval_seconds=60,
-        destination_queue="build.queue",
-        message="go",
-    )
-
-    assert result == 1
-    assert captured == [
-        {
-            "action": "upsert",
-            "heartbeat_id": "build",
-            "interval_seconds": 60,
-            "destination_queue": "build.queue",
-            "message": "go",
-        }
-    ]
-
-
-def test_ensure_heartbeat_service_fails_on_startup_timeout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = build_context(spec_context=tmp_path)
-
-    monkeypatch.setattr(
-        "weft.core.heartbeat.resolve_endpoint",
-        lambda context_arg, name, *, broker=None: None,
-    )
-    monkeypatch.setattr(
-        core_manager_runtime,
-        "ensure_manager",
-        lambda context_arg, *, broker=None: None,
-    )
-
-    with pytest.raises(RuntimeError, match="did not publish a live endpoint"):
-        ensure_heartbeat_service(context, startup_timeout=0.0)
-
-
-def test_heartbeat_endpoint_terminal_task_log_rejects_stale_endpoint(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = build_context(spec_context=tmp_path)
-    tid = "1777000000000000900"
-    log_queue = context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
-    try:
-        log_queue.write(
-            json.dumps(
-                {
-                    "tid": tid,
-                    "status": "completed",
-                    "taskspec": {
-                        "metadata": {
-                            INTERNAL_SERVICE_KEY_METADATA_KEY: (
-                                INTERNAL_SERVICE_KEY_HEARTBEAT
-                            ),
-                            INTERNAL_RUNTIME_TASK_CLASS_KEY: (
-                                INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
-                            ),
-                            INTERNAL_RUNTIME_ENDPOINT_NAME_KEY: (
-                                INTERNAL_HEARTBEAT_ENDPOINT_NAME
-                            ),
-                        }
-                    },
-                }
-            )
-        )
-    finally:
-        log_queue.close()
-    monkeypatch.setattr(
-        "weft.core.heartbeat.send_keyed_ping_probe",
-        lambda *args, **kwargs: type(
-            "Probe", (), {"matched": object(), "error": None}
-        )(),
-    )
-
-    assert not _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
-
-
 def test_endpoint_owner_uses_host_runtime_handle_liveness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -279,39 +129,6 @@ def test_endpoint_owner_rejects_dead_host_runtime_handle(
         task_statuses={},
         tid_states={tid: {"runtime_handle": _host_runtime_handle(4242, 1.5)}},
     )
-
-
-def test_heartbeat_endpoint_liveness_uses_task_process_runtime_handle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = build_context(spec_context=tmp_path)
-    tid = "1777000000000000903"
-    mapping_queue = context.queue(task_state_queue_name(tid), persistent=False)
-    try:
-        mapping_queue.write(
-            json.dumps(
-                {
-                    "full": tid,
-                    "short": tid[-10:],
-                    "runtime_handle": _host_runtime_handle(4242, 1.5),
-                }
-            )
-        )
-    finally:
-        mapping_queue.close()
-    monkeypatch.setattr(
-        "weft.core.heartbeat.handle_has_live_host_process",
-        lambda handle: True,
-    )
-
-    def fail_ping(*args: Any, **kwargs: Any) -> object:
-        del args, kwargs
-        raise AssertionError("live task pid mapping should avoid heartbeat PING")
-
-    monkeypatch.setattr("weft.core.heartbeat.send_keyed_ping_probe", fail_ping)
-
-    assert _heartbeat_endpoint_is_live(context, resolved=_resolved_endpoint(tid))
 
 
 def test_external_supervisor_endpoint_owner_uses_runtime_liveness_probe(
@@ -449,3 +266,212 @@ def test_internal_submit_spawn_request_can_target_internal_queue(
         payload[INTERNAL_RUNTIME_ENVELOPE_TASK_CLASS_KEY]
         == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
     )
+
+
+def _registration_rows(context: Any) -> list[tuple[dict[str, Any], int]]:
+    with context.broker() as reader:
+        return [
+            (json.loads(body), int(timestamp))
+            for body, timestamp in reader.peek_generator(
+                WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, with_timestamps=True
+            )
+        ]
+
+
+def test_upsert_heartbeat_writes_one_row_and_returns_without_manager(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration is one row write; the helper starts nothing [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+
+    def fail(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        pytest.fail("helper must not start a manager")
+
+    monkeypatch.setattr(core_manager_runtime, "ensure_manager", fail)
+
+    upsert_heartbeat(
+        context,
+        registrant_tid=tid,
+        heartbeat_id="probe",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+
+    rows = _registration_rows(context)
+    assert [row for row, _timestamp in rows] == [
+        {
+            "heartbeat_id": "probe",
+            "registrant_tid": tid,
+            "interval_seconds": 60,
+            "lease_seconds": 3600,
+            "destination_queue": "probe.dest",
+            "message": "tick",
+        }
+    ]
+    with context.broker() as reader:
+        assert reader.peek_one(WEFT_ENDPOINTS_REGISTRY_QUEUE) is None
+        assert reader.peek_one(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE) is None
+
+
+def test_upsert_heartbeat_replaces_by_heartbeat_id(workdir: Path) -> None:
+    """An upsert with the same id replaces the row and its lease [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    upsert_heartbeat(
+        context,
+        registrant_tid=tid,
+        heartbeat_id="probe",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+    first_id = _registration_rows(context)[0][1]
+    upsert_heartbeat(
+        context,
+        registrant_tid=tid,
+        heartbeat_id="probe",
+        interval_seconds=120,
+        lease_seconds=7200,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+
+    rows = _registration_rows(context)
+    assert len(rows) == 1
+    row, second_id = rows[0]
+    assert row["interval_seconds"] == 120
+    assert row["lease_seconds"] == 7200
+    assert second_id > first_id
+
+    upsert_heartbeat(
+        context,
+        registrant_tid=tid,
+        heartbeat_id="other",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+    assert sorted(row["heartbeat_id"] for row, _ in _registration_rows(context)) == [
+        "other",
+        "probe",
+    ]
+
+
+def test_cancel_heartbeat_deletes_every_row_for_its_id(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel deletes every row of its canonical id and nothing else [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+
+    def fail(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        pytest.fail("helper must not start a manager")
+
+    monkeypatch.setattr(core_manager_runtime, "ensure_manager", fail)
+
+    def row(heartbeat_id: str) -> str:
+        return json.dumps(
+            {
+                "heartbeat_id": heartbeat_id,
+                "registrant_tid": tid,
+                "interval_seconds": 60,
+                "lease_seconds": 3600,
+                "destination_queue": "probe.dest",
+                "message": "tick",
+            }
+        )
+
+    with context.broker() as writer:
+        writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, row("a"))
+        writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, row("a"))
+        writer.write(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE, row("b"))
+
+    cancel_heartbeat(context, heartbeat_id="a")
+    assert [row["heartbeat_id"] for row, _ in _registration_rows(context)] == ["b"]
+    cancel_heartbeat(context, heartbeat_id="unknown")
+    assert [row["heartbeat_id"] for row, _ in _registration_rows(context)] == ["b"]
+
+    upsert_heartbeat(
+        context,
+        registrant_tid=tid,
+        heartbeat_id=" probe ",
+        interval_seconds=60,
+        lease_seconds=3600,
+        destination_queue="probe.dest",
+        message="tick",
+    )
+    assert sorted(row["heartbeat_id"] for row, _ in _registration_rows(context)) == [
+        "b",
+        "probe",
+    ]
+    cancel_heartbeat(context, heartbeat_id=" probe ")
+    assert [row["heartbeat_id"] for row, _ in _registration_rows(context)] == ["b"]
+    with pytest.raises(ValueError):
+        cancel_heartbeat(context, heartbeat_id="  ")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"interval_seconds": 59},
+        {"interval_seconds": 10**400, "lease_seconds": 10**400},
+        {
+            "interval_seconds": HEARTBEAT_MAX_LEASE_SECONDS + 1,
+            "lease_seconds": HEARTBEAT_MAX_LEASE_SECONDS + 1,
+        },
+        {"interval_seconds": 60, "lease_seconds": 59},
+        {"interval_seconds": 60, "lease_seconds": HEARTBEAT_MAX_LEASE_SECONDS + 1},
+        {"interval_seconds": 60, "lease_seconds": 10**400},
+        {"destination_queue": "weft.x"},
+        {"destination_queue": ""},
+        {"registrant_tid": "nope"},
+        {"heartbeat_id": ""},
+        {"message": object()},
+    ],
+    ids=[
+        "interval-below-minimum",
+        "interval-overflow",
+        "interval-above-maximum",
+        "lease-below-interval",
+        "lease-above-maximum",
+        "lease-overflow",
+        "weft-destination",
+        "empty-destination",
+        "bad-registrant",
+        "empty-id",
+        "unserializable-message",
+    ],
+)
+def test_upsert_heartbeat_rejects_invalid_rows_before_writing(
+    workdir: Path,
+    overrides: dict[str, Any],
+) -> None:
+    """The writer rejects every unschedulable or unbounded row [MF-3.2]."""
+
+    context = build_context(spec_context=workdir)
+    arguments: dict[str, Any] = {
+        "registrant_tid": str(time.time_ns()),
+        "heartbeat_id": "probe",
+        "interval_seconds": 60,
+        "lease_seconds": 3600,
+        "destination_queue": "probe.dest",
+        "message": "tick",
+    }
+    arguments.update(overrides)
+
+    with pytest.raises(ValueError):
+        upsert_heartbeat(context, **arguments)
+
+    assert _registration_rows(context) == []

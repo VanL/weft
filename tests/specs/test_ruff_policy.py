@@ -111,6 +111,7 @@ EXPECTED_GROUP_IDS = [
             244,
             247,
             250,
+            251,
             254,
             260,
             324,
@@ -142,8 +143,8 @@ EXPECTED_GROUP_IDS = [
     "RUFF-SUP-377",
     "RUFF-SUP-378",
 ]
-EXPECTED_GROUP_COUNT = 194
-EXPECTED_DIRECTIVE_COUNT = 324
+EXPECTED_GROUP_COUNT = 193
+EXPECTED_DIRECTIVE_COUNT = 323
 EXPECTED_C901_DIRECTIVE_COUNT = 112
 TAGGED_C901 = re.compile(
     r"#\s*noqa:\s*[^#\n]*\bC901\b[^#\n]*"

@@ -468,23 +468,58 @@ _Implementation mapping_: `weft/core/tasks/base.py`
 Current heartbeat flow is task-shaped:
 
 ```text
-helper -> resolve _weft.heartbeat -> ordinary queue write to service inbox
-service inbox -> in-memory registration heap -> ordinary queue write to destination
+registrant -> validated row write to weft.state.heartbeats (upsert replaces, cancel deletes)
+weft.state.heartbeats holds a row that is unexpired or not yet rejected -> manager desires and launches the heartbeat service
+service peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
 ```
 
 Current rules:
 
 - the built-in heartbeat service is one internal persistent task that
   multiplexes many registrations in one process
-- heartbeat registrations are runtime-only and disappear on service or Weft
-  restart
-- helper startup ensures a manager exists and waits for a live manager-owned
-  heartbeat endpoint. The helper does not submit heartbeat tasks directly;
-  heartbeat launch and restart belong to the manager-owned internal service
-  path.
-- registration messages are ordinary inbox payloads with `action` `upsert` or
-  `cancel`
-- `upsert` resets `next_due_at` to `now + interval_seconds`
+- heartbeat registrations are rows on the runtime-state queue
+  `weft.state.heartbeats`, one row per live registration, keyed by
+  `heartbeat_id` and naming the registrant's TID in `registrant_tid`. A row
+  carries `heartbeat_id`, `registrant_tid`, `interval_seconds`,
+  `lease_seconds`, `destination_queue`, and `message`, and nothing else.
+  Registrations survive heartbeat-service and manager restarts; like every
+  `weft.state.*` queue, the queue is excluded from dumps.
+- every registration carries its own lease (`lease_seconds`, at least
+  `interval_seconds` and at most `HEARTBEAT_MAX_LEASE_SECONDS`, seven days;
+  the maximum is a policy value, not intrinsic to Weft). It expires
+  `lease_seconds` after the row's own message timestamp; the service deletes
+  an expired row at its expiry deadline and emits nothing for it in any turn
+  whose rebuild found it expired.
+  A registrant that wants the heartbeat to continue resubmits (upsert with
+  the same `heartbeat_id`), which replaces the row and its lease. No reader
+  consults the registrant's liveness.
+- `upsert_heartbeat` validates the row (`interval_seconds` at least
+  `HEARTBEAT_MIN_INTERVAL_SECONDS`; `lease_seconds` at least
+  `interval_seconds` and at most `HEARTBEAT_MAX_LEASE_SECONDS`, so every
+  accepted interval and lease is bounded and schedulable), writes it, then
+  deletes the older
+  rows with the same
+  `heartbeat_id`; `cancel_heartbeat` canonicalizes `heartbeat_id` as upsert
+  does and deletes every row with that `heartbeat_id`. Each returns once its queue write or deletes commit. Neither
+  looks up an endpoint, starts a manager, or waits for the service. Any
+  process in the operator trust domain may write the queue; validation checks
+  shape, not authority.
+- the canonical manager desires the heartbeat service while the queue holds a
+  row that is unexpired or invalid (an invalid row is the service's to reject)
+  and launches it through the manager-owned internal service path ([MA-1]
+  item 7). A row written while no manager runs waits in the queue; the next
+  manager start launches the service.
+- the service builds its registration table by peeking the queue and never
+  consumes a valid row by reading it: a row is an active leased request,
+  and it is consumed only when that request ends, by the registrant's
+  cancel or by the service's delete at the lease's expiry. No row outlives
+  its request, so the queue is never an unconsumed history ([ALT-WT-019]).
+  The registration of a `heartbeat_id` is its newest row;
+  older rows of that id are residue of an interrupted replacement and are
+  deleted when the table is built. A row that is new or replaced since the
+  previous build is first due `interval_seconds` after the build that finds
+  it; an unchanged row keeps its due time. The heartbeat task's inbox accepts no registration
+  mutation: each inbox row is rejected as an invalid request.
 - intervals are integer seconds with a first-slice minimum of 60 seconds
 - on each due wake, the canonical owner writes at most one message per
   registration to the configured destination queue, then advances to the next
@@ -492,51 +527,67 @@ Current rules:
 - if a due registration is late, the service coalesces to one emit and does
   not replay every missed slot
 - the heartbeat service is driven by the shared task reactor loop. It handles
-  at most one bounded control/registration/due-emission turn in
+  at most one bounded control/inbox-rejection/table-build/due-emission turn in
   `process_once()`, exposes the next registration due time or idle shutdown
   through `next_wait_timeout()`, and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
-  heartbeat timer is only the timeout supplied to that same wait path.
+  heartbeat timer is only the timeout supplied to that same wait path. It holds
+  a notification-only interest in `weft.state.heartbeats` ([QUEUE.7]): a row
+  newer than its publication cursor, or the absence of a row its table holds,
+  rebuilds the table on the next turn, whether or not the service is paused.
+  The wait also carries the earliest lease expiry over the table as a
+  deadline; a turn at or after it rebuilds the table, which deletes the
+  expired row. A turn that finds a registration due rebuilds the table before
+  emitting, so it never emits for a row that rebuild found expired; an
+  emission whose rebuild found the row unexpired may land after the expiry
+  instant by at most that turn's duration. The same rebuild bounds
+  cancellation: a cancel committed before it suppresses the turn's emission,
+  and a cancel committed after it may be followed by at most one emission.
+- with an empty table the service exits after its idle timeout
+  (`HEARTBEAT_IDLE_TIMEOUT_SECONDS`); the manager does not restart it while the
+  queue holds no unexpired or invalid row.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
   keyed `PING`/`PONG`; stale non-terminal rows without live proof do not block
-  replacement. Helper-side endpoint validation classifies the endpoint as
-  service-candidate evidence and uses the shared singleton summary rules, so
-  terminal task-log proof or dead host-process proof for the endpoint TID
-  rejects stale endpoint rows even if older endpoint registry data remains.
+  replacement. The registration helpers do not read the heartbeat endpoint.
   Service status summaries must prefer a separate live singleton owner over a
   terminal duplicate from another TID, while terminal proof still overrides
   launch evidence for the same TID.
 - the heartbeat service is an interval emitter, not a scheduler: there is no
   cron syntax, wall-clock scheduling, timezone handling, or missed-run replay
 - Heartbeat `destination_queue` remains payload-directed runtime egress, not a
-  construction-fixed reactor role. Upsert validation rejects a destination
-  equal to the Heartbeat task's own inbox, reserved, or control lanes and rejects
-  BaseTask's reserved `weft.` system queue namespace before storing the
-  registration. An ordinary destination task queue remains valid. Rejection uses
-  the existing invalid-request lifecycle event and reserved-on-error policy and
-  must not block a later valid mutation.
-- the supervised `TaskMonitor` uses heartbeat registrations for periodic
-  wake messages to its own `T{tid}.inbox`; if registration is temporarily
-  unavailable, the monitor records operational health and falls back to its
-  bounded local interval
+  construction-fixed reactor role. `upsert_heartbeat` rejects the reserved
+  `weft.` system queue namespace before writing. The service validates each row
+  again when it builds its table and rejects a destination equal to the
+  Heartbeat task's own inbox, reserved, or control lanes or in the `weft.`
+  namespace. An ordinary destination task queue remains valid. A rejected row
+  is reported with the existing invalid-request lifecycle event and deleted by
+  its exact message ID, and it must not block a later valid registration.
+- no built-in service registers a heartbeat. Each built-in service keeps
+  its own clock through `next_wait_timeout()` on the shared task reactor
+  wait path, and no built-in service uses a queue message from another
+  service as its clock.
+  The heartbeat service is an emitter for consumers that want a periodic
+  message, not the clock of another service (theory: [ALT-WT-004] in
+  `docs/program-theory.md`).
 - the supervised `TaskMonitor` includes cached operational diagnostics in
-  PONG extension data under `extended.task_monitor`: configuration, heartbeat
-  registration state, scheduling state, and the previous cycle summary. For
-  built-in cleanup processors, the summary includes cached queue-level cleanup
-  stats and cached policy-level cleanup stats under
-  `cleanup_policy_stats`. This extension must not scan queues or recompute
-  cleanup candidates during PING.
+  PONG extension data under `extended.task_monitor`: configuration,
+  scheduling state, and the previous cycle summary. For built-in cleanup
+  processors, the summary includes cached queue-level cleanup stats and
+  cached policy-level cleanup stats under `cleanup_policy_stats`. This
+  extension must not scan queues or recompute cleanup candidates during PING.
 
 _Implementation mapping_: `weft/core/heartbeat.py`;
 `weft/core/tasks/heartbeat.py`; `weft/core/manager.py`;
 `weft/core/manager_services.py`; `weft/core/endpoints.py`;
 `weft/core/monitor/task_monitor.py`.
-`weft/core/tasks/heartbeat.py::HeartbeatTask._handle_work_message` validates
-payload-directed destinations against its resolved task-local roles and the
-reserved weft. system queue namespace before storing a registration;
+`weft/core/heartbeat.py::upsert_heartbeat` and `cancel_heartbeat` write and
+delete registration rows;
+`weft/core/tasks/heartbeat.py::HeartbeatTask._rebuild_registrations`
+validates payload-directed destinations against its resolved task-local roles
+and the reserved weft. system queue namespace when it builds the table;
 dynamic-egress rejection/progress coverage lives in
 `tests/tasks/test_heartbeat.py`.
 
@@ -570,7 +621,7 @@ Task completion + configured output queues -> known-TID status/result
 Task lifecycle events -> weft.log.tasks -> explicit --log/history observation
 Task lifecycle events -> weft.log.tasks -> task-monitor JSONL logs
 Task lifecycle events -> weft.log.tasks -> Monitor-owned collation tables
-TaskMonitor heartbeat wake -> T{monitor_tid}.inbox -> bounded processor cycle
+TaskMonitor cycle deadline or inbox wake -> bounded processor cycle
 manager serve operational events -> process stderr/stdout only
 ```
 
@@ -601,6 +652,7 @@ external Monitor projection/restoration in `weft/core/monitor/store.py`,
 and owner-thread result merge in `weft/core/monitor/task_monitor.py`
 (`MaintenanceWorker`, `MaintenanceWorker.capture_diagnostics`,
 `_maintenance_worker_scope`, `TaskMonitor._apply_maintenance_diagnostics`,
+`TaskMonitor._arm_next_cycle_deadline`,
 `TaskMonitor._handle_builtin_cycle_worker_result`,
 `TaskMonitor._handle_control_cleanup_worker_result`, and
 `TaskMonitor._apply_worker_external_task_log_status`); manager operational projection in
@@ -740,9 +792,23 @@ Current rules:
   processor result, checkpoint, and cached diagnostics after the typed worker
   event returns. Built-in cleanup modes run through a separate registered
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
-  for task-local PING/STATUS/STOP/KILL, heartbeat registration, and schedule
-  bookkeeping while the worker scans, writes Monitor-store rows, and applies
-  exact deletes.
+  for task-local PING/STATUS/STOP/KILL and schedule bookkeeping while the
+  worker scans, writes Monitor-store rows, and applies exact deletes.
+  The monitor's only clock is its own cycle deadline, published through
+  `next_wait_timeout()`. The first cycle runs on the first enabled turn and
+  anchors a fixed periodic grid: ticks fall at that cycle's start plus
+  whole multiples of `WEFT_TASK_MONITOR_INTERVAL_SECONDS`, and the grid is
+  never re-anchored. A cycle runs at each grid tick and consumes, at its
+  start, every tick at or before that start. A message on
+  `T{monitor_tid}.inbox` requests an immediate cycle and does not move the
+  grid. If one or more ticks pass while a cycle runs, the monitor owes
+  exactly one immediate follow-up cycle; the owed follow-up persists across
+  the bookkeeping that follows the cycle, including a control-cleanup pass,
+  until a cycle starts. While a cleanup policy reports remaining backlog,
+  the next cycle is due at the earlier of the grid-derived time and
+  `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` after the previous cycle's
+  results are committed. With no inbox or control message, no worker
+  result, and no due deadline, the monitor runs no turns.
 
   Before submitting maintenance, the TaskMonitor reactor captures explicit
   configuration, work identity and required state values. A fresh
@@ -2021,8 +2087,8 @@ deletion is logged at error level when Weft logging is enabled
   parent-row retirement waits for that marker when `reserved_probe_needed` is
   set. When a
   cycle stops because the FIFO pass hit its scan limit, the monitor uses
-  `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` for the next wake instead of the
-  full heartbeat interval.
+  `WEFT_TASK_MONITOR_CATCHUP_INTERVAL_SECONDS` for its next cycle deadline
+  when that is earlier than the next grid tick.
 - the durable table-backed collation path uses
   `weft/core/monitor/store.py` for schema, checkpoints,
   task-summary rows, child raw-message rows, and the table access layer; it uses
@@ -2118,6 +2184,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
+- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease, and the heartbeat service runs only while the queue holds a row that is unexpired or not yet rejected ([MF-3.2]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([MF-3]).
 - [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
