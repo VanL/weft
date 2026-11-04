@@ -23,7 +23,7 @@ import threading
 import time
 import traceback
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -8804,9 +8804,10 @@ def test_manager_stop_does_not_hold_past_window_for_stuck_launch(
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3].
 
-    Guard. Named mutation: ending phase 1 only when launches settle (removing
-    the window bound) makes STOP hold while the launch worker is blocked, and
-    the test fails at its outer bound.
+    Guard. Named mutations: ending phase 1 only when launches settle
+    (removing the window bound) makes STOP hold while the launch worker is
+    blocked, and the test fails at its outer bound; releasing the launch at
+    once (an immediate expiry that keeps the warning) fails the lower bound.
     """
 
     manager, make_queue = manager_setup
@@ -8827,6 +8828,7 @@ def test_manager_stop_does_not_hold_past_window_for_stuck_launch(
         launch_id = make_queue(manager._queue_names["inbox"]).write(json.dumps(payload))
         drive_manager_until(manager, manager._has_active_child_launches)
 
+        stop_written = time.monotonic()
         make_queue(manager._queue_names["ctrl_in"]).write(
             encode_control_message(CONTROL_STOP)
         )
@@ -8835,8 +8837,12 @@ def test_manager_stop_does_not_hold_past_window_for_stuck_launch(
         while not manager.should_stop and time.monotonic() < outer_bound:
             manager.process_once()
             manager.wait_for_activity(0.05)
+        released_after = time.monotonic() - stop_written
 
         assert manager.should_stop
+        # Lower bound: the hold lasts the phase-1 window; the drain began
+        # after the STOP was written, so release cannot precede the window.
+        assert released_after >= window
         assert not release.is_set()
         assert manager._has_active_child_launches()
         events = [json.loads(item) for item in drain(log_queue)]
@@ -8916,6 +8922,15 @@ def _drain_snapshot_payload(
     return payload
 
 
+def _remove_drain_snapshots(
+    make_queue: Callable[[str], Queue], tids: Iterable[str]
+) -> None:
+    """Remove fabricated snapshot rows so harness cleanup does not stop them."""
+
+    for tid in tids:
+        make_queue(task_state_queue_name(tid)).delete()
+
+
 def test_manager_stop_skips_terminal_and_internal_adopted_snapshots(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:
@@ -8979,8 +8994,112 @@ def test_manager_stop_skips_terminal_and_internal_adopted_snapshots(
         assert covered not in manager._scheduler_residents
         assert targets[stage].escalate is False
     finally:
+        manager._scheduler_residents.clear()
+        _remove_drain_snapshots(
+            make_queue,
+            (uncovered, stage, covered, terminal, service, unresolved, peer),
+        )
         worker.kill()
         worker.wait(timeout=10.0)
+
+
+def test_manager_stop_keeps_target_whose_identity_probe_fails(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable identity probe is unknown, never verified exit [WT-2a.13].
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. A
+    non-terminal target whose live process denies its creation-time probe
+    stays in phase 1, and phase 1 does not advance. Named mutation:
+    settling exit with ``pid_matches_create_time`` (False on a failed
+    probe) instead of the tri-state ``inspect_host_process`` releases the
+    target and starts phase 2.
+    """
+
+    psutil = pytest.importorskip("psutil")
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns() + 4096)
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(worker.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid, pid=worker.pid, created=created))
+        )
+        manager._scheduler_residents[tid] = {}
+        manager._drain_stop_targets = manager._collect_drain_stop_targets()
+        assert tid in manager._drain_stop_targets
+        assert manager._drain_stop_targets[tid].identity
+
+        def denied(self: Any) -> float:
+            raise psutil.AccessDenied(self.pid)
+
+        monkeypatch.setattr(psutil.Process, "create_time", denied)
+        manager._draining = True
+        manager._drain_started_ns = time.time_ns()
+        assert worker.poll() is None
+
+        assert manager._drain_user_work_phase_holds() is True
+        assert tid in manager._drain_stop_targets
+        assert manager._drain_services_phase is False
+    finally:
+        manager._drain_stop_targets.clear()
+        manager._scheduler_residents.clear()
+        manager._draining = False
+        monkeypatch.undo()
+        _remove_drain_snapshots(make_queue, [tid])
+        worker.kill()
+        worker.wait(timeout=10.0)
+
+
+def test_manager_stop_releases_target_on_terminal_log_event(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """A target's terminal envelope in ``weft.log.tasks`` is terminal proof.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. The task
+    broadcasts its terminal event before its best-effort snapshot append;
+    here the append never happens and the target has no host identity, so
+    only the terminal event can release it. Named mutation: observing
+    completion from the snapshot queue alone keeps the target until window
+    expiry.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns() + 4096)
+    make_queue(task_state_queue_name(tid)).write(
+        json.dumps(_drain_snapshot_payload(tid))
+    )
+    manager._scheduler_residents[tid] = {}
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    log_queue.write(json.dumps({"tid": "1" * 19, "event": "unrelated"}))
+    manager._drain_stop_targets = manager._collect_drain_stop_targets()
+    try:
+        assert tid in manager._drain_stop_targets
+        assert manager._drain_stop_targets[tid].identity == ()
+        assert manager._has_pending_drain_stop_observation() is False
+
+        log_queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "event": "control_stop",
+                    "status": "cancelled",
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "task",
+                }
+            )
+        )
+        assert manager._has_pending_drain_stop_observation() is True
+        manager._settle_drain_stop_targets()
+
+        assert tid not in manager._drain_stop_targets
+        assert manager._drain_stop_log_queue is None
+    finally:
+        manager._clear_drain_stop_targets()
+        manager._scheduler_residents.clear()
+        _remove_drain_snapshots(make_queue, [tid])
 
 
 @pytest.mark.skipif(

@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,7 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_SERVICE_KEYS,
+    TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -27,6 +29,7 @@ from weft.context import WeftContext, build_context
 from weft.core.launcher import launch_task_process
 from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec, generate_tid
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.taskspec import TaskSpec
@@ -376,6 +379,49 @@ def _wait_until(
     raise AssertionError(f"Timed out waiting for {message}")
 
 
+def _wait_on_queues(
+    context: WeftContext,
+    queue_names: list[str],
+    ready: Any,
+    *,
+    timeout: float = 60.0,
+    message: str = "condition",
+) -> Any:
+    """Re-check ``ready`` on activity in the named queues, not on a timer."""
+
+    with ExitStack() as stack:
+        queues = [
+            stack.enter_context(context.queue(name, persistent=True))
+            for name in queue_names
+        ]
+        monitor = stack.enter_context(
+            closing(QueueChangeMonitor(queues, config=context.config))
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            value = ready()
+            if value:
+                return value
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"Timed out waiting for {message}")
+            monitor.wait(remaining)
+
+
+def _first_terminal_log_id(context: WeftContext, tid: str) -> int | None:
+    """Return the task's terminal envelope message ID in ``weft.log.tasks``."""
+
+    return next(
+        (
+            timestamp
+            for payload, timestamp in _queue_rows(context, WEFT_GLOBAL_LOG_QUEUE)
+            if payload.get("tid") == tid
+            and payload.get("type") == TERMINAL_ENVELOPE_TYPE
+        ),
+        None,
+    )
+
+
 def _running_snapshot(context: WeftContext, tid: str) -> dict[str, Any] | None:
     snapshot = read_task_state_snapshot(context, tid)
     if snapshot is None:
@@ -483,8 +529,11 @@ def test_manager_stop_reaches_earlier_manager_detached_task(
     assert rc == 0, (rc, out, err)
     task_tid = out.strip()
     weft_harness.register_tid(task_tid)
-    snapshot = _wait_until(
-        lambda: _running_snapshot(context, task_tid), message="task running"
+    snapshot = _wait_on_queues(
+        context,
+        [task_state_queue_name(task_tid)],
+        lambda: _running_snapshot(context, task_tid),
+        message="task running",
     )
     task_pids = _snapshot_pids(snapshot)
     assert task_pids
@@ -503,7 +552,9 @@ def test_manager_stop_reaches_earlier_manager_detached_task(
     manager_b, started = _parse_manager_start_output(out)
     assert started and manager_b != manager_a
     weft_harness.register_manager_tid(manager_b)
-    _wait_until(
+    _wait_on_queues(
+        context,
+        [task_state_queue_name(manager_b)],
         lambda: task_tid in _checkpoint_residents(context, manager_b),
         message="Manager B adopting the detached task",
     )
@@ -526,9 +577,10 @@ def test_manager_stop_reaches_earlier_manager_detached_task(
     weft_harness.wait_for_terminal_state(task_tid, expected_status="cancelled")
     control_stop = _first_log_id(context, task_tid, {"control_stop"})
     drained = _first_log_id(context, manager_b, {"manager_stop_drained"})
+    terminal = _first_terminal_log_id(context, task_tid)
     assert control_stop is not None, "task never handled a delivered STOP"
     assert drained is not None
-    assert control_stop < drained
+    assert terminal is not None and terminal < drained
     _wait_until(
         lambda: not any(_pid_running(pid) for pid in task_pids),
         timeout=30.0,
@@ -555,6 +607,7 @@ def test_manager_stop_reaches_task_under_another_live_manager(
     its resolved route; A keeps custody, reaps it, and stays alive.
     """
 
+    psutil = pytest.importorskip("psutil")
     context = weft_harness.context
     suffix = generate_tid(context)
     managers: dict[str, tuple[str, str]] = {}
@@ -582,11 +635,15 @@ def test_manager_stop_reaches_task_under_another_live_manager(
 
     snapshots: dict[str, dict[str, Any]] = {}
     for label, (manager_tid, task_tid) in managers.items():
-        snapshots[label] = _wait_until(
+        snapshots[label] = _wait_on_queues(
+            context,
+            [task_state_queue_name(task_tid)],
             lambda tid=task_tid: _running_snapshot(context, tid),
             message=f"task {label} running",
         )
-        _wait_until(
+        _wait_on_queues(
+            context,
+            [task_state_queue_name(manager_tid)],
             lambda m=manager_tid, tid=task_tid: (
                 tid in _checkpoint_residents(context, m)
             ),
@@ -609,15 +666,16 @@ def test_manager_stop_reaches_task_under_another_live_manager(
     weft_harness.wait_for_terminal_state(task_a, expected_status="cancelled")
     weft_harness.wait_for_terminal_state(task_b, expected_status="cancelled")
     assert _first_log_id(context, task_a, {"control_stop"}) is not None
-    terminal_a = _first_log_id(context, task_a, {"control_stop"})
-    terminal_b = _first_log_id(context, task_b, {"control_stop", "task_signal_stop"})
+    terminal_a = _first_terminal_log_id(context, task_a)
+    terminal_b = _first_terminal_log_id(context, task_b)
     drained_b = _first_log_id(context, manager_b, {"manager_stop_drained"})
     assert terminal_a is not None and terminal_b is not None
     assert drained_b is not None
     assert terminal_a < drained_b and terminal_b < drained_b
+    # PID absence, not "not running": A must have joined (reaped) its child.
     _wait_until(
         lambda: (
-            not any(_pid_running(pid) for pid in _snapshot_pids(snapshots["a"]))
+            not any(psutil.pid_exists(pid) for pid in _snapshot_pids(snapshots["a"]))
             and task_a not in _checkpoint_residents(context, manager_a)
         ),
         timeout=30.0,

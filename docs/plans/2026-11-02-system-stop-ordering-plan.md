@@ -1617,6 +1617,7 @@ The row is present in the working tree and must land in
 the same change as this file.
 - cross-plan correction applied 2026-11-03 (owner's outside reviewer; owner: 'I accept the disclosed bounded-shutdown choice; I would tighten the promise'): the spec delta's unconditional "the last lifecycle event of the stop" now reads as the last event the Manager publishes for the stop, with the released-launch child named as the one exception whose own events may follow (final cleanup runs after the drained event, manager.py:4908 then `_finalize_task_once`); the kept-sentence note and the register row say the same. Plan metadata gate and `bin/check-doc-paths` re-run.
 - implementation 2026-11-03: the exact-name broadcast fork was closed on the owner's implement instruction (2026-11-03) with the recommended option: keep per-target STOP writes (the probe showed patterns match only queues that already hold rows). Tasks 1 to 5, 7 and 8 executed from `26cc08da`; task 6 is the rejected variant and was not run.
+- Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range 26cc08da..e266a85a): BLOCKED on F1 (a failed identity probe released a live target as exited) and F2 (snapshot-only completion observation; the terminal event precedes the snapshot, so a failed snapshot append hid published proof): accepted and fixed (tri-state `inspect_host_process`; weft.log.tasks terminal-event interest restored per Task 7). F3 (PID-absence and terminal-event oracles), F4 (one shared phase-1 cleanup deadline), F5 (lower-bound assertion on the stuck-launch guard): accepted and fixed. Publication-order claims in the execution log corrected. Round 2 pending.
 
 ## Execution log
 
@@ -1824,8 +1825,11 @@ Task 5, end-to-end ordering at the CLI seam:
   retires internal-service lifecycle rows from the raw task log
   (`INTERNAL_SERVICE_RUNTIME_CLASSES`, "classified as internal service
   lifecycle rows"), so that log is not a stable oracle for services. The
-  terminal snapshot is published by the task itself before its terminal
-  log event (`BaseTask._publish_projection_edge`) and only LivenessMonitor
+  terminal snapshot is published by the task itself (corrected after the
+  completed-work review round 1: the task broadcasts its terminal event to
+  `weft.log.tasks` and `ctrl_out` first, `BaseTask._report_state_change`
+  through `_write_state_queue_message`, and then appends the snapshot best
+  effort through `_publish_projection_edge`), and only LivenessMonitor
   deletes it ([LIVENESS.R3]; disabled under the harness). The drained
   event itself is still read from `weft.log.tasks`.
 - Verify: `./.venv/bin/python -m pytest tests/cli/test_cli_manager.py -k
@@ -1914,14 +1918,14 @@ GREEN (`weft/core/manager.py`):
 
 Deviations in task 7:
 
-4. Wake interest covers each target's snapshot queue only, not
-   `weft.log.tasks`. The terminal snapshot is the task-owned proof the drain
-   releases on, and `BaseTask._publish_projection_edge` publishes it before
-   the terminal log event; a `weft.log.tasks` interest would wake the
-   Manager on every row in the context and finding a target's terminal
-   event there would be the shared-log scan [ALT-WT-009] rejects. A task
-   killed without a terminal snapshot is released on verified PID exit at
-   the next turn or at the window.
+4. (Withdrawn after the completed-work review round 1, F2.) As first
+   landed, wake interest covered each target's snapshot queue only, on the
+   premise that the snapshot precedes the terminal log event. That premise
+   was reversed: `BaseTask` broadcasts the terminal event first and then
+   appends the snapshot best effort, so a failed append hid published
+   proof. The fix restores Task 7 as written: the targets' terminal
+   envelopes in `weft.log.tasks` are a wake interest and terminal proof
+   too (followed by TID past a cursor, never a liveness scan).
 5. The first CLI test's detached task is a `command` task (`python -c
    "import time; time.sleep(120)"`) rather than a function task: the CLI
    `--kw` passes strings.
@@ -1965,10 +1969,67 @@ Task 8, traceability reconciliation and closeout:
   still never proof of death: an unconfirmed target is released as
   unknown, never declared exited. Other rows carry forward unchanged by
   reference.
-- Not done by the implementing agent: the keyed possession probe (the
-  owner writes the key first; an agent of a different family answers) and
-  the completed-work cross-family review. They are left to the series
-  coordinator, so `Status:` and the `docs/plans/README.md` row stay
-  `promoted` until both are recorded.
+- Task 8 is not fully closed by these commits. Not evidenced: the keyed
+  possession probe (the owner writes the key first; an agent of a
+  different family answers), the slow suite (`-m ""`), and the green CI
+  run on Linux, macOS and Windows that `## Verification` requires. The
+  completed-work cross-family review has its round 1 recorded in the
+  Review Log; round 2 is pending. `Status:` and the `docs/plans/README.md`
+  row stay `promoted` until all of these are recorded.
 - No theory edit: this plan has no `docs/program-theory.md` Replacement
   block, so no "Theory:" commit was made.
+
+Completed-work review round 1 fixes (2026-11-03, from `e266a85a`):
+
+- F1: `Manager._settle_drain_stop_targets` verifies exit only when every
+  recorded identity observes `stale` through
+  `weft/liveness/host.py::inspect_host_process` (process absent, zombie, or
+  identity mismatch); an `unknown` observation keeps the target until
+  window expiry, where it is reported and released as unknown. Regression
+  `test_manager_stop_keeps_target_whose_identity_probe_fails` (live
+  process, non-terminal snapshot, `psutil.Process.create_time` raising
+  `psutil.AccessDenied`). RED against `e266a85a`'s `manager.py`:
+  `assert manager._drain_user_work_phase_holds() is True` /
+  `E assert False is True` (the target was released and phase 2 began).
+  Named mutation: settling exit with `pid_matches_create_time`.
+- F2: the targets' terminal envelopes in `weft.log.tasks` are a wake
+  interest (`_drain_stop_target_queues` adds the log queue while a target
+  remains; `_has_pending_drain_stop_observation` peeks the newest row past
+  a wake cursor, claimed rows included) and terminal proof
+  (`Manager._drain_stop_terminal_events` peeks past a settled cursor fixed
+  before the drain's snapshot read and returns target TIDs whose row has
+  `type == TERMINAL_ENVELOPE_TYPE`). The log interest closes when the last
+  target leaves. Regression
+  `test_manager_stop_releases_target_on_terminal_log_event` (no identity,
+  non-terminal snapshot, terminal envelope only). RED against `e266a85a`:
+  `assert manager._has_pending_drain_stop_observation() is True` /
+  `E assert False is True`.
+- F3: `test_manager_stop_reaches_task_under_another_live_manager` asserts
+  PID absence (`psutil.pid_exists` false) for A's task and compares the
+  tasks' terminal envelopes (not `control_stop`) against B's drained event;
+  the `control_stop` delivery assertion stays.
+  `test_manager_stop_reaches_earlier_manager_detached_task` also checks
+  its terminal envelope precedes the drained event.
+- F4: `_drain_user_work_phase_holds` computes one forced-reap deadline at
+  phase-1 expiry and passes it to `_terminate_children(..., tids=...)` and
+  then `_release_drain_stop_targets_at_expiry(deadline)`, so the 34 s
+  accounting in [MA-3] and the CHANGELOG holds unchanged.
+- F5: `test_manager_stop_does_not_hold_past_window_for_stuck_launch`
+  asserts the release happens no earlier than the window after the STOP
+  was written; an immediate-expiry mutation fails it.
+- Minor drift: the CLI coverage tests wait for "task running" and for
+  checkpoint residency with `_wait_on_queues` (a `QueueChangeMonitor` on
+  the named `weft.state.tasks.<tid>` queues, the
+  `tests/system/test_family_recovery.py::_wait` pattern). `_wait_until`
+  polling remains (deviation 7) where no queue carries the condition: the
+  Manager PID lookup goes through a `weft manager status` subprocess, PID
+  exit has no queue event, and the task 5 readiness marker is a file.
+- The unit tests delete their fabricated `weft.state.tasks.*` rows in
+  `finally` (test fixtures, not a component deleter): otherwise harness
+  cleanup sends each fabricated task STOP and waits about 4 s per row.
+- [MA-3] mapping names `Manager._drain_stop_terminal_events`, the shared
+  deadline, the log wake interest, and the two new tests.
+- Gates before the round 1 fix commit: fast suite exit 0 (6,386 passed,
+  47 skipped); mypy `Success: no issues found in 484 source files`; ruff
+  `All checks passed!`; `bin/check-doc-paths` OK; plan metadata test
+  passed. The slow suite is left to the series coordinator.

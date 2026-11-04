@@ -956,12 +956,18 @@ _Implementation mapping_:
   terminal and host-escalation filters), `Manager._manager_checkpoint_residents`
   (the one `covered` rule shared with `Manager._bootstrap_scheduler_evidence`),
   `Manager._settle_drain_stop_targets` (release on task-owned terminal proof
-  or verified exit), `Manager._release_drain_stop_targets_at_expiry` (forced
-  reap of eligible targets, report and release of the rest),
+  or verified exit; an unknown identity probe keeps the target),
+  `Manager._drain_stop_terminal_events` (the targets' terminal envelopes in
+  `weft.log.tasks`, peeked past a cursor),
+  `Manager._release_drain_stop_targets_at_expiry` (forced reap of eligible
+  targets under phase 1's one forced-reap deadline, report and release of
+  the rest),
   `Manager._drain_phase_members` (escalation clocks), and
   `Manager._drain_stop_target_queues` / `Manager._has_pending_drain_stop_observation`
-  (wake interest on each target's snapshot queue). Tests:
+  (wake interest on each target's snapshot queue and on `weft.log.tasks`). Tests:
   `tests/core/test_manager.py::test_manager_stop_skips_terminal_and_internal_adopted_snapshots`,
+  `tests/core/test_manager.py::test_manager_stop_keeps_target_whose_identity_probe_fails`,
+  `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_log_event`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager`,
   `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`.

@@ -163,6 +163,7 @@ from weft.helpers import (
     terminate_process_tree,
 )
 from weft.liveness import analyze_liveness
+from weft.liveness.host import inspect_host_process
 from weft.liveness.policy import mapping_row_is_live
 
 from .admission import (
@@ -697,6 +698,12 @@ class Manager(ServiceTask):
         self._drain_stops_children = True
         self._drain_services_phase = False
         self._drain_stop_targets: dict[str, _ManagerDrainStopTarget] = {}
+        # Terminal-event interest in weft.log.tasks for the targets above:
+        # ``_drain_stop_log_cursor`` is the settled position and
+        # ``_drain_stop_log_wake_id`` the wake cursor [MA-3].
+        self._drain_stop_log_queue: Queue | None = None
+        self._drain_stop_log_cursor: int | None = None
+        self._drain_stop_log_wake_id: int | None = None
         self._drain_leader_tid: str | None = None
         self._drain_signaled_children: set[str] = set()
         self._drain_escalated_children: set[str] = set()
@@ -4951,6 +4958,17 @@ class Manager(ServiceTask):
 
         try:
             with self._get_connected_queue().get_connection() as broker:
+                # Fix the terminal-event cursor before the snapshot read, so a
+                # terminal event published after that read is never skipped.
+                newest = broker.peek_many(
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    limit=1,
+                    order="newest",
+                    with_timestamps=True,
+                    include_claimed=True,
+                )
+                self._drain_stop_log_cursor = int(newest[0][1]) if newest else None
+                self._drain_stop_log_wake_id = self._drain_stop_log_cursor
                 snapshots = latest_task_state_rows(
                     self._manager_context(), broker=broker
                 )
@@ -5068,21 +5086,26 @@ class Manager(ServiceTask):
     def _settle_drain_stop_targets(self) -> None:
         """Release targets with task-owned terminal proof or verified exit.
 
-        Liveness that cannot be read stays unknown and keeps the target in
-        the phase ([WT-2a.13]).
+        Terminal proof is the task's terminal envelope in ``weft.log.tasks``
+        (published first) or its terminal snapshot (appended after, best
+        effort). Exit is verified only when every recorded identity observes
+        ``stale``; an ``unknown`` probe keeps the target in the phase
+        ([WT-2a.13], LIVENESS.R5).
         """
 
         if not self._drain_stop_targets:
             return
         try:
             with self._get_connected_queue().get_connection() as broker:
+                for tid in self._drain_stop_terminal_events(broker):
+                    self._release_drain_stop_target(tid)
                 for tid, target in tuple(self._drain_stop_targets.items()):
                     latest = read_task_state_snapshot(
                         self._manager_context(), tid, broker=broker
                     )
                     terminal = latest is not None and latest[1].get("terminal") is True
-                    exited = bool(target.identity) and not any(
-                        pid_is_live(pid) and pid_matches_create_time(pid, created)
+                    exited = bool(target.identity) and all(
+                        inspect_host_process(pid, created).evidence == "stale"
                         for pid, created in target.identity
                     )
                     if terminal or exited:
@@ -5090,16 +5113,52 @@ class Manager(ServiceTask):
         except (BrokerError, OSError, RuntimeError, ValueError):
             logger.debug("System STOP target observation deferred", exc_info=True)
 
+    def _drain_stop_terminal_events(self, broker: Any) -> set[str]:
+        """Follow ``weft.log.tasks`` past the cursor for targets' terminal envelopes.
+
+        Peeks only, including rows a TaskMonitor has claimed, and reads only
+        the explicit lifecycle events of the named target TIDs.
+        """
+
+        terminal: set[str] = set()
+        with closing_queue_iterator(
+            broker.peek_generator(
+                WEFT_GLOBAL_LOG_QUEUE,
+                with_timestamps=True,
+                after_timestamp=self._drain_stop_log_cursor,
+                include_claimed=True,
+            )
+        ) as rows:
+            for body, timestamp in cast(Iterator[tuple[str, int]], rows):
+                self._drain_stop_log_cursor = int(timestamp)
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("tid") in self._drain_stop_targets
+                    and payload.get("type") == TERMINAL_ENVELOPE_TYPE
+                ):
+                    terminal.add(payload["tid"])
+        return terminal
+
     def _release_drain_stop_target(self, tid: str) -> None:
         target = self._drain_stop_targets.pop(tid, None)
         if target is not None and target.queue is not None:
             target.queue.close()
             target.queue = None
+        if not self._drain_stop_targets and self._drain_stop_log_queue is not None:
+            self._drain_stop_log_queue.close()
+            self._drain_stop_log_queue = None
 
-    def _release_drain_stop_targets_at_expiry(self) -> None:
-        """Force-reap eligible targets, then report and release the rest."""
+    def _release_drain_stop_targets_at_expiry(self, deadline: float) -> None:
+        """Force-reap eligible targets, then report and release the rest.
 
-        deadline = time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
+        ``deadline`` is phase 1's one forced-reap deadline, shared with the
+        tracked user-work children.
+        """
+
         for target in self._drain_stop_targets.values():
             for pid in self._drain_target_live_pids(target):
                 remaining = self._remaining_deadline(deadline)
@@ -5121,21 +5180,44 @@ class Manager(ServiceTask):
             self._release_drain_stop_target(tid)
 
     def _drain_stop_target_queues(self) -> list[Queue]:
+        targets = getattr(self, "_drain_stop_targets", {})
         queues: list[Queue] = []
-        for tid, target in getattr(self, "_drain_stop_targets", {}).items():
+        for tid, target in targets.items():
             if target.queue is None:
                 target.queue = self._manager_context().queue(task_state_queue_name(tid))
             queues.append(target.queue)
+        if targets:
+            if self._drain_stop_log_queue is None:
+                self._drain_stop_log_queue = self._manager_context().queue(
+                    WEFT_GLOBAL_LOG_QUEUE
+                )
+            queues.append(self._drain_stop_log_queue)
         return queues
 
     def _has_pending_drain_stop_observation(self) -> bool:
-        """Advance a publication cursor per target; never consume task state."""
+        """Advance publication cursors; never consume task state or the log.
+
+        A new snapshot row for a target, or a new ``weft.log.tasks`` row that
+        may be a target's terminal event, makes a turn pending; the turn's
+        settlement reads the terminal events by TID.
+        """
 
         targets = getattr(self, "_drain_stop_targets", {})
         if not targets:
             return False
         try:
             with self._get_connected_queue().get_connection() as broker:
+                log_rows = broker.peek_many(
+                    WEFT_GLOBAL_LOG_QUEUE,
+                    limit=1,
+                    order="newest",
+                    with_timestamps=True,
+                    after_timestamp=self._drain_stop_log_wake_id,
+                    include_claimed=True,
+                )
+                if log_rows:
+                    self._drain_stop_log_wake_id = int(log_rows[0][1])
+                    return True
                 for tid, target in targets.items():
                     rows = broker.peek_many(
                         task_state_queue_name(tid),
@@ -9120,19 +9202,18 @@ class Manager(ServiceTask):
         if members or launches or self._drain_stop_targets:
             if not self._shutdown_drain_timed_out():
                 return True
-            if self._drain_stop_targets:
-                self._release_drain_stop_targets_at_expiry()
+            # One forced-reap deadline for the whole phase [MA-3].
+            deadline = time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS
             if members:
                 logger.warning(
                     "Manager %s drain timed out with %s user-work task(s); terminating",
                     self.tid,
                     len(members),
                 )
-                self._terminate_children(
-                    time.monotonic() + TASK_CLEANUP_TIMEOUT_SECONDS,
-                    tids=tuple(members),
-                )
+                self._terminate_children(deadline, tids=tuple(members))
                 self._cleanup_children()
+            if self._drain_stop_targets:
+                self._release_drain_stop_targets_at_expiry(deadline)
             if launches:
                 logger.warning(
                     "Manager %s drain window expired with unsettled child "
