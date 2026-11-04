@@ -94,22 +94,33 @@ sites that clear the three collections together: `_begin_shutdown_drain`
 Clocks. The wake block converts wall-clock deadlines with
 `_timeout_until_ns(due_ns, now_ns=now_ns)` from
 `weft/core/tasks/service.py` 662, where `now_ns` is `time.time_ns()`. The
-forced-cleanup budgets at 9157 and 9184 use `time.monotonic()`. The file
-has 71 `time.time_ns()` calls and 17 `time.monotonic()` calls; most of the
-former stamp published events or compare against broker timestamps and are
-out of scope. Tests drive Manager deadlines by patching
-`manager_mod.time.time_ns` (`tests/core/test_manager.py` 3674, 3955, 4047,
-4064, 4514, 4551; `tests/core/test_manager_family_maintenance.py` 997) and
-once `manager_mod.time.monotonic` (`test_manager_family_maintenance.py`
-167); Task 0 records which of these touch drain windows.
+forced-cleanup budgets at 9157 and 9184 and the family-repair deadline at
+8577 use `time.monotonic()`. The file has 72 `time.time_ns()` calls and 17
+`time.monotonic()` calls; most of the former stamp published events or
+compare against broker timestamps and are out of scope. Tests drive
+Manager deadlines by patching `manager_mod.time.time_ns`; of those
+patches, exactly two drive drain windows: `tests/core/test_manager.py`
+4564 and 4599 (round-1 F1; the other seven, at 3674, 3955, 4047, 4064,
+4514, 4551 and `test_manager_family_maintenance.py` 997, drive
+convergence cadence, source wakes, probe scheduling, PONG wakes,
+supervision wakes, immediate-work wakes and startup-feedback observation,
+and are untouched). The test at 4564 also asserts wall-clock leadership
+revalidation (the branch at 8717-8729 stays on the wall clock), so its
+wall-clock patch stays and a `monotonic_ns` patch is added beside it for
+the drain assertions. The monotonic patch at
+`test_manager_family_maintenance.py` 167 drives admission retry
+scheduling and is untouched. The wake-timer tests for the drain are at
+4558 and 4593; 8746 is a SIGTERM-drain assertion.
 
 Service enablement. Three sites restate the same policy:
 `_reconcile_managed_services` (7586-7592: if the inbox is the public spawn
 queue, append the heartbeat spec, then TaskMonitor and LivenessMonitor by
 their flags), `_pending_service_probes_for_scope` (8186-8192: the same
 test on the inbox, then `internal_keys.add(...)` by the same flags) and
-`_managed_service_convergence_active_reasons` (8226-8232: a literal set of
-the three keys). The flags are `_task_monitor_enabled` and
+`_managed_service_convergence_active_reasons` (8246-8257: the guard that
+narrows `missing_active_tid` combines a literal set of the three keys with
+the two flags and the canonical-inbox test; round-1 F5 settles Task 0's
+question: this guard means "desired"). The flags are `_task_monitor_enabled` and
 `_liveness_monitor_enabled`; the canonical test is
 `self._queue_names["inbox"] == WEFT_SPAWN_REQUESTS_QUEUE`. The reducer in
 `weft/core/manager_services.py` (line 240) consumes evidence and returns
@@ -117,8 +128,8 @@ decisions; it is not touched.
 
 Tests that reference the drain attributes: `tests/core/test_manager.py`
 lines 3921-3926 and 4568-4603 (set `_drain_started_ns` directly), 8746
-(asserts membership of `_drain_signaled_children`), 9106 (sets the start
-stamp), plus plan 15's
+(asserts membership of `_drain_signaled_children` in a SIGTERM-drain
+test), 9106 (sets the start stamp), plus plan 15's
 `test_first_stop_rung_is_one_broadcast_over_pending_targets`.
 
 ### Files to modify
@@ -273,37 +284,53 @@ No D row.
   site clears some collections and not others today (then that site's
   behavior is a finding, not something to preserve silently).
 - Done when: the escalation and wake-timer tests pass unchanged in
-  meaning; `grep -n "_drain_signaled_children\|_drain_escalated_children\|_drain_signal_started_ns" weft tests` prints nothing.
+  meaning; `grep -rn "_drain_signaled_children\|_drain_escalated_children\|_drain_signal_started_ns" weft tests` prints nothing.
 
 ### Task 2. Drain windows on the monotonic clock
 
 - RED first, `tests/core/test_manager.py`:
-  `test_wall_clock_step_does_not_move_drain_windows`. Using the in-process
-  Manager fixture the stop-order tests use, begin a drain with one child
-  that ignores STOP (the existing long-work child the escalation tests
-  use); patch `manager_mod.time.time_ns` to return a value one hour ahead
-  of real time while leaving `time.monotonic` real; assert
-  `manager._shutdown_drain_timed_out()` is `False` and that the rung is
-  not escalated (no SIGTERM, `term_attempted` false) on the next
-  `_signal_children_to_stop` call; then patch `time_ns` one hour behind
-  and assert the wake timeout for the shutdown window is at most
-  `MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`. RED at `e13bb7b5`: the forward
-  step exhausts the window immediately (timed out `True`, rung escalated)
-  and the backward step stretches it.
+  `test_wall_clock_step_does_not_move_drain_windows`, written beside the
+  drain wake-timer tests at 4558 and 4593 with their fixture and child
+  setup (a `manager_setup` Manager and the long-work child those tests
+  register; copy their setup, do not invent one). Begin the drain the way
+  those tests do, then run one drain turn so `_drain_immediate_work_pending`
+  is cleared through the intended path (round-1 F3: a direct signalling
+  call leaves it set and the wake block returns `[0.0]` regardless of any
+  deadline). Patch `manager_mod.time.time_ns` to return real time plus one
+  hour, leaving `manager_mod.time.monotonic_ns` real (this is the
+  repository's existing clock seam, used by the patches listed in `## 3`;
+  it mutates the shared `time` module for the test's duration and is
+  restored by `monkeypatch`; no new clock namespace is introduced, which
+  would be a second seam for one caller). Assert
+  `manager._shutdown_drain_timed_out()` is `False`, and that after one
+  more `_signal_children_to_stop` call the rung's `term_attempted` is
+  still `False` (no SIGTERM). Then patch `time_ns` to real time minus one
+  hour and read `_manager_drain_timeouts(now_ns=...)`: assert its shutdown
+  candidate (the first appended value) is at most
+  `MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` and its escalation candidate
+  (the second) is at most `MANAGER_CHILD_STOP_ESCALATION_SECONDS`,
+  checked separately so the two-second candidate cannot mask the shutdown
+  one. RED at `e13bb7b5` (round 1 confirmed by an execution probe of the
+  HEAD methods): the forward step makes the predicate `True` and records
+  escalation; the backward step yields candidates near 3615 s and 3602 s.
 - GREEN: `_drain_started_ns` becomes `_drain_started_monotonic_ns` set
   from `time.monotonic_ns()` at the four sites; `_StopProgress.attempted_at`
-  is `time.monotonic_ns()`; `_shutdown_drain_timed_out` and the wake block
-  compute `max(0.0, (due - time.monotonic_ns()) / 1e9)` directly instead of
-  going through `_timeout_until_ns(..., now_ns=wall)`. Name the fields with
-  their domain. Published timestamps untouched.
-- Update the drain-window tests Task 0 listed to patch `monotonic_ns`
-  (or advance it) instead of `time_ns`.
+  is `time.monotonic_ns()`. `_shutdown_drain_timed_out` stays a predicate:
+  `time.monotonic_ns() - self._drain_started_monotonic_ns >= timeout_ns`
+  (round-1 F2). The wake block computes each candidate as
+  `max(0.0, (due_ns - time.monotonic_ns()) / 1e9)` instead of going through
+  `_timeout_until_ns(..., now_ns=wall)`; the leadership-revalidation branch
+  at 8717-8729 keeps the wall clock. Name the fields with their domain.
+  Published timestamps untouched.
+- Update the two drain-window tests (4564, 4599) to drive the drain with a
+  `monotonic_ns` patch; at 4564 keep the existing `time_ns` patch for its
+  leadership assertion.
 - Stop if: a drain deadline is compared against a broker message
   timestamp anywhere (then that comparison needs the wall clock and must
   stay); or the wake aggregation cannot accept a monotonic timeout without
   changing `_timeout_until_ns` for every caller.
 - Done when: the RED test is green; the escalation and shutdown-timeout
-  tests pass; `grep -n "_drain_started_ns" weft tests` prints nothing.
+  tests pass; `grep -rn "_drain_started_ns" weft tests` prints nothing.
 
 ### Task 3. Internal-service enablement defined once
 
@@ -312,15 +339,17 @@ No D row.
   the heartbeat key, plus the TaskMonitor key if `_task_monitor_enabled`,
   plus the LivenessMonitor key if `_liveness_monitor_enabled`. Docstring:
   `Spec: [MA-1] item 7`.
-- `_reconcile_managed_services`: build `internal_services` from the keys
-  (a small mapping from key to spec-builder method, built once in the
-  function; specs are constructed only here). `_pending_service_probes_for_scope`
-  and `_managed_service_convergence_active_reasons`: replace their inline
-  policy with the keys function (the latter currently uses a literal set
-  of all three keys; Task 0 confirms whether that site must mean "desired"
-  or "any internal key" and the Execution log records which; if it means
-  "any", it keeps the literal and the plan's claim of three sites becomes
-  two, recorded as a deviation-free correction).
+- `_reconcile_managed_services`: build `internal_services` by iterating
+  an ordered tuple of `(key, builder)` pairs in today's order (heartbeat,
+  TaskMonitor, LivenessMonitor) and keeping those whose key is in the
+  desired set; never iterate the set itself, since the order reaches
+  broker writes and request IDs (round-1 F4). Specs are constructed only
+  here. `_pending_service_probes_for_scope`: replace its inline policy
+  with the keys function. `_managed_service_convergence_active_reasons`:
+  replace the whole enablement guard at 8246-8257 with membership in the
+  keys function's result (round-1 F5); keep the `spawn_pending` and
+  `uncertain_attempts` reasons, which apply beyond desired internal
+  services, exactly as they are.
 - Tests: `tests/core/test_manager.py`,
   `test_desired_internal_service_keys` parametrized over canonical versus
   scoped inbox and the two flags (eight cases), asserting the exact set;
@@ -336,10 +365,10 @@ No D row.
   escalation delays are measured on the monotonic clock, so a wall-clock
   step during a drain no longer shortens or stretches them; published
   timestamps are unchanged ([MA-3])."
-- Gates in `## 7`; cross-family review of the landed work; the plan's
-  index row to `completed` with the [WT-7] items (audit refresh of rows
-  I-13 and 4.4-b by reference; a keyed possession probe from the owner's
-  bank).
+- Gates in `## 7`; cross-family review of the landed work; then the plan's
+  index row to `completed`. No [WT-7] possession probe or audit refresh:
+  those trigger at a release or a class-5 completion, and this unit is
+  class 4 (round-1 F6).
 
 ## 6. Testing Plan
 
@@ -372,9 +401,10 @@ bin/check-doc-paths
 ## 9. Out of Scope
 
 - The reducer in `manager_services.py`; any service framework.
-- The remaining wall-clock deadlines in the Manager (admission retries,
-  family repair, registration refresh): they compare against broker
-  timestamps or publish, and are not windows.
+- The Manager's other deadlines (admission retries, registration refresh,
+  the leadership-revalidation branch): they compare against broker
+  timestamps or publish wall-clock facts; the family-repair deadline is
+  already monotonic (8577). None is in this unit.
 - `_timeout_until_ns` in `weft/core/tasks/service.py` and its other
   callers.
 - Suggestion 5 (`## 10`).
@@ -406,13 +436,36 @@ bin/check-doc-paths
   after drafting): the wake block is `_manager_drain_timeouts` (8678), the
   four reset sites outside `_begin_shutdown_drain` are named by function,
   and the four test references are described by what each does; every
-  other path, symbol, line and constant resolved by lookup. Cross-family
-  round 1: pending.
+  other path, symbol, line and constant resolved by lookup.
+- Cross-family round 1 (codex 0.161.0, 2026-11-04, the plan at `dcd02012`):
+  verdict `blocker: F1, F2, F3, F4`, all accepted and applied. F1 (P2): the
+  seven `time_ns` patches listed drove other deadlines; the drain-window
+  patches are at 4564 and 4599, and 4564 also asserts wall-clock
+  leadership revalidation; fixed in `## 3` and Task 2. F2 (P2): the
+  remaining-time formula had been assigned to the Boolean predicate; fixed,
+  `_shutdown_drain_timed_out` keeps a comparison. F3 (P2): the backward-step
+  assertion could pass with `_drain_immediate_work_pending` set, and the
+  escalation candidate could mask the shutdown one; fixed, the test runs
+  the intended drain turn first and asserts the two candidates separately;
+  the suggested new clock namespace is declined in favour of the
+  repository's existing `manager_mod.time` seam (one caller, no second
+  seam). F4 (P2): iterating the frozenset would reorder enqueues; fixed,
+  an ordered builder tuple filtered by membership. F5 (P3): the third site
+  is the full guard at 8246-8257 and means "desired"; fixed. F6 (P3): the
+  [WT-7] probe and audit refresh are class-5 closure items; removed from
+  Task 4. F7 (nit): 72 `time_ns` calls, 8746 is a SIGTERM-drain assertion,
+  completion greps now recursive; fixed. Round 1 confirmed the record's
+  readers and reset sites complete, the monotonic conversion sound with no
+  drain deadline compared against a broker timestamp, all three
+  enablement sites meaning "desired", register row 3 correctly C, and
+  class 4 with no spec delta. Cross-family round 2 (scoped to F1-F5):
+  pending.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
+| 2026-11-04 | `dcd02012` | `## 3`, Tasks 1-4, `## 9` | Round-1 F1-F7: drain-window test inventory corrected; Boolean predicate kept; wake candidates asserted separately after a drain turn; ordered service construction; full enablement guard; class-4 closure. | Yes: round 2, scoped to F1-F5. |
 
 ## Execution log
 
