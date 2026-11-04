@@ -899,3 +899,21 @@ happens. A "never after" claim over a poll-then-check guard is a race, not a
 contract. See [RM-5.2](specifications/06-Resource_Management.md),
 [MA-3](specifications/03-Manager_Architecture.md), and
 `tests/cli/test_cli_serve.py::test_serve_sigterm_drains_children_cleanly`.
+
+## 2026-11-03: Internal services are always on, and idle when not needed
+
+Plan 6 made the heartbeat start on demand and stop when idle. To do that the
+Manager grew a desire predicate read on several paths, a delete role with an
+ordering barrier, a cursor and an observed flag, and the heartbeat grew an
+idle exit with its timeout plumbing; `weft status` grew a table read. The
+owner, 2026-11-03: "This is negative knowledge: trying to make services stop
+and start ended up creating too much state. The simpler, more robust design
+is always on services, with care taken that the service idles when not
+needed." Also: "if what is wanted is a ServiceTask, then we accept that
+there will be a process." Rule: run an internal service as a standing
+service of the canonical Manager; give it no timer and no poll when it has
+nothing to do; prove the idle with a counted quiet-window test, not prose.
+The owning service alone reads and deletes its queues. See
+[MA-1](specifications/03-Manager_Architecture.md),
+[MF-3.2](specifications/05-Message_Flow_and_State.md), and
+`plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.

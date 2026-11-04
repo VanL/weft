@@ -3490,3 +3490,167 @@ Review round 1 fixes (2026-11-03).
 - The cost-reduction early return in `_pending_service_probes_for_scope` was
   not applied (withdrawn by the coordinator pending an owner redirect of how
   the Manager reads `weft.state.heartbeats`).
+
+Owner redirect: services are always on (2026-11-03; statements 1–8 in
+`## 9. Owner forks`; code commit `c9369ee6`).
+
+- Evidence for statement 8 ("trying to make services stop and start ended
+  up creating too much state"): the on-demand design had accumulated, for
+  one heartbeat, the Manager desire predicate
+  (`Manager._heartbeat_registrations_present`) with its per-call broker
+  reads at three gate sites and in `next_wait_timeout` (about 4 calls a
+  second on an idle Manager); the Manager's all-expired delete role with
+  its ascending-order barrier; the Manager's strict cursor
+  (`_heartbeat_registrations_cursor`), observed flag
+  (`_heartbeat_registration_observed`) and notification interest; the
+  heartbeat's idle exit with its timeout plumbing
+  (`heartbeat_idle_timeout` metadata, `HEARTBEAT_IDLE_TIMEOUT_SECONDS`,
+  `_empty_since_monotonic`, `_maybe_idle_shutdown`, `_next_idle_timeout`);
+  and the status table read with its `no-registrations` evidence. All of it
+  is removed.
+- Intermediate fork, recorded: the first redirect asked for a
+  construction-fixed PEEK lane on `weft.state.heartbeats` whose handler
+  ignores the body. `MultiQueueWatcher._fetch_next_message` returns
+  `peek_one()` (the oldest row) for PEEK lanes, with no cursor, and
+  `_queue_has_pending` uses `has_pending()` with no `after_timestamp`, so
+  such a lane re-delivers the oldest row every pass and never delivers a
+  newer upsert as itself. The owner resolved the fork with statement 7.
+- Code (`weft/core/manager.py`): `_reconcile_managed_services` appends the
+  heartbeat spec unconditionally; `_pending_service_probes_for_scope` always
+  includes the heartbeat key; `_managed_service_convergence_active_reasons`
+  counts a missing heartbeat as `missing_active_tid` unconditionally;
+  removed `_heartbeat_registrations_present`,
+  `_has_pending_heartbeat_registration`, both fields, the
+  `_activity_wait_queues` and `_has_pending_observation` entries, the turn's
+  forced convergence, and the imports. Net Manager diff against `ecf7ad42`:
+  the three gates no longer read `_task_monitor_enabled` for the heartbeat,
+  and the spawn payload has no `heartbeat_idle_timeout`.
+  `weft/core/tasks/heartbeat.py`: idle exit and its plumbing removed; the
+  1.0 s ownership-audit deadline removed (`_next_ownership_audit_at`;
+  `_exit_if_superseded` still runs on every turn and the emission path
+  still checks ownership before each emit); `next_wait_timeout` returns 0.0
+  while a rebuild is pending, else the next due emission and the earliest
+  lease expiry, else `None`. `weft/commands/system.py::_service_enabled`
+  reports the heartbeat enabled and reads no queue (S1 decision: the field
+  stays and reports the heartbeat as an enabled internal service like the
+  others; `no-registrations` is removed; no registration facts are shown).
+  `weft/_constants.py`: `HEARTBEAT_IDLE_TIMEOUT_SECONDS` and
+  `HEARTBEAT_OWNERSHIP_AUDIT_INTERVAL_SECONDS` deleted.
+- RED (before the code change):
+  - (a) `test_manager_enqueues_heartbeat_through_service_path`, now with an
+    empty table and both monitors disabled: no heartbeat payload.
+  - (b) `test_heartbeat_with_empty_table_runs_zero_timer_turns_and_wakes_on_upsert`:
+    "heartbeat ran 29 turns over 30.0s with an empty table";
+    `test_heartbeat_empty_table_publishes_no_timer`: `1.0 is None` (the
+    audit deadline); `test_heartbeat_empty_table_never_idle_exits` (T3
+    rewritten): `should_stop` was `True`.
+  - (c) `test_manager_never_reads_or_deletes_heartbeat_registrations`
+    (marked slow, run explicitly): reads 531, 551, 557 for 0, 1, 10 rows;
+    deletes 0.
+  - M1 (`test_canonical_manager_always_desires_heartbeat`, 3 cases), the
+    convergence test (`test_missing_heartbeat_keeps_convergence_active`),
+    S1 (`test_status_reports_heartbeat_as_standing_internal_service`, 3
+    cases), T8 and T9 (no idle exit) all failed on the old desire or idle
+    rule.
+- GREEN: all of the above pass; (c) reads 0 and deletes 0 for 0, 1 and 10
+  rows over 30 s; (b) zero turns over 30 s with an empty table, then wake
+  on upsert and one emission. The window test settles past a one-time
+  post-start turn (startup lifecycle publication, about 1–3 s after start)
+  before measuring.
+- (d) Plan 4's drain selection and `tests/cli/test_cli_manager.py` green.
+  The thirteen `test_manager.py` tests that wrote a registration row first
+  (`test_manager_task_monitor_supervision_ignores_dispatch_ownership`,
+  `test_managed_service_convergence_active_reasons_are_stable`,
+  `test_reconcile_reuses_tracked_service_candidates`,
+  `test_reconcile_clears_duplicate_scan_after_live_tracked_evidence`,
+  `test_task_monitor_stale_log_without_liveness_does_not_block_restart`,
+  `test_task_monitor_recent_log_without_liveness_blocks_duplicate_restart`,
+  `test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart`,
+  `test_task_monitor_public_pending_spawn_request_does_not_block_internal_restart`,
+  `test_task_monitor_spoofed_pending_spawn_without_internal_envelope_does_not_block`,
+  `test_task_monitor_spoofed_public_metadata_does_not_claim_singleton`,
+  `test_task_monitor_latest_terminal_log_overrides_older_running_evidence`,
+  `test_task_monitor_matching_pong_blocks_duplicate_restart`,
+  `test_manager_service_convergence_advances_without_dispatch_ownership`):
+  the row existed only to satisfy desire in each; the arrangement and the
+  `_write_heartbeat_registration` helper are removed, assertions unchanged,
+  all green. Likewise the row in
+  `test_status_services_prefer_live_duplicate_over_terminal_duplicate` and
+  `test_serve_restarts_singleton_services_without_duplicates` is removed.
+- Tests whose premise was a service-free canonical Manager (both monitors
+  disabled meant no internal service; several also pass a nonexistent
+  `WEFT_HEARTBEAT_ENABLED` key): `test_manager_enqueues_liveness_monitor_when_independently_enabled`
+  and `test_manager_does_not_enqueue_task_monitor_when_disabled` now expect
+  the heartbeat payload (the former's pre-`da5fa0f6` assertion);
+  `_discovery_manager` and
+  `test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved`
+  record only non-heartbeat launches;
+  `test_manager_admission_retains_public_while_internal_can_launch`
+  allows only the heartbeat's own spawn row to remain queued;
+  `test_process_once_reconciles_internal_services_before_user_spawn_work`
+  drains the startup heartbeat enqueue;
+  `test_manager_idle_pending_work_excludes_retained_reserved_custody` uses a
+  scoped Manager; the fixtures `recovery_manager`
+  (`tests/core/test_admission_recovery.py`), `validating_manager`
+  (`tests/core/test_child_spawn_validation.py`), `manager` and
+  `startup_pg_manager` (`tests/core/test_manager_family_maintenance.py`), and
+  `test_source_to_manager_reservation_handoff_uses_real_reserve_owner`
+  (`tests/commands/test_submission_observation.py`) patch
+  `Manager._service_supervision_allowed` to `False`, which is the
+  "without services" premise their docstrings state. The plan 6
+  TaskMonitor tests (R1, R2, C1–C4, G1) are untouched. The heartbeat tests
+  that pinned the 1.0 s audit deadline with an empty table
+  (`test_heartbeat_run_until_stopped_uses_next_wait_timeout`,
+  `test_heartbeat_pending_input_wakes_through_reactor_wait`,
+  `test_heartbeat_ping_while_waiting_is_handled_promptly`) now assert no
+  deadline and a wake from the input itself.
+- Found and not changed (owner decision): an idle heartbeat's wait still
+  reads its own table. SimpleBroker's polling strategy returns from its
+  native wait on its idle-poll schedule (about every 0.1 s), and each
+  return calls `_has_pending_observation`, which reads
+  `weft.state.heartbeats` (`has_pending`, plus a row-ID peek with rows).
+  Measured over 30 s, scratch probe: 230 reads with 0 rows, 458 with 1
+  row; zero reactor turns. These are the heartbeat reading its own queue,
+  but on SimpleBroker's idle-poll cadence, not on a change.
+- Spec deltas applied in `c9369ee6`: [MA-1] item 7; [MF-3.2] flow line, the
+  manager bullet, and the idle-exit bullet; [QUEUE.7]; the Quick Reference
+  `weft.state.heartbeats` row; the backlink sentence in 00, 01, 03, 05, 07;
+  CHANGELOG. README's admission-reserve wording ("Manager, TaskMonitor,
+  LivenessMonitor, and Heartbeat") already matches and is unchanged. The
+  plan's Replacement blocks carry the landed text.
+
+Proposed theory text for the owner (not applied; the series lead commits
+it after acceptance).
+
+Proposed replacement for the `docs/program-theory.md` [ALT-WT-004]
+"Current consequence" bullet:
+
+```text
+- Current consequence: TaskMonitor's only clock is its cycle deadline
+  through `next_wait_timeout()`; it registers nothing. The heartbeat service
+  is a standing internal service of the canonical Manager ([MA-1] item 7)
+  that idles with no timer when nothing is due; it is the only reader and
+  deleter of `weft.state.heartbeats`, and the Manager neither reads nor
+  deletes that queue (this supersedes the `da5fa0f6` gate).
+```
+
+Proposed new entry for `docs/program-theory.md`, after [ALT-WT-021]:
+
+```text
+### [ALT-WT-022] Internal services started on demand and stopped when idle
+
+- Kind: tried and discarded (built for the heartbeat by `2026-11-02-task-monitor-heartbeat-clock-plan.md`, then removed by the owner's redirect of 2026-11-03)
+- Disposition: rejected
+- Candidate: internal services started on demand and stopped when idle.
+- Why plausible: No process runs while nothing needs it.
+- Reason: Owner, 2026-11-03: "trying to make services stop and start ended
+  up creating too much state. The simpler, more robust design is always on
+  services, with care taken that the service idles when not needed." If what
+  is wanted is a ServiceTask, there will be a process.
+- Current consequence: internal services are always on under the canonical
+  Manager and idle when not needed: no timer and no poll with nothing to do,
+  blocking on the watcher.
+- Reconsider when: Never for an internal service of the canonical Manager; a
+  consumer that wants no process does not want a ServiceTask.
+- Evidence: owner decision 2026-11-03; `docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.
+```
