@@ -352,11 +352,11 @@ class HeartbeatTask(ServiceTask):
         in ascending message-ID order; reject and delete an invalid newest
         row; delete an expired newest row with a
         ``heartbeat_registration_expired`` event; otherwise keep it as the
-        registration. Failure barrier: if an older-row delete raises, deletion
-        for that id stops there and its newest row stays in the queue, so no
-        older row can ever become current; the id's rows are retried at the
-        next build. The rebuild flag is cleared either way (a held flag would
-        spin the reactor).
+        registration. Older rows go first, in ascending order, so a build
+        interrupted by process death leaves the newest row in place and no
+        older row can become current. The rebuild flag is cleared before the
+        build (a held flag would spin the reactor); a build that cannot read
+        the queue does nothing.
 
         Spec: [MF-3.2], [QUEUE.7]
         """

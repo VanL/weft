@@ -2073,3 +2073,12 @@ Scoped round 2 fixes (2026-11-03, from `d53929c9`):
   47 skipped); mypy clean on 484 files; ruff clean; `ruff format --check .`
   reports only three pre-existing plan documents this plan does not touch;
   `bin/check-doc-paths` OK; plan metadata test passed.
+- 2026-11-04, after closure (owner ruling on plan 13, "If those underlying
+  reads fail, do nothing is the correct response"): the round 2 F6
+  regression `test_manager_stop_keeps_terminal_proof_across_a_failed_log_page`
+  and the "page-read failure" comment in `_drain_stop_terminal_events` were
+  removed as over-armoring ([WT-4] 4.4): a `peek_generator` page raising
+  mid-traversal occurs only on a database that is no longer readable, where
+  the retry it protected cannot succeed. The code is unchanged (the cursor
+  is still assigned after the traversal; that is its natural shape, not a
+  failure contract). The spec 03 [MA-3] test list no longer names the test.

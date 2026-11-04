@@ -3681,3 +3681,13 @@ Scoped round 2 (2026-11-03).
   `weft/core/heartbeat.py` module docstring and the
   `HeartbeatRegistrationRow` docstring no longer name a Manager predicate or
   a status reader.
+- 2026-11-04, after closure (owner ruling on plan 13, "If those underlying
+  reads fail, do nothing is the correct response"): the `failed-delete`
+  case of `test_heartbeat_build_deletes_residue_and_an_expired_newest_row`
+  (round 1 F1's residual, Task 7 item 4 a) and the "failure barrier"
+  sentences in the `_rebuild_registrations` docstring were removed as
+  over-armoring ([WT-4] 4.4): a registration-row delete raising occurs only
+  on a database that is no longer readable. The code is unchanged: older
+  rows are still deleted first in ascending order, which guards a build
+  interrupted by process death (an OS boundary, kept), and a build that
+  cannot read the queue still does nothing with the flag cleared.

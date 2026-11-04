@@ -9260,59 +9260,6 @@ def test_manager_stop_releases_target_on_terminal_event_before_collection(
         _remove_drain_snapshots(make_queue, [tid])
 
 
-def test_manager_stop_keeps_terminal_proof_across_a_failed_log_page(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A log page-read failure neither loses nor skips observed terminal proof.
-
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. Named
-    mutation: advancing ``_drain_stop_log_cursor`` inside the loop moves it
-    past the terminal row before the failure, so the healthy retry never
-    sees it.
-    """
-
-    manager, make_queue = manager_setup
-    tid = str(time.time_ns() + 4096)
-    make_queue(task_state_queue_name(tid)).write(
-        json.dumps(_drain_snapshot_payload(tid))
-    )
-    manager._scheduler_residents[tid] = {}
-    manager._drain_stop_targets = manager._collect_drain_stop_targets()
-    terminal_id = make_queue(WEFT_GLOBAL_LOG_QUEUE).write(_terminal_envelope(tid))
-    cursor_before = manager._drain_stop_log_cursor
-    with manager._get_connected_queue().get_connection() as broker:
-        broker_cls = type(broker)
-    original_peek_generator = broker_cls.peek_generator
-
-    def failing_peek_generator(
-        self: Any, queue: str, *args: Any, **kwargs: Any
-    ) -> Iterator[Any]:
-        if queue != WEFT_GLOBAL_LOG_QUEUE:
-            yield from original_peek_generator(self, queue, *args, **kwargs)
-            return
-        yield (_terminal_envelope(tid), terminal_id)
-        raise BrokerError("log page read failed")
-
-    try:
-        assert tid in manager._drain_stop_targets
-        with monkeypatch.context() as patcher:
-            patcher.setattr(broker_cls, "peek_generator", failing_peek_generator)
-            manager._settle_drain_stop_targets()
-
-        assert tid in manager._drain_stop_targets
-        assert manager._drain_stop_log_cursor == cursor_before
-        assert cursor_before is not None and cursor_before < terminal_id
-
-        manager._settle_drain_stop_targets()
-
-        assert tid not in manager._drain_stop_targets
-    finally:
-        manager._clear_drain_stop_targets()
-        manager._scheduler_residents.clear()
-        _remove_drain_snapshots(make_queue, [tid])
-
-
 @pytest.mark.skipif(
     os.name == "nt" or getattr(signal, "SIGUSR1", None) is None,
     reason="SIGUSR1 not available",

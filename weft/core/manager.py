@@ -5141,8 +5141,6 @@ class Manager(ServiceTask):
                     and payload.get("type") == TERMINAL_ENVELOPE_TYPE
                 ):
                     terminal.add(payload["tid"])
-        # Commit the cursor only after a complete traversal: a page-read
-        # failure must not skip proof it did not deliver.
         self._drain_stop_log_cursor = cursor
         return terminal
 

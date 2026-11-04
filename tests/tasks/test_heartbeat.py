@@ -1040,7 +1040,7 @@ def test_heartbeat_expired_registration_is_deleted_at_its_deadline(
         destination.close()
 
 
-@pytest.mark.parametrize("case", ["expired-newest", "unexpired", "failed-delete"])
+@pytest.mark.parametrize("case", ["expired-newest", "unexpired"])
 def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
     workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1056,7 +1056,7 @@ def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
     destination = context.queue("build.queue", persistent=False)
     try:
         with context.broker() as writer:
-            row_a = writer.write(
+            writer.write(
                 WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
                 _row_text(tid, "x", lease_seconds=3600),
             )
@@ -1072,39 +1072,6 @@ def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
             assert task._registrations["x"].expires_at_ns == (
                 row_b + 60 * 1_000_000_000
             )
-            return
-
-        if case == "failed-delete":
-            handle = task._queue(WEFT_HEARTBEAT_REGISTRATIONS_QUEUE)
-            original = handle.delete
-            calls: list[int] = []
-
-            def fail_once(**kwargs: Any) -> bool:
-                calls.append(1)
-                if len(calls) == 1:
-                    raise OSError("injected registration delete failure")
-                return original(**kwargs)
-
-            monkeypatch.setattr(handle, "delete", fail_once)
-            task.process_once()
-
-            assert _raw_registration_ids(context) == [row_a, row_b]
-            assert "x" not in task._registrations
-            assert task._registrations_rebuild_pending is False
-            assert task._has_pending_observation() is False
-            assert _task_events(context, tid, "heartbeat_registration_expired") == []
-
-            monkeypatch.setattr(handle, "delete", original)
-            _upsert(context, tid, "y")
-            task.wait_for_activity(0.05)
-            task.process_once()
-
-            assert {row["heartbeat_id"] for row, _ in _registration_rows(context)} == {
-                "y"
-            }
-            expired = _task_events(context, tid, "heartbeat_registration_expired")
-            assert [event["message_id"] for event in expired] == [row_b]
-            assert "y" in task._registrations
             return
 
         task.process_once()

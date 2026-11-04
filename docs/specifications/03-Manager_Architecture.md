@@ -975,7 +975,6 @@ _Implementation mapping_:
   `tests/core/test_manager.py::test_manager_stop_keeps_target_whose_identity_probe_fails`,
   `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_log_event`,
   `tests/core/test_manager.py::test_manager_stop_releases_target_on_terminal_event_before_collection`,
-  `tests/core/test_manager.py::test_manager_stop_keeps_terminal_proof_across_a_failed_log_page`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_earlier_manager_detached_task`,
   `tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_under_another_live_manager`,
   `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`.
