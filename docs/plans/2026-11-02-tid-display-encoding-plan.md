@@ -1242,6 +1242,7 @@ one commit (strategy B).
              chars.append(TASKSPEC_TID_ENCODING_ALPHABET[digit])
          return "".join(reversed(chars))
 
+
      def decode_tid(text: str) -> str:
          if is_task_tid(text):
              normalize_exact_message_id(text)
@@ -2172,6 +2173,7 @@ TITLE_BUDGET = 71
 _VOCAB = "weft-abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHJKMNPQRSTVWXYZ:"
 PROBE = "".join(_VOCAB[i % len(_VOCAB)] for i in range(PROBE_LENGTH))
 
+
 def _child(conn: Connection) -> None:
     from weft.core import process_title
 
@@ -2197,6 +2199,7 @@ def _child(conn: Connection) -> None:
         conn.send("phase2")
         conn.recv()
 
+
 def _survived(joined: str) -> int:
     best = 0
     for k in range(1, PROBE_LENGTH + 1):
@@ -2205,6 +2208,7 @@ def _survived(joined: str) -> int:
         else:
             break
     return best
+
 
 def _report(pid: int, phase: int) -> int:
     cmdline = psutil.Process(pid).cmdline()
@@ -2223,6 +2227,7 @@ def _report(pid: int, phase: int) -> int:
         print(f"span-below-title-budget phase={phase}", flush=True)
         return 1
     return 0
+
 
 def main() -> int:
     ctx = multiprocessing.get_context("spawn")
@@ -2247,6 +2252,7 @@ def main() -> int:
             proc.kill()
             proc.join(timeout=10)
     return status
+
 
 if __name__ == "__main__":
     sys.exit(main())
