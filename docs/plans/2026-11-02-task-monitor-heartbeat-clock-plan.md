@@ -1135,8 +1135,9 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 ```text
 - the heartbeat service is driven by the shared task reactor loop. It handles
   at most one bounded control/inbox-rejection/table-build/due-emission turn in
-  `process_once()`, exposes the next registration due time or idle shutdown
-  through `next_wait_timeout()`, and leaves all destination queue writes on the
+  `process_once()`, exposes the next registration due time and the earliest
+  lease expiry through `next_wait_timeout()` (no deadline with an empty
+  table), and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
   heartbeat timer is only the timeout supplied to that same wait path. It holds
@@ -2914,6 +2915,7 @@ self-driven fresh-eyes review: done 2026-11-02 (distinct pass after drafting): 1
 - Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range ecf7ad42..db824087): BLOCKED on F1 (both registration decoders caught `JSONDecodeError` only, so an oversized integer in a row raised `ValueError` past the malformed-row disposition and could crash-loop the emitter): accepted and fixed in `1409b4f2`, with the T6 case. F2 (literal planned assertions absent in H1, H3, T8, T9, T10): accepted and applied. The reviewer confirmed all 18 Replacement blocks verbatim, the lease model as ruled, the rebuild continuation and helper split as behavior-preserving, no remaining readers of the removed events, and the heartbeat interest composing with plan 4's drain interests; it corrected the log's predicate-call-rate attribution (a call rate, not a turn rate; no new poll interval). Round 2 pending.
 - owner redirect applied 2026-11-03 (statements 1–8 in `## 9. Owner forks`): services are always on; the Manager's heartbeat predicate, interest, cursor, and delete role, the heartbeat's idle exit and ownership-audit timer, and the status table read are removed. The implementer first reported a fork on the intermediate rule (a body-ignoring PEEK lane re-delivers the oldest row every pass, `MultiQueueWatcher._fetch_next_message` → `peek_one`); the owner resolved it with statement 7. Not yet reviewed cross-family.
 
+- Scoped round 2 (codex 0.161.0, 2026-11-03, range db824087..1b319004): round-1 F1 confirmed fixed; the always-on redirect confirmed implemented (18 Replacement blocks verbatim; no Manager reference to weft.state.heartbeats; test dispositions justified; audit-timer removal loses no spec-mandated bound). BLOCKED on F1 (the watcher's `_activity_hint_action` calls `_has_pending_observation` on hint-free strategy returns, so the resident heartbeat reads its table about 10 times a second at idle: 'no poll' not met; pre-existing watcher behavior made permanent by the resident service): accepted; fix at the watcher boundary, venue pending the owner's decision ([CC-2.1] contract). F2 (stale idle-shutdown, supersession-check and Manager-reader sentences in specs 01 and 05 and two docstrings): accepted and fixed in the commit that adds this entry. No round 3 under the owner's one-scoped-round rule; the F1 fix, when landed, is verified by the series lead.
 ## Execution log
 
 Plan-authoring resolution checks (2026-11-02, `b7eed9f9`, author). Each
@@ -3654,3 +3656,26 @@ Proposed new entry for `docs/program-theory.md`, after [ALT-WT-021]:
   consumer that wants no process does not want a ServiceTask.
 - Evidence: owner decision 2026-11-03; `docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.
 ```
+
+Scoped round 2 (2026-11-03).
+
+- F1 accepted, not implemented: the fix belongs at the watcher boundary
+  (keep the register-before-read observation check in
+  `_wait_for_activity_body`; on a healthy, hint-free, pre-deadline strategy
+  return in `_activity_hint_action`, skip the observation and readiness
+  scans; keep the transient and degraded fallback paths). It changes the
+  [CC-2.1] watcher contract, so whether it lands inside plan 6 or in its own
+  plan is the owner's decision, pending. Until then
+  `test_heartbeat_with_empty_table_runs_zero_timer_turns_and_wakes_on_upsert`
+  proves zero reactor turns, not zero reads: the scratch probe still counts
+  230 reads of `weft.state.heartbeats` over 30 s with an empty table. The
+  eventual fix must add a read count at the broker boundary to that test,
+  counted as `test_manager_never_reads_or_deletes_heartbeat_registrations`
+  counts (the broker class found from a live connection's MRO), asserting
+  zero reads over the quiet window.
+- F2 fixed: [MF-3.2]'s reactor bullet (and its Replacement block here) and
+  [CC-2.3]'s `HeartbeatTask` bullet now name only the due-emission and
+  lease-expiry deadlines, with no deadline on an empty table; the
+  `weft/core/heartbeat.py` module docstring and the
+  `HeartbeatRegistrationRow` docstring no longer name a Manager predicate or
+  a status reader.

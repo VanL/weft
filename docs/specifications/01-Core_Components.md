@@ -694,9 +694,10 @@ Current task families:
 - `PipelineTask`: internal orchestrator for first-class linear pipelines
 - `PipelineEdgeTask`: generated one-shot edge task for pipeline handoff
 - `HeartbeatTask`: manager-supervised internal interval emitter for
-  runtime-scoped periodic queue writes. It exposes registration due time,
-  idle shutdown, and singleton supersession checks through
-  `next_wait_timeout()` and returns from its protected `_process_reactor_turn()`
+  runtime-scoped periodic queue writes, a standing internal service of the
+  canonical manager. It exposes only the next registration due time and the
+  earliest lease expiry through `next_wait_timeout()` (no deadline with an
+  empty table; singleton supersession is checked on each turn it runs) and returns from its protected `_process_reactor_turn()`
   hook after one bounded reactor turn; it does not run a private inner wait
   loop or task-local queue pending probe. Queue readiness is owned by
   `MultiQueueWatcher`.

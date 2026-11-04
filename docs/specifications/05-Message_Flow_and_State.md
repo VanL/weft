@@ -528,8 +528,9 @@ Current rules:
   not replay every missed slot
 - the heartbeat service is driven by the shared task reactor loop. It handles
   at most one bounded control/inbox-rejection/table-build/due-emission turn in
-  `process_once()`, exposes the next registration due time or idle shutdown
-  through `next_wait_timeout()`, and leaves all destination queue writes on the
+  `process_once()`, exposes the next registration due time and the earliest
+  lease expiry through `next_wait_timeout()` (no deadline with an empty
+  table), and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
   heartbeat timer is only the timeout supplied to that same wait path. It holds

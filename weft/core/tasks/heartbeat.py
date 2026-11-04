@@ -55,9 +55,9 @@ logger = logging.getLogger(__name__)
 class HeartbeatRegistrationRow(BaseModel):
     """One validated heartbeat registration row on ``weft.state.heartbeats``.
 
-    The same model validates at every reader and writer: the registration
-    helper, the heartbeat table build, the Manager's desire predicate, and
-    ``weft status``. ``HEARTBEAT_MIN_INTERVAL_SECONDS <= interval_seconds <=
+    The same model validates at the writer (the registration helper) and at
+    the only reader, the heartbeat table build; neither the Manager nor
+    ``weft status`` reads the table. ``HEARTBEAT_MIN_INTERVAL_SECONDS <= interval_seconds <=
     lease_seconds <= HEARTBEAT_MAX_LEASE_SECONDS`` keeps every accepted row
     bounded and schedulable.
 

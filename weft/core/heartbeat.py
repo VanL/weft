@@ -3,8 +3,9 @@
 A registration is one row on the runtime-state queue
 ``weft.state.heartbeats``. The helpers write or delete rows and return; they
 do not look up the heartbeat endpoint, start a manager, or wait for the
-service. The canonical manager launches the heartbeat service while the queue
-holds a row that is unexpired or not yet rejected.
+service. The heartbeat service, a standing internal service of the canonical
+manager, is the queue's only reader and deleter; the manager neither reads
+nor deletes it.
 
 Spec references:
 - docs/specifications/03-Manager_Architecture.md [MA-1] item 7
