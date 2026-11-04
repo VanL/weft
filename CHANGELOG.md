@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.120] - 2026-11-04
 
 ### Added
 
@@ -188,6 +188,9 @@
   work item is supervised ([RM-5.1]). This is an owner-accepted diminution:
   a sustained CPU violation (four of five samples) is now detected after
   about four intervals rather than about 0.2 s.
+- First-party extension packages were bumped for this release and require
+  weft 0.9.120: `weft-django 0.9.55`, `weft-docker 0.9.95`,
+  `weft-macos-sandbox 0.6.24`, and `weft-microsandbox 0.5.25`.
 
 ## [0.9.119] - 2026-10-31
 
