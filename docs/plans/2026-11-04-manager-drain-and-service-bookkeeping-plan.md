@@ -252,9 +252,10 @@ No D row.
 
 - Answer the three questions in the Execution log before any edit;
   re-verify every line cited in `## 3`.
-- List, in the Execution log, which of the seven `time_ns` patches in the
-  two test files drive a drain window (shutdown timeout or escalation) and
-  which drive other deadlines; only the former change in Task 2.
+- Confirm, in the Execution log, the drain-window test inventory of `## 3`
+  (the patches at `tests/core/test_manager.py` 4564 and 4599 drive drain
+  windows; the seven others drive other deadlines); only the former change
+  in Task 2.
 - Confirm plan 15 has landed (its tests present) and record its landing
   commit.
 
@@ -291,8 +292,10 @@ No D row.
 - RED first, `tests/core/test_manager.py`:
   `test_wall_clock_step_does_not_move_drain_windows`, written beside the
   drain wake-timer tests at 4558 and 4593 with their fixture and child
-  setup (a `manager_setup` Manager and the long-work child those tests
-  register; copy their setup, do not invent one). Begin the drain the way
+  setup: a `manager_setup` Manager and a synthetic `ManagedChild`
+  registered with `SimpleNamespace(pid=1234)` as those tests do, plus the
+  cleanup and control patches the continuation test at 4593 installs (copy
+  that setup; no process fixture is needed, round-2 F9). Begin the drain the way
   those tests do, then run one drain turn so `_drain_immediate_work_pending`
   is cleared through the intended path (round-1 F3: a direct signalling
   call leaves it set and the wake block returns `[0.0]` regardless of any
@@ -312,7 +315,11 @@ No D row.
   checked separately so the two-second candidate cannot mask the shutdown
   one. RED at `e13bb7b5` (round 1 confirmed by an execution probe of the
   HEAD methods): the forward step makes the predicate `True` and records
-  escalation; the backward step yields candidates near 3615 s and 3602 s.
+  escalation, which is where the test fails at HEAD; on an un-escalated
+  rung the backward step would yield candidates near 3615 s and 3602 s
+  (after the forward escalation at HEAD only the shutdown candidate
+  remains, since escalated rungs are skipped at 8704; after GREEN the
+  rung is never escalated and both candidates are present).
 - GREEN: `_drain_started_ns` becomes `_drain_started_monotonic_ns` set
   from `time.monotonic_ns()` at the four sites; `_StopProgress.attempted_at`
   is `time.monotonic_ns()`. `_shutdown_drain_timed_out` stays a predicate:
@@ -346,10 +353,14 @@ No D row.
   broker writes and request IDs (round-1 F4). Specs are constructed only
   here. `_pending_service_probes_for_scope`: replace its inline policy
   with the keys function. `_managed_service_convergence_active_reasons`:
-  replace the whole enablement guard at 8246-8257 with membership in the
-  keys function's result (round-1 F5); keep the `spawn_pending` and
-  `uncertain_attempts` reasons, which apply beyond desired internal
-  services, exactly as they are.
+  replace the enablement part of the guard at 8246-8257 (the literal key
+  set, the two flags and the canonical-inbox test) with membership in the
+  keys function's result, keeping the settlement condition in front of it:
+  `if service_unsettled and service_key in desired_keys:` (round-1 F5,
+  round-2 F8: without `service_unsettled` a healthy desired service would
+  contribute `missing_active_tid` and change convergence cadence); keep
+  the `spawn_pending` and `uncertain_attempts` reasons, which apply beyond
+  desired internal services, exactly as they are.
 - Tests: `tests/core/test_manager.py`,
   `test_desired_internal_service_keys` parametrized over canonical versus
   scoped inbox and the two flags (eight cases), asserting the exact set;
@@ -379,8 +390,9 @@ No D row.
   and 3 are representation changes with no new observable behavior; their
   proof is the unchanged behavior tests plus mypy (Task 1) and the
   parametrized keys test (Task 3).
-- Guards: escalation tests (4568-4603), wake-timer test (8746), stop-order
-  tests, the heartbeat-registrations test, plan 15's four tests.
+- Guards: escalation and drain wake-timer tests (4558-4603), the
+  SIGTERM-drain test at 8746, stop-order tests, the
+  heartbeat-registrations test, plan 15's four tests.
 
 ## 7. Verification
 
@@ -458,14 +470,28 @@ bin/check-doc-paths
   readers and reset sites complete, the monotonic conversion sound with no
   drain deadline compared against a broker timestamp, all three
   enablement sites meaning "desired", register row 3 correctly C, and
-  class 4 with no spec delta. Cross-family round 2 (scoped to F1-F5):
-  pending.
+  class 4 with no spec delta.
+- Cross-family scoped round 2 (codex 0.161.0, 2026-11-04, the plan at
+  `a8c87283`): verdict `blocker: F8`. F1-F4 and F7 confirmed resolved
+  (execution probe of HEAD methods: the forward hour makes the predicate
+  `True`; the ordered tuple preserves enqueue order; keeping the
+  `manager_mod.time` seam accepted). F8 (P2): replacing the whole guard
+  would drop `service_unsettled`, so a healthy desired service would
+  contribute `missing_active_tid`; fixed, the predicate is
+  `service_unsettled and service_key in desired_keys` (probe: this matches
+  the original across 128 combinations). F9 (P3): the wake tests use a
+  synthetic `ManagedChild` with `SimpleNamespace(pid=1234)`, not a process;
+  fixed in Task 2. F10 (nit): Task 0's "seven", `## 6`'s 8746 label and the
+  backward-candidate explanation corrected. Under the one-scoped-round
+  rule the loop closes here; the completed-work review checks the applied
+  text. Review before implementation is complete.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-04 | `dcd02012` | `## 3`, Tasks 1-4, `## 9` | Round-1 F1-F7: drain-window test inventory corrected; Boolean predicate kept; wake candidates asserted separately after a drain turn; ordered service construction; full enablement guard; class-4 closure. | Yes: round 2, scoped to F1-F5. |
+| 2026-11-04 | `a8c87283` | Task 0, Task 2, Task 3, `## 6` | Round-2 F8-F10: `service_unsettled` kept in front of the membership test; synthetic-child setup described; text synchronized. | No: one scoped round spent. |
 
 ## Execution log
 
