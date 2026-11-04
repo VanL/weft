@@ -17,6 +17,7 @@ from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
+    INTERNAL_SERVICE_KEYS,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
@@ -204,6 +205,152 @@ def test_manager_start_and_status(weft_harness: WeftTestHarness) -> None:
     assert err == ""
     detail = json.loads(out)
     assert detail.get("status") == "stopped"
+
+
+_TERM_IGNORING_TASK_SCRIPT = """
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
+time.sleep(120)
+"""
+
+
+def _queue_rows(context: WeftContext, name: str) -> list[tuple[dict[str, Any], int]]:
+    """Peek every JSON row of one queue, including claimed rows."""
+
+    queue = context.queue(name, persistent=False)
+    try:
+        rows = queue.peek_many(
+            limit=100_000, with_timestamps=True, include_claimed=True
+        )
+    finally:
+        queue.close()
+    decoded: list[tuple[dict[str, Any], int]] = []
+    for body, timestamp in rows:
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            decoded.append((payload, int(timestamp)))
+    return decoded
+
+
+def _internal_service_tids(context: WeftContext) -> set[str]:
+    """Name the live internal services from the service registry rows."""
+
+    return {
+        payload["owner_tid"]
+        for payload, _timestamp in _queue_rows(context, WEFT_SERVICES_REGISTRY_QUEUE)
+        if payload.get("service_key") in INTERNAL_SERVICE_KEYS
+        and isinstance(payload.get("owner_tid"), str)
+    }
+
+
+def _first_terminal_snapshot(
+    context: WeftContext, tid: str
+) -> tuple[int, dict[str, Any]] | None:
+    """Return the task's first task-owned terminal snapshot row."""
+
+    return next(
+        (
+            (timestamp, payload)
+            for payload, timestamp in _queue_rows(context, task_state_queue_name(tid))
+            if payload.get("terminal") is True
+        ),
+        None,
+    )
+
+
+def test_manager_stop_orders_user_work_before_internal_services(
+    weft_harness: WeftTestHarness, tmp_path: Path
+) -> None:
+    """``weft manager stop`` drains user work, then services, then itself.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. The user
+    task ignores SIGTERM and is ready (its handler installed) before STOP,
+    so a simultaneous broadcast could not produce this order by chance.
+    Order is read from task-owned terminal snapshots (broker message IDs):
+    TaskMonitor collates and retires internal-service rows from
+    ``weft.log.tasks``, so the raw log is not a stable oracle for services.
+    """
+
+    context_root = weft_harness.root
+    context = weft_harness.context
+    script = tmp_path / "term_ignoring_task.py"
+    script.write_text(_TERM_IGNORING_TASK_SCRIPT.lstrip(), encoding="utf-8")
+    marker = tmp_path / "term-ignoring-task.pid"
+
+    rc, out, err = run_cli(
+        "manager",
+        "start",
+        "--context",
+        context_root,
+        cwd=context_root,
+        env={**os.environ, "WEFT_TASK_MONITOR_ENABLED": "1"},
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    manager_tid, _started = _parse_manager_start_output(out)
+    weft_harness.register_manager_tid(manager_tid)
+
+    rc, out, err = run_cli(
+        "run",
+        "--no-wait",
+        "--context",
+        context_root,
+        sys.executable,
+        str(script),
+        str(marker),
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    user_tid = out.strip()
+    weft_harness.register_tid(user_tid)
+
+    deadline = time.monotonic() + 60.0
+    services: set[str] = set()
+    while time.monotonic() < deadline:
+        services = _internal_service_tids(context)
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() and services:
+            break
+        time.sleep(0.1)
+    assert marker.exists(), "user task never became ready"
+    assert services, "no internal service appeared before STOP"
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        "--context",
+        context_root,
+        cwd=context_root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+
+    user_terminal = _first_terminal_snapshot(context, user_tid)
+    manager_terminal = _first_terminal_snapshot(context, manager_tid)
+    assert user_terminal is not None
+    assert manager_terminal is not None
+    drained = [
+        timestamp
+        for payload, timestamp in _queue_rows(context, WEFT_GLOBAL_LOG_QUEUE)
+        if payload.get("tid") == manager_tid
+        and payload.get("event") == "manager_stop_drained"
+    ]
+    assert drained
+    for service_tid in services:
+        service_terminal = _first_terminal_snapshot(context, service_tid)
+        assert service_terminal is not None, f"service {service_tid} not terminal"
+        assert service_terminal[1]["projection"]["event"] == "control_stop"
+        assert user_terminal[0] < service_terminal[0] < drained[0]
+        assert service_terminal[0] < manager_terminal[0]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

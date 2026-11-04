@@ -1785,3 +1785,52 @@ Deviations recorded during tasks 2 and 3:
 - Gates before the task 2 and 3 commit: fast suite exit 0 (6,380 passed,
   47 skipped, from the progress dots); mypy `Success: no issues found in
   484 source files`; ruff `All checks passed!`; `bin/check-doc-paths` OK.
+
+Task 2 and 3 commit: `80891922`.
+
+Task 4, traceability links for the ordering:
+
+- [MA-3] `_Implementation mapping_` gains a "System STOP phase ordering"
+  bullet beside "External signal handling", naming
+  `Manager._begin_shutdown_drain`, `Manager._continue_shutdown_drain`,
+  `Manager._drain_user_work_phase_holds`, `Manager._drain_phase_children`,
+  `Manager._signal_children_to_stop`, `Manager._terminate_children`,
+  `Manager._manager_drain_timeouts`, the error-path owner
+  `Manager._cleanup_task_resources`, and the three tests.
+- `Spec: docs/specifications/03-Manager_Architecture.md [MA-3]` added to
+  the docstrings of `_continue_shutdown_drain`, `_signal_children_to_stop`,
+  `_drain_user_work_phase_holds`, `_drain_phase_children` and
+  `_terminate_children` (beside its existing [IMPL.10] reference).
+- `bin/check-doc-paths`: OK. The backstitch traceability gate was not
+  available: no `backstitch` executable is on `PATH` and no in-repo wrapper
+  exists under `bin/`.
+
+Task 5, end-to-end ordering at the CLI seam:
+
+- `tests/cli/test_cli_manager.py::test_manager_stop_orders_user_work_before_internal_services`
+  starts the Manager with `weft manager start` and
+  `WEFT_TASK_MONITOR_ENABLED=1`, submits a SIGTERM-ignoring `weft run
+  --no-wait` command task that writes its readiness marker after installing
+  the handler, waits for the marker and for at least one internal service
+  in `weft.state.services`, runs `weft manager stop` (rc 0), and asserts:
+  user terminal, then each service's terminal (`control_stop`), then the
+  Manager's `manager_stop_drained` event and terminal snapshot.
+- Deviation 3: the order oracle is the task-owned terminal snapshot in
+  each task's `weft.state.tasks.<tid>` queue (broker message IDs), not the
+  services' rows in `weft.log.tasks`, and the service TIDs come from the
+  `weft.state.services` registry. Observed: in two of four early runs the
+  services' `weft.log.tasks` rows were absent while their registry rows
+  existed, even with `include_claimed=True`. TaskMonitor collates and
+  retires internal-service lifecycle rows from the raw task log
+  (`INTERNAL_SERVICE_RUNTIME_CLASSES`, "classified as internal service
+  lifecycle rows"), so that log is not a stable oracle for services. The
+  terminal snapshot is published by the task itself before its terminal
+  log event (`BaseTask._publish_projection_edge`) and only LivenessMonitor
+  deletes it ([LIVENESS.R3]; disabled under the harness). The drained
+  event itself is still read from `weft.log.tasks`.
+- Verify: `./.venv/bin/python -m pytest tests/cli/test_cli_manager.py -k
+  orders_user_work -q`: five consecutive runs passed. Against the
+  pre-phase `weft/core/manager.py` (from `2029b2b4`, restored afterwards)
+  it failed twice in two runs on `assert user_terminal[0] <
+  service_terminal[0]` (for example `assert 1793752575788134400 <
+  1793752575540375552`), so it is a real ordering check, not a guard.
