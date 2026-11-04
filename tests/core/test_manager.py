@@ -9054,7 +9054,6 @@ def test_manager_stop_skips_terminal_and_internal_adopted_snapshots(
         assert set(targets) == {uncovered, stage, covered}
         assert targets[uncovered].ctrl_in == f"T{uncovered}.ctrl_in"
         assert targets[uncovered].escalate is True
-        assert targets[covered].covered is True
         assert targets[covered].escalate is False
         assert targets[covered].identity == targets[uncovered].identity
         assert covered not in manager._scheduler_residents
@@ -9067,6 +9066,100 @@ def test_manager_stop_skips_terminal_and_internal_adopted_snapshots(
         )
         worker.kill()
         worker.wait(timeout=10.0)
+
+
+def test_collect_drain_stop_targets_names_snapshot_only_task(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """A live user task no checkpoint lists is a STOP-drain member [MA-3].
+
+    Membership comes from the task's own snapshot, not from this Manager's
+    residents or a live peer's checkpoint; with no covering peer the target
+    is escalation-eligible once its same-host identity verifies.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns())
+    own_created = process_create_time(os.getpid())
+    assert own_created is not None
+    make_queue(task_state_queue_name(tid)).write(
+        json.dumps(_drain_snapshot_payload(tid, pid=os.getpid(), created=own_created))
+    )
+    try:
+        assert tid not in manager._scheduler_residents
+        targets = manager._collect_drain_stop_targets()
+        assert tid in targets
+        assert targets[tid].ctrl_in == f"T{tid}.ctrl_in"
+        assert targets[tid].escalate is True
+    finally:
+        _remove_drain_snapshots(make_queue, (tid,))
+
+
+def test_first_stop_rung_is_one_broadcast_over_pending_targets(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 1 sends its first STOP rung as one exact-name broadcast [MA-3].
+
+    Two snapshot-only tasks with distinct routes receive one STOP envelope
+    each from a single ``broadcast(queue_names=..., create_missing=True)``
+    call, share one signalled timestamp, and a second signalling turn before
+    the escalation window writes nothing more ([SB-BCAST-2], [SB-BCAST-4]).
+    """
+
+    manager, make_queue = manager_setup
+    base = time.time_ns()
+    first, second = str(base + 4096), str(base + 8192)
+    for tid in (first, second):
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid))
+        )
+    routes = {f"T{first}.ctrl_in", f"T{second}.ctrl_in"}
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    original_broadcast = broker_type.broadcast
+    original_write = broker_type.write
+    broadcasts: list[tuple[tuple[str, ...], bool]] = []
+    writes: list[str] = []
+
+    def forwarding_broadcast(self: Any, message: str, **kwargs: Any) -> Any:
+        broadcasts.append(
+            (tuple(kwargs.get("queue_names") or ()), bool(kwargs.get("create_missing")))
+        )
+        return original_broadcast(self, message, **kwargs)
+
+    def forwarding_write(self: Any, queue_name: str, *args: Any, **kwargs: Any) -> Any:
+        writes.append(queue_name)
+        return original_write(self, queue_name, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(broker_type, "broadcast", forwarding_broadcast)
+            patch.setattr(broker_type, "write", forwarding_write)
+            manager._begin_shutdown_drain(
+                message_id=None,
+                reason="test",
+                event=None,
+                completion_event="manager_stop_drained",
+            )
+            assert set(manager._drain_stop_targets) == {first, second}
+            assert len(broadcasts) == 1
+            names, create_missing = broadcasts[0]
+            assert set(names) == routes and len(names) == 2
+            assert create_missing is True
+            assert not routes.intersection(writes)
+            stamps = {manager._drain_signal_started_ns[tid] for tid in (first, second)}
+            assert len(stamps) == 1
+            manager._signal_children_to_stop({})
+            assert len(broadcasts) == 1
+            assert not routes.intersection(writes)
+        for route in routes:
+            rows = make_queue(route).peek_many(limit=5)
+            assert [str(row) for row in rows] == [encode_control_message(CONTROL_STOP)]
+    finally:
+        _remove_drain_snapshots(make_queue, (first, second))
+        for route in routes:
+            make_queue(route).delete()
 
 
 def test_manager_stop_keeps_target_whose_identity_probe_fails(

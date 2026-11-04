@@ -1,6 +1,6 @@
 # System STOP Targets Every Live Task by Snapshot
 
-Status: draft
+Status: promoted
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.12]
 Superseded by: none
 
@@ -656,4 +656,90 @@ write, so the choice is mechanism, not semantics (register row 4).
 
 ## Execution log
 
-(empty until implementation)
+### Implementer, 2026-11-04 (series lead, from `dcd02012`; another agent holds uncommitted edits to CHANGELOG.md, README.md, docs/plans/README.md, three specs and tests/tasks/test_task_monitor.py in this checkout, so every commit here stages its own hunks only)
+
+Task 0 answers, written before the first edit:
+
+1. Today's candidates are the stopping Manager's own `_scheduler_residents`
+   and the residents of checkpoints whose Manager `_admission_mapping_is_live`
+   judges live at collection (`covered`). A task launched by a Manager that
+   was alive at this Manager's bootstrap (so never adopted) and dead at
+   collection is in neither; so is any task that Manager launched after the
+   bootstrap, and any task no checkpoint lists.
+2. A pattern selects existing queue names only ([SB-BCAST-1]) and never
+   creates one; a never-controlled task has no `ctrl_in` row, so plan 4's
+   probe returned 0. Exact `queue_names` with `create_missing=True` skips
+   the name scan and inserts into every named queue
+   (`_select_broadcast_queues`, `simplebroker/db.py` 3732-3733; the
+   normalizer requires `queue_names` with `create_missing`, 3710-3711).
+   The names come from each task's own snapshot observation, so services,
+   Managers and non-default routes are handled by the candidate filter.
+3. Escalation only: a covered target gets the STOP, `escalate` stays
+   false, so neither the SIGTERM rung nor the expiry-time forced reap
+   signals it, and its own Manager reaps it. Coverage no longer decides
+   membership. After Task 3 the target record carries `escalate` and no
+   `covered` attribute.
+
+Line re-verification: `_collect_drain_stop_targets` 4926,
+`_signal_children_to_stop` 4861, `_send_child_control_command` 5388,
+`_begin_shutdown_drain` 5234, `_bootstrap_scheduler_evidence` 2576,
+`_manager_checkpoint_residents` 2597, `_admission_mapping_is_live` 2849,
+the mapping span at spec 03 lines 960-962, `_ManagerDrainStopTarget` 355,
+the existing collection test at `tests/core/test_manager.py` 9000 with the
+`covered` assertion at 9056. All hold at `dcd02012`.
+
+#### Task 2. RED (tests first, no production edit)
+
+Three tests added as the plan words them:
+`tests/cli/test_cli_manager.py::test_manager_stop_reaches_task_of_peer_that_died_after_bootstrap`
+(with a `_start_covering_manager` helper beside it and
+`MANAGER_ADMISSION_RECHECK_SECONDS` imported),
+`tests/core/test_manager.py::test_collect_drain_stop_targets_names_snapshot_only_task`
+and `::test_first_stop_rung_is_one_broadcast_over_pending_targets`. Because
+another agent's in-flight edits break the import graph in the shared
+checkout (`weft/core/monitor/task_monitor.py` imports a constant not yet
+in `weft/_constants.py`), every test run for this plan uses a `git
+worktree` of `dcd02012` with this plan's files copied in and the
+worktree's package first on `PYTHONPATH`. RED there, `-n 0 -m ""`: the
+process test times out waiting for the dead Manager's task's
+`control_stop`; the collection test fails `assert tid in targets` (empty
+targets); the broadcast test fails `set(manager._drain_stop_targets) ==
+{first, second}` (empty set). Three failed, as Task 2 requires.
+
+#### Task 3. GREEN
+
+`weft/core/manager.py` only: candidates are the union of snapshots,
+residents and covered; the first rung collects the pending rungs and
+calls the new `_broadcast_stop_command` (exact names, `create_missing=True`,
+failure logged at debug), then marks every pending rung signalled with
+one stamp; `_ManagerDrainStopTarget.covered` removed with its constructor
+argument and the class docstring updated; the collection docstring and the
+signalling docstring say what the plan says. `ruff format` and `ruff
+check` clean; `mypy weft/core/manager.py` clean. In the worktree, the three
+new tests and the guards (`earlier_manager_detached_task`,
+`under_another_live_manager`, both `stop_orders` tests,
+`skips_terminal_and_internal_adopted_snapshots` with its `covered`
+assertion removed) pass: eight passed. `git diff --stat weft/core/manager.py`:
+50 insertions, 16 deletions.
+
+#### Task 4. Spec, backlink, CHANGELOG, status
+
+Both Replacement blocks applied verbatim to
+`docs/specifications/03-Manager_Architecture.md` (the mapping span with its
+two-space continuation; the backlink bullet at the top of `## Related
+Plans`); the CHANGELOG bullet under `## [Unreleased]` / `### Changed`; plan
+`Status:` and the index row `promoted`. Because another agent holds
+uncommitted hunks in `CHANGELOG.md` and `docs/plans/README.md`, this
+plan's hunks in those two files are staged as blobs built from `HEAD`
+plus the hunk, so the landing commit carries only this plan's changes.
+
+#### Task 5. Final gates (worktree of `dcd02012` plus this plan's files, before the landing commit)
+
+- `tests/specs/test_plan_metadata.py`: 4 passed; `bin/check-doc-paths`:
+  OK; `ruff check .`: clean; `ruff format --check .`: 658 files formatted.
+- `mypy` over the CI set: "Success: no issues found in 487 source files".
+- Full fast suite, `pytest -q -rA`: 6479 passed, 0 failed, 25 skipped,
+  exit 0.
+- `./bin/pytest-pg --fast`: 6329 passed, 27 skipped in 342.84 s, exit 0.
+- The CLI and Manager files with `-m ""` were covered by the Task 3 run
+  (eight passed) and by the full suite.

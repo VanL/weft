@@ -10,6 +10,12 @@
 
 ### Changed
 
+- A system STOP now reaches every live user-work task in the context
+  through the task's own snapshot, whichever Manager launched it and
+  whether that Manager is still alive; before, a task whose launching
+  Manager was alive when the stopping Manager started and had since died
+  was missed. The first STOP rung is one atomic exact-name broadcast that
+  creates a never-controlled task's control queue ([MA-3]).
 - A task's reactor wait no longer reads its notification-only observation
   queues on every idle strategy return: on persistent SQLite it reads them
   only at wait entry and on returns that carry a local, native or

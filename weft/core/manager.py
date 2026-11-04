@@ -356,13 +356,13 @@ class _ManagerDrainStopTarget:
     """One phase-1 STOP-drain member outside this Manager's child table [MA-3].
 
     ``identity`` holds the same-host ``(pid, create_time)`` pairs verified when
-    the drain began; ``escalate`` is true only for an uncovered ``host-pid``
-    target with such an identity. ``queue`` and ``publication_id`` are the
-    wake interest on the task's own snapshot queue.
+    the drain began; ``escalate`` is true only for a ``host-pid`` target with
+    such an identity that no other live Manager covers. Peer coverage has no
+    other consequence, so the record carries no coverage flag. ``queue`` and
+    ``publication_id`` are the wake interest on the task's own snapshot queue.
     """
 
     ctrl_in: str
-    covered: bool
     identity: tuple[tuple[int, float], ...]
     escalate: bool
     queue: Queue | None = None
@@ -4862,9 +4862,13 @@ class Manager(ServiceTask):
         """Best-effort STOP, then host SIGTERM, for one drain phase's children.
 
         The caller passes the active phase's members: user work in phase 1,
-        internal services in phase 2. One rung serves both phases.
+        internal services in phase 2. One rung serves both phases. The first
+        rung goes to every member not yet signalled as one exact-name
+        broadcast; a rung is marked signalled whether or not the write
+        succeeded, as a per-target write was.
 
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+        [SB-BCAST-2], [SB-BCAST-4]
         """
 
         rungs: list[tuple[str, str, Callable[[], tuple[int, ...]]]] = [
@@ -4881,6 +4885,7 @@ class Manager(ServiceTask):
                 (tid, target.ctrl_in, partial(self._drain_target_live_pids, target))
                 for tid, target in self._drain_stop_targets.items()
             )
+        pending: list[tuple[str, str]] = []
         for tid, ctrl_queue, escalation_pids in rungs:
             if tid in self._drain_signaled_children:
                 if tid in self._drain_escalated_children:
@@ -4902,9 +4907,15 @@ class Manager(ServiceTask):
                         terminate_process_tree(pid, timeout=0.2, kill_after=False)
                     self._drain_escalated_children.add(tid)
                 continue
-            self._send_stop_command(ctrl_queue)
-            self._drain_signaled_children.add(tid)
-            self._drain_signal_started_ns[tid] = time.time_ns()
+            pending.append((tid, ctrl_queue))
+        if pending:
+            self._broadcast_stop_command(
+                tuple(dict.fromkeys(queue for _tid, queue in pending))
+            )
+            stamp = time.time_ns()
+            for tid, _queue in pending:
+                self._drain_signaled_children.add(tid)
+                self._drain_signal_started_ns[tid] = stamp
 
     @staticmethod
     def _child_stop_escalation_pids(child: ManagedChild) -> tuple[int, ...]:
@@ -4926,10 +4937,12 @@ class Manager(ServiceTask):
     def _collect_drain_stop_targets(self) -> dict[str, _ManagerDrainStopTarget]:
         """Name phase-1 members outside the child table from task evidence.
 
-        Members are the adopted residents and the residents another live
-        Manager's checkpoint covers, read from one fresh snapshot pass with
-        the bootstrap's ``covered`` rule. The Manager only reads snapshots
-        here ([LIVENESS.R3]).
+        Members are every live user-work task a snapshot names, whichever
+        Manager launched it and whether that Manager is alive, plus this
+        Manager's residents, read from one fresh snapshot pass. A task
+        another live Manager's checkpoint lists (the bootstrap's ``covered``
+        rule) is a member like any other; coverage decides escalation only.
+        The Manager only reads snapshots here ([LIVENESS.R3]).
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
         """
@@ -4961,8 +4974,10 @@ class Manager(ServiceTask):
                 exc_info=True,
             )
             return {}
-        candidates = {tid: tid in covered for tid in self._scheduler_residents}
-        candidates.update(dict.fromkeys(covered, True))
+        candidates = {
+            tid: tid in covered
+            for tid in (*snapshots, *self._scheduler_residents, *covered)
+        }
         targets: dict[str, _ManagerDrainStopTarget] = {}
         unresolved: list[str] = []
         for tid, is_covered in candidates.items():
@@ -4986,7 +5001,6 @@ class Manager(ServiceTask):
             identity = self._verified_host_identity(payload)
             targets[tid] = _ManagerDrainStopTarget(
                 ctrl_in=observation.ctrl_in,
-                covered=is_covered,
                 identity=identity,
                 escalate=(
                     bool(identity)
@@ -5400,6 +5414,26 @@ class Manager(ServiceTask):
 
     def _send_stop_command(self, queue_name: str) -> None:
         self._send_child_control_command(queue_name, CONTROL_STOP)
+
+    def _broadcast_stop_command(self, queue_names: tuple[str, ...]) -> None:
+        """Write one STOP to every named control queue in one broadcast.
+
+        Exact names with ``create_missing`` reach a never-controlled task
+        whose ``ctrl_in`` has no row yet, and the write is atomic over the
+        set. A failed write is logged; the caller marks the rungs signalled
+        anyway, as it does after a failed per-target write.
+
+        Spec: [MA-3]; [SB-BCAST-2], [SB-BCAST-4]
+        """
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                broker.broadcast(
+                    encode_control_message(CONTROL_STOP),
+                    queue_names=queue_names,
+                    create_missing=True,
+                )
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to broadcast STOP to %s", queue_names, exc_info=True)
 
     @staticmethod
     def _peeked_message_timestamp(pending: object) -> int | None:

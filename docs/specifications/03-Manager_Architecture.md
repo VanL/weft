@@ -33,6 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [System STOP Targets Every Live Task by Snapshot](../plans/2026-11-04-system-stop-snapshot-targets-plan.md) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
 - [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MA-1] item 7).
 - [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) orders a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3].
@@ -957,9 +958,13 @@ _Implementation mapping_:
   `tests/core/test_manager.py::test_manager_sentinel_failure_during_shutdown_still_reaps_children`,
   `tests/core/test_manager.py::test_manager_stop_does_not_hold_past_window_for_stuck_launch`.
 - System STOP coverage beyond the child table (Reading B) — `weft/core/manager.py` ::
-  `Manager._collect_drain_stop_targets` (adopted residents and residents other
-  live Managers cover, from one fresh snapshot pass; route, service-role,
-  terminal and host-escalation filters), `Manager._manager_checkpoint_residents`
+  `Manager._collect_drain_stop_targets` (every live user-work task named by a
+  task-owned snapshot in one fresh snapshot pass, whichever Manager launched it
+  and whether that Manager is alive, plus this Manager's residents; residents
+  other live Managers cover are marked covered for escalation only; route,
+  service-role, terminal and host-escalation filters), `Manager._signal_children_to_stop`
+  (the first STOP rung as one exact-name broadcast with `create_missing`, [SB-BCAST-2], [SB-BCAST-4]),
+  `Manager._manager_checkpoint_residents`
   (the one `covered` rule shared with `Manager._bootstrap_scheduler_evidence`),
   `Manager._settle_drain_stop_targets` (release on task-owned terminal proof
   or verified exit; an unknown identity probe keeps the target),

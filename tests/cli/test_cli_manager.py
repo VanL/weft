@@ -19,6 +19,7 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_SERVICE_KEYS,
+    MANAGER_ADMISSION_RECHECK_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_MANAGER_OUTBOX_QUEUE,
@@ -722,6 +723,109 @@ def test_manager_stop_reaches_task_under_another_live_manager(
     assert rc == 0, (rc, out, err)
     processes["a"].join(timeout=30.0)
     processes["b"].join(timeout=30.0)
+
+
+def _start_covering_manager(
+    weft_harness: WeftTestHarness, label: str, suffix: str
+) -> tuple[str, str, Any]:
+    """Start one non-canonical Manager over its own inbox holding one task."""
+
+    context = weft_harness.context
+    inbox = f"test.stop-cover-dead.{suffix}.{label}.requests"
+    with context.queue(inbox, persistent=True) as queue:
+        queue.write(json.dumps({"name": f"cover-{label}", "spec": _LONG_WORK_SPEC}))
+        peeked = queue.peek_one(with_timestamps=True)
+    assert isinstance(peeked, tuple)
+    task_tid = str(peeked[1])
+    weft_harness.register_tid(task_tid)
+    manager_tid = generate_tid(context)
+    process = launch_task_process(
+        Manager,
+        context.broker_target,
+        _non_canonical_manager_spec(context, manager_tid, inbox),
+        config=context.config,
+    )
+    assert process.pid is not None
+    weft_harness.register_manager_tid(manager_tid)
+    weft_harness.register_pid(process.pid, manager_tid)
+    return manager_tid, task_tid, process
+
+
+def test_manager_stop_reaches_task_of_peer_that_died_after_bootstrap(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """A system STOP reaches a live task whose Manager died after B started.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-3]. B bootstraps
+    while A is alive and lists its task, so B marks the task covered and does
+    not adopt it. A then dies and its task keeps running. B's STOP must reach
+    that task through the task's own snapshot, not through A's checkpoint or
+    B's residents. The task's own ``control_stop`` is the delivery oracle (a
+    host SIGTERM rescue would publish ``task_signal_stop`` instead).
+    """
+
+    psutil = pytest.importorskip("psutil")
+    context = weft_harness.context
+    suffix = generate_tid(context)
+    manager_a, task_a, process_a = _start_covering_manager(weft_harness, "a", suffix)
+    snapshot_a = _wait_on_queues(
+        context,
+        [task_state_queue_name(task_a)],
+        lambda: _running_snapshot(context, task_a),
+        message="task a running",
+    )
+    _wait_on_queues(
+        context,
+        [task_state_queue_name(manager_a)],
+        lambda: task_a in _checkpoint_residents(context, manager_a),
+        message="Manager A checkpoint listing its task",
+    )
+    for pid in _snapshot_pids(snapshot_a):
+        weft_harness.register_pid(pid, task_a)
+    manager_b, task_b, _process_b = _start_covering_manager(weft_harness, "b", suffix)
+    _wait_on_queues(
+        context,
+        [task_state_queue_name(task_b)],
+        lambda: _running_snapshot(context, task_b),
+        message="task b running",
+    )
+    _wait_on_queues(
+        context,
+        [task_state_queue_name(manager_b)],
+        lambda: task_b in _checkpoint_residents(context, manager_b),
+        message="Manager B checkpoint listing its task",
+    )
+    # B bootstrapped with A alive: A's task is covered, not adopted.
+    assert task_a not in _checkpoint_residents(context, manager_b)
+
+    psutil.Process(process_a.pid).kill()
+    process_a.join(timeout=30.0)
+    assert not process_a.is_alive()
+    # B's live verdict about A from a probe before A died is reused for
+    # MANAGER_ADMISSION_RECHECK_SECONDS; past it, A is dead to B and nothing
+    # but the task's own snapshot can name the task.
+    time.sleep(2 * MANAGER_ADMISSION_RECHECK_SECONDS)
+    assert any(psutil.pid_exists(pid) for pid in _snapshot_pids(snapshot_a))
+    assert _first_log_id(context, task_a, {"control_stop"}) is None
+
+    rc, out, err = run_cli(
+        "manager",
+        "stop",
+        manager_b,
+        "--context",
+        weft_harness.root,
+        cwd=weft_harness.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, (rc, out, err)
+    weft_harness.wait_for_terminal_state(task_b, expected_status="cancelled")
+    assert _first_log_id(context, manager_b, {"manager_stop_drained"}) is not None
+    _wait_until(
+        lambda: _first_log_id(context, task_a, {"control_stop"}) is not None,
+        timeout=20.0,
+        message="B's STOP reaching the dead Manager's task",
+    )
+    weft_harness.wait_for_terminal_state(task_a, expected_status="cancelled")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")
