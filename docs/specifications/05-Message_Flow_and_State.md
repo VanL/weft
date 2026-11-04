@@ -469,7 +469,7 @@ Current heartbeat flow is task-shaped:
 
 ```text
 registrant -> validated row write to weft.state.heartbeats (upsert replaces, cancel deletes)
-the heartbeat service, always running under the canonical Manager, peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
+the heartbeat service, a context-level singleton any canonical Manager ensures, peeks weft.state.heartbeats -> in-memory due heap -> ordinary queue write to destination
 ```
 
 Current rules:
@@ -503,12 +503,15 @@ Current rules:
   looks up an endpoint, starts a manager, or waits for the service. Any
   process in the operator trust domain may write the queue; validation checks
   shape, not authority.
-- the canonical manager runs the heartbeat service as a standing internal
-  service through the manager-owned internal service path ([MA-1] item 7),
-  whether or not any row exists; the manager neither reads nor deletes the
-  queue. The heartbeat service is the queue's only reader and deleter. A row
-  written while no manager runs waits in the queue until a heartbeat service
-  runs.
+- the canonical manager ensures the heartbeat service exists through the
+  manager-owned internal service path ([MA-1] item 7), whether or not any row
+  exists, and stops it on no drain or exit (the termination exceptions of
+  [MA-1] item 7 apply); the manager neither reads nor deletes the queue. The
+  heartbeat service is the queue's only reader and deleter. It has work while
+  its table holds a row; with no row and no live non-superseded manager it
+  keeps one idle clock and ends itself after `SERVICE_IDLE_EXIT_SECONDS`. A row
+  written while no heartbeat service runs waits in the queue until a manager
+  ensures one.
 - the service builds its registration table by peeking the queue and never
   consumes a valid row by reading it: a row is an active leased request,
   and it is consumed only when that request ends, by the registrant's
@@ -529,8 +532,7 @@ Current rules:
 - the heartbeat service is driven by the shared task reactor loop. It handles
   at most one bounded control/inbox-rejection/table-build/due-emission turn in
   `process_once()`, exposes the next registration due time and the earliest
-  lease expiry through `next_wait_timeout()` (no deadline with an empty
-  table), and leaves all destination queue writes on the
+  lease expiry through `next_wait_timeout()` (with an empty table the only deadline is the idle clock), and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
   heartbeat timer is only the timeout supplied to that same wait path. It holds
@@ -545,10 +547,12 @@ Current rules:
   instant by at most that turn's duration. The same rebuild bounds
   cancellation: a cancel committed before it suppresses the turn's emission,
   and a cancel committed after it may be followed by at most one emission.
-- the service does not exit on an empty table. With an empty table it
-  publishes no deadline and blocks on its watcher (its `ctrl_in` lane and its
-  notification interest in `weft.state.heartbeats`); with rows its only
-  deadlines are the next due emission and the earliest lease expiry.
+- the service ends itself after `SERVICE_IDLE_EXIT_SECONDS` with an empty
+  table and no live non-superseded manager. With an empty table its only
+  deadline is that idle clock and it otherwise blocks on its watcher (its
+  `ctrl_in` lane and its notification interest in `weft.state.heartbeats`);
+  with rows its deadlines are the next due emission and the earliest lease
+  expiry, and the idle clock is not armed.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
@@ -2207,6 +2211,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) gives the heartbeat its own lifetime: it has work while a row exists, and otherwise ends itself after `SERVICE_IDLE_EXIT_SECONDS` once no live manager remains ([MF-3.2]).
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MF-3.2], [MF-5]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MF-3.2]).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([MF-3]).
 - [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.

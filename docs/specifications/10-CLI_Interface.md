@@ -989,8 +989,19 @@ Current subcommands:
 - `weft system load`
 - `weft system task-monitor`
 - `weft system prune`
+- `weft system stop`
 
 Current behavior:
+
+- `system stop` stops the active manager as `weft manager stop` does, then
+  sends STOP to every live internal service of the context by its registry
+  record, waits for each to exit within the same window, and escalates as the
+  manager drain does (host SIGTERM after the escalation delay, forced reap at
+  the window) only for same-host processes whose identity verifies. It is the
+  one command that empties a context; `weft manager stop` leaves the
+  context's services running ([MA-1] item 7). `--timeout` and `--force` match
+  `manager stop`; a service whose record names no route is reported, never
+  sent a guessed route; exit codes follow `manager stop`.
 
 - `system builtins` reports the shipped task-only builtin inventory Weft
   ships, independent of local stored-spec shadows in the metadata directory's
@@ -1105,6 +1116,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `weft system stop`, the one command that stops the manager and the context's internal services.
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CLI-1.1.1], [CLI-1.3]).
 - [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].

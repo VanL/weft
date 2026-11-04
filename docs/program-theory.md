@@ -358,8 +358,9 @@ theory revision, not a spec edit.
   lifetimes: Manager supersession, idle exit, or crash changes who takes
   future work and never kills or moves running tasks. A system STOP is
   different: it is the Manager's responsibility to stop, suspend, or kill
-  active tasks, then its internal services, then itself (owner,
-  2026-11-02). Because no lifetime contains
+  active tasks, then itself (owner, 2026-11-02); internal services are
+  context-level singletons with lifetimes of their own and outlive any
+  Manager stop while they have work (owner, 2026-11-04). Because no lifetime contains
   another, absence is never proof of death: a missing snapshot, an expired
   window, or a failed probe is `unknown`, and task-owned terminal proof
   outranks any supervisor's inference ([MA-1.6a], [MA-3], [MF-5],
@@ -395,7 +396,7 @@ theory revision, not a spec edit.
 | Evidence | Queue row, scoped `(pid, create_time)` process identity, or runtime handle supporting a liveness or custody claim | One broker-free liveness policy (`weft.liveness`) classifies it; every reader applies that policy rather than its own classifier | [MF-5]; `07-System_Invariants.md` LIVENESS.R3–R7 |
 | Runner plugin | A named runtime backend that executes a task's work behind an opaque runtime handle; core sees ordinary runner options and the handle, never the runtime's internals | The runner plugin surface (`weft.ext` contracts, resolution in `weft._runner_plugins`); each plugin owns its runtime-specific execution | `01-Core_Components.md` [CC-3.1], [CC-3.2]; `02-TaskSpec.md` [TS-1.3] |
 | Agent runtime and session | Agent-backed work run as an ordinary task: the agent TaskSpec section, the runtime adapters, and a per-task persistent conversation in a dedicated session subprocess; no second durable conversation store | The agent runtime modules (`weft.core.agents`); the owning task's session (`weft.core.runners.sessions`) for persistent scope | `13-Agent_Runtime.md` [AR-0.0], [AR-5], [AR-6], [AR-8] |
-| Service registry | `weft.state.services` runtime records naming the live owner of each Manager and managed service, plus the convergence policy that selects one live owner among duplicates | The Manager (`weft.core.manager_services` for managed-service state, `weft.core.service_convergence` for convergence) | `03-Manager_Architecture.md` [MA-1.6], [MA-1.6a]; `07-System_Invariants.md` MANAGER.3, OBS.15; [ALT-WT-007] |
+| Service registry | `weft.state.services` runtime records naming the live owner of each Manager and managed service, plus the convergence policy that selects one live owner among duplicates | The Manager ensures (`weft.core.manager_services` for managed-service state, `weft.core.service_convergence` for convergence); services own their lifetime (`weft.core.tasks.service`) | `03-Manager_Architecture.md` [MA-1.6], [MA-1.6a]; `07-System_Invariants.md` MANAGER.3, OBS.15; [ALT-WT-007] |
 
 Concepts that compose from the rows above and need no row of their own:
 
@@ -1001,9 +1002,15 @@ alternative. An agent must not propose the alternative again unless the
   up creating too much state. The simpler, more robust design is always on
   services, with care taken that the service idles when not needed." If what
   is wanted is a ServiceTask, there will be a process.
-- Current consequence: internal services are always on under the canonical
-  Manager and idle when not needed: no timer and no poll with nothing to do,
-  blocking on the watcher.
+- Current consequence: internal services are always on in the sense that
+  no Manager manages their lifetime: a Manager only ensures that each
+  ServiceTask is running, through the internal spawn path and the registry
+  reducer, and services are context-level singletons converged by the
+  same procedure that picks the canonical Manager. A service idles when
+  not needed, with no timer and no poll beyond one idle clock, and ends
+  itself after five minutes without work as it defines work, once no live
+  Manager remains; it runs on, Manager or no Manager, while it has work
+  (owner, 2026-11-04).
 - Reconsider when: Never for an internal service of the canonical Manager; a
   consumer that wants no process does not want a ServiceTask.
 - Evidence: owner decision 2026-11-03; `docs/plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.

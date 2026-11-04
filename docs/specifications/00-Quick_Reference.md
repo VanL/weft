@@ -40,7 +40,7 @@ Global queues:
 | `weft.state.endpoints` | Active named endpoint registry | No (runtime state) |
 | `weft.state.streaming` | Active streaming sessions | No (runtime state) |
 | `weft.state.pipelines` | Active pipeline registry | No (runtime state) |
-| `weft.state.heartbeats` | Heartbeat registrations: one row per live registration, keyed by `heartbeat_id`, naming its registrant TID; each row carries its own lease and expires when it ends; the heartbeat service, a standing internal service of the canonical manager, is its only reader and deleter ([MF-3.2]) | No (runtime state) |
+| `weft.state.heartbeats` | Heartbeat registrations: one row per live registration, keyed by `heartbeat_id`, naming its registrant TID; each row carries its own lease and expires when it ends; the heartbeat service, a context-level singleton any canonical manager ensures, is its only reader and deleter ([MF-3.2]) | No (runtime state) |
 
 Manager spawn reserved queues are `T{manager_tid}.reserved` for all ordinary work,
 `T{manager_tid}.internal_reserved` for internal work. See [MF-6].
@@ -249,6 +249,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) restates the `weft.state.heartbeats` row: the heartbeat is a context-level singleton any canonical manager ensures.
 - [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock (the `WEFT_TASK_MONITOR_INTERVAL_SECONDS` row). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it (the `weft.state.heartbeats` row).
 - [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` (the Queue Names and Control Messages tables).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.

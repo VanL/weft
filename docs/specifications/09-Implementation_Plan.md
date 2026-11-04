@@ -82,7 +82,7 @@ packages.
 - `weft/core/agents/backends/__init__.py` owns built-in backend registration
   only; backend classes remain owned by their leaf modules.
 
-_Implementation mapping_: `weft/client/_namespaces.py::SystemNamespace.prune` over `weft/commands/prune.py::prune_system`; `weft/client/_namespaces.py::SystemNamespace.task_monitor` over `weft/commands/task_monitor.py::task_monitor_system`; the [IP-1.1] client API parity matrix's verb coverage is enforced by `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart`.
+_Implementation mapping_: `weft/client/_namespaces.py::SystemNamespace.prune` over `weft/commands/prune.py::prune_system`; `weft/client/_namespaces.py::SystemNamespace.task_monitor` over `weft/commands/task_monitor.py::task_monitor_system`; `weft/client/_namespaces.py::SystemNamespace.stop` over `weft/commands/system.py::stop_system` (returns `SystemStopResult`); the [IP-1.1] client API parity matrix's verb coverage is enforced by `tests/architecture/test_import_boundaries.py::test_every_cli_verb_has_a_client_counterpart`.
 
 ## Boundary Inventory [IP-1.0]
 
@@ -175,6 +175,7 @@ Client API parity matrix:
 | Spec create/list/show/delete/validate/generate | `namespace` | `client.specs.*` | Uses `weft.commands.specs.validate_spec_source` and the shared command-layer stored-spec helpers. |
 | System status/tidy/dump/load/builtins | `namespace` | `client.system.*` | Public maintenance helpers with typed results. |
 | Foreground task monitor scan | `namespace` | `client.system.task_monitor` | Same scan, checkpoint, and sink behavior as `weft system task-monitor`, on the client's resolved context; returns `TaskMonitorResult`, or `CommandStream[TaskMonitorSummary]` iff `follow=True`. |
+| System stop | `namespace` | `client.system.stop` | Same manager stop plus registry-driven service stop as `weft system stop`, on the client's resolved context; returns a typed result naming what was stopped, escalated and unreachable. |
 | Runtime-state and retention prune | `namespace` | `client.system.prune` | Same family validation, reports, and archive as `weft system prune`, on the client's resolved context; a dry run unless `apply=True`; returns `SystemPruneResult`. |
 | Manager diagnostics | `cli_only` | `weft manager list --diagnostic` | Operator/debug output lacks a stable typed result contract. |
 

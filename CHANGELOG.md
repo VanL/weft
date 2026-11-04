@@ -188,6 +188,23 @@
   work item is supervised ([RM-5.1]). This is an owner-accepted diminution:
   a sustained CPU violation (four of five samples) is now detected after
   about four intervals rather than about 0.2 s.
+- Internal services (heartbeat, TaskMonitor, LivenessMonitor) are context-level
+  singletons: a Manager ensures they exist through the internal spawn path and
+  the registry reducer, but never stops, signals or terminates one on a drain,
+  supersession, yield, idle exit or cleanup (SIGUSR1, duplicate convergence and
+  the after-deadline launch reap remain). The system STOP drain has no services
+  phase, so its worst case drops from about 34 s to about 17 s, and a superseded
+  Manager with no user work exits at once instead of waiting on a heartbeat it
+  launched. Each service defines its own work and ends itself after
+  `SERVICE_IDLE_EXIT_SECONDS` (300 s) without work and without a live Manager:
+  the heartbeat while no registration row exists, TaskMonitor once no retained
+  item has a future expiry it would act on and its last cycle found nothing,
+  LivenessMonitor once no user-work mapping remains. `weft manager stop` leaves
+  the services running; the new `weft system stop` (and `client.system.stop`)
+  stops the Manager and then every live internal service by registry record
+  and is the one command that empties a context. Services keep their `manager_tid`
+  as provenance ([MA-1] item 7, [MA-3], [MF-3.2];
+  `docs/plans/2026-11-04-context-level-service-singletons-plan.md`).
 - First-party extension packages were bumped for this release and require
   weft 0.9.120: `weft-django 0.9.55`, `weft-docker 0.9.95`,
   `weft-macos-sandbox 0.6.24`, and `weft-microsandbox 0.5.25`.
