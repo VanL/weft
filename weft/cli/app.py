@@ -2105,6 +2105,52 @@ def prune(
         raise typer.Exit(code=1)
 
 
+@system_app.command("stop")
+def system_stop(
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help="Seconds to wait for the Manager, then for the services, to stop",
+        ),
+    ] = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Force terminate the manager process"),
+    ] = False,
+    context: Annotated[
+        Path | None,
+        typer.Option("--context", help="Weft project directory"),
+    ] = None,
+) -> None:
+    """Stop the Manager, then the context's internal services.
+
+    The one command that empties a context. Exit codes match
+    ``weft manager stop``. Spec: docs/specifications/10-CLI_Interface.md
+    (system stop); docs/specifications/03-Manager_Architecture.md [MA-3].
+    """
+
+    try:
+        result = commands.cmd_system_stop(
+            timeout=timeout,
+            force=force,
+            context=context,
+        )
+    except commands.WeftError as exc:
+        _command_exit(exc)
+    if result.manager_tid is not None:
+        typer.echo(f"Stopped manager {result.manager_tid}")
+    for tid in result.stopped:
+        note = " (escalated)" if tid in result.escalated else ""
+        typer.echo(f"Stopped service {result.service_keys[tid]} {tid}{note}")
+    for tid in result.unreachable:
+        typer.echo(
+            f"Unreachable service {result.service_keys[tid]} {tid}: "
+            "registry record has no control route",
+            err=True,
+        )
+
+
 @app.command("status")
 def status_command(
     all_tasks: Annotated[

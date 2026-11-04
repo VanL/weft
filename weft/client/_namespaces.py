@@ -56,6 +56,7 @@ from weft.commands.types import (
     SystemLoadResult,
     SystemPruneResult,
     SystemStatusSnapshot,
+    SystemStopResult,
     SystemTidyResult,
     TaskControlResult,
     TaskSnapshot,
@@ -540,6 +541,22 @@ class SystemNamespace:
             limit=limit,
             report=report,
         )
+
+    def stop(
+        self,
+        *,
+        timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+        force: bool = False,
+    ) -> SystemStopResult:
+        """Mirror `weft system stop` on the client's resolved context.
+
+        Stops the Manager, then the context's internal services.
+
+        Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2];
+        docs/specifications/09-Implementation_Plan.md [IP-1].
+        """
+
+        return system.stop_system(self.client.context, timeout=timeout, force=force)
 
     def task_monitor(
         self,

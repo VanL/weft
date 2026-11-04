@@ -907,6 +907,7 @@ COMMAND_EXPORTS = {
     "cmd_system_tidy",
     "cmd_system_task_monitor",
     "cmd_system_prune",
+    "cmd_system_stop",
     "cmd_system_dump",
     "cmd_system_builtins",
     "cmd_system_load",
@@ -943,6 +944,7 @@ COMMAND_TYPES = {
     "SystemLoadResult",
     "SystemDumpResult",
     "SystemPruneResult",
+    "SystemStopResult",
     "BuiltinSpecRecord",
     "TaskMonitorConfig",
     "TaskMonitorResult",
@@ -1168,7 +1170,15 @@ CLIENT_COUNTERPARTS: dict[str, tuple[str, ...]] = {
     },
     **{
         f"cmd_system_{verb}": (f"SystemNamespace.{verb}",)
-        for verb in ("tidy", "task_monitor", "prune", "dump", "builtins", "load")
+        for verb in (
+            "tidy",
+            "task_monitor",
+            "prune",
+            "stop",
+            "dump",
+            "builtins",
+            "load",
+        )
     },
 }
 """CLI verb to `weft.client` counterpart, per the [IP-1] client API parity matrix."""
@@ -1333,6 +1343,7 @@ CLI_ERROR_INVOCATIONS = {
     "cmd_system_tidy": ("system", "tidy"),
     "cmd_system_task_monitor": ("system", "task-monitor", "--once"),
     "cmd_system_prune": ("system", "prune", "--family", "runtime-state"),
+    "cmd_system_stop": ("system", "stop"),
     "cmd_system_dump": ("system", "dump"),
     "cmd_system_builtins": ("system", "builtins"),
     "cmd_system_load": ("system", "load"),
