@@ -853,6 +853,7 @@ def _assert_diagnostic_field_contract(
         *DIAGNOSTIC_FIELDS,
         "policy_progress",
         "external_task_log_status",
+        "retained_work_pending",
     }
     task._apply_maintenance_diagnostics(diagnostics)
     for group_name, field_names in DIAGNOSTIC_FIELDS.items():

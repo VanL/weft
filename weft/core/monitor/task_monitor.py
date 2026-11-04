@@ -568,6 +568,9 @@ class _MaintenanceDiagnostics:
     policy_progress: tuple[PolicyProgress, ...] | None = None
     external_task_log_status: ExternalTaskLogStatus | None = None
     control_reconciliation: _ControlReconciliationState | None = None
+    # Retained state with a future action this Monitor will take (owner
+    # ruling 10.3 of 2026-11-04); computed by the worker, read by the idle rule.
+    retained_work_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -825,6 +828,7 @@ class MaintenanceWorker:
         self._control_rows_remaining = self._monitor_config.task_log_scan_limit
         self._control_deadline: float | None = None
         self._control_reconciliation_observed = False
+        self._open_families_present = False
 
     def _open_resources(self, *, borrowed_session: BrokerSession | None = None) -> None:
         """Acquire resources under the enclosing cleanup scope ([IMPL.11])."""
@@ -947,7 +951,58 @@ class MaintenanceWorker:
             external_task_log_status=self._external_task_log_status
             if self._external_observed
             else None,
+            retained_work_pending=self._retained_work_pending(),
         )
+
+    def _retained_work_pending(self) -> bool:
+        """Return whether retained state still awaits a future Monitor action.
+
+        Inputs, all produced or carried by this invocation: the open-family
+        presence check (run beside family retirement), pending control
+        cleanup, reserved cleanup skipped because a retention window is still
+        running, pending deferred writes, scan candidates seen but not yet
+        safe to delete, and runtime prune candidates not yet deleted.
+
+        Spec: [MF-5], [OBS.13]; owner ruling 10.3 (2026-11-04)
+        """
+
+        maintenance = self._maintenance_state
+        return bool(
+            self._open_families_present
+            or self._collation_state.last_control_cleanup_pending
+            or self._cleanup_state.last_reserved_skipped_not_ready > 0
+            or self._deferred_task_log_pending > 0
+            or self._scan_state.last_candidates_seen
+            > self._scan_state.last_safe_to_delete_candidates
+            or maintenance.last_maintenance_runtime_prune_candidates
+            > maintenance.last_maintenance_runtime_prune_deleted
+        )
+
+    def _retained_families_present(self, store: MonitorStore) -> bool:
+        """Return whether any collation family awaits retirement by this Monitor.
+
+        The open-family presence check: pages retained families in TID order
+        and stops at the first that counts. A terminal family of any kind
+        counts until it is retired; a non-terminal family counts unless it is
+        a live Manager or service lifecycle row (those end only when their
+        process does, so they are not retained work).
+
+        Spec: [MF-5], [OBS.13]; owner ruling 10.3 (2026-11-04)
+        """
+
+        page = max(1, int(self._monitor_config.batch_size))
+        after_tid: str | None = None
+        while True:
+            records = store.list_task_collations(limit=page, after_tid=after_tid)
+            for record in records:
+                if (
+                    record.terminal_seen
+                    or not record.service_classification().is_service_record
+                ):
+                    return True
+            if len(records) < page:
+                return False
+            after_tid = records[-1].tid
 
     def run_collation(self, work: _TaskMonitorCollationWork) -> bool:
         """Prepare custom collation without a second sink probe or processor.
@@ -1409,6 +1464,7 @@ class MaintenanceWorker:
                     ),
                 )
                 self._apply_monitor_store_retirement_result(family_retirement)
+                self._open_families_present = self._retained_families_present(store)
                 self._last_policy_progress = (
                     *self._last_policy_progress,
                     PolicyProgress(
@@ -4323,6 +4379,8 @@ class TaskMonitor(ServiceTask):
         self._last_errors: tuple[str, ...] = ()
         self._last_policy_progress: tuple[PolicyProgress, ...] = ()
         self._last_catchup_pending = False
+        # Whether the last applied cycle result was substantive (idle rule).
+        self._last_cycle_found_work = False
         self._runtime_cleanup_queue_discovery_pending = False
         self._next_runtime_cleanup_queue_discovery_due_monotonic = 0.0
         self._external_task_log_sink: ExternalTaskLogSink | None = None
@@ -4487,6 +4545,9 @@ class TaskMonitor(ServiceTask):
             # edges own task-state publication and health notifications.
             self._apply_maintenance_diagnostics(
                 result.diagnostics, notify_external_status=False
+            )
+            self._last_cycle_found_work = self._diagnostics_show_work(
+                result.diagnostics
             )
         if result.errors or result.close_errors:
             errors = (*result.errors, *result.close_errors)
@@ -4760,12 +4821,14 @@ class TaskMonitor(ServiceTask):
     def next_wait_timeout(self) -> float | None:
         """Return the launcher wait timeout for the next monitor turn.
 
-        The monitor's only clock is its own cycle deadline,
-        ``_next_cycle_due_monotonic``. Queue readiness is owned by the shared
-        MultiQueueWatcher wait path; this method only exposes that deadline
-        and local worker deadlines.
+        The monitor's own clock is its cycle deadline,
+        ``_next_cycle_due_monotonic``; the ``ServiceTask`` idle-clock
+        remainder, armed only with no work and no cycle in flight, is merged
+        in through ``super().next_wait_timeout()``. Queue readiness is owned by
+        the shared MultiQueueWatcher wait path; this method only exposes those
+        deadlines and local worker deadlines.
 
-        Spec: [CC-2.5], [MF-5]
+        Spec: [CC-2.5], [MA-1] item 7, [MF-5]
         """
 
         if self._has_pending_worker_results():
@@ -4818,7 +4881,100 @@ class TaskMonitor(ServiceTask):
                     break
         return count
 
-    def _process_reactor_turn(self) -> None:
+    def _has_work(self) -> bool:
+        """Return whether the last applied cycle left the Monitor work to do.
+
+        Work is cycle-sampled. Inputs, all held by the reactor after a cycle's
+        diagnostics are applied: ``_last_cycle_found_work`` (set from that
+        cycle's result and diagnostics: rows ingested, deleted or recovered,
+        families retired, summaries emitted, a deferred-write flush, follow-up
+        runtime cleanup effects, or ``retained_work_pending`` from the
+        worker), the cached deferred-write backlog
+        ``_deferred_task_log_pending``, and the catch-up flag
+        ``_last_catchup_pending``. Starting a cycle is not work, and an empty
+        cycle leaves the idle clock where it was.
+
+        Spec: [MA-1] item 7, [MF-3.2], [MF-5]; owner ruling 10.3
+        """
+
+        return bool(
+            self._last_cycle_found_work
+            or self._deferred_task_log_pending > 0
+            or self._last_catchup_pending
+        )
+
+    def _work_undetermined(self) -> bool:
+        """Return whether a monitor cycle lane has work whose result is unapplied.
+
+        True while the built-in cycle worker, the custom processor or a
+        runtime-cleanup slice is in flight; the idle decision waits for the
+        applied result.
+
+        Spec: [MA-1] item 7, [MF-5]
+        """
+
+        return (
+            self._builtin_cycle_work_in_flight is not None
+            or self._processor_work_in_flight is not None
+            or self._control_cleanup_work_in_flight is not None
+        )
+
+    @staticmethod
+    def _diagnostics_show_work(diagnostics: _MaintenanceDiagnostics | None) -> bool:
+        """Return whether one cycle's produced diagnostics record real work.
+
+        Only groups this invocation produced are read; an omitted group is no
+        evidence of work.
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        if diagnostics is None:
+            return False
+        if diagnostics.retained_work_pending:
+            return True
+        store = diagnostics.store
+        if store is not None:
+            ingest = store.last_retained_task_log_ingest
+            if ingest.valid_ingested or ingest.raw_deleted or ingest.malformed_deleted:
+                return True
+            if store.last_pre_checkpoint_task_log_recovery.valid_ingested:
+                return True
+        collation = diagnostics.collation
+        return (
+            collation is not None and collation.last_monitor_store_families_retired > 0
+        )
+
+    @staticmethod
+    def _processor_result_shows_work(result: TaskMonitorProcessorResult) -> bool:
+        """Return whether a cycle's processor result handled any row.
+
+        Spec: [MF-5]
+        """
+
+        return bool(result.processed or result.deleted or result.reported)
+
+    @staticmethod
+    def _control_cleanup_shows_work(cleanup: _TaskControlCleanupResult) -> bool:
+        """Return whether a runtime-cleanup slice acted or left a future action.
+
+        Spec: [MF-5], [OBS.13.12]; owner ruling 10.3
+        """
+
+        return bool(
+            cleanup.pending
+            or cleanup.reserved_skipped_not_ready
+            or cleanup.dead_tids_pending
+            or cleanup.dead_tids_deferred_retention
+            or cleanup.dead_tids_skipped_too_young
+            or cleanup.families_disposed
+            or cleanup.families_retired
+            or cleanup.queues_deleted
+            or cleanup.reserved_queues_deleted
+            or cleanup.dead_tid_queues_deleted
+        )
+
+    def _service_reactor_turn(self) -> None:
         """Run one persistent monitor scheduling turn.
 
         Spec:
@@ -5541,6 +5697,7 @@ class TaskMonitor(ServiceTask):
             return
 
         self._last_cycle_at = now_ns
+        self._last_cycle_found_work = False
         sink = self._external_task_log_sink
         if sink is not None:
             sink.reset_cycle_counts()
@@ -5977,6 +6134,10 @@ class TaskMonitor(ServiceTask):
                     success=False,
                     errors=("task-monitor processor returned an invalid result",),
                 )
+        self._last_cycle_found_work = (
+            self._last_cycle_found_work
+            or self._processor_result_shows_work(processor_result)
+        )
         self._finish_monitor_cycle(
             candidates=work.candidates,
             last_timestamp=work.last_timestamp,
@@ -6020,8 +6181,16 @@ class TaskMonitor(ServiceTask):
                 worker_result = value
 
         self._last_cycle_at = work.now_ns
+        flush_before = self._deferred_task_log_last_flush_at
+        applied: _MaintenanceDiagnostics | None = None
         if worker_result.diagnostics is not None and not worker_result.close_errors:
-            self._apply_maintenance_diagnostics(worker_result.diagnostics)
+            applied = worker_result.diagnostics
+            self._apply_maintenance_diagnostics(applied)
+        self._last_cycle_found_work = (
+            self._diagnostics_show_work(applied)
+            or self._processor_result_shows_work(worker_result.result)
+            or self._deferred_task_log_last_flush_at != flush_before
+        )
         self._finish_monitor_cycle(
             candidates=(),
             last_timestamp=None,
@@ -6122,6 +6291,9 @@ class TaskMonitor(ServiceTask):
                 self._collation_state.last_terminal_families_disposed
                 + cleanup.families_disposed
             ),
+        )
+        self._last_cycle_found_work = (
+            self._last_cycle_found_work or self._control_cleanup_shows_work(cleanup)
         )
         self._runtime_cleanup_queue_discovery_pending = (
             cleanup.pending or not cleanup.success

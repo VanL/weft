@@ -1,27 +1,36 @@
 """Tests for shared long-lived service task helpers.
 
 Spec references:
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+- docs/specifications/05-Message_Flow_and_State.md [MF-3.2]
 - docs/specifications/07-System_Invariants.md [IMPL.10]
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue as thread_queue
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+import weft.core.tasks.service as service_module
 from simplebroker import Queue
 from tests.helpers.typing import BrokerEnv
 from weft._constants import (
+    CONTROL_STOP,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
+    SERVICE_IDLE_EXIT_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
 )
+from weft.core.control_messages import encode_control_message
+from weft.core.service_convergence import build_manager_service_payload
 from weft.core.tasks.base import TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
@@ -733,3 +742,367 @@ def test_service_task_lanes_are_single_flight(
     assert work == {"request": 1}
     assert result.value == "done"
     assert thread_id == threading.get_ident()
+
+
+# --- Service idle clock ([MA-1] item 7, [MF-3.2]; owner rules 2026-11-04) ---
+
+_IDLE_WINDOW_NS = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+
+
+class IdleClockServiceTask(ServiceTestTask):
+    """Service double whose work and observation state the test sets.
+
+    Its turn runs one "cycle" (counted) that changes nothing the predicate
+    reads, so a turn without work is an empty cycle.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.work = False
+        self.undetermined = False
+        self.cycles = 0
+        super().__init__(*args, **kwargs)
+
+    def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
+        configs = super()._build_queue_configs()
+        configs[self._queue_names["ctrl_in"]] = self._peek_queue_config(
+            self._handle_control_message
+        )
+        return configs
+
+    def _service_reactor_turn(self) -> None:
+        super()._service_reactor_turn()
+        self.cycles += 1
+
+    def _has_work(self) -> bool:
+        return self.work
+
+    def _work_undetermined(self) -> bool:
+        return self.undetermined
+
+
+@pytest.fixture
+def idle_clock(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Freeze the service idle clock through the service module's seam."""
+
+    clock = {"ns": 10**12}
+    monkeypatch.setattr(service_module, "_service_monotonic_ns", lambda: clock["ns"])
+    return clock
+
+
+def _task_events(log_queue: Queue, tid: str, event: str) -> list[dict[str, Any]]:
+    """Return this task's visible global-log events with one event name."""
+
+    return [
+        payload
+        for payload in (
+            json.loads(body)
+            for body, _timestamp in log_queue.peek_generator(with_timestamps=True)
+        )
+        if payload.get("tid") == tid and payload.get("event") == event
+    ]
+
+
+def _write_stop(make_queue: Callable[[str], Queue], task: ServiceTask) -> None:
+    """Write STOP to the task's ctrl_in and let its watcher observe it."""
+
+    make_queue(task.taskspec.io.control["ctrl_in"]).write(
+        encode_control_message(CONTROL_STOP, request_id="stop")
+    )
+    task.wait_for_activity(timeout=1.0)
+
+
+def test_service_with_work_has_no_idle_deadline(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """(a) With work, ``next_wait_timeout`` carries no idle deadline."""
+
+    db_path, _make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task.work = True
+    try:
+        task.process_once()
+        idle_clock["ns"] += 10 * _IDLE_WINDOW_NS
+        task.process_once()
+        assert task.next_wait_timeout() is None
+        assert task._idle_since_monotonic_ns is None
+        assert not task.should_stop
+    finally:
+        task.stop()
+
+
+def test_service_without_work_exits_once_the_window_elapses(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """(b) Without work the remainder counts down and the task exits."""
+
+    db_path, make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        task.process_once()
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
+        idle_clock["ns"] += _IDLE_WINDOW_NS // 2
+        assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS / 2
+        task.process_once()
+        assert not task.should_stop
+
+        idle_clock["ns"] += _IDLE_WINDOW_NS // 2
+        assert task.next_wait_timeout() == 0.0
+        task.process_once()
+
+        assert task.should_stop
+        assert task.taskspec.state.status == "completed"
+        assert task.taskspec.state.return_code == 0
+        exits = _task_events(log_queue, unique_tid, "service_idle_exit")
+        assert len(exits) == 1
+        assert exits[0]["idle_seconds"] == SERVICE_IDLE_EXIT_SECONDS
+    finally:
+        task.stop()
+
+
+def test_service_work_returning_mid_window_clears_the_clock(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """(c) Work mid-window clears the clock; the next window starts afresh."""
+
+    db_path, _make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    try:
+        task.process_once()
+        assert task._idle_since_monotonic_ns == idle_clock["ns"]
+        idle_clock["ns"] += _IDLE_WINDOW_NS - 1
+        task.work = True
+        task.process_once()
+        assert task._idle_since_monotonic_ns is None
+
+        task.work = False
+        idle_clock["ns"] += _IDLE_WINDOW_NS
+        task.process_once()
+        restarted = idle_clock["ns"]
+        assert task._idle_since_monotonic_ns == restarted
+        idle_clock["ns"] += _IDLE_WINDOW_NS - 1
+        task.process_once()
+        assert not task.should_stop
+        assert task._idle_since_monotonic_ns == restarted
+    finally:
+        task.stop()
+
+
+def test_service_stop_during_idle_window_stops_normally(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """(d) A STOP during the idle window stops the task as for any task."""
+
+    db_path, make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    try:
+        task.process_once()
+        idle_clock["ns"] += _IDLE_WINDOW_NS // 2
+        _write_stop(make_queue, task)
+        task.process_once()
+        assert task.should_stop
+        assert task.taskspec.state.status == "cancelled"
+        assert _task_events(log_queue, unique_tid, "service_idle_exit") == []
+    finally:
+        task.stop()
+
+
+def test_service_empty_turn_does_not_move_a_set_clock(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """(e) Checking for work is not work: empty cycles leave the clock alone."""
+
+    db_path, _make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    try:
+        task.process_once()
+        started = task._idle_since_monotonic_ns
+        assert started == idle_clock["ns"]
+        for _ in range(5):
+            idle_clock["ns"] += _IDLE_WINDOW_NS // 10
+            task.process_once()
+            assert task._idle_since_monotonic_ns == started
+        assert task.cycles == 6
+        assert not task.should_stop
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("held_result", ["empty", "substantive"])
+def test_service_undetermined_turn_defers_the_decision(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+    held_result: str,
+) -> None:
+    """(f) An observation in flight at an expired window neither exits nor moves.
+
+    The held asynchronous result then decides: substantive clears the clock,
+    empty exits on the original window.
+    """
+
+    db_path, _make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    try:
+        task.process_once()
+        started = task._idle_since_monotonic_ns
+        idle_clock["ns"] += _IDLE_WINDOW_NS
+        task.undetermined = True
+        task.process_once()
+        assert not task.should_stop
+        assert task._idle_since_monotonic_ns == started
+        assert task.next_wait_timeout() is None
+
+        task.undetermined = False
+        task.work = held_result == "substantive"
+        task.process_once()
+        if held_result == "substantive":
+            assert not task.should_stop
+            assert task._idle_since_monotonic_ns is None
+        else:
+            assert task.should_stop
+            assert task.taskspec.state.status == "completed"
+    finally:
+        task.stop()
+
+
+def test_service_stop_in_the_expiry_turn_is_not_marked_completed(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(g) A STOP handled in the turn that reaches expiry wins; no completion."""
+
+    db_path, make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    completions: list[int | None] = []
+    real_mark_completed = TaskSpec.mark_completed
+
+    def spy_mark_completed(self: TaskSpec, *args: Any, **kwargs: Any) -> None:
+        completions.append(kwargs.get("return_code"))
+        real_mark_completed(self, *args, **kwargs)
+
+    try:
+        task.process_once()
+        monkeypatch.setattr(TaskSpec, "mark_completed", spy_mark_completed)
+        idle_clock["ns"] += _IDLE_WINDOW_NS
+        _write_stop(make_queue, task)
+        task.process_once()
+        assert task.should_stop
+        assert task.taskspec.state.status == "cancelled"
+        assert completions == []
+        assert _task_events(log_queue, unique_tid, "service_idle_exit") == []
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize(
+    ("manager_status", "handle_kind", "stays"),
+    [
+        ("active", "this_process", True),
+        ("active", "unverified", True),
+        ("active", "dead_identity", False),
+        ("superseded", "this_process", False),
+    ],
+)
+def test_service_live_manager_keeps_an_idle_service(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+    manager_status: str,
+    handle_kind: str,
+    stays: bool,
+) -> None:
+    """A live non-superseded Manager keeps an idle service (owner ruling 10.1).
+
+    The window restarts on each check, so the service re-reads the registry
+    at its next idle deadline instead of exiting. A superseded Manager row or
+    a host-pid identity that no longer matches is not a live Manager.
+    """
+
+    db_path, make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    handles: dict[str, dict[str, Any]] = {
+        "this_process": {
+            "runner": "host",
+            "kind": "process",
+            "id": str(os.getpid()),
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [os.getpid()],
+                "host_processes": [{"pid": os.getpid(), "create_time": None}],
+            },
+            "metadata": {},
+        },
+        "unverified": {},
+        "dead_identity": {
+            "runner": "host",
+            "kind": "process",
+            "id": str(os.getpid()),
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [os.getpid()],
+                "host_processes": [{"pid": os.getpid(), "create_time": 1.0}],
+            },
+            "metadata": {},
+        },
+    }
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(
+            build_manager_service_payload(
+                context=task._task_context(),
+                tid=str(time.time_ns()),
+                name="manager",
+                status=cast(Any, manager_status),
+                queues={},
+                runtime_handle=handles[handle_kind],
+            )
+        )
+    )
+    try:
+        task.process_once()
+        idle_clock["ns"] += _IDLE_WINDOW_NS
+        task.process_once()
+        assert task.should_stop is (not stays)
+        if stays:
+            assert task._idle_since_monotonic_ns == idle_clock["ns"]
+            assert task.next_wait_timeout() == SERVICE_IDLE_EXIT_SECONDS
+    finally:
+        task.stop()
+
+
+def test_service_without_work_definition_never_idle_exits(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+) -> None:
+    """A service that does not define its work keeps the default: never idle."""
+
+    db_path, _make_queue = broker_env
+    task = ServiceTestTask(db_path, make_service_taskspec(unique_tid))
+    try:
+        task.process_once()
+        idle_clock["ns"] += 10 * _IDLE_WINDOW_NS
+        task.process_once()
+        assert not task.should_stop
+        assert task.next_wait_timeout() is None
+    finally:
+        task.stop()

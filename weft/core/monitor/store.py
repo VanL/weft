@@ -1860,6 +1860,32 @@ class _MonitorTableAccess:
         )
         return tuple(_record_from_row(row) for row in rows)
 
+    def list_task_collations(
+        self,
+        *,
+        limit: int,
+        after_tid: str | None = None,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Read one TID-ordered page of retained families. Spec: [MF-5]."""
+
+        if limit <= 0:
+            return ()
+        parameters = (
+            (self._context_key, after_tid, int(limit))
+            if after_tid is not None
+            else (self._context_key, int(limit))
+        )
+        rows = self._session.run(
+            monitor_sql.select_task_collations_page(
+                self._tables.task_collations,
+                _task_columns,
+                after_tid=after_tid is not None,
+            ),
+            parameters,
+            fetch=True,
+        )
+        return tuple(_record_from_row(row) for row in rows)
+
     def list_summary_correction_ready_tasks(
         self,
         *,
@@ -2791,6 +2817,28 @@ class MonitorStore:
             return ()
         with self._sidecar_session() as session:
             return self._access(session).list_control_reconciliation_candidates(
+                limit=limit,
+                after_tid=after_tid,
+            )
+
+    def list_task_collations(
+        self,
+        *,
+        limit: int,
+        after_tid: str | None = None,
+    ) -> tuple[MonitorTaskCollationRecord, ...]:
+        """Read one TID-ordered page of retained families, any state.
+
+        Used by the TaskMonitor cycle worker's open-family presence check
+        (plan 2026-11-04 context-level service singletons, owner ruling 10.3).
+
+        Spec: [MF-5], [OBS.13]
+        """
+
+        if limit <= 0:
+            return ()
+        with self._sidecar_session() as session:
+            return self._access(session).list_task_collations(
                 limit=limit,
                 after_tid=after_tid,
             )

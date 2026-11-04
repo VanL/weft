@@ -658,6 +658,29 @@ def select_control_reconciliation_candidates(
         """
 
 
+def select_task_collations_page(
+    collations_table: str,
+    columns: Sequence[str],
+    *,
+    after_tid: bool,
+) -> str:
+    """Select one TID-ordered page of retained families, any state.
+
+    Read by the TaskMonitor cycle worker's open-family presence check.
+    Spec: [MF-5], [OBS.13]
+    """
+
+    seek = "AND tid > ?" if after_tid else ""
+    return f"""
+        SELECT {identifier_list(columns)}
+        FROM {identifier(collations_table)}
+        WHERE context_key = ?
+          {seek}
+        ORDER BY tid
+        LIMIT ?
+        """
+
+
 def select_summary_correction_ready_tasks(
     collations_table: str,
     columns: Sequence[str],

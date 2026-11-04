@@ -1,4 +1,9 @@
-"""LivenessMonitor service and exact mapping-reaper tests."""
+"""LivenessMonitor service and exact mapping-reaper tests.
+
+Spec references:
+- docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+- docs/specifications/07-System_Invariants.md [LIVENESS.R1]-[LIVENESS.R10]
+"""
 
 from __future__ import annotations
 
@@ -14,17 +19,23 @@ from typing import Any
 import pytest
 
 import weft.core.tasks.liveness_monitor as liveness_monitor_mod
+import weft.core.tasks.service as service_module
 from simplebroker import Queue
 from weft._constants import (
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+    INTERNAL_SERVICE_KEY_METADATA_KEY,
+    INTERNAL_SERVICE_KEY_TASK_MONITOR,
     LIVENESS_MONITOR_MAX_IN_FLIGHT_PROBES,
     LIVENESS_PROBE_WORKER_NAME,
+    SERVICE_IDLE_EXIT_SECONDS,
 )
 from weft.context import WeftContext, build_context
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.liveness_monitor import (
     LivenessMonitor,
+    MappingRow,
     ProbeResult,
     ProbeWork,
 )
@@ -1517,3 +1528,148 @@ def test_terminal_projection_retains_snapshot_without_repeated_probes(
     expiry = next(work for work in submitted if work.tid == tid)
     monitor._apply_probe_result(ProbeResult(expiry, replacement_stale, attempted=True))
     assert queue.peek_one(exact_timestamp=replacement_id) is None
+
+
+# --- Idle rule: which mappings count as work (owner ruling 10.4) ---
+
+_COUNTING_CASES: list[tuple[str, dict[str, Any], bool]] = [
+    ("user_task", {}, True),
+    ("named_user_role", {"role": "worker"}, True),
+    ("manager_role", {"role": "manager"}, False),
+    ("internal_service_role", {"role": "heartbeat_service"}, False),
+    (
+        "internal_service_key",
+        {
+            "projection": {
+                "metadata": {
+                    INTERNAL_SERVICE_KEY_METADATA_KEY: INTERNAL_SERVICE_KEY_TASK_MONITOR
+                }
+            }
+        },
+        False,
+    ),
+    (
+        "internal_runtime_class",
+        {
+            "projection": {
+                "metadata": {
+                    INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                        INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+                    )
+                }
+            }
+        },
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "extra", "counts"),
+    _COUNTING_CASES,
+    ids=[case[0] for case in _COUNTING_CASES],
+)
+def test_liveness_counting_rule_for_rows_and_in_flight_probes(
+    workdir: Path,
+    label: str,
+    extra: dict[str, Any],
+    counts: bool,
+) -> None:
+    """Only user-work mappings are work, as rows and as in-flight probes.
+
+    Presence of a counting row is the whole test; a probe (or its pending
+    result, which stays in ``_in_flight`` until applied) of a non-counting
+    mapping never touches the idle clock.
+    """
+
+    del label
+    context = build_context(spec_context=workdir)
+    monitor = LivenessMonitor(
+        context.broker_target,
+        _taskspec(str(time.time_ns()), workdir),
+        mapping_min_age_seconds=0.0,
+    )
+    tid = str(time.time_ns())
+    payload = {**_mapping(tid), **extra}
+    try:
+        monitor._latest_rows.clear()
+        monitor._in_flight.clear()
+        assert monitor._has_work() is False
+
+        monitor._latest_rows[tid] = MappingRow(tid, 1, payload, "g1")
+        assert monitor._has_work() is counts
+
+        monitor._latest_rows.clear()
+        monitor._in_flight[tid] = ProbeWork(tid, 1, payload, "g1", "token")
+        assert monitor._has_work() is counts
+    finally:
+        monitor.stop(join=False)
+        monitor.cleanup()
+
+
+def test_liveness_due_heap_entry_alone_is_not_work(
+    namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
+) -> None:
+    """A scheduled heap entry without a counting row or probe is not work."""
+
+    _context, monitor, _queue, tid, _now = namespace_case
+    monitor._drain_worker_results()
+    monitor._reconcile_mapping_rows(full=False)
+    row = monitor._latest_rows[tid]
+    assert monitor._has_work() is True
+    monitor._latest_rows.clear()
+    monitor._in_flight.clear()
+    monitor._push_due(row, due_at=0.0)
+    assert monitor._due_heap
+    assert monitor._has_work() is False
+
+
+@pytest.mark.parametrize("user_row", [False, True])
+def test_liveness_idle_exits_only_without_a_counting_row(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    user_row: bool,
+) -> None:
+    """With only its own and service mappings the monitor idle-exits.
+
+    A user-work mapping keeps it running: it stays until that row is retired,
+    which is what lets TaskMonitor see the row gone (owner ruling 10.4).
+    """
+
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_module, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    context = build_context(spec_context=workdir)
+    queues: list[Queue] = []
+    service_tid = str(time.time_ns())
+    service_queue = context.queue(task_state_queue_name(service_tid), persistent=False)
+    service_queue.write(
+        json.dumps({**_mapping(service_tid), "role": "heartbeat_service"})
+    )
+    queues.append(service_queue)
+    if user_row:
+        user_tid = str(time.time_ns())
+        user_queue = context.queue(task_state_queue_name(user_tid), persistent=False)
+        user_queue.write(json.dumps(_mapping(user_tid)))
+        queues.append(user_queue)
+    now = [10.0]
+    monitor = LivenessMonitor(
+        context.broker_target,
+        _taskspec(str(time.time_ns()), workdir),
+        monotonic_clock=lambda: now[0],
+        mapping_min_age_seconds=0.0,
+    )
+    try:
+        monitor.process_once()
+        assert monitor._has_work() is user_row
+        service_clock["ns"] += int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+        monitor.process_once()
+        assert monitor.should_stop is (not user_row)
+        if not user_row:
+            assert monitor.taskspec.state.status == "completed"
+    finally:
+        monitor.stop(join=False)
+        monitor.cleanup()
+        for queue in queues:
+            queue.close()

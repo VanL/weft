@@ -1653,6 +1653,17 @@ INTERNAL_SERVICE_RUNTIME_CLASSES: Final[frozenset[str]] = frozenset(
 )
 """Runtime task classes classified as internal service lifecycle rows."""
 
+SERVICE_IDLE_EXIT_SECONDS: Final[float] = 300.0
+"""Idle window after which an internal service with no work ends itself.
+
+Each ``ServiceTask`` defines its own work; a service with no work and no live
+non-superseded Manager in its context for this long marks itself completed
+and exits on one idle clock of its own. Checking for work is not work. Owner
+rule of 2026-11-04 (services are context-level singletons that own their
+lifetime) and ruling 10.1 of the same day (a live Manager keeps a service
+alive). Spec: [MA-1] item 7, [MF-3.2].
+"""
+
 HEARTBEAT_MIN_INTERVAL_SECONDS: Final[int] = 60
 """Minimum interval accepted by the first-slice heartbeat service."""
 
