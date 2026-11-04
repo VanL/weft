@@ -1506,6 +1506,7 @@ Replacement (`docs/program-theory.md`):
 ```text
 | Agent runtime and session | Agent-backed work run as an ordinary task: the agent TaskSpec section, the runtime adapters, and a per-task persistent conversation in a dedicated session subprocess; no second durable conversation store | The agent runtime modules (`weft.core.agents`); the owning task's session (`weft.core.runners.sessions`) for persistent scope | `13-Agent_Runtime.md` [AR-0.0], [AR-5], [AR-6], [AR-8] |
 ```
+- Cross-family completed-work review round 1 (codex 0.161.0, 2026-11-03, range c7007f96..df9a2821): no blocker. Every task implemented as written or with a justified, logged deviation; both Replacement blocks verbatim; the acyclic-import test proved substantive (three strongly connected components at baseline, zero after, each named mutation restoring its component); builtin agent backends confirmed unloaded on the six entry imports; the ruff recount confirmed. Observation: the reviewer's fresh runs measured `import weft.cli.app` at 212–220 ms against the logged 149–161 ms (module count 492 reproduced; no governing latency bound). Round closed; Status stays `promoted` pending the [WT-7] probe.
 
 ## Execution log
 
