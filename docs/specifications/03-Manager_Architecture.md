@@ -33,6 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Program Theory Revision: Published Refusals, Wake Predicates, Observable Quiet, and Behaviour Probes](../plans/2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md) moves frontier and bucket compaction mechanics from program theory [ALT-WT-016] into [MA-1.8]; no behaviour change.
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) makes internal services context-level singletons: a manager ensures them and never stops them, the STOP drain has no services phase, and `weft system stop` empties a context ([MA-1] item 7, [MA-3]).
 - [System STOP Targets Every Live Task by Snapshot](../plans/2026-11-04-system-stop-snapshot-targets-plan.md) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
 - [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
@@ -539,6 +540,8 @@ bucket rather than scanning unrelated pending work, and leave broker custody
 unchanged. A bucket-local linear compaction is permitted with an amortized
 bound and measured latency evidence; this is not permission for a full pending
 graph or dictionary scan on each dispatch or exit.
+
+The frontier's contracted-pointer table and each pending bucket compact when their physical entries exceed twice their live entries.
 
 Reserve fraction is finite in `[0,1)` and defaults to `0.1`; reserve `R` is `max(ceil(C*f), 3 + int(liveness_monitor_enabled))`. Internal runtime work may use the reserve but still requires measured usage below C. Unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` selects the backend maximum on PostgreSQL and disables the resource gate only on SQLite. A positive configured ceiling overrides automatic capacity. The removed `WEFT_ADMISSION_TASK_CONNECTION_BUDGET` and `WEFT_SCHEDULER_MAX_FRONTIERS` settings raise actionable configuration errors directing operators to measured admission and its global reserve.
 

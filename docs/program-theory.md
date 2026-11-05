@@ -7,7 +7,7 @@ Owner: Weft product owner
 Boundary: The identity of Weft and the rules for design judgment. Not the
 exact current behavior. The specifications in `docs/specifications/` give the
 exact current behavior.
-Verification: Four measures, each named for what it measures. Owner
+Verification: Five measures, each named for what it measures. Owner
 endorsement: the owner can defend each sentence of [WT-2a], [WT-4], [WT-5],
 and [WT-6] as their own, confirmed at adoption and at each [REV-WT-*]
 record; endorsement is not a demonstration of possession. Transfer probe:
@@ -25,6 +25,12 @@ to its contract and its evidence in the tree as aligned, drifted (naming
 the plan that closes it), or theory revision; unchanged rows carry forward
 by reference and touched claims are re-audited. The table measures
 document-versus-tree agreement, not possession.
+Behaviour probe: each [WT-4.3] row and each behavioural [WT-2a] invariant
+names one black-box probe against a running system (for example: CPU
+consumed while one task runs; delay from an idle Manager to launch; dispatch
+after a Manager kill). The probes run at each release and their numbers go
+in the audit table beside the row. A row with no probe is marked unmeasured,
+not aligned.
 Required action: Read this document before you make a product-scope or
 design decision. Obey it, or propose a theory revision as a class-5 change.
 Governing process: Theory revisions are class-5 plans with one cross-family
@@ -372,6 +378,13 @@ theory revision, not a spec edit.
   observing Manager availability or starting a Manager, is separate from
   acceptance and may take time. (Owner, 2026-10-14: "Tasks sitting waiting
   to be spawned do not consume processes. Only live processes do")
+- **[WT-2a.15] A standing refusal is a fact, and it is scoped.** When a
+  Manager declines to dispatch accepted work for longer than one maintenance
+  pass, the refusal, its reason, and the records that cause it are published
+  as a queue fact that an ordinary status read shows. A refusal caused by
+  one record holds that record; it does not hold unrelated work unless a
+  measured resource says it must. Every standing refusal names the evidence
+  or the operator action that ends it. (Owner, 2026-11-05.)
 
 ## Core concepts and ownership [WT-3]
 
@@ -432,6 +445,7 @@ engineering rule.
 | Consume-to-disappear queues, not relational tables | SimpleBroker queues auto-create on write and auto-disappear when emptied. Consume tokens as work is dispatched (`delete`/`move_one`) instead of accumulating unconsumed event logs that require tombstones and manual GC sweeps. | Owner & architectural review, 2026-10-14 | [SB-0.1]; `2026-10-14` family scheduling plan |
 | Address a fact to its observers | Terminal completion is broadcast atomically to `weft.log.tasks` and `T{tid}.ctrl_out` so task waiters watch only their target's queue instead of scanning global history in $O(W \cdot E)$. | `2026-10-12` burst plan; owner, 2026-10-09 | [MF-3], [MF-5], OBS.1 |
 | Keep an identity you already have | An owner that wrote a row retains the returned ID; a caller that created a TaskSpec derives queue names from its TID rather than scanning logs to rediscover it. | Owner, 2026-10-09: "We don't need to re-discover it from the taskspec that we just created" | [MF-5]; [SB-0.2] |
+| A wake predicate reads facts and guarantees progress | The test that grants a reactor turn is answered from queue rows, never from memory that only a turn can update. It is true only when the granted turn will change its inputs, so it can neither lose a wake nor spin. | Owner, 2026-11-05; 2026-11-05 review: the Manager's inbox predicate read the in-memory scheduler and dropped every new request until a periodic turn | [CC-2.1]; [MA-1.8] |
 
 ### 4.2 Classical Algorithms and Resource Control
 
@@ -449,7 +463,7 @@ engineering rule.
 | Principle | Design consequence | Evidence | Contract |
 |-----------|--------------------|----------|----------|
 | One reactor, one arbiter, a closed set of inputs | Every task waits at one `PollingStrategy` arbiter driven by backend hints/notifications, local `notify_activity()` events, OS sentinel adapters, and explicit deadlines—never defensive polling wait-caps. The principle names today's realization (`PollingStrategy` and the four input origins); the identity statement is [WT-2a.6]. | Owner, 2026-09-17: "we are all event driven, with just a limited number of types of events" | [CC-2.2.1]; IMPL.8 to IMPL.11; [WT-2a.6] |
-| A quiet task does nothing | When no event arrives and no deadline is due, a reactor sleeps without running turns. First wake after quiet is bounded by one pass of SimpleBroker's polling strategy, followed by burst mode; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17 | [CC-2.2.1] |
+| A quiet task costs nothing an operator can see | When no event arrives and no deadline is due, a reactor runs no turns and publishes no deadline that is already due. A task that is only supervising (waiting on a child, a session, or a timer in the future) is quiet in this sense. Idle and supervising cost is bounded by the strategy's own polling pass and is measured, not inferred. A new input is acted on within one strategy pass; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17; owner, 2026-11-05; 2026-11-05 review | [CC-2.2.1] |
 | Subprocess and stream supervision is readiness-driven, not timer-polled | When a runner supervises child stdio pipes alongside timeouts and resource limits, the platform readiness adapter drives wakeups; the supervision timeout is only the protective ceiling until the next deadline. Post-exit stream drain stops immediately when the kernel pipe reports EOF or empty rather than sleeping out a fixed drain window when an inherited grandchild descriptor remains open, and is otherwise bounded by the private drain budget while a descendant keeps writing. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5], [CC-3.4] |
 | Bounded per-turn stream work and backpressure over unbounded buffering | Active stream drainage reads a bounded chunk budget per turn so output floods cannot starve timeout, cancellation, or resource-limit checks, and slow downstream sinks apply OS pipe backpressure to the child rather than growing parent memory without bound. At process termination, remaining kernel pipe bytes are captured into memory before slow sink delivery. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5] |
 | Availability and death are different questions | A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death. Task-owned terminal proof wins over a Manager `wrapper_lost` record, and reservation/checkpoint custody survives until task-snapshot handoff or positive settlement. | Owner, 2026-09-08; `2026-09-17` discovery plan; `2026-10-14` family scheduling plan | [MA-1.6a], [MA-3], [MF-5], LIVENESS.R3–R7; [WT-2a.13] |
@@ -810,12 +824,9 @@ alternative. An agent must not propose the alternative again unless the
   its contracted scheduling parent in $O(1)$ and melds the two in-memory
   pending indexes in $O(\log n)$, moving no token, and continues consuming
   `.pending.<parent_tid>` directly as children are dispatched. The live
-  frontier contracts through the same contracted-pointer idea: an exit
-  updates its own path and, when the pointer table has grown past twice the
-  registered count, triggers one whole-table compaction charged to the exits
-  that created the dead entries; each pointer lookup costs amortized
-  $O(\log n)$ under path compression alone, and only the Manager checkpoint
-  write remains proportional to the lineage it publishes.
+  frontier contracts through the same contracted-pointer idea at amortized
+  logarithmic cost per exit, and only the Manager checkpoint write remains
+  proportional to the lineage it publishes ([MA-1.8]).
 - Reconsider when: Never for per-dispatch scans or $O(N)$ exit moves. Bounded,
   resumable reconciliation runs amortized across maintenance turns to heal
   cursor holes.
@@ -1057,6 +1068,10 @@ alternative. An agent must not propose the alternative again unless the
 - **Event-driven against absence:** Timers exist only for clock work or for
   absence detection (such as missing best-effort startup snapshots). Each new
   timer must answer: *which event cannot arrive, and why?*
+- **Aligned by reading, false by running:** If a behavioural claim is marked
+  aligned in the audit table and a thirty-second measurement contradicts it,
+  the audit method failed, not only the code. Add the probe before repairing
+  the code.
 - **Measured admission is a soft guard:** PostgreSQL enforces its own server
   and role connection limits, and external clients share the server. The theory
   does not promise exact per-task connection forecasting. It measures real
@@ -1248,6 +1263,31 @@ evidence of why the theory evolved rather than a competing model.
     aligned, 8 drifted plus one ordering half, 1 theory revision), eight
     cross-family review rounds, and the 2026-11-02 keyed possession probe
     (PASS, three of three) in the plan's review log.
+
+### [REV-WT-005] Published refusals, fact-reading wake predicates, observable quiet, and behaviour probes
+
+- Current account: [WT-2a.15] makes a standing refusal to dispatch a
+  published, scoped fact that names what ends it. [WT-4.1] requires a wake
+  predicate to read queue facts and to guarantee progress. [WT-4.3] defines
+  quiet by what an operator can observe, covers supervising tasks, and
+  bounds acting on a new input. The header and [WT-7] add the behaviour
+  probe as a fifth verification measure. [ALT-WT-016] no longer carries
+  compaction mechanics.
+- Supersedes: a theory precise about safety and silent about a Manager that
+  declines to dispatch; a quiet rule stated in turns and wakes; and four
+  verification measures that all checked documents or reasoning.
+- Pressure: the 2026-11-05 deep-dive review at `44d7f900`. A Manager used a
+  full core for as long as any user task ran, and an idle Manager acted on a
+  new request only at its next periodic turn; both had shipped since at
+  least 0.9.105 and both rows were marked aligned by reading. One Manager
+  kill in the launch window stopped all dispatch for the context with no
+  published reason.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md`,
+    section 6 (measurements and audit rows)
+  - owner-recalled: owner session 2026-11-05 ("I agree with the theory
+    changes, and those should be made first"; "No E, otherwise good and
+    accepted as is")
 
 ## Sources
 
