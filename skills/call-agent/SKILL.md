@@ -124,13 +124,61 @@ validated.
 | Agent | Review invocation | Verified |
 |-------|-------------------|----------|
 | codex | `codex exec -s read-only -C "$(git rev-parse --show-toplevel)" "$PROMPT" --json` — OS-enforced sandbox; parse `item.completed`/`agent_message` events; add `-c 'model_reasoning_effort="high"'` for gating reviews | live, 2026-07-14 (4 review rounds) |
-| grok | `grok --cwd "$(git rev-parse --show-toplevel)" --sandbox read-only --always-approve --disable-web-search --output-format json --prompt-file "$F"` — OS-enforced sandbox; `$F` must be **absolute** (relative resolves against `--cwd`); parse `jq -r .text`, gate on `jq -r .stopReason` == `EndTurn` (**exit code is 0 even on `Cancelled`**); `streaming-json` emits `{"type":"text","data":…}` fragments + a final `end` event. Never use `--permission-mode plan` as the safety posture — it auto-approves writes. Caveats: repo/home writes are blocked but `/tmp` and `~/.grok` are not; child-process network blocking is Linux-only (a no-op on macOS — `--disable-web-search` removes only the built-in tools); if the sandbox fails to apply, grok warns and continues **unenforced** — treat a sandbox warning on stderr as an invocation failure, not a soft note | live, 2026-07-14 (step-7 debugging session) |
+| grok | On this macOS/OrbStack host: `grok --cwd "$(git rev-parse --show-toplevel)" --sandbox review-read-only-macos --always-approve --disable-web-search --no-subagents --output-format json --prompt-file "$F"`; install the profile below first (the built-in `--sandbox read-only` refuses to start here). `$F` must be **absolute** (relative resolves against `--cwd`). Parse `.text`; require exit 0, nonempty text, and `.stopReason == "end_turn"` (older verified releases used `EndTurn`). A cancelled or empty result is a failure even with exit 0. Never use `--permission-mode plan` as containment: it auto-approves writes. On other hosts, use the built-in `read-only` profile and probe it there. | 1.0.70, 2026-11-05: `end_turn`; direct repository write failed with EPERM; sentinel absent. 1.0.62, 2026-10-20 (in `../mm`): same; OrbStack access explicitly accepted by owner. |
 | claude | `claude -p "$PROMPT" --permission-mode plan --allowedTools "Read,Grep,Glob"` — harness-level containment, write-attempt verified: the write was diverted to a plan file outside the repo, repo untouched | live, 2026-07-14 (liveness + write attempt passed) |
 | qwen | `qwen --approval-mode plan -o text "$PROMPT"` (positional prompt; `-p` deprecated) — **blocked** as of 2026-07-14: API 404, default model requires a paid slug; re-probe after config/billing change | blocked, 2026-07-14 |
 | kimi | `kimi -p "$PROMPT" --output-format text` — **`--plan` cannot combine with `-p`** (probe-verified), so headless kimi has no containment mode at all: brief boundary only; write-attempt probe under plain `-p` still pending before any review eligibility | probe incomplete, 2026-07-14 |
 | opencode | **Review eligibility revoked 2026-07-14**: the write-attempt probe succeeded — `opencode run` created a file in the repo despite the brief. Do not use for reviews until a containment flag or config is found and a re-probe passes | revoked, 2026-07-14 |
 | gemini | **Deprecated upstream** (2026-07-14): Google discontinued the Gemini CLI for the antigravity CLI. The local binary still answers `--help`; do not select it for new reviews; remove this row when the binary is gone | do not use |
 | antigravity | Not installed — Google's replacement for the gemini CLI. Add a verified row (and sandbox/containment research) when it lands | pending install |
+
+#### Grok on this macOS/OrbStack host
+
+The owner accepted OrbStack access on 2026-10-20 (first recorded in
+`../mm`'s call-agent skill) and extended it to this repository's reviews
+on 2026-11-05. This is a machine-specific exception, not a claim that
+Docker cannot modify the repository. Direct filesystem writes remain
+OS-restricted; Docker access can provide an indirect write path. Do not
+describe this profile as complete write isolation.
+
+Add this profile to `~/.grok/sandbox.toml`, preserving any other profiles
+(it is already installed on this host):
+
+```toml
+[profiles.review-read-only-macos]
+extends = "read-only"
+restrict_network = false
+```
+
+Grok 1.0.60, 1.0.62 and 1.0.70 refuse to start with the built-in
+`read-only` profile when `/var/run/docker.sock` links to
+`~/.orbstack/run/docker.sock`. Stderr reads `could not resolve
+runtime-socket deny path /var/run/docker.sock: endpoint is a symlink to a
+path outside the deny list`, then `Refusing to start with its protections
+missing`, and grok exits 1. The automatic runtime-socket deny resolver
+rejects that target. A custom `deny` entry does not repair the resolver.
+The profile above retains the native read-only filesystem grants and
+skips the failing automatic container-socket scan. On macOS,
+`restrict_network` does not otherwise enforce child-process network
+blocking. This workaround is **macOS-only**; use the built-in `read-only`
+profile on other hosts and probe it there.
+
+Grok 1.0.62 and later fail closed when the sandbox cannot be installed
+(re-confirmed on 1.0.70). Earlier versions were observed to continue
+unenforced. In either case, a sandbox application/initialization failure
+on stderr invalidates the invocation. Ordinary warnings about blocked
+configuration writes or plugin discovery are not sandbox-installation
+failures. `/tmp` and Grok's own runtime state remain writable;
+`--disable-web-search` removes built-in web tools, not all network
+access.
+
+Probe evidence: on 2026-10-20 (grok 1.0.62, in `../mm`) a probe attempted
+one new repository sentinel and connected to both socket paths without
+sending requests: write denied, both connections allowed, sentinel
+absent. On 2026-11-05 (grok 1.0.70, from the `../weft` checkout) the row's
+command, asked to create a repository sentinel, returned `end_turn` with
+the write failing on EPERM; the sentinel was absent and stderr was empty.
+No Docker configuration or socket link changed.
 
 Session continuity (optional, for multi-round reviews): codex
 `exec resume <thread-id>` (id from the `thread.started` event) with
