@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
 import hashlib
 import io
@@ -19,6 +20,7 @@ import threading
 import time as real_time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import psutil
@@ -163,6 +165,59 @@ class _Forwarding:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._target, name)
+
+
+class _WithoutPidfd(_Forwarding):
+    """Hide only the Python wrapper while preserving real OS operations."""
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "pidfd_open":
+            raise AttributeError(name)
+        return super().__getattr__(name)
+
+
+@pytest.fixture(
+    params=[
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="real Linux libc pidfd binding"
+            ),
+        ),
+    ],
+    ids=["default", "libc"],
+)
+def pidfd_binding(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise existing real supervision proofs with either Linux binding."""
+    if request.param:
+        monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+
+
+def _patch_native_pidfd(
+    monkeypatch: pytest.MonkeyPatch, *, descriptor: int = -1, code: int = 0
+) -> None:
+    """Inject a native return/errno while keeping the production conversion."""
+
+    def native(pid: int, flags: int) -> int:
+        assert pid == os.getpid()
+        assert flags == 0
+        ctypes.set_errno(code)
+        return descriptor
+
+    def load_library(name: str | None, *, use_errno: bool) -> Any:
+        assert name is None and use_errno
+        return SimpleNamespace(pidfd_open=native)
+
+    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
+    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(
+        subprocess_runner,
+        "get_ctypes",
+        lambda: _Forwarding(ctypes, CDLL=load_library),
+    )
 
 
 class _ObservedOverlapped:
@@ -1245,6 +1300,7 @@ def _reap_descendant(ready: Path) -> None:
 
 def test_root_exit_with_inherited_pipe_and_no_deadlines_completes_within_drain_budget(
     tmp_path: Path,
+    pidfd_binding: None,
 ) -> None:
     """Child exit wakes a deadline-free wait on its own [RM-5.2]."""
     process, ready = _spawn_inherited_writer_root(
@@ -2531,21 +2587,104 @@ def test_linux_pidfd_requirement_explains_capability_failure(
 
     monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
     _patch_os(monkeypatch, pidfd_open=denied)
+
+    def forbidden() -> Any:
+        raise AssertionError("retried Python syscall failure through libc")
+
+    monkeypatch.setattr(subprocess_runner, "get_ctypes", forbidden)
     with pytest.raises(RuntimeError, match=r"Linux 5\.3.*pidfd_open") as raised:
         subprocess_runner._open_child_exit_source(os.getpid())
     assert raised.value.__cause__ is failure
     assert str(failure) in str(raised.value)
 
 
-def test_linux_pidfd_requirement_explains_missing_python_primitive(
+@pytest.mark.parametrize("missing", ["ctypes", "symbol"])
+def test_linux_pidfd_requirement_explains_missing_bindings(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    """Missing both bindings identifies the unavailable native dependency."""
+    failure = ImportError("no ctypes")
+
+    def unavailable() -> Any:
+        if missing == "ctypes":
+            raise failure
+        return _Forwarding(ctypes, CDLL=lambda *args, **kwargs: object())
+
+    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
+    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(subprocess_runner, "get_ctypes", unavailable)
+    with pytest.raises(RuntimeError, match="libc.*pidfd_open") as raised:
+        subprocess_runner._open_child_exit_source(1)
+    if missing == "ctypes":
+        assert raised.value.__cause__ is failure
+    else:
+        assert isinstance(raised.value.__cause__, AttributeError)
+
+
+@pytest.mark.parametrize("code", [errno.ESRCH, errno.EPERM, errno.EMFILE])
+def test_linux_libc_pidfd_converts_native_errno(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """A native -1 preserves gone-child, capability, and resource semantics."""
+    _patch_native_pidfd(monkeypatch, code=code)
+    if code == errno.ESRCH:
+        assert subprocess_runner._open_child_exit_source(os.getpid()) is None
+    elif code == errno.EPERM:
+        with pytest.raises(RuntimeError) as raised:
+            subprocess_runner._open_child_exit_source(os.getpid())
+        assert isinstance(raised.value.__cause__, PermissionError)
+        assert raised.value.__cause__.errno == code
+    else:
+        with pytest.raises(OSError) as failed:
+            subprocess_runner._open_child_exit_source(os.getpid())
+        assert failed.value.errno == code
+
+
+def test_linux_libc_loader_error_is_not_a_syscall_capability_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Python build without pidfd_open cannot supply the required exit source."""
+    """Acquisition failure must not enter the syscall-only errno classifier."""
+    failure = OSError(errno.EPERM, "loader denied")
+
+    def denied(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
     monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    monkeypatch.setattr(subprocess_runner, "os", object())
-    with pytest.raises(RuntimeError, match=r"Linux 5\.3.*pidfd_open") as raised:
-        subprocess_runner._open_child_exit_source(1)
-    assert isinstance(raised.value.__cause__, AttributeError)
+    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(
+        subprocess_runner,
+        "get_ctypes",
+        lambda: _Forwarding(ctypes, CDLL=denied),
+    )
+    with pytest.raises(OSError) as raised:
+        subprocess_runner._open_child_exit_source(os.getpid())
+    assert raised.value is failure
+
+
+@pytest.mark.parametrize("binding", ["python", "libc"])
+def test_linux_pidfd_accepts_descriptor_zero(
+    monkeypatch: pytest.MonkeyPatch, binding: str
+) -> None:
+    """Descriptor zero is success; close through a spy so stdin stays owned."""
+    if binding == "libc":
+        _patch_native_pidfd(monkeypatch, descriptor=0)
+    else:
+        monkeypatch.setattr(
+            subprocess_runner, "sys", _Forwarding(sys, platform="linux")
+        )
+        _patch_os(monkeypatch, pidfd_open=lambda pid: 0)
+
+        def forbidden() -> Any:
+            raise AssertionError("loaded libc despite a Python pidfd wrapper")
+
+        monkeypatch.setattr(subprocess_runner, "get_ctypes", forbidden)
+    closed: list[int] = []
+    monkeypatch.setattr(subprocess_runner.os, "close", closed.append)
+    source = subprocess_runner._open_child_exit_source(os.getpid())
+    assert source is not None
+    assert source.fileno() == 0
+    source.close()
+    assert closed == [0]
 
 
 @pytest.mark.parametrize(
@@ -2654,6 +2793,7 @@ def test_linux_pidfd_preserves_exit_and_noncapability_errors(
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX exit registration ordering")
 def test_live_child_exit_source_is_registered_before_first_reaping_poll(
     monkeypatch: pytest.MonkeyPatch,
+    pidfd_binding: None,
 ) -> None:
     """A live child cannot fall between the exit watch and its owning poll."""
     process = open_supervised_process([sys.executable, "-c", "print('live')"])

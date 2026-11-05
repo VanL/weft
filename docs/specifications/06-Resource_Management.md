@@ -267,12 +267,23 @@ Budget expiry neither converts a completed root into an execution timeout nor
 asserts physical EOF. Missing physical EOF remains a bounded diagnostic, with
 no new terminal state or outcome field.
 
-On Linux, subprocess supervision requires Linux 5.3 or newer, Python's
-`os.pidfd_open`, and permission to use that syscall. Missing support or security
-policy denial raises `RuntimeError` explaining the requirement, chained from the
-underlying error; there is no timer-polling fallback. A cached process returncode
-bypasses PID lookup for an already-reaped child. Live-child exit registration
-still precedes the supervisor's poll.
+On Linux, subprocess supervision requires Linux 5.3 or newer and permission
+to open pidfds. When Python provides os.pidfd_open, the supervisor uses it.
+If that attribute is absent, the supervisor attempts the exported libc
+pidfd_open function through ctypes. This compatibility binding opens the same
+kernel exit descriptor; it introduces no helper thread, polling fallback,
+or alternate reaping owner. It does not retry a failed Python pidfd_open call
+through libc, and it does not invoke raw architecture-specific syscall numbers.
+
+If Python lacks os.pidfd_open and either ctypes or libc's exported pidfd_open
+symbol is unavailable, supervision raises RuntimeError identifying the unavailable
+binding, chained from the actual acquisition
+error. Kernel ENOSYS or security-policy EPERM/EACCES raises RuntimeError
+identifying the syscall support or permission requirement, chained from the
+actual syscall error. Other loader and syscall errors propagate unchanged.
+ProcessLookupError means the child is already gone and requests an immediate
+wake. A cached process returncode bypasses PID lookup for an already-reaped
+child. Live-child exit registration still precedes the supervisor's poll.
 
 While execution is active, output drainage performs finite work per stream
 before returning to other streams and supervision, and slow downstream sinks
@@ -330,6 +341,10 @@ boundary; both route observations through `weft/core/terminal_handoff.py`.
 (`_open_process_io`: `_PosixSelectorProcessIO` and
 `_WindowsOverlappedProcessIO`), and supervised process construction
 (`open_supervised_process`).
+`weft/core/runners/subprocess_runner.py::_open_child_exit_source` owns Linux
+pidfd binding selection and the kernel exit source;
+`weft/core/deferred.py::get_ctypes` loads the optional ctypes dependency for
+the libc binding.
 
 ## Error Handling
 
@@ -421,6 +436,7 @@ controls stay here only when they are already shipped and observable:
 - retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 - retired: `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces timer-polled subprocess pipe supervision with the platform readiness adapter (`[RM-5.2]`).
 - retired: `2026-11-02-reactor-edge-timer-floors-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces fixed timer floors on agent-session and interactive waits with their real event sources and samples persistent agent sessions at the monitor's `polling_interval` ([RM-5.1], [RM-5.2]).
+- [Linux libc pidfd binding](../plans/2026-11-05-linux-libc-pidfd-binding-plan.md) adds the libc/ctypes binding when Python omits its wrapper ([RM-5.2]).
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

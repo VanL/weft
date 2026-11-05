@@ -28,6 +28,9 @@
 - Supervised internal services use ordinary task process titles ([OBS.4]).
 - Context documentation explains relocated targets and unsupported use of
   multiple context identities against one database ([SB-0.4]).
+- Linux subprocess supervision now uses libc through ctypes when Python omits
+  `os.pidfd_open`, preserving pidfd readiness and distinguishing unavailable
+  bindings from kernel or permission failures ([RM-5.2]).
 
 ## [0.9.120] - 2026-11-04
 

@@ -16,9 +16,12 @@ $ weft status
 # shows current task, manager, and broker status
 ```
 
-Linux subprocess execution requires kernel 5.3+ and a Python build with
-`os.pidfd_open`; container/seccomp policy must permit that syscall. Unsupported
-or denied pidfd access produces a clear error. There is no polling fallback.
+Linux subprocess execution requires kernel 5.3+ and permission to open pidfds.
+Weft uses Python's `os.pidfd_open` when present; otherwise it binds libc's
+exported `pidfd_open` through ctypes (available with glibc 2.36+). This requires
+ctypes support in Python and a libc that exports the function. Missing bindings,
+unsupported kernels, and denied pidfd access produce specific errors.
+There is no polling fallback.
 
 ## What Weft Is (And Is Not)
 

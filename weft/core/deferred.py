@@ -1,4 +1,8 @@
-"""Deferred core dependencies (Spec: 01-Core_Components.md [CC-2.4])."""
+"""Deferred core dependencies.
+
+Spec: docs/specifications/01-Core_Components.md [CC-2.4];
+docs/specifications/06-Resource_Management.md [RM-5.2].
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,12 @@ if TYPE_CHECKING:
     from simplebroker_pg import ConnectionUsage
 
     from simplebroker import Queue
+
+
+def get_ctypes() -> ModuleType:
+    """Load the optional native pidfd binding dependency (Spec: [RM-5.2])."""
+    # Optional native dependency: Python's pidfd wrapper needs no ctypes support.
+    return import_module("ctypes")
 
 
 def get_setproctitle() -> ModuleType:

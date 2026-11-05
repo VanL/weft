@@ -45,6 +45,7 @@ from weft._constants import (
     SUBPROCESS_STREAM_TURN_READ_BYTES,
     SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
 )
+from weft.core.deferred import get_ctypes
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.outcome import RunnerOutcome
@@ -720,23 +721,61 @@ class _DescriptorExitSource:
         os.close(self._descriptor)
 
 
+def _linux_pidfd_opener() -> Callable[[int], int]:
+    """Select Python's pidfd wrapper or bind libc before classifying syscall errors.
+
+    Dependency/loader acquisition must stay outside the syscall-only error
+    handler in `_open_child_exit_source`. The ctypes function retains its CDLL
+    owner; each acquisition binds locally without shared mutable FFI state.
+
+    Spec: docs/specifications/06-Resource_Management.md [RM-5.2].
+    """
+    python_opener = getattr(os, "pidfd_open", None)
+    if python_opener is not None:
+        return cast("Callable[[int], int]", python_opener)
+
+    try:
+        ctypes = get_ctypes()
+        libc = ctypes.CDLL(None, use_errno=True)
+        native = libc.pidfd_open
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Subprocess supervision cannot open pidfds: Python lacks os.pidfd_open "
+            "and ctypes or libc's pidfd_open binding is unavailable "
+            f"(Python {sys.version.split()[0]} at {sys.executable}): {exc}"
+        ) from exc
+
+    native.argtypes = [ctypes.c_int, ctypes.c_uint]
+    native.restype = ctypes.c_int
+
+    def open_native(pid: int) -> int:
+        descriptor = cast("int", native(pid, 0))
+        if descriptor == -1:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+        return descriptor
+
+    return open_native
+
+
 def _open_child_exit_source(pid: int) -> _ExitSource | None:
     """Open a selectable kernel object that becomes readable when ``pid`` exits.
 
-    Linux uses a pidfd; macOS and BSD use a kqueue holding a one-shot
-    process-exit filter, whose own descriptor joins the selector. Neither
-    reaps the child or touches ``Popen._waitpid_lock``. ``None`` means the
+    Linux uses a pidfd through Python or libc; macOS and BSD use a kqueue
+    holding a one-shot process-exit filter, whose own descriptor joins the
+    selector. Neither reaps the child or touches ``Popen._waitpid_lock``. ``None`` means the
     child is already gone, which the caller treats as an immediate wake.
 
     Spec: [RM-5.2]
     """
     if sys.platform == "linux":
+        pidfd_open = _linux_pidfd_opener()
         try:
-            return _DescriptorExitSource(os.pidfd_open(pid))
+            return _DescriptorExitSource(pidfd_open(pid))
         except ProcessLookupError:
             return None
-        except (AttributeError, OSError) as exc:
-            if isinstance(exc, OSError) and exc.errno not in (
+        except OSError as exc:
+            if exc.errno not in (
                 errno.ENOSYS,
                 errno.EPERM,
                 errno.EACCES,
@@ -744,7 +783,7 @@ def _open_child_exit_source(pid: int) -> _ExitSource | None:
                 raise
             raise RuntimeError(
                 "Subprocess supervision requires Linux 5.3+ with pidfd_open "
-                "available in Python and permitted by the container/security policy: "
+                "supported by the kernel and permitted by the container/security policy: "
                 f"{exc}"
             ) from exc
     if sys.platform == "win32":
