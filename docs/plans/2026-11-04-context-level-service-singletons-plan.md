@@ -1346,6 +1346,22 @@ next probe settles, not a liveness-contract gap, and a Windows-only
 exit-signal check at the identity seam would be armor against a window
 psutil itself cannot resolve through its public API.
 
+Release run 10 (`30882ecc`): ruff, format, mypy and the full suite (6587
+passed, 4:32) green; the PostgreSQL leg stalled at 74%: the host-runner
+parity test's consumer published its runtime handle and then made no
+progress for 15 s on its pre-written inbox message, and
+`test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_root`
+hung until the 900 s pytest timeout killed its worker; the controller then
+hung in teardown. Environment failure, not weft: the docker API behind the
+PostgreSQL container (OrbStack) stopped answering (`docker ps`, the socket
+ping and `docker exec` all hung past their timeouts) and its VM log shows
+repeated engine errors (`failed to mount rootfs ... open tree in mount ns:
+no such process`) from about two hours earlier. The run's processes, the
+crashed worker's leftover harness processes and a hung `docker port`
+client were terminated by PID; `orb restart docker` itself hung, and a
+full `orb stop` / `orb start` brought the docker API back (the user's
+own containers restarted on their own). No test or code change.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty
