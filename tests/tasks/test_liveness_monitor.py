@@ -1561,6 +1561,7 @@ _COUNTING_CASES: list[tuple[str, dict[str, Any], bool]] = [
         },
         False,
     ),
+    ("terminal_user_row", {"terminal": True}, False),
 ]
 
 
@@ -1624,16 +1625,19 @@ def test_liveness_due_heap_entry_alone_is_not_work(
     assert monitor._has_work() is False
 
 
-@pytest.mark.parametrize("user_row", [False, True])
+@pytest.mark.parametrize("user_row", ["none", "live", "terminal"])
 def test_liveness_idle_exits_only_without_a_counting_row(
     workdir: Path,
     monkeypatch: pytest.MonkeyPatch,
-    user_row: bool,
+    user_row: str,
 ) -> None:
     """With only its own and service mappings the monitor idle-exits.
 
-    A user-work mapping keeps it running: it stays until that row is retired,
-    which is what lets TaskMonitor see the row gone (owner ruling 10.4).
+    A live user-work mapping keeps it running: it stays until that row is
+    retired, which is what lets TaskMonitor see the row gone (owner ruling
+    10.4). A terminal user-work mapping does not: its retention retirement
+    is not liveness work, so the monitor idles and the next Manager's ensure
+    brings one back (owner ruling 10.6).
     """
 
     service_clock = {"ns": 10**12}
@@ -1648,11 +1652,14 @@ def test_liveness_idle_exits_only_without_a_counting_row(
         json.dumps({**_mapping(service_tid), "role": "heartbeat_service"})
     )
     queues.append(service_queue)
-    if user_row:
+    if user_row != "none":
         user_tid = str(time.time_ns())
         user_queue = context.queue(task_state_queue_name(user_tid), persistent=False)
-        user_queue.write(json.dumps(_mapping(user_tid)))
+        user_queue.write(
+            json.dumps({**_mapping(user_tid), "terminal": user_row == "terminal"})
+        )
         queues.append(user_queue)
+    counts = user_row == "live"
     now = [10.0]
     monitor = LivenessMonitor(
         context.broker_target,
@@ -1662,11 +1669,11 @@ def test_liveness_idle_exits_only_without_a_counting_row(
     )
     try:
         monitor.process_once()
-        assert monitor._has_work() is user_row
+        assert monitor._has_work() is counts
         service_clock["ns"] += int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
         monitor.process_once()
-        assert monitor.should_stop is (not user_row)
-        if not user_row:
+        assert monitor.should_stop is (not counts)
+        if not counts:
             assert monitor.taskspec.state.status == "completed"
     finally:
         monitor.stop(join=False)

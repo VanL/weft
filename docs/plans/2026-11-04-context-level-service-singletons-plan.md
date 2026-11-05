@@ -340,7 +340,11 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
    launch whose result lands after the manager's cleanup deadline is reaped
    ([IMPL.10]). Each service defines its own work and ends itself after
    `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
-   manager in the context ([MF-3.2]); checking for work is not work. An
+   manager in the context ([MF-3.2]); checking for work is not work. The
+   LivenessMonitor's work is a live (non-terminal) user-work mapping row or
+   an in-flight probe of one; a terminal row waits for its retention
+   retirement without keeping the monitor alive
+   (`weft/core/tasks/liveness_monitor.py::LivenessMonitor._mapping_counts_as_work`). An
    explicit STOP on a service's `ctrl_in` stops it as for any task. A service process runs with its context root as
    its working directory (`weft/core/launcher.py::service_working_directory`),
    never the directory its launcher happened to be in. `weft
@@ -981,6 +985,18 @@ Manager leaves, and LivenessMonitor never idles while a Manager runs.
 Recommendation: only rows whose role is user work (not `manager`, not an
 internal service class) count; their presence is the whole test.
 **Ruled by the owner, 2026-11-04: agree.**
+
+### 10.6 Terminal rows are not LivenessMonitor work
+
+Ruling 10.4 counted a user-work row by presence. A terminal row stays
+until the LivenessMonitor retires it at `TASK_OBSERVATION_RETENTION_SECONDS`
+(two days by default), so a context whose last task has completed kept its
+LivenessMonitor alive for the whole window (found through the leaked test
+services, Execution log). **Ruled by the owner, 2026-11-05: a terminal row
+should not count as work to do.** `_mapping_counts_as_work` now returns
+false for a terminal row; the monitor idles five minutes after the last
+live user-work row is gone, and the terminal row is retired by whichever
+LivenessMonitor the next Manager's ensure brings back.
 
 ### 10.5 A launch result that lands after the cleanup deadline
 

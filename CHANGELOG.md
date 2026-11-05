@@ -199,7 +199,9 @@
   `SERVICE_IDLE_EXIT_SECONDS` (300 s) without work and without a live Manager:
   the heartbeat while no registration row exists, TaskMonitor once no retained
   item has a future expiry it would act on and its last cycle found nothing,
-  LivenessMonitor once no user-work mapping remains. `weft manager stop` leaves
+  LivenessMonitor once no live (non-terminal) user-work mapping remains; a
+  terminal row waits for its retention retirement without keeping the monitor
+  alive. `weft manager stop` leaves
   the services running; the new `weft system stop` (and `client.system.stop`)
   stops the Manager and then every live internal service by registry record
   and is the one command that empties a context. A service process runs in

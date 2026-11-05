@@ -164,16 +164,21 @@ class LivenessMonitor(ServiceTask):
 
     @staticmethod
     def _mapping_counts_as_work(payload: Mapping[str, Any]) -> bool:
-        """Return whether one mapping row is user work (owner ruling 10.4).
+        """Return whether one mapping row is live user work (owner rulings 10.4, 10.6).
 
-        A row counts unless its role is ``manager`` or an internal service
-        role, or its projected metadata names an internal service key or
-        internal service runtime class. Presence is the whole test: no
+        A row counts unless it is terminal, its role is ``manager`` or an
+        internal service role, or its projected metadata names an internal
+        service key or internal service runtime class. A terminal row has no
+        liveness work left: it is retired at its retention deadline by
+        whichever LivenessMonitor is running then, and is never a reason to
+        keep this one alive. Below that, presence is the whole test: no
         live/stale distinction is read.
 
         Spec: [MA-1] item 7, [LIVENESS.R1]
         """
 
+        if payload.get("terminal") is True:
+            return False
         role = payload.get("role")
         if role == "manager" or role in INTERNAL_SERVICE_ROLES:
             return False

@@ -306,7 +306,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    launch whose result lands after the manager's cleanup deadline is reaped
    ([IMPL.10]). Each service defines its own work and ends itself after
    `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
-   manager in the context ([MF-3.2]); checking for work is not work. An
+   manager in the context ([MF-3.2]); checking for work is not work. The
+   LivenessMonitor's work is a live (non-terminal) user-work mapping row or
+   an in-flight probe of one; a terminal row waits for its retention
+   retirement without keeping the monitor alive
+   (`weft/core/tasks/liveness_monitor.py::LivenessMonitor._mapping_counts_as_work`). An
    explicit STOP on a service's `ctrl_in` stops it as for any task. A service process runs with its context root as
    its working directory (`weft/core/launcher.py::service_working_directory`),
    never the directory its launcher happened to be in. `weft
