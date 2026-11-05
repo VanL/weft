@@ -1120,6 +1120,17 @@ class WeftTestHarness:
         active_records.sort(key=lambda item: int(str(item.get("tid", "0"))))
         return active_records
 
+    def _record_names_this_process(self, record: dict[str, object]) -> bool:
+        """Return whether a Manager record's host PIDs are all this process's own.
+
+        Inline Managers run in the test process; fabricated records in the
+        harness tests name it too. Such a record cannot be settled by a
+        process exit, so the forced Manager stop must not wait on it.
+        """
+
+        pids = [pid for pid in self._mapping_host_pids(record) if pid > 0]
+        return bool(pids) and all(self._should_skip_pid(pid) for pid in pids)
+
     def _cleanup_manager_records(self) -> dict[str, dict[str, object]]:
         manager_records: dict[str, dict[str, object]] = {}
         for record in self._list_active_manager_records():
@@ -1221,7 +1232,11 @@ class WeftTestHarness:
                 break
 
         if force and issued_task_stops:
-            for tid in sorted(issued_task_stops):
+            # KILL waits for terminal evidence; a fabricated task row with no
+            # live process can never supply it and would wait out the whole
+            # confirmation window. Escalate only where a process still runs.
+            still_live = set(self._live_task_tids_from_mappings())
+            for tid in sorted(issued_task_stops & still_live):
                 try:
                     task_cmd.kill_tasks([tid], context_path=context_path)
                 except CommandExecutionError as exc:
@@ -1232,9 +1247,26 @@ class WeftTestHarness:
 
         if force:
             for tid in sorted(manager_records):
+                record = manager_records[tid]
+                if self._record_names_this_process(record):
+                    # An inline Manager (or a fabricated record) names this
+                    # very process: no process exit can ever settle it, and
+                    # the forced stop would wait out its whole timeout. The
+                    # Manager object is already stopped or never existed, so
+                    # publish the stopped row the registry needs and move on.
+                    manager_runtime._mark_manager_stopped(
+                        self.context, tid, record=record
+                    )
+                    continue
+                # A placeholder from `_registered_manager_tids` carries no
+                # registry row; passing it as the record would stand in for
+                # one and wait out the confirmation timeout. With no record,
+                # `stop_manager` resolves the registry itself and returns at
+                # once when nothing is there to stop.
+                registry_record = record if record.get("status") is not None else None
                 manager_runtime.stop_manager(
                     self.context,
-                    manager_records[tid],
+                    registry_record,
                     tid=tid,
                     force=True,
                     timeout=stop_timeout,
