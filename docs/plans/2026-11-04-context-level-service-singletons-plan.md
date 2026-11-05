@@ -1269,6 +1269,32 @@ from this release's precheck and is to be run on its own against the
 released commit once the quota returns. The codex adapter is untouched by
 this plan and the series.
 
+Release run 7 (`3143e2bb`): every local gate passed (fast suite 6584 in
+5:11, PostgreSQL `--all` 6532, extensions, live canaries for claude_code,
+opencode and qwen); main pushed; CI run 41957365852: lint, every Linux
+and macOS lane and all three PostgreSQL lanes green, which closes the
+convergence failure of run 41917203345. Windows failed on two signatures:
+`tests/test_harness_registration.py::test_inline_managers_sharing_pid_have_independent_liveness`
+(all three Python versions, `remaining`) and
+`tests/core/test_client.py::test_entered_client_keeps_alternate_runtime_roots_bounded`
+(`core-commands`, all three), both `WinError 32` on the harness root: the
+harness terminated a still-exiting service of an inline Manager and
+removed the root in the same breath, and on Windows the exiting process
+still held its SQLite handles (before the plan the Manager joined its
+services as children before cleanup). Also one Windows 3.12 flake,
+`test_real_harness_owned_process_live_then_joined_exit` (passes on 3.13,
+3.14 and in the previous run; psutil timing after `Popen.wait`). Fix
+(harness branch): `_stop_context_services` registers the live service
+processes first, stops them by registry record, waits for their exit, and
+only then terminates survivors; it skips entirely when no live service
+process exists (fabricated service rows had made it wait out its window:
+the last ten-second teardown cluster locally). Two more pre-existing
+ten-second waits removed in the same branch: a forced Manager stop on a
+record naming the test process (now publishes the stopped row directly)
+or on a placeholder with no registry row (now passed as no record), and
+KILL escalation on a fabricated task row with no process (now only for
+tasks whose process still runs).
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty
