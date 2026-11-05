@@ -1362,6 +1362,22 @@ client were terminated by PID; `orb restart docker` itself hung, and a
 full `orb stop` / `orb start` brought the docker API back (the user's
 own containers restarted on their own). No test or code change.
 
+Release run 11 (`dd6de261`): the full suite stopped on
+`tests/cli/test_cli_queue.py::test_queue_watch_sigint_exits_cleanly`
+(`weft queue watch` did not exit within 10 s of SIGINT; 6584 other tests
+passed in a 6:55 run on a machine whose load average was above 19 while
+the restarted docker containers came up). Third sighting of a
+pre-existing hang: run 5's PostgreSQL leg, and plan
+2026-10-20-bounded-startup-fast-path.md records one in 240 concurrent
+probes with the main thread blocked on a lock acquisition. Reproduction
+attempts here: 25 pytest runs of the test under a twelve-worker load
+generator, 320 CLI readiness/SIGINT sequences at 16 in parallel, and 240
+inside real harness roots across 12 worker processes (load averages 45
+to 98): zero hangs, slowest exit 0.47 s. Root cause still unknown; the
+test now captures the hung child's native stacks (`sample`) and its
+Python tracebacks (SIGABRT with `PYTHONFAULTHANDLER=1`) into the failure
+message, so the next sighting in a release log names the blocking frame.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty

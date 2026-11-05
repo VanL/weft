@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -117,6 +118,36 @@ def test_queue_stdin_context_failure_is_clean_execution_error(
     assert "Traceback" not in result.stderr
 
 
+def _dump_hung_child(process: subprocess.Popen[str]) -> str:
+    """Capture where a child that ignored SIGINT is stuck, then end it.
+
+    macOS ``sample`` records every thread's native stack without privileges;
+    SIGABRT makes the child's faulthandler (``PYTHONFAULTHANDLER=1``) print
+    the Python traceback of every thread to stderr. Both land in the failure
+    message, so a hang seen only under full-suite load is diagnosable from
+    the run's log.
+    """
+
+    report: list[str] = []
+    if shutil.which("sample") is not None:
+        sampled = subprocess.run(
+            ["sample", str(process.pid), "1"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        report.append(sampled.stdout[-12000:])
+    process.send_signal(signal.SIGABRT)
+    try:
+        _stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        _stdout, stderr = process.communicate()
+    report.append(stderr or "")
+    return "\n".join(report)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
 def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
     process = subprocess.Popen(
@@ -129,6 +160,7 @@ def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
             "sigint.queue",
         ],
         cwd=workdir,
+        env={**os.environ, "PYTHONFAULTHANDLER": "1"},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -139,7 +171,13 @@ def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
         startup = process.stderr.readline()
         assert "Watching queue" in startup, startup
         process.send_signal(signal.SIGINT)
-        stdout, stderr = process.communicate(timeout=10)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "weft queue watch did not exit within 10 s of SIGINT:\n"
+                + _dump_hung_child(process)
+            )
     finally:
         if process.poll() is None:
             process.kill()
