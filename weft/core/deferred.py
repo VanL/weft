@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from importlib import import_module
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from simplebroker_pg import ConnectionUsage
@@ -30,6 +30,20 @@ def get_processtitle() -> ModuleType:
 def get_task_evidence() -> ModuleType:
     """Break endpoints -> evidence -> spawn_requests -> endpoints imports."""
     return import_module("weft.core.task_evidence")
+
+
+def get_manager_registry_record_liveness() -> Callable[
+    [dict[str, Any] | None], Literal["live", "stale", "unknown"]
+]:
+    """Break service -> manager_runtime -> launcher -> tasks -> service imports.
+
+    The service idle rule reuses the Manager reader's three-valued registry
+    liveness ([MA-1], [LIVENESS.R3]).
+    """
+    return cast(
+        Callable[[dict[str, Any] | None], Literal["live", "stale", "unknown"]],
+        import_module("weft.core.manager_runtime").manager_registry_record_liveness,
+    )
 
 
 def get_pg_connection_stats() -> Callable[[Queue], dict[str, int]]:

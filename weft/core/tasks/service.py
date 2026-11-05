@@ -37,6 +37,7 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
+from weft.core.deferred import get_manager_registry_record_liveness
 from weft.core.service_convergence import (
     ServiceOwnerRecord,
     collect_service_owner_records,
@@ -45,8 +46,7 @@ from weft.core.service_convergence import (
     timestamp_is_expired,
 )
 from weft.core.taskspec import TaskSpec
-from weft.ext import RunnerHandle
-from weft.helpers import closing_queue_iterator, handle_has_live_host_process
+from weft.helpers import closing_queue_iterator
 
 from .base import BaseTask, TaskWorkerResult
 
@@ -55,10 +55,11 @@ logger = logging.getLogger(__name__)
 _service_worker_stop = object()
 _service_worker_thread_done = object()
 
-_SERVICE_IDLE_EXIT_NS = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
-_MANAGER_RECORD_UNVERIFIED_TTL_NS = int(
-    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000
-)
+
+def _service_idle_exit_ns() -> int:
+    """Return ``SERVICE_IDLE_EXIT_SECONDS`` in nanoseconds (Spec: [MF-3.2])."""
+
+    return int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
 
 
 def _service_monotonic_ns() -> int:
@@ -251,7 +252,7 @@ class ServiceTask(BaseTask):
         idle_since = self._idle_since_monotonic_ns
         if idle_since is None or self._has_work() or self._work_undetermined():
             return None
-        remaining_ns = _SERVICE_IDLE_EXIT_NS - (_service_monotonic_ns() - idle_since)
+        remaining_ns = _service_idle_exit_ns() - (_service_monotonic_ns() - idle_since)
         return max(0.0, remaining_ns / 1_000_000_000)
 
     def _reactor_support_routes(self) -> dict[str, str]:
@@ -340,7 +341,7 @@ class ServiceTask(BaseTask):
             self._idle_since_monotonic_ns = now_ns
             return
         idle_ns = now_ns - idle_since
-        if idle_ns < _SERVICE_IDLE_EXIT_NS:
+        if idle_ns < _service_idle_exit_ns():
             return
         self.taskspec.mark_completed(return_code=0)
         self._report_state_change(
@@ -355,11 +356,15 @@ class ServiceTask(BaseTask):
 
         Reads ``weft.state.services`` once, keeps the canonical manager key
         through the shared ``service_convergence`` readers, reduces to the
-        latest row per Manager owner, and reports whether any ``active`` row is
-        live: a ``host-pid`` handle must name a process whose identity still
-        matches; a row without one counts while it is younger than the
-        unverified-record TTL. A registry that cannot be read reports ``True``:
-        absence is not proof ([WT-2a.13]), and the next wake re-checks.
+        latest row per Manager owner, and reports whether any ``active`` row
+        keeps the service: ``live`` evidence always does, ``unknown`` evidence
+        does while the row is younger than the unknown-row age policy the
+        Manager reader and ``weft status`` apply
+        (``MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS``), and ``stale``
+        evidence never does. The evidence is the Manager reader's own
+        three-valued ``manager_registry_record_liveness``. A registry that
+        cannot be read reports ``True``: absence is not proof ([WT-2a.13]), and
+        the next wake re-checks.
 
         Spec: [MA-1] item 7, [MA-1.6], [MF-3.2]
         """
@@ -394,26 +399,23 @@ class ServiceTask(BaseTask):
 
     @staticmethod
     def _manager_owner_record_live(record: ServiceOwnerRecord, *, now_ns: int) -> bool:
-        """Return whether one active Manager owner row has live evidence.
+        """Return whether one active Manager owner row keeps the service.
+
+        ``live`` keeps it; ``unknown`` keeps it within the unknown-row age
+        policy; ``stale`` does not.
 
         Spec: [MA-1.6], [LIVENESS.R3]
         """
 
-        payload = record.payload.get("runtime_handle")
-        handle: RunnerHandle | None = None
-        if isinstance(payload, Mapping):
-            try:
-                handle = RunnerHandle.from_dict(payload)
-            except ValueError:
-                handle = None
-        if (
-            handle is not None
-            and handle.control.get("authority") == "host-pid"
-            and handle.scoped_host_processes()
-        ):
-            return handle_has_live_host_process(handle)
+        liveness = get_manager_registry_record_liveness()(dict(record.payload))
+        if liveness == "live":
+            return True
+        if liveness == "stale":
+            return False
         return not timestamp_is_expired(
-            record.timestamp, now_ns, _MANAGER_RECORD_UNVERIFIED_TTL_NS
+            record.timestamp,
+            now_ns,
+            int(MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS * 1_000_000_000),
         )
 
     def _emit_activity_event(self) -> None:

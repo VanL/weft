@@ -14,8 +14,10 @@ import queue as thread_queue
 import threading
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
+import psutil
 import pytest
 
 import weft.core.tasks.service as service_module
@@ -23,6 +25,7 @@ from simplebroker import Queue
 from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_STOP,
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     SERVICE_IDLE_EXIT_SECONDS,
@@ -747,6 +750,7 @@ def test_service_task_lanes_are_single_flight(
 # --- Service idle clock ([MA-1] item 7, [MF-3.2]; owner rules 2026-11-04) ---
 
 _IDLE_WINDOW_NS = int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+_THIS_CREATE_TIME = psutil.Process(os.getpid()).create_time()
 
 
 class IdleClockServiceTask(ServiceTestTask):
@@ -1048,7 +1052,9 @@ def test_service_live_manager_keeps_an_idle_service(
             "control": {"authority": "host-pid"},
             "observations": {
                 "host_pids": [os.getpid()],
-                "host_processes": [{"pid": os.getpid(), "create_time": None}],
+                "host_processes": [
+                    {"pid": os.getpid(), "create_time": _THIS_CREATE_TIME}
+                ],
             },
             "metadata": {},
         },
@@ -1104,5 +1110,87 @@ def test_service_without_work_definition_never_idle_exits(
         task.process_once()
         assert not task.should_stop
         assert task.next_wait_timeout() is None
+    finally:
+        task.stop()
+
+
+def _host_pid_manager_payload(task: ServiceTask) -> dict[str, Any]:
+    """Return an active canonical Manager row naming this process exactly."""
+
+    return build_manager_service_payload(
+        context=task._task_context(),
+        tid=str(time.time_ns()),
+        name="manager",
+        status="active",
+        queues={},
+        runtime_handle={
+            "runner": "host",
+            "kind": "process",
+            "id": str(os.getpid()),
+            "control": {"authority": "host-pid"},
+            "observations": {
+                "host_pids": [os.getpid()],
+                "host_processes": [
+                    {"pid": os.getpid(), "create_time": _THIS_CREATE_TIME}
+                ],
+            },
+            "metadata": {},
+        },
+    )
+
+
+@pytest.mark.parametrize("row_age", ["fresh", "past_unknown_policy"])
+def test_service_unresolved_manager_identity_follows_the_unknown_row_policy(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    idle_clock: dict[str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    row_age: str,
+) -> None:
+    """An unresolved Manager identity is ``unknown``, not absence (review R3).
+
+    With the host probe denied (``AccessDenied``), the Manager reader's
+    three-valued liveness is ``unknown``. A fresh row keeps the idle service
+    alive past its window; a row older than the unknown-row age policy that
+    the Manager reader and ``weft status`` apply no longer does, so the
+    service idle-exits.
+    """
+
+    db_path, make_queue = broker_env
+    task = IdleClockServiceTask(db_path, make_service_taskspec(unique_tid))
+    task._activate_service_task()
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(_host_pid_manager_payload(task))
+    )
+
+    def access_denied(pid: int) -> Any:
+        raise psutil.AccessDenied(pid)
+
+    # Every host-identity probe in the process is denied, as for a Manager
+    # owned by another user.
+    monkeypatch.setattr(psutil, "Process", access_denied)
+    if row_age == "past_unknown_policy":
+        aged_ns = time.time_ns() + int(
+            (MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS + 1) * 1_000_000_000
+        )
+        monkeypatch.setattr(
+            service_module,
+            "time",
+            SimpleNamespace(
+                time_ns=lambda: aged_ns,
+                monotonic=time.monotonic,
+                monotonic_ns=time.monotonic_ns,
+            ),
+        )
+    try:
+        task.process_once()
+        idle_clock["ns"] += _IDLE_WINDOW_NS
+        task.process_once()
+        if row_age == "fresh":
+            assert not task.should_stop
+            assert task.taskspec.state.status == "running"
+        else:
+            assert task.should_stop
+            assert task.taskspec.state.status == "completed"
     finally:
         task.stop()
