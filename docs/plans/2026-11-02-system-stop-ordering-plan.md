@@ -1,6 +1,6 @@
 # System STOP: Tasks, Then Internal Services, Then the Manager
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.10], [OBS.6], [LIVENESS.R3]-[LIVENESS.R7]; docs/specifications/02-TaskSpec.md [TS-1], [TS-1.1]; docs/specifications/05-Message_Flow_and_State.md [MF-5]
 Superseded by: none
 
@@ -1622,6 +1622,18 @@ the same change as this file.
 - Scoped round 2 (codex 0.161.0, 2026-11-03, range e266a85a..d53929c9): F1, F3, F4, F5 confirmed fixed; the publication-order correction confirmed. BLOCKED on F2 residual (the settlement cursor started at the newest log row, excluding terminal proof published before collection) and F6 (the cursor advanced during iteration, so a page-read failure discarded observed proof and skipped it permanently); F7 (the log-handle closure assertion was vacuous): all accepted and fixed in `3cd931d6`. No round 3 under the owner's one-scoped-round rule; the fix verified by the series lead (tests run, mutations reasoned from the code).
 
 - [WT-7] keyed possession probe (2026-11-04). Key, items P4, C4, B2 from the fourteen-item bank the owner reviewed on 2026-11-02 (held outside the repository; items reusable by the owner's instruction): P4 "One task that supervises several agent sessions at once" (expected: in core as a reactor tree under [WT-2a.6], root owner plus one child reactor per session, immutable controls down and events up, no shared handles); C4 "Keep the old ten-digit TID short form decodable for one release" (expected refusal: [WT-2a.9], [ALT-WT-012]; a bounded forward migration, not a dual decoder); B2 "Audit the Manager's STOP drain" (expected: tasks and internal services signalled together with no tasks-then-services-then-self ordering [WT-2a.13]). Taker: codex 0.161.0, read-only sandbox, a different family from the plan author and the bank drafter; its command log shows reads of `docs/program-theory.md` and nothing else. Grading rule as in plan 1 (pass on reaching the expected placement, refusal or prediction with at least one expected entry or one that entails it); graded by the series lead against the owner-reviewed bank. The owner's instruction of 2026-11-04: "Do all the probe keys. You can re-use them." Result: PASS, three of three. (1) an ordinary task supervising child session reactors in its own reactor tree, one arbiter each, immutable controls down and events up, no shared handles; cited [WT-3], [WT-2a.6], [WT-2], [WT-5]. (2) refused as compatibility code; the old form is lossy; all Weft-owned producers and consumers move together, old decoder removed, bounded forward migration only; cited [ALT-WT-012], [WT-2a.9], [ALT-WT-022], [WT-2a.1], "No compatibility code". (3) a shutdown dependency-order defect, the Manager stopping services or exiting before active tasks are handled, with Manager-local child tracking insufficient for detached tasks, and missing evidence never proof of death; cited [WT-2a.13], [ALT-WT-015], "Availability and death are different questions". The probe is spent for this plan; the audit refresh (I-13) is recorded above. `completed` still waits on the green CI run on Linux, macOS and Windows that `## Verification` requires, which needs a push, so the plan stays `promoted`.
+
+- Closure (2026-11-05). The one item this plan still waited on, the green
+  CI run on Linux, macOS and Windows that `## Verification` requires, is
+  GitHub Actions run 42003247847 on `0ff8cfbf` (the weft 0.9.120 release
+  commit): all 36 jobs passed, including every Windows, macOS, Linux and
+  PostgreSQL test lane. That commit carries this plan's user-work phase and
+  snapshot targets; its services phase was removed afterwards by
+  `docs/plans/2026-11-04-context-level-service-singletons-plan.md` (internal
+  services are context-level singletons a Manager never stops), as the
+  2026-11-04 revision note above records. The keyed possession probe (PASS
+  three of three) and the I-13 audit refresh are recorded above. Status
+  `completed`; index row `completed`.
 
 ## Execution log
 

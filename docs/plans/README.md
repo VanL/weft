@@ -27,7 +27,7 @@ There are currently 67 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `promoted` | none |
+| [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `completed` | none |
 | [`2026-11-04-manager-drain-and-service-bookkeeping-plan.md`](./2026-11-04-manager-drain-and-service-bookkeeping-plan.md) | Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule | `completed` | none |
 | [`2026-11-04-system-stop-snapshot-targets-plan.md`](./2026-11-04-system-stop-snapshot-targets-plan.md) | System STOP Targets Every Live Task by Snapshot | `completed` | none |
 | [`2026-11-04-admission-evidence-read-failure-plan.md`](./2026-11-04-admission-evidence-read-failure-plan.md) | Admission Evidence: A Failed Read Changes No Mode | `completed` | none |
@@ -38,7 +38,7 @@ There are currently 67 plan files in this directory.
 | [`2026-11-02-docs-and-broker-boundary-plan.md`](./2026-11-02-docs-and-broker-boundary-plan.md) | Docs and the Broker Boundary: Security Account and Layer Ownership | `completed` | none |
 | [`2026-11-02-python-craft-late-imports-plan.md`](./2026-11-02-python-craft-late-imports-plan.md) | Python Craft: Late Imports and the Expert-Developer Test (owner decision first) | `completed` | none |
 | [`2026-11-02-reactor-edge-timer-floors-plan.md`](./2026-11-02-reactor-edge-timer-floors-plan.md) | Reactor Edges: Replace Timer Floors with Readiness Waits | `completed` | none |
-| [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `promoted` | none |
+| [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `completed` | none |
 | [`2026-11-02-task-monitor-heartbeat-clock-plan.md`](./2026-11-02-task-monitor-heartbeat-clock-plan.md) | TaskMonitor: One Clock, Not Two | `completed` | none |
 | [`2026-11-02-test-suite-structure-plan.md`](./2026-11-02-test-suite-structure-plan.md) | Test Suite: Release-Tool Tests and Structural Flakiness (owner decision first) | `draft` | none |
 | [`2026-11-02-tid-display-encoding-plan.md`](./2026-11-02-tid-display-encoding-plan.md) | TID Display Encoding: Lossless Rendering Everywhere | `completed` | none |

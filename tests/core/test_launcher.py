@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import psutil
 import pytest
 
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
@@ -73,3 +76,40 @@ def test_service_without_a_usable_context_root_keeps_the_inherited_cwd(
         )
         is None
     )
+
+
+def test_launched_service_process_runs_in_its_context_root(
+    weft_harness: WeftTestHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service launched from another directory sits in its context root.
+
+    The entry wiring, observed on the real process: the Manager runs in this
+    process with a working directory outside the context, so without the
+    change of directory at process entry the service would inherit that one.
+    """
+
+    elsewhere = tmp_path / "launcher-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    weft_harness.ensure_foreground_manager()
+
+    def service_pids() -> list[int]:
+        live = weft_harness._live_internal_service_processes()
+        return [pid for processes in live.values() for pid, _created in processes]
+
+    def working_directories() -> list[Path]:
+        return [Path(psutil.Process(pid).cwd()).resolve() for pid in service_pids()]
+
+    root = weft_harness.root.resolve()
+    assert elsewhere.resolve() != root
+    # The Manager records a service's pid at launch, before the spawned
+    # process has reached its entry, so the directory settles a moment later.
+    deadline = time.monotonic() + 30.0
+    observed = working_directories()
+    while (not observed or set(observed) != {root}) and time.monotonic() < deadline:
+        time.sleep(0.05)
+        observed = working_directories()
+    assert observed, "no internal service process appeared"
+    assert set(observed) == {root}

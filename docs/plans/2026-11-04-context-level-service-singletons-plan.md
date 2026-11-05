@@ -1,6 +1,6 @@
 # Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-1.6a], [MA-3]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2]; docs/specifications/07-System_Invariants.md [MANAGER.13], [MANAGER.15]
 Superseded by: none
 
@@ -1067,6 +1067,85 @@ into §1 and Task 3. **Ruled by the owner, 2026-11-04: agree.**
   `mark_completed` on a cancelled task; fixed, terminal guard first, test
   (g). F9 (Medium): SIGTERM is not a Windows proof of normal shutdown;
   fixed, Task 3 (f) uses `weft manager stop`.
+
+- Closing review and probe, reviewer availability (2026-11-05). Two bounded
+  Tier-1 attempts failed before a third family was used. grok 1.0.70
+  refused to start: its `read-only` sandbox could not be applied on this
+  machine (`/var/run/docker.sock` is a symlink into OrbStack, outside its
+  deny list), and a sandbox that fails to apply is an invocation failure.
+  codex 0.161.0 returned its usage-limit error (quota exhausted until
+  2026-11-11). The taker and reviewer was qwen 0.17.1 in plan approval mode
+  with `meta/muse-spark-1.3-contributor` through OpenRouter (the release
+  canary's configuration), a different family from the author and the bank
+  drafter. Its write-attempt containment was probed immediately before use:
+  asked to create one file and append to another, it wrote neither.
+- Scoped completed-work review (qwen as above, 2026-11-05, one round) of the
+  two production changes that landed after the implementation re-review:
+  `eda46063` (a service runs in its context root) and `0ff8cfbf` (ruling
+  10.6). It read one file holding the two diffs and their surrounding code.
+  No finding on the terminal-row rule; it confirmed both new terminal test
+  cases fail on the previous code. F1 (P2): `os.chdir` at process entry is
+  unguarded, so a context root removed between the existence check and the
+  change of directory ends the service at entry. Disposition: declined. A
+  context root that disappears in that window is a context being removed;
+  the service has nothing left to serve, failing at entry is the fail-stop
+  outcome and a later Manager's ensure launches a fresh one, and a catch
+  there would be armor against a failure with no observed instance (owner
+  rule of 2026-09-10 and 2026-11-04). F2 (P3): the three launcher tests
+  exercised only `service_working_directory`, so removing the entry wiring
+  would fail nothing off Windows. Disposition: fixed.
+  `tests/core/test_launcher.py::test_launched_service_process_runs_in_its_context_root`
+  starts a Manager from a directory outside the context and waits for every
+  live service process to report the context root as its working directory;
+  it fails with the change of directory disabled and passes with it.
+- [WT-7] keyed possession probe (2026-11-05). Key, items P2, C1, B4 from
+  the owner-reviewed bank (reusable by the owner's 2026-11-04 rule): P2 "A
+  `weft top` daemon that keeps a live index of task status for fast
+  display" (expected: a stateless read model over the queues is fine; a
+  daemon with its own index is a second control plane; [WT-5], "Observable
+  with standard tools", [WT-2a.2]); C1 "Cache task status in a
+  Manager-local table so `weft task list` is fast" (expected refusal:
+  [WT-2a.2], [ALT-WT-010], [ALT-WT-019]); B4 "Audit the service worker and
+  interactive loops" (expected: fixed timer floors standing in for readiness
+  waits; [WT-2a.6], [WT-7] "Event-driven against absence", [ALT-WT-021]).
+  Taker: qwen as above, run in a directory holding only a copy of
+  `docs/program-theory.md`; it listed that one file as read and the
+  directory was unchanged afterwards. Grading rule as in plan 1; graded by
+  the series lead against the owner-reviewed bank. Result: PASS, three of
+  three. (1) refused the daemon with a live index as a second control plane
+  and accepted only an ephemeral observer with no daemon, index, cache or
+  query service; cited [WT-5], [ALT-WT-010], [WT-2a.2], "Observable with
+  standard tools". (2) refused the Manager-local table as status truth,
+  Manager memory staying a hint rebuilt from queues; cited [WT-2a.2],
+  "Queues carry facts; processes carry hints", [ALT-WT-015], [ALT-WT-010].
+  (3) predicted defensive fixed polling caps and timer floors in place of
+  one arbiter over a closed input set with readiness demultiplexing; cited
+  [WT-2a.6], [ALT-WT-002], [ALT-WT-021].
+- Audit-table refresh (by reference to
+  `docs/plans/2026-11-02-program-theory-reconciliation-plan.md`
+  `### Audit table`; that plan is not edited), against `0ff8cfbf`: I-13 →
+  [WT-2a.13] (line 5441): aligned, amended by this plan. A Manager ensures
+  its context's internal services and stops none of them on any drain,
+  supersession, yield, idle exit or cleanup; a system STOP is user work and
+  then the Manager; `weft system stop` empties a context. Evidence:
+  `tests/core/test_manager.py::test_manager_superseded_without_user_work_exits_leaving_service_running`,
+  `tests/core/test_manager.py::test_manager_idle_exit_detaches_launched_service`,
+  `tests/cli/test_cli_system.py::test_system_stop_stops_manager_then_every_internal_service`.
+  4.3-a (line 5456): aligned for the service lifetime this plan added. The
+  idle clock is one deadline merged into the task's single wait
+  (`ServiceTask.next_wait_timeout`), not a second clock. Evidence:
+  `tests/tasks/test_heartbeat.py::test_heartbeat_empty_table_idle_exits_and_a_row_never_does`,
+  `tests/tasks/test_service_task.py::test_service_without_work_definition_never_idle_exits`,
+  `tests/tasks/test_liveness_monitor.py::test_liveness_idle_exits_only_without_a_counting_row`.
+  [ALT-WT-023] was added after the table and has no row. All other rows
+  carry forward by reference.
+- Closure (2026-11-05). Independent implementation review PASS on re-review,
+  the scoped completed-work review above with both findings disposed, the
+  keyed possession probe PASS three of three, audit rows I-13 and 4.3-a
+  refreshed, and the release evidence in the Execution log (weft 0.9.120:
+  CI run 42003247847, 36 of 36 jobs, on `0ff8cfbf`). Status `completed`;
+  index row `completed`. Not a closure condition and still open: the codex
+  live canary against the released commit when its quota returns.
 
 ## Revision Log
 
