@@ -1486,6 +1486,22 @@ only dark wakes, so the suite has been running inside a dark-wake power
 state since the keep-awake hold began at 02:03. Nothing in weft changed
 between run 9 and run 14 except test files.
 
+Release run 15 (`db2a8ed8`): 6586 passed in 5:12 once the machine was in
+full wake and the leftover services were gone; the two failures were
+pytest workers killed from outside the run while it was in progress.
+
+Release run 16 (`0ff8cfbf`, with ruling 10.6): every local gate passed
+(full suite 6589 in 4:39, PostgreSQL 6538 in 7:19, the extension and
+integration suites, the live provider canary without codex, all five
+builds). CI run 42003247847 passed all 36 jobs, including every Windows,
+macOS, Linux and PostgreSQL lane. Tags `v0.9.120`, `weft_docker/v0.9.95`,
+`weft_django/v0.9.55`, `weft_macos_sandbox/v0.6.24` and
+`weft_microsandbox/v0.5.25` were pushed at that commit and all five release
+gates succeeded; the GitHub Release and PyPI carry 0.9.120. Still open
+after the release: the codex live canary against the released commit when
+quota returns, the keyed [WT-7] possession probe and Status closure of this
+plan, and closure of the system-stop-ordering plan on this green CI.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty
