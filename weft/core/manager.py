@@ -39,7 +39,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -256,7 +256,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_LAUNCH_RESULT_ACCEPTED: Final[object] = object()
+_launch_result_accepted = object()
 """Launch-worker return value once its result is in the Manager's accepted
 slot; the reactor takes the slot on this notice or at acceptance close
 (plan 2026-11-04-context-level-service-singletons, ruling 10.5)."""
@@ -1637,7 +1637,7 @@ class Manager(ServiceTask):
         The result is handed to the reactor under ``_launch_handoff_lock``:
         while acceptance is open (and before the cleanup deadline and any
         stop request) it goes into the accepted slot and the worker returns
-        ``_LAUNCH_RESULT_ACCEPTED`` as the notice; otherwise nothing can
+        ``_launch_result_accepted`` as the notice; otherwise nothing can
         register the launch, so the worker undoes it for either role.
 
         Spec: docs/specifications/07-System_Invariants.md [IMPL.10];
@@ -1664,7 +1664,7 @@ class Manager(ServiceTask):
                     # The reactor still accepts: it commits the result (a
                     # service detached, user work then terminated).
                     self._accepted_launch_results.append(result)
-                    return _LAUNCH_RESULT_ACCEPTED
+                    return _launch_result_accepted
             return self._reap_unaccepted_launch(item, process, cleanup_deadline)
         return None
 
@@ -2052,7 +2052,7 @@ class Manager(ServiceTask):
             return
         if event.kind != "result":
             return
-        if event.value is _LAUNCH_RESULT_ACCEPTED:
+        if event.value is _launch_result_accepted:
             self._handle_accepted_launch_results()
             return
         if not isinstance(event.value, _ManagerChildLaunchResult):

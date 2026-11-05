@@ -1727,6 +1727,40 @@ def stop_system(
     """
 
     manager_tid = _stop_active_manager(context, timeout=timeout, force=force)
+    services = stop_internal_services(context, timeout=timeout)
+    return SystemStopResult(
+        manager_tid=manager_tid,
+        stopped=services.stopped,
+        escalated=services.escalated,
+        unreachable=services.unreachable,
+        service_keys=services.service_keys,
+    )
+
+
+def stop_internal_services(
+    context: WeftContext,
+    *,
+    timeout: float = MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS,
+) -> SystemStopResult:
+    """Stop every live internal service of the context by registry record.
+
+    The service half of `stop_system`, with no Manager stop: callers that
+    have already stopped or reaped the Manager (the test harness) use it so
+    a stale active Manager row is not waited out twice. Each live internal
+    service is sent STOP on its record's ``ctrl_in`` in one exact-name
+    broadcast and waited for within ``timeout``, escalating on the Manager
+    drain's rungs for verified same-host ``host-pid`` identities only. A
+    record with no route is reported as unreachable. ``manager_tid`` of the
+    result is ``None``.
+
+    Raises:
+        ControlRejected: A reachable service did not stop.
+        CommandExecutionError: The registry or a task snapshot could not be
+            read, during target collection or settlement.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
+    """
+
     targets = _collect_service_stop_targets(context)
     reachable = {tid: t for tid, t in targets.items() if t.ctrl_in is not None}
     if reachable:
@@ -1745,7 +1779,7 @@ def stop_system(
                 + ", ".join(sorted(pending))
             )
     return SystemStopResult(
-        manager_tid=manager_tid,
+        manager_tid=None,
         stopped=tuple(sorted(reachable)),
         escalated=tuple(sorted(tid for tid, t in reachable.items() if t.escalated)),
         unreachable=tuple(sorted(set(targets) - set(reachable))),
@@ -1775,6 +1809,7 @@ __all__ = [
     "cmd_status",
     "cmd_system_stop",
     "collect_broker_status",
+    "stop_internal_services",
     "stop_system",
     "system_status",
 ]

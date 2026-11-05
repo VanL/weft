@@ -1176,7 +1176,7 @@ plus lead commits `12c2ab91` (R7) and `1c881907` (mappings):
   PID are never signalled.
 - R2 (`c5d8e77e`): `_launch_handoff_lock`, `_launch_acceptance_closed`
   and an accepted-results slot: the worker, under the lock, appends its
-  result and returns `_LAUNCH_RESULT_ACCEPTED` (the framework's completion
+  result and returns `_launch_result_accepted` (the framework's completion
   notice follows), or reaps through `_reap_unaccepted_launch` once
   acceptance is closed, the deadline passed or stop requested; cleanup
   closes acceptance under the lock after its wait, then drains queued
@@ -1215,4 +1215,20 @@ plus lead commits `12c2ab91` (R7) and `1c881907` (mappings):
   failed once under the twelve-worker merged run and passes alone;
   treated as a load flake, watched in the release run.
 
-Scoped re-review of `d00aae2f..6c66679f` requested (one round).
+Scoped re-review of `d00aae2f..6c66679f` (codex, read-only): PASS, R1-R7
+all confirmed resolved with citations; in-memory probes of the three
+handoff orderings produced one commit or one reap, never both. Its
+non-actionable observation, taken up by the lead: harness teardowns of
+tests with real services had doubled because `stop_system` stopped the
+Manager again (waiting out an active row of an inline Manager the test
+had already torn down), and a service STOPped generically before its
+identity was captured could only be waited out. Lead fixes:
+`stop_internal_services` is the service-only half of `stop_system`
+(which now composes `_stop_active_manager` with it); the harness calls
+it; internal services are excluded from the harness's generic task-stop
+fan-out so their identity is captured while their snapshot exists.
+Teardown of `test_manager_leadership_yields_to_canonical_lower_manager`:
+20.2 s back to 10.2 s (its pre-plan value). Also: the launch-handoff
+sentinel is `_launch_result_accepted = object()` (the constants test
+treats an upper-case module name as a production constant; the house
+sentinel form is lower case, as in `weft/core/tasks/service.py`).

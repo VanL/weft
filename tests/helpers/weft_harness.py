@@ -28,6 +28,7 @@ from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_r
 from weft._constants import (
     CONTROL_STOP,
     INTERNAL_SERVICE_KEYS,
+    INTERNAL_SERVICE_ROLES,
     LIVE_SERVICE_STATUSES,
     MANAGER_STARTUP_LOG_DIRNAME,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
@@ -1049,9 +1050,16 @@ class WeftTestHarness:
         candidate_tids: list[str] = []
         terminal_events = self._latest_task_events()
         for full_tid, data in self._latest_tid_state_payloads().items():
+            role = self._mapping_role(data)
             if (
                 full_tid in self._registered_manager_tids
-                or self._mapping_role(data) == "manager"
+                or role == "manager"
+                # Internal services are stopped by registry record through
+                # `_stop_context_services`, with their identity captured
+                # while their snapshot still exists; a generic STOP or KILL
+                # here would retire the snapshot first and leave an active
+                # registry row that `stop_system` can only wait out.
+                or role in INTERNAL_SERVICE_ROLES
                 or self._mapping_has_safe_owner(data)
                 or terminal_events.get(full_tid) in TERMINAL_TASK_EVENTS
             ):
@@ -1324,7 +1332,7 @@ class WeftTestHarness:
     def _stop_context_services(self, *, timeout: float, force: bool) -> None:
         """Stop the context's services after the Manager, then reap survivors.
 
-        `stop_system` stops any Manager still active and every live internal
+        `stop_internal_services` stops every live internal
         service by registry record. A service whose latest live registry row
         still names a live scoped host process afterwards is terminated
         through the registered-PID path, and every escalation, unreachable
@@ -1336,7 +1344,8 @@ class WeftTestHarness:
         """
 
         try:
-            result = system_cmd.stop_system(self.context, timeout=timeout, force=force)
+            del force  # the harness has already stopped or reaped the Manager
+            result = system_cmd.stop_internal_services(self.context, timeout=timeout)
         except WeftError as exc:
             self._record_cleanup_diagnostic(f"system stop failed: {exc}")
         else:
