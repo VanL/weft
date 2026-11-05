@@ -129,6 +129,21 @@ def _dump_hung_child(process: subprocess.Popen[str]) -> str:
     """
 
     report: list[str] = []
+    # Signal state first: a child whose SIGINT is blocked keeps it pending
+    # forever (macOS ps shows the mask and the pending set; bit 0x2 is SIGINT).
+    dispositions = subprocess.run(
+        ["ps", "-o", "sigmask=,sig=", "-p", str(process.pid)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    report.append(
+        "child sigmask/pending: "
+        + dispositions.stdout.strip()
+        + f"; parent SIGINT handler={signal.getsignal(signal.SIGINT)!r}"
+        + f" blocked={signal.pthread_sigmask(signal.SIG_BLOCK, [])!r}"
+    )
     if shutil.which("sample") is not None:
         sampled = subprocess.run(
             ["sample", str(process.pid), "1"],
@@ -137,7 +152,8 @@ def _dump_hung_child(process: subprocess.Popen[str]) -> str:
             timeout=30,
             check=False,
         )
-        report.append(sampled.stdout[-12000:])
+        # Keep the call graph; the trailing "Binary Images" table is noise.
+        report.append(sampled.stdout.split("Binary Images:")[0][-16000:])
     process.send_signal(signal.SIGABRT)
     try:
         _stdout, stderr = process.communicate(timeout=5)
@@ -150,6 +166,11 @@ def _dump_hung_child(process: subprocess.Popen[str]) -> str:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
 def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
+    # The child inherits this process's SIGINT disposition and signal mask:
+    # CPython installs its SIGINT handler only over SIG_DFL, and a blocked
+    # signal stays pending. Name a polluted worker rather than hang in it.
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert signal.SIGINT not in signal.pthread_sigmask(signal.SIG_BLOCK, [])
     process = subprocess.Popen(
         [
             sys.executable,

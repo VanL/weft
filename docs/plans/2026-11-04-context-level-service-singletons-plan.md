@@ -1378,6 +1378,25 @@ test now captures the hung child's native stacks (`sample`) and its
 Python tracebacks (SIGABRT with `PYTHONFAULTHANDLER=1`) into the failure
 message, so the next sighting in a release log names the blocking frame.
 
+Release run 12 (`3c6850ad`): the SIGINT hang recurred and the diagnostic
+fired. The hung child's Python tracebacks show its main thread inside
+`QueueChangeMonitor.wait` (`_activity_token.acquire(timeout=0.5)`) called
+from `watch_queue`'s polling loop, and its watcher thread in the
+strategy's `Event.wait`: a process polling normally with no
+`KeyboardInterrupt` ever raised. So the interrupt never reached the
+Python level at all, which points at the signal's delivery (an inherited
+ignored disposition, which CPython does not override at startup, or an
+inherited blocked mask) rather than at a lock or a swallowed exception.
+The test now asserts before spawning that its own worker has SIGINT at
+the default handler and unblocked, and on a hang records the child's
+signal mask and pending set (`ps -o sigmask=,sig=`) beside the stacks.
+The same run also saw a first sighting of
+`test_agent_session_blocking_poll_failure_is_consumed_as_next_turn_transport_failure`
+(an agent session not ready within 5 s, phase `runtime_startup`, process
+alive) with the machine's load average between 47 and 66; watched, not
+changed. The run's 14:56 wall time is the `-x` stop waiting for in-flight
+long tests, not a slowdown (no test ran over 10 s before the stop).
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty
