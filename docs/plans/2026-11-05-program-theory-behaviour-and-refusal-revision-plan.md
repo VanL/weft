@@ -327,10 +327,12 @@ Replacement (`docs/program-theory.md`):
      migration table in section 6: a named probe with the numbers from a
      run, or the verdict `unmeasured`. No such row stays `aligned` on
      reading alone. This step adds no tooling and repairs nothing.
-   - The closing plan named for each drifted row is
-     `docs/plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md`.
-     If that plan is split or renamed before this one closes, update the
-     rows.
+   - The [WT-4.1] and [WT-4.3] rows name
+     `docs/plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md`
+     as their closing plan. The [WT-2a.15] row names none: that plan defers
+     scoped dispatch and the published refusal, so completing it leaves the
+     invariant violated. The row stays drifted until a plan that carries
+     both is named. If the repair plan is split or renamed, update the rows.
 
 6. Entry wiring check.
    - Open `docs/agent-context/context.index.yaml`. If it carries a
@@ -351,7 +353,7 @@ macOS, default configuration, commit `44d7f900`.
 
 | Claim | Contract | Evidence in the tree | Verdict | Closing plan |
 |-------|----------|----------------------|---------|--------------|
-| [WT-2a.15] standing refusal is published and scoped | [MA-1.8]; MANAGER.11 | After a Manager SIGKILL between the pre-launch checkpoint and process creation, a later `weft run` stayed undispatched for more than three minutes; status showed the Manager `active` and the task `queued`. `weft/core/manager.py::Manager._recover_scheduler_paths` adds the launch to `_scheduler_undurable`, which gates all ordinary dispatch. [MA-1.8] states that rule. | drifted (code and spec) | `docs/plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md` |
+| [WT-2a.15] standing refusal is published and scoped | [MA-1.8]; MANAGER.11 | After a Manager SIGKILL between the pre-launch checkpoint and process creation, a later `weft run` stayed undispatched for more than three minutes; status showed the Manager `active` and the task `queued`. `weft/core/manager.py::Manager._recover_scheduler_paths` adds the launch to `_scheduler_undurable`, which gates all ordinary dispatch. [MA-1.8] states that rule. | drifted (code and spec) | not yet named: the repair plan defers scoped dispatch and the published refusal to owner decisions, so it does not close this row |
 | [WT-4.1] wake predicate reads facts | [CC-2.1]; [MA-1.8] | `Manager._queue_has_pending` answers for the request queue from the in-memory scheduler. Launch delay for a lone submission to an idle Manager: 17 to 949 ms (mean about 470); 10 to 29 ms with the predicate consulting the queue. | drifted (code) | `docs/plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md` |
 | [WT-4.3] quiet costs nothing observable | [CC-2.2.1]; [MA-1] item 5 | Manager CPU with one `sleep` task running: 9.95 s in 10 s. Idle: 0.9%. `Manager.next_wait_timeout` publishes the idle broker-probe deadline while user children exist and the turn never re-arms it. Present in 0.9.105. | drifted (code) | `docs/plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md` |
 | Header and [WT-7] behaviour probe | this document | No probe existed; both rows above were marked aligned in the 2026-11-02 table. | theory revision (this plan) | this plan |
@@ -511,3 +513,4 @@ Open: none.
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-05 | `7e9c6106` | Change B ([WT-4.1] wake-predicate row) | Owner-approved fix ("Make that change", 2026-11-05) after the two-factor fit trial. The other-family account showed the row stated only a soundness condition ("true only when ..."), which does not prevent the lost wake that motivated it, and that "answered from queue rows" contradicted [WT-2a.6] local inputs. The row now states completeness ("true whenever actionable work is present"), scopes itself to predicates over queued work, and names local completions and deadlines as arbiter inputs. | No cross-family round; the fix applies the reviewer's own finding and is re-checked by the repeated fit trial |
+| 2026-11-05 | `90e1de3f` | Section 6 [WT-2a.15] row; Task 5 | An outside review of the repair plan (relayed by the owner) found that the repair plan defers scoped dispatch (its D1) and the published refusal (its D5), so it cannot close [WT-2a.15]. The row now names no closing plan and stays drifted. | No |
