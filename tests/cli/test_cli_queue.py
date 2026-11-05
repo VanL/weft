@@ -166,10 +166,12 @@ def _dump_hung_child(process: subprocess.Popen[str]) -> str:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT semantics")
 def test_queue_watch_sigint_exits_cleanly(workdir: Path) -> None:
-    # The child inherits this process's SIGINT disposition and signal mask:
-    # CPython installs its SIGINT handler only over SIG_DFL, and a blocked
-    # signal stays pending. Name a polluted worker rather than hang in it.
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    # An ignored SIGINT and a blocked signal mask survive exec (a Python-level
+    # handler resets to the default), and CPython installs its own handler
+    # only over the default. A process launched from a subshell background
+    # job (``(cmd &)``) in a non-interactive shell starts with SIGINT ignored
+    # and passes that on. Name a polluted worker rather than hang in it.
+    assert signal.getsignal(signal.SIGINT) is not signal.SIG_IGN
     assert signal.SIGINT not in signal.pthread_sigmask(signal.SIG_BLOCK, [])
     process = subprocess.Popen(
         [

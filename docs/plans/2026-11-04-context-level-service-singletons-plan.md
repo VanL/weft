@@ -1397,6 +1397,43 @@ alive) with the machine's load average between 47 and 66; watched, not
 changed. The run's 14:56 wall time is the `-x` stop waiting for in-flight
 long tests, not a slowdown (no test ran over 10 s before the stop).
 
+Release run 13 (`3b17f9a7`): the SIGINT hang is root-caused, and it was
+never weft. The new precondition fired: the pytest worker's SIGINT handler
+was `SIG_IGN`. An ignored disposition survives exec and CPython installs
+its own SIGINT handler only over the default, so the `weft queue watch`
+child ignored the interrupt. The source is the launch command: in this
+session's non-interactive tool shell a subshell background job (`(nohup
+... &)`) starts with SIGINT ignored (verified directly: `(cmd & wait)` and
+`(nohup cmd &)` report `SIG_IGN`; a top-level `nohup cmd &` reports the
+default handler), and release runs 11, 12 and 13 were launched in that
+form while runs 9 and 10 were not. The ignored disposition passed from
+`bin/release.py` through pytest and its workers to every test child; only
+this test depends on receiving SIGINT. The 2026-10-20 sighting and run 5
+are presumed the same launch-form inheritance (an agent's backgrounded
+run), not reproduced. The precondition now rejects only inherited states
+(`SIG_IGN`, a blocked mask); a Python-level handler left by another test
+resets on exec. Two tests that installed `_install_signal_handlers` in the
+worker (`test_installed_signal_handler_only_records_state_no_broker_call`,
+and the in-process `_task_process_entry` tests in
+tests/tasks/test_task_execution.py) restored only SIGTERM or nothing; they
+now restore SIGTERM, SIGINT and SIGUSR1.
+
+Runs 11 to 13 also ran on a machine that was asleep between
+fifteen-minute dark wakes (pmset log: Maintenance Sleep from 22:45,
+"Dark Wake Thermal Emergency" sleep at 00:43, lid closed), which freezes
+every process: run 13's other two failures
+(`test_pause_resume_control_flow` 5 s reactor evidence,
+`test_result_all_simple_tasks` task completion timeout) and run 12's
+agent-session readiness timeout are frozen timers, and run 10's "wedged
+docker engine" coincides with the 22:45 to 23:44 sleep periods. The
+session now holds the app's keep-awake across turns (a `caffeinate` hold
+was refused by the tool policy). Leaked test children were also found:
+46 `multiprocessing` spawn children with their resource trackers, parented
+to launchd, from `test_run_inline_wait_succeeds` and
+`test_run_inline_no_wait_succeeds` across today's runs (0.6% CPU each);
+terminating them was refused by the tool policy, so they remain for the
+owner, and the leak is a follow-up.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty

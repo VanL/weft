@@ -264,7 +264,13 @@ def test_installed_signal_handler_only_records_state_no_broker_call() -> None:
             self.handled.append(signum)
 
     task = RecordingTask()
-    original_handler = signal.getsignal(signal.SIGTERM)
+    installed_signals = [signal.SIGTERM, signal.SIGINT]
+    sigusr1 = getattr(signal, "SIGUSR1", None)
+    if sigusr1 is not None:
+        installed_signals.append(sigusr1)
+    original_handlers = {
+        signum: signal.getsignal(signum) for signum in installed_signals
+    }
     try:
         _install_signal_handlers(task)
         installed = signal.getsignal(signal.SIGTERM)
@@ -272,7 +278,11 @@ def test_installed_signal_handler_only_records_state_no_broker_call() -> None:
         # Invoke exactly as CPython's signal machinery would.
         installed(signal.SIGTERM, None)
     finally:
-        signal.signal(signal.SIGTERM, original_handler)
+        # The installer binds SIGTERM, SIGINT and SIGUSR1; leaving any of them
+        # on this stand-in task would redirect the worker's own signals.
+        for signum, original_handler in original_handlers.items():
+            if original_handler is not None:
+                signal.signal(signum, original_handler)
 
     assert task.noted == [signal.SIGTERM]
     assert task.handled == []

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -4636,6 +4636,23 @@ def test_runtime_summary_contains_plugin_failure_but_propagates_fatal_exit(
         assert exc_info.value is fatal
     finally:
         task.cleanup()
+
+
+@pytest.fixture(autouse=True)
+def _restore_termination_signal_handlers() -> Iterator[None]:
+    """``_task_process_entry`` installs SIGTERM/SIGINT/SIGUSR1 handlers in this process."""
+
+    signals = [signal.SIGTERM, signal.SIGINT]
+    sigusr1 = getattr(signal, "SIGUSR1", None)
+    if sigusr1 is not None:
+        signals.append(sigusr1)
+    original = {signum: signal.getsignal(signum) for signum in signals}
+    try:
+        yield
+    finally:
+        for signum, handler in original.items():
+            if handler is not None and signal.getsignal(signum) is not handler:
+                signal.signal(signum, handler)
 
 
 def test_task_process_entry_waits_through_activity_seam(
