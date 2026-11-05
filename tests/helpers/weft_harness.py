@@ -1379,8 +1379,22 @@ class WeftTestHarness:
         docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
         """
 
+        del force  # the harness has already stopped or reaped the Manager
+        live_before = self._live_internal_service_processes()
+        if not live_before:
+            # Only a live service process can settle a registry STOP. Fabricated
+            # service rows (duplicate candidates, dead registered PIDs, replayed
+            # service families) have no process behind them and would make the
+            # registry stop wait out its whole window for nothing.
+            return
+        # Register the service processes first: a service settles its registry
+        # row and terminal snapshot before its process has fully exited, and on
+        # Windows the root cannot be removed while the exiting process still
+        # holds its SQLite handles; the registered-PID wait below covers that.
+        for processes in live_before.values():
+            for pid, create_time in processes:
+                self.register_pid(pid, kind="managed", create_time=create_time)
         try:
-            del force  # the harness has already stopped or reaped the Manager
             result = system_cmd.stop_internal_services(self.context, timeout=timeout)
         except WeftError as exc:
             self._record_cleanup_diagnostic(f"system stop failed: {exc}")
@@ -1393,6 +1407,7 @@ class WeftTestHarness:
                 self._record_cleanup_diagnostic(
                     f"system stop found unreachable services {list(result.unreachable)}"
                 )
+        self._wait_for_registered_pids_to_exit(timeout=timeout)
         for tid, processes in sorted(self._live_internal_service_processes().items()):
             for pid, create_time in processes:
                 self.register_pid(pid, kind="managed", create_time=create_time)
@@ -1400,6 +1415,7 @@ class WeftTestHarness:
                     f"terminated service {tid} pid {pid} after system stop"
                 )
                 self._terminate_pid(pid)
+        self._wait_for_registered_pids_to_exit(timeout=timeout)
 
     def _live_internal_service_processes(
         self,
