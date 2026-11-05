@@ -6,6 +6,7 @@ import json
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
@@ -456,6 +457,16 @@ def test_real_harness_owned_process_live_then_joined_exit(
         process.stdin.close()
         process.wait(timeout=10)
         dead = tasks.task_runtime_liveness(TID, context=weft_harness.context)
+        if sys.platform == "win32":
+            # Windows signals the process object (which is what ``wait``
+            # returns on) before the PID leaves the system process list, and
+            # psutil reports the PID as a running process until it does; its
+            # own ``Process.wait`` polls ``pid_exists`` after WAIT_OBJECT_0 for
+            # this reason. The verdict settles within milliseconds.
+            settle_deadline = time.monotonic() + 5.0
+            while dead.state == "live" and time.monotonic() < settle_deadline:
+                time.sleep(0.01)
+                dead = tasks.task_runtime_liveness(TID, context=weft_harness.context)
         assert (dead.state, dead.reason) == ("dead", "runtime_dead")
     finally:
         if process.poll() is None:

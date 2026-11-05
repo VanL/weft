@@ -3071,6 +3071,13 @@ def _drain_task_monitor_workers_without_turns(
 
     A reactor turn may start the owed follow-up cycle; the overrun tests must
     observe the owed state between the overrunning cycle and that follow-up.
+
+    A lane thread publishes its work result, then its ``result`` and
+    ``stopped`` events and its lane completion. The in-flight marker clears on
+    the first of those; the rest may still be unpublished when the result
+    queue reads empty. Waiting for the lane threads to exit as well leaves no
+    straggling event for the next reactor turn, which would otherwise handle
+    it and return before starting the owed cycle.
     """
 
     deadline = time.monotonic() + timeout
@@ -3079,6 +3086,7 @@ def _drain_task_monitor_workers_without_turns(
         or task._processor_work_in_flight is not None
         or task._control_cleanup_work_in_flight is not None
         or task._has_pending_worker_results()
+        or task._has_active_worker_threads()
     ):
         assert time.monotonic() < deadline, _task_monitor_idle_diagnostics(task)
         task.wait_for_activity(timeout=0.05)

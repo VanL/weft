@@ -98,9 +98,16 @@ def wait_for_file(path: str, *, timeout: float = 30.0, result: str = "done") -> 
 def signal_ready_and_wait_for_release(
     ready_path: str, release_path: str, *, timeout: float = 60.0
 ) -> str:
-    """Publish actual function entry, then await the test owner's release."""
+    """Publish actual function entry, then await the test owner's release.
 
-    Path(ready_path).write_text(str(os.getpid()), encoding="utf-8")
+    The ready file appears only once its content is complete: a reader that
+    polls for existence must never observe an empty file.
+    """
+
+    ready = Path(ready_path)
+    partial = ready.with_name(ready.name + ".partial")
+    partial.write_text(str(os.getpid()), encoding="utf-8")
+    os.replace(partial, ready)
     return wait_for_file(release_path, timeout=timeout)
 
 

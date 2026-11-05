@@ -1314,6 +1314,38 @@ Spec [MA-1] item 7 gains the sentence; tests/core/test_launcher.py holds
 the firing tests. Also: a failed root removal now names the processes
 holding the root (cwd or open files) in its note (`0abb6289`).
 
+Release run 9 (`54ec418a`, CI run 41966107703): both Windows
+root-removal tests passed on every Windows lane, so the service cwd fix
+holds. Four unrelated single-lane failures, each root-caused and fixed in
+tests only (`weft/` unchanged):
+`test_child_commit_reads_only_new_sentinel` (Windows 3.12) built child
+TIDs from `time.time_ns()` in a tight loop; the coarse Windows clock
+repeated a value and the launch-custody guard (`_child_launch_already_committed`)
+correctly refused the second process for one TID — the test now uses a
+strictly increasing timestamp base.
+`test_dispatch_reuses_outer_child_cleanup[watcher]` (Ubuntu 3.12) polled
+for the child's ready file to exist and read it empty: the sample target
+wrote it in place; it now writes a `.partial` file and renames it.
+`test_task_monitor_overrun_builtin_cycle_with_control_cleanup_runs_exactly_one_follow_up`
+(macOS 3.13): a lane thread publishes its work result, then `result`,
+`stopped` and lane-completion events; the in-flight marker clears on the
+first, so the test's no-turn drain helper could see an empty result
+queue while the trailing events were still unpublished, and the next
+reactor turn handled those stragglers and returned before starting the
+owed cycle. The helper now also waits for the lane threads to exit.
+`test_real_harness_owned_process_live_then_joined_exit` (Windows 3.13,
+and 3.12 in run 7): Windows signals the process object (what
+`Popen.wait` returns on) before the PID leaves the system process list,
+and psutil reports the PID as running until it does (psutil's own
+`Process.wait` polls `pid_exists` after `WAIT_OBJECT_0` for this reason:
+"its PID may still stick around"). The verdict settles within
+milliseconds, so the test polls for it on Windows only, bounded at 5 s;
+POSIX keeps the immediate assertion. No production rule was added: a
+dead process read as live for milliseconds is a timeliness matter the
+next probe settles, not a liveness-contract gap, and a Windows-only
+exit-signal check at the identity seam would be armor against a window
+psutil itself cannot resolve through its public API.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty

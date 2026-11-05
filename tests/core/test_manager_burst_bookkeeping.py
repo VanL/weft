@@ -483,8 +483,13 @@ def test_child_commit_reads_only_new_sentinel(
             return True
 
     pipes = []
+    # Child TIDs come from the spawn timestamp. Production timestamps are
+    # unique broker timestamps; a coarse wall clock (Windows) can repeat
+    # ``time.time_ns()`` across iterations, and a repeated TID is a launch
+    # conflict, not a second child.
+    base_timestamp = time.time_ns()
     try:
-        for _ in range(population):
+        for index in range(population):
             reader, writer = multiprocessing.Pipe(duplex=False)
             pipes.append((reader, writer))
             spec = manager._build_child_spec(
@@ -494,7 +499,7 @@ def test_child_commit_reads_only_new_sentinel(
                         "function_target": "tests.tasks.sample_targets:echo_payload",
                     }
                 },
-                time.time_ns(),
+                base_timestamp + index,
             )
             assert spec is not None
             request = manager_mod._ManagerChildLaunchRequest(
