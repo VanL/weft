@@ -19,10 +19,12 @@ from collections.abc import Mapping
 from dataclasses import replace
 from multiprocessing import resource_tracker
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from typing import Any, cast
 
 from simplebroker import BrokerTarget, serialize_config
 from weft._constants import (
+    INTERNAL_RUNTIME_TASK_CLASS_KEY,
     PARENT_LOSS_WAKE_INTERVAL_CEILING,
     PARENT_LOSS_WAKE_INTERVAL_FLOOR,
     PARENT_LOSS_WATCH_INTERVAL_SECONDS,
@@ -119,6 +121,32 @@ def _redirect_standard_streams_to_devnull() -> None:
             os.close(devnull_fd)
 
 
+def service_working_directory(spec: TaskSpec) -> Path | None:
+    """Return the working directory an internal service process runs in.
+
+    An internal service is a context-level singleton ([MA-1] item 7): its
+    working directory is its own context root, never whatever directory its
+    launcher happened to be in. A spawned child otherwise inherits the
+    launcher's cwd, and on Windows a directory that is any live process's
+    cwd cannot be removed, so a service launched from inside another
+    context's directory would pin that directory for as long as it lives.
+    Only an absolute, existing context root is used; user work keeps the
+    inherited cwd and its own ``working_dir``.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+    """
+
+    if not spec.metadata.get(INTERNAL_RUNTIME_TASK_CLASS_KEY):
+        return None
+    context = getattr(spec.spec, "weft_context", None)
+    if not isinstance(context, str) or not context:
+        return None
+    root = Path(context)
+    if not root.is_absolute() or not root.is_dir():
+        return None
+    return root
+
+
 def _task_process_entry(
     task_cls_path: str,
     db_path: BrokerTarget | str,
@@ -148,6 +176,9 @@ def _task_process_entry(
         install_runtime_identity(RuntimeIdentity.from_mapping(runtime_identity))
     task_cls = _load_task_class(task_cls_path)
     spec = decode_taskspec_transport_payload(json.loads(spec_json))
+    working_directory = service_working_directory(spec)
+    if working_directory is not None:
+        os.chdir(working_directory)
     task = task_cls(db_path, spec, config=resolved_config)
     _install_signal_handlers(task)
     initial_parent_pid = os.getppid()
