@@ -39,7 +39,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import ValidationError
 
@@ -255,6 +255,11 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_LAUNCH_RESULT_ACCEPTED: Final[object] = object()
+"""Launch-worker return value once its result is in the Manager's accepted
+slot; the reactor takes the slot on this notice or at acceptance close
+(plan 2026-11-04-context-level-service-singletons, ruling 10.5)."""
 
 DispatchOwnershipState = Literal["self", "other", "none", "unknown"]
 ManagerLivenessState = Literal["live", "stale", "unknown"]
@@ -690,6 +695,13 @@ class Manager(ServiceTask):
         self._child_launch_started_this_turn = False
         self._dispatch_cleanup_scope = False
         self._active_cleanup_deadline: float | None = None
+        # Launch custody handoff [IMPL.10]: under this lock a launch worker
+        # either places its result in the accepted slot (the reactor's to
+        # commit) or, once acceptance is closed, keeps the launch and reaps
+        # it; cleanup closes acceptance under the same lock.
+        self._launch_handoff_lock = threading.Lock()
+        self._launch_acceptance_closed = False
+        self._accepted_launch_results: list[_ManagerChildLaunchResult] = []
         self._last_child_cleanup_survivors: tuple[dict[str, Any], ...] = ()
         self._idle_timeout: float = float(
             taskspec.metadata.get(
@@ -1619,57 +1631,83 @@ class Manager(ServiceTask):
     def _run_child_launch_service_worker(
         self,
         context: ServiceWorkerContext,
-    ) -> _ManagerChildLaunchResult | None:
-        """Run one queued child-launch request through the service-worker API."""
+    ) -> _ManagerChildLaunchResult | object | None:
+        """Run one queued child-launch request through the service-worker API.
+
+        The result is handed to the reactor under ``_launch_handoff_lock``:
+        while acceptance is open (and before the cleanup deadline and any
+        stop request) it goes into the accepted slot and the worker returns
+        ``_LAUNCH_RESULT_ACCEPTED`` as the notice; otherwise nothing can
+        register the launch, so the worker undoes it for either role.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10];
+        docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+        """
 
         for item in context.iter_items():
             if not isinstance(item, _ManagerChildLaunchRequest):
                 raise TypeError("manager child-launch worker received invalid work")
             result = self._run_child_launch_worker(item)
             process = result.process
+            if process is None:
+                return result
             cleanup_deadline = self._active_cleanup_deadline
-            if process is not None and (
-                context.stop_requested()
-                or (
-                    cleanup_deadline is not None
-                    and self._remaining_deadline(cleanup_deadline) <= 0
-                )
-            ):
-                # A result before the cleanup deadline is the reactor's to
-                # commit (a service detached, user work then terminated); after
-                # it, or after the stop request, nothing can register it, so
-                # the launch is undone for either role [IMPL.10].
-                deadline = cleanup_deadline or time.monotonic()
-                remaining = self._remaining_deadline(deadline)
-                pid = process.pid
-                if isinstance(pid, int) and pid > 0:
-                    if remaining > 0:
-                        # Split-budget KILL escalation; see _terminate_children.
-                        terminate_process_tree(
-                            pid,
-                            timeout=remaining / 2.0,
-                            kill_after=True,
-                        )
-                    else:
-                        # The shared deadline forbids a new grace period, but
-                        # already-visible descendants must not be abandoned
-                        # with the late wrapper.
-                        kill_process_tree(pid, timeout=0.0)
-                try:
-                    if process.is_alive():
-                        process.kill()
-                except (AssertionError, OSError, ValueError):
-                    logger.debug(
-                        "Failed to reap child launched during manager cleanup",
-                        exc_info=True,
+            with self._launch_handoff_lock:
+                if not (
+                    self._launch_acceptance_closed
+                    or context.stop_requested()
+                    or (
+                        cleanup_deadline is not None
+                        and self._remaining_deadline(cleanup_deadline) <= 0
                     )
-                return _ManagerChildLaunchResult(
-                    request=item,
-                    process=process,
-                    error=RuntimeError("manager stopped while child launch completed"),
-                )
-            return result
+                ):
+                    # The reactor still accepts: it commits the result (a
+                    # service detached, user work then terminated).
+                    self._accepted_launch_results.append(result)
+                    return _LAUNCH_RESULT_ACCEPTED
+            return self._reap_unaccepted_launch(item, process, cleanup_deadline)
         return None
+
+    def _reap_unaccepted_launch(
+        self,
+        request: _ManagerChildLaunchRequest,
+        process: BaseProcess,
+        cleanup_deadline: float | None,
+    ) -> _ManagerChildLaunchResult:
+        """Undo a launch the reactor can no longer accept, whatever its role.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        deadline = cleanup_deadline or time.monotonic()
+        remaining = self._remaining_deadline(deadline)
+        pid = process.pid
+        if isinstance(pid, int) and pid > 0:
+            if remaining > 0:
+                # Split-budget KILL escalation; see _terminate_children.
+                terminate_process_tree(
+                    pid,
+                    timeout=remaining / 2.0,
+                    kill_after=True,
+                )
+            else:
+                # The shared deadline forbids a new grace period, but
+                # already-visible descendants must not be abandoned
+                # with the late wrapper.
+                kill_process_tree(pid, timeout=0.0)
+        try:
+            if process.is_alive():
+                process.kill()
+        except (AssertionError, OSError, ValueError):
+            logger.debug(
+                "Failed to reap child launched during manager cleanup",
+                exc_info=True,
+            )
+        return _ManagerChildLaunchResult(
+            request=request,
+            process=process,
+            error=RuntimeError("manager stopped while child launch completed"),
+        )
 
     def _run_child_launch_worker(
         self,
@@ -2014,6 +2052,9 @@ class Manager(ServiceTask):
             return
         if event.kind != "result":
             return
+        if event.value is _LAUNCH_RESULT_ACCEPTED:
+            self._handle_accepted_launch_results()
+            return
         if not isinstance(event.value, _ManagerChildLaunchResult):
             request = next(iter(self._active_child_launches.values()), None)
             if request is None:
@@ -2028,6 +2069,18 @@ class Manager(ServiceTask):
             )
             return
         self._handle_child_launch_result(event.value)
+
+    def _handle_accepted_launch_results(self) -> None:
+        """Commit every launch result a worker placed in the accepted slot.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]
+        """
+
+        with self._launch_handoff_lock:
+            accepted = self._accepted_launch_results
+            self._accepted_launch_results = []
+        for result in accepted:
+            self._handle_child_launch_result(result)
 
     def _handle_worker_result(self, result: TaskWorkerResult) -> None:
         if isinstance(result.value, ServiceWorkerEvent):
@@ -8563,14 +8616,23 @@ class Manager(ServiceTask):
     # Cleanup
     # ------------------------------------------------------------------
     def _drain_active_child_launches_for_cleanup(self, deadline: float) -> None:
-        """Commit in-flight child launches before child termination cleanup."""
+        """Commit in-flight child launches, then close launch acceptance.
+
+        After the wait, acceptance closes under ``_launch_handoff_lock``: a
+        result a worker accepted before the close is committed here, and a
+        worker that reaches the lock after it reaps its own launch. No
+        launch is left both uncommitted and unreaped.
+
+        Spec: docs/specifications/07-System_Invariants.md [IMPL.10]; plan
+        2026-11-04-context-level-service-singletons, ruling 10.5
+        """
 
         while (
             self._has_active_child_launches() and self._remaining_deadline(deadline) > 0
         ):
             handled = self._drain_worker_results()
             if not self._has_active_child_launches():
-                return
+                break
             if handled:
                 continue
             if not self._has_worker_activity():
@@ -8579,18 +8641,17 @@ class Manager(ServiceTask):
                     sorted(self._active_child_launches),
                 )
                 self._active_child_launches.clear()
-                return
+                break
             self._sync_worker_result_event()
             self._worker_result_event.wait(
                 timeout=min(0.05, self._remaining_deadline(deadline))
             )
-        if self._has_active_child_launches():
-            # A result the worker published before the deadline, after this
-            # loop's last pass, is still the reactor's to commit: one final
-            # non-blocking drain takes it. A result published after the
-            # deadline meets the worker's own reap instead ([IMPL.10]; plan
-            # 2026-11-04-context-level-service-singletons, ruling 10.5).
-            self._drain_worker_results()
+        with self._launch_handoff_lock:
+            self._launch_acceptance_closed = True
+        # Queued launch failures and notices, then any accepted result whose
+        # notice is not yet queued; neither waits.
+        self._drain_worker_results()
+        self._handle_accepted_launch_results()
 
     def _cleanup_task_resources(self, deadline: float) -> None:
         """Release Manager-owned children and registrations by the deadline.

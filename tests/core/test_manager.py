@@ -7404,6 +7404,65 @@ def test_manager_cleanup_final_pass_commits_result_published_before_the_deadline
             )
 
 
+def test_manager_launch_result_after_acceptance_close_is_reaped(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch that reaches the handoff after acceptance closed is reaped.
+
+    Spec: docs/specifications/07-System_Invariants.md [IMPL.10]; plan
+    2026-11-04-context-level-service-singletons ruling 10.5 (review R2).
+    The worker finishes its launch and pauses just before the handoff lock;
+    meanwhile the reactor's cleanup drain gives up and closes acceptance.
+    No cleanup deadline is set and no stop is requested, so only the closed
+    acceptance can send the worker to its reap. Named mutation: a worker
+    that publishes its result without the synchronized acceptance check
+    leaves the process alive, uncommitted and unregistered.
+    """
+
+    manager, make_queue = manager_setup
+    reactor = threading.current_thread()
+    at_handoff = threading.Event()
+    resume = threading.Event()
+    real_lock = manager._launch_handoff_lock
+
+    class PausingLock:
+        """The real lock; the worker pauses before acquiring it."""
+
+        def __enter__(self) -> bool:
+            if threading.current_thread() is not reactor:
+                at_handoff.set()
+                resume.wait()
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc_info: object) -> None:
+            real_lock.__exit__(None, None, None)
+
+    monkeypatch.setattr(manager, "_launch_handoff_lock", PausingLock())
+    child_spec, process, _entered, release = _start_blocked_service_launch(
+        manager, monkeypatch
+    )
+    assert child_spec.tid is not None
+    try:
+        release.set()
+        assert at_handoff.wait(timeout=10.0)
+        manager._drain_active_child_launches_for_cleanup(time.monotonic() + 0.2)
+        assert manager._launch_acceptance_closed is True
+        assert process.is_alive()
+        resume.set()
+        reap_deadline = time.monotonic() + 10.0
+        while process.is_alive() and time.monotonic() < reap_deadline:
+            time.sleep(0.01)
+        assert not process.is_alive()
+    finally:
+        release.set()
+        resume.set()
+    assert child_spec.tid not in manager._child_processes
+    assert not _active_service_owner_rows(
+        make_queue, service_key=INTERNAL_SERVICE_KEY_HEARTBEAT, tid=child_spec.tid
+    )
+
+
 def test_manager_late_service_launch_after_cleanup_deadline_is_reaped(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
