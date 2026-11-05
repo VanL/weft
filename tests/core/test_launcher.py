@@ -28,7 +28,9 @@ def _spec(
             weft_context=weft_context,
         ),
         io=IOSection(
-            inputs={"inbox": f"T{tid}.inbox"}, outputs={"outbox": f"T{tid}.outbox"}
+            inputs={"inbox": f"T{tid}.inbox"},
+            outputs={"outbox": f"T{tid}.outbox"},
+            control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
         ),
         state=StateSection(),
         metadata={
