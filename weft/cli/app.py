@@ -35,6 +35,7 @@ from weft._constants import (
     __version__,
     get_weft_directory_name,
 )
+from weft.commands._output import render_text_output
 from weft.commands._resources import command_resource_scope
 from weft.commands._streaming import decode_stream_text
 from weft.commands.manager import dispatch_refusal_lines, dispatch_refusals_json
@@ -300,10 +301,19 @@ def _render_task_result(
                 ),
                 nl=nl,
             )
-        elif isinstance(value, (dict, list)):
-            typer.echo(json.dumps(value, ensure_ascii=False), nl=nl)
         elif value is not None:
-            typer.echo(str(value), nl=nl)
+            try:
+                render_text_output(
+                    value,
+                    outputs_root=result.outputs_root,
+                    nl=nl,
+                    emit_text=lambda text, newline: typer.echo(text, nl=newline),
+                )
+            except BrokenPipeError:
+                raise
+            except OSError as exc:
+                typer.echo(str(exc), err=True)
+                return 1
         return 0
     if json_output and result.reconciliation is not None:
         typer.echo(
@@ -2316,6 +2326,7 @@ def result_command(
                             stderr=payload.get("stderr"),
                             error=payload.get("error"),
                             reconciliation=payload.get("reconciliation"),
+                            outputs_root=payload.get("outputs_root"),
                         )
                         exit_code = _render_task_result(
                             result,

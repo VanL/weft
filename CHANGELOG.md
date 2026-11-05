@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Spill files survive task exit and result consumption; retaining or removing
+  them is the caller's responsibility. Each output has its own exclusive
+  numbered file, with ordinary umask-based permissions. Prefer an explicit
+  output location for large artifacts that need managed retention ([MF-2.1]).
+- Waiting text-mode `weft run` and single-task `weft result` deliver local
+  spilled bytes with size/SHA-256 verification. JSON, all-results and client
+  reads keep references. Scripts parsing text references should use `--json`.
+  References carry the producer hostname; cross-host delivery is unsupported.
+  Top-level lists containing a reference-shaped element render element by
+  element; ordinary lists keep JSON rendering ([CLI-1.1.1], [CLI-1.2.2]).
+
 ## [0.9.121] - 2026-11-05
 
 ### Changed

@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 40 plan files in this directory.
+There are currently 41 plan files in this directory.
 
 ## Curation Policy
 
@@ -27,6 +27,7 @@ There are currently 40 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-05-result-output-fidelity-plan.md`](./2026-11-05-result-output-fidelity-plan.md) | Result Output Fidelity: Spilled Output Survives Its Reference, Failed Commands Keep Their Stdout | `promoted` | none |
 | [`2026-11-05-linux-libc-pidfd-binding-plan.md`](./2026-11-05-linux-libc-pidfd-binding-plan.md) | Linux pidfd Binding Through libc When Python Omits the Wrapper | `promoted` | none |
 | [`2026-11-05-scoped-ambiguous-launch-dispatch-plan.md`](./2026-11-05-scoped-ambiguous-launch-dispatch-plan.md) | Scoped Dispatch Around Ambiguous Launches | `completed` | none |
 | [`2026-11-05-manager-published-refusals-plan.md`](./2026-11-05-manager-published-refusals-plan.md) | Manager Published Refusals | `completed` | none |

@@ -152,6 +152,18 @@ $ weft result 1234567890 --json
 # emits the completed result payload as JSON
 ```
 
+Large results spill to local files. Waiting text-mode `weft run` and
+single-task `weft result` deliver their content and check its size and SHA-256;
+`--json`, `result --all`, and Python clients return the reference. Delivery
+requires a path within the reading context's outputs directory or Weft's
+local temporary outputs directory. Cross-host delivery is unsupported.
+
+Weft never deletes spill files, even after task exit or result consumption.
+You own their retention and removal, including unreferenced files left by a
+failed publication. For output you need to keep or share, have the task write
+to a known file path or artifact store and return a small result naming it.
+Automatic spills are a fallback for unexpectedly large results.
+
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
 
 ## Embedding Weft in Python

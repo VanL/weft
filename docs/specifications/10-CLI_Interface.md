@@ -263,6 +263,14 @@ any frame is written. Reducer state, event, transition ID, channel seal, and
 drain-budget details are private diagnostics and do not appear in `weft run`
 output.
 
+A waiting `weft run` renders results under the same rules as single-task `weft result` ([CLI-1.2.2]): text mode delivers verified large-output content under the reservation and host rules of Large Output Handling; `--json` returns the reference as written.
+
+_Implementation mapping_: `weft/commands/_output.py::render_text_output`
+serves `weft/cli/run.py::render_run_result` and
+`weft/cli/app.py::_render_task_result`. The command result carries its actual
+`outputs_root`, including stored-spec rebinding and `result --stream` events.
+Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
+
 Plain rendering retains the existing `Error executing task: ` prefix before
 the category. JSON stores the category itself in `error` without that prefix.
 
@@ -539,6 +547,7 @@ Current behavior:
 - `--peek` inspects `--all` results without consuming them
 - `--error` selects stderr-oriented output where available
 - `--json` includes metadata
+- in text mode a large-output reference that satisfies the reservation rules of Large Output Handling is delivered as its verified content; `--json` and `--all` return it as written ([MF-2.1])
 - if a known result row exists only as claimed outbox residue and no terminal
   lifecycle proof is visible, `weft result TID --json` returns promptly with
   `status="failed"`, `result=null`, `error`, and additive `reconciliation`

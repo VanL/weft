@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -133,7 +134,7 @@ def await_task_result(
     with closing_queue_iterator(source) as rows:
         for row in rows:
             if isinstance(row, TaskResult):
-                return row
+                return replace(row, outputs_root=str(context.outputs_dir.resolve()))
     raise CommandExecutionError("Result collection ended without an outcome")
 
 
@@ -184,6 +185,7 @@ def _read_outbox_task_result(
         stdout=stdout,
         stderr=stderr,
         error=None,
+        outputs_root=str(context.outputs_dir.resolve()),
     )
 
 
@@ -230,6 +232,11 @@ def _task_result_event(result: TaskResult) -> TaskEvent:
             "stdout": result.stdout,
             "stderr": result.stderr,
             "error": result.error,
+            **(
+                {"outputs_root": result.outputs_root}
+                if result.outputs_root is not None
+                else {}
+            ),
         },
     )
 
@@ -252,7 +259,9 @@ def _result_task_event_stream(
                     yield row
                 else:
                     _require_available_result(row)
-                    yield _task_result_event(row)
+                    yield _task_result_event(
+                        replace(row, outputs_root=str(context.outputs_dir.resolve()))
+                    )
 
     return cast(CommandStream[TaskEvent], _stream())
 

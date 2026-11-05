@@ -24,6 +24,7 @@ from weft.commands import (
     RunSpecDescription,
     TaskEvent,
 )
+from weft.commands._output import render_text_output
 from weft.commands._resources import command_resource_scope
 from weft.commands._streaming import decode_stream_text
 from weft.commands.run import _LiveRunSession, _stop_interactive_run_session
@@ -103,10 +104,18 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
             )
         elif suppress_result_value:
             pass
-        elif isinstance(result_value, (dict, list)):
-            typer.echo(json.dumps(result_value, ensure_ascii=False))
         elif result_value not in (None, ""):
-            typer.echo(str(result_value))
+            try:
+                render_text_output(
+                    result_value,
+                    outputs_root=execution.outputs_root,
+                    emit_text=lambda text, newline: typer.echo(text, nl=newline),
+                )
+            except BrokenPipeError:
+                raise
+            except OSError as exc:
+                typer.echo(str(exc), err=True)
+                return 1
         return 0
 
     display_error = error_message

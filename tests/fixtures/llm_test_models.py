@@ -115,10 +115,38 @@ class DeterministicAgentModel(Model):
         yield f"text:{task}"
 
 
+class SpillPairModel(Model):
+    """Two real tool-chain responses, each over the spill threshold."""
+
+    model_id = "weft-test-spill-pair-model"
+    supports_tools = True
+
+    def execute(
+        self,
+        prompt: Prompt,
+        stream: bool,
+        response: Response,
+        conversation: Any,
+    ) -> Iterator[str]:
+        del stream, conversation
+        if prompt.tool_results:
+            yield "b" * (2 * 1024 * 1024)
+        else:
+            response.add_tool_call(
+                ToolCall(
+                    name=prompt.tools[0].name,
+                    arguments={"payload": "continue"},
+                    tool_call_id="spill-pair",
+                )
+            )
+            yield "a" * (2 * 1024 * 1024)
+
+
 @llm.hookimpl
 def register_models(register: Callable[[Model], None]) -> None:
     """Register deterministic test models through llm's real hook surface."""
     register(DeterministicAgentModel())
+    register(SpillPairModel())
 
 
 def register_test_model_plugin() -> None:

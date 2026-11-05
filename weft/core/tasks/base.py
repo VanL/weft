@@ -21,7 +21,6 @@ import logging
 import os
 import queue as thread_queue
 import re
-import shutil
 import signal
 import socket
 import tempfile
@@ -275,7 +274,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         self.should_stop = False
         self._paused = False
         self._resource_monitor: Any | None = None
-        self._spilled_output_dirs: set[Path] = set()
+        self._spill_sequence = 0
         self._last_poll_report_at = time.monotonic()
         self._last_reported_status: str | None = None
         self._activity: str | None = None
@@ -699,17 +698,28 @@ class BaseTask(MultiQueueWatcher, ABC):
         return Path(tempfile.gettempdir()) / "weft" / "outputs"
 
     def _spill_large_output(self, encoded: bytes) -> dict[str, Any]:
-        """Write a spill reference under OS policy (Large Output Handling, [CTX.5])."""
+        """Publish caller-owned output without replacing prior spills [MF-2.1], [CTX.5]."""
         assert self.tid is not None
         output_dir = self._outputs_base_dir() / self.tid
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "output.dat"
-        output_path.write_bytes(encoded)
+        while True:
+            self._spill_sequence += 1
+            output_path = output_dir / f"{self._spill_sequence}.dat"
+            try:
+                descriptor = os.open(
+                    output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666
+                )
+                break
+            except FileExistsError:
+                continue
+        with os.fdopen(descriptor, "wb") as output_file:
+            output_file.write(encoded)
 
         sha = hashlib.sha256(encoded).hexdigest()
         preview = encoded[:1024].decode("utf-8", errors="replace")
         reference = {
             "type": "large_output",
+            "hostname": socket.gethostname(),
             "path": str(output_path),
             "size": len(encoded),
             "size_mb": round(len(encoded) / (1024 * 1024), 2),
@@ -719,7 +729,6 @@ class BaseTask(MultiQueueWatcher, ABC):
                 f"Output too large ({len(encoded)} bytes); saved to {output_path}"
             ),
         }
-        self._spilled_output_dirs.add(output_dir)
         self._report_state_change(
             event="output_spilled",
             size_bytes=len(encoded),
@@ -966,7 +975,6 @@ class BaseTask(MultiQueueWatcher, ABC):
         attempt("broker_resources", self._close_owned_broker_resources)
         self._owned_queue_names.clear()
         self._queue_cache.clear()
-        self._spilled_output_dirs.clear()
         if failures:
             raise failures[0]
 
@@ -3066,27 +3074,6 @@ class BaseTask(MultiQueueWatcher, ABC):
             while reserved_queue.read_many(64):
                 continue
         return
-
-    def _cleanup_spilled_outputs_if_needed(self) -> None:
-        """Remove spilled output directories when ``cleanup_on_exit`` is enabled.
-
-        Spec: [CC-2.4], [MF-2]
-        """
-        if not getattr(self.taskspec.spec, "cleanup_on_exit", False):
-            return
-
-        for directory in list(self._spilled_output_dirs):
-            try:
-                if directory.exists():
-                    shutil.rmtree(directory, ignore_errors=False)
-            except OSError:
-                logger.debug(
-                    "Failed to remove spilled output directory %s",
-                    directory,
-                    exc_info=True,
-                )
-            finally:
-                self._spilled_output_dirs.discard(directory)
 
 
 def _signal_name(signum: int) -> str:

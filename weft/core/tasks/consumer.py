@@ -884,7 +884,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
         self._emit_pipeline_terminal_event(status="completed")
         self._update_process_title("completed")
-        self._cleanup_spilled_outputs_if_needed()
         self._end_streaming_session()
         self.should_stop = True
         if self._stop_event:
@@ -1193,7 +1192,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._purge_start_tokens()
             if not self._uses_live_command_streaming():
                 self._purge_stream_markers()
-            self._cleanup_spilled_outputs_if_needed()
 
         super()._cleanup_task_resources(deadline)
 

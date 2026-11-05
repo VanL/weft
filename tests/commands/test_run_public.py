@@ -294,6 +294,7 @@ def test_cmd_run_wait_returns_a_session(
             tid="1780000000000000001",
             status="completed",
             result_value="ok",
+            outputs_root=str(context.outputs_dir.resolve()),
             error_prefix="Custom failure",
             submitted_payload={"tid": "1780000000000000001", "status": "submitted"},
             manager_started_payload={"tid": "manager", "status": "active"},
@@ -373,6 +374,7 @@ def test_run_session_wait_preserves_terminal_task_timeout(
             status="timeout",
             error_message="target timed out",
             error_prefix="Target failed",
+            outputs_root=str(context.outputs_dir.resolve()),
         )
     finally:
         session.close()

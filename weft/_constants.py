@@ -1935,6 +1935,9 @@ WEFT_BROKER_PROJECT_CONFIG_FILENAME: Final[str] = "broker.toml"
 STREAM_CHUNK_SIZE_BYTES: Final[int] = 512 * 1024
 """Chunk size used when splitting large task output into queue messages."""
 
+SPILL_OUTPUT_READ_SIZE: Final[int] = 64 * 1024
+"""Bounded file read size for text-mode spill delivery ([MF-2.1])."""
+
 SUBPROCESS_STREAM_READ_SIZE: Final[int] = 64 * 1024
 """Read size for subprocess stdout/stderr drain loops."""
 

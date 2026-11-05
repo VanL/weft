@@ -2766,6 +2766,9 @@ def test_run_work_item_spills_large_output(
     reference = json.loads(raw_reference)
     assert reference["type"] == "large_output"
     task.cleanup()
+    output_path = Path(reference["path"])
+    output_path.unlink()
+    output_path.parent.rmdir()
 
 
 def test_run_work_item_deferred_stop_without_active_message_preserves_reserved_queue(
@@ -4927,7 +4930,7 @@ def test_large_output_spills_to_disk(
         if os.name == "posix":
             output_dir.chmod(0o750)
             (output_dir / "output.dat").chmod(0o640)
-            expected_dir_mode, expected_file_mode = 0o750, 0o640
+            expected_dir_mode = 0o750
 
     task = Consumer(db_path, spec)
 
@@ -4993,17 +4996,16 @@ def test_large_output_spills_to_custom_weft_directory_name(
     raw_reference = outbox.read_one()
     assert raw_reference is not None
     reference = json.loads(raw_reference)
-    expected_path = (
-        Path(context_root) / ".engram" / "outputs" / unique_tid / "output.dat"
-    )
+    expected_path = Path(context_root) / ".engram" / "outputs" / unique_tid / "1.dat"
 
     assert Path(reference["path"]) == expected_path
     assert expected_path.exists()
     assert expected_path.read_bytes() == b"x" * output_size
 
 
-def test_large_output_cleanup_on_exit(
-    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+@pytest.mark.parametrize("cleanup_on_exit", [False, True])
+def test_large_output_survives_cleanup_on_exit(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str, cleanup_on_exit: bool
 ) -> None:
     db_path, make_queue = broker_env
     context_root = tmp_path / "project"
@@ -5011,7 +5013,7 @@ def test_large_output_cleanup_on_exit(
     spec = make_function_taskspec(
         unique_tid,
         "tests.tasks.sample_targets:large_output",
-        cleanup_on_exit=True,
+        cleanup_on_exit=cleanup_on_exit,
         weft_context=str(context_root),
         output_size_limit_mb=1,
     )
@@ -5026,8 +5028,11 @@ def test_large_output_cleanup_on_exit(
         lambda: task.taskspec.state.status == "completed",
     )
 
-    expected_path = Path(context_root) / ".weft" / "outputs" / unique_tid / "output.dat"
-    assert not expected_path.exists()
+    raw_reference = make_queue(spec.io.outputs["outbox"]).read_one()
+    assert raw_reference is not None
+    output_path = Path(json.loads(raw_reference)["path"])
+    task.cleanup()
+    assert output_path.read_bytes() == b"x" * (2 * 1024 * 1024)
 
 
 def test_stream_output_writes_chunks(
@@ -5470,3 +5475,73 @@ def test_reserved_policy_clear_on_error(broker_env: BrokerEnv, unique_tid: str) 
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     assert reserved.has_pending() is False
     assert task.taskspec.state.status == "failed"
+
+
+def test_spill_names_preserve_existing_files_and_repeated_direct_outputs(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
+    """Exclusive numeric creation preserves prior caller-owned output [MF-2.1]."""
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:large_output",
+        weft_context=str(tmp_path),
+        output_size_limit_mb=1,
+    )
+    spec = spec.model_copy(
+        update={"spec": spec.spec.model_copy(update={"persistent": True})}
+    )
+    output_dir = tmp_path / ".weft" / "outputs" / unique_tid
+    output_dir.mkdir(parents=True)
+    (output_dir / "1.dat").write_bytes(b"previous")
+    task = Consumer(db_path, spec)
+    try:
+        for char in ("a", "b"):
+            task.run_work_item({"kwargs": {"size": 2 * 1024 * 1024, "char": char}})
+        outbox = make_queue(spec.io.outputs["outbox"])
+        references: list[dict[str, Any]] = []
+        for _ in range(2):
+            raw_reference = outbox.read_one()
+            assert raw_reference is not None
+            references.append(json.loads(raw_reference))
+        assert [Path(ref["path"]).name for ref in references] == ["2.dat", "3.dat"]
+        for ref, byte in zip(references, (b"a", b"b"), strict=True):
+            assert Path(ref["path"]).read_bytes() == byte * (2 * 1024 * 1024)
+        assert (output_dir / "1.dat").read_bytes() == b"previous"
+    finally:
+        task.cleanup()
+
+
+def test_persistent_inbox_spills_are_independent(
+    tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
+) -> None:
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:large_output",
+        weft_context=str(tmp_path),
+        output_size_limit_mb=1,
+    )
+    spec = spec.model_copy(
+        update={"spec": spec.spec.model_copy(update={"persistent": True})}
+    )
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    outbox = make_queue(spec.io.outputs["outbox"])
+    try:
+        for index, char in enumerate(("a", "b"), 1):
+            inbox.write(json.dumps({"kwargs": {"size": 2 * 1024 * 1024, "char": char}}))
+
+            def emitted(expected: int = index) -> bool:
+                return outbox.stats().total >= expected
+
+            _drive_consumer_until(task, emitted)
+        rows = list(outbox.peek_generator())
+        assert len(rows) == 2
+        for raw, byte in zip(rows, (b"a", b"b"), strict=True):
+            assert Path(json.loads(raw)["path"]).read_bytes() == byte * (
+                2 * 1024 * 1024
+            )
+        assert len({json.loads(raw)["path"] for raw in rows}) == 2
+    finally:
+        task.cleanup()

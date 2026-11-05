@@ -1729,8 +1729,14 @@ _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`;
 Current behavior:
 
 - outbox payloads may contain a large-output reference instead of inline data
-- `weft result` reads the outbox payload as written
-- `weft result` does not currently auto-dereference large-output references
+- `large_output` is a reserved transport envelope. Text-mode readers evaluate a value in order: (1) shape: `type: "large_output"`, a string `path`, a nonnegative integer `size`, a 64-hex-character `sha256` and, if present, a nonempty string `hostname`; otherwise it prints as written; (2) host: a `hostname` other than the reader's host exits 1 naming that host and path, without opening the path; (3) location: the symlink-resolved `path` must lie under the symlink-resolved outputs root of the reading context or under the resolved `{tempdir}/weft/outputs/`, compared by path components; otherwise it prints as written; (4) delivery
+- any top-level list result (whether one task's value or several aggregated outputs) with at least one element of reference shape is rendered by text mode element by element in order, each on its own line, with shaped elements evaluated under these rules; nested values are not inspected, and a list with no shaped element keeps its JSON rendering
+- text-mode `weft run` and single-task text-mode `weft result` deliver the referenced bytes to stdout, verifying `size` and `sha256` and flushing stdout; a missing file, a mismatch, a read error or a failed write exits 1 with an error naming the path, never 0
+- an over-limit result is available only on the host where the task ran. Weft does not support multi-host contexts; a PostgreSQL context used from several hosts gets no cross-host delivery
+- forwarding or copying preserves the reference, and the file is never deleted by Weft, but it does not extend the reader's allowed roots. Automatic text delivery is promised only within those roots and after the host check. Same-host or legacy host-unscoped references outside those roots print as ordinary values; fully shaped foreign-host envelopes report the preceding host error regardless of location
+- every other reader returns a large-output reference as written: `--json` on either command, `weft result --all` (including `--peek`, which remains `--all`-only), pipelines and the Python client
+- delivery is at most once per consuming read: the result row is claimed before delivery, so a failed delivery leaves the row consumed and the spill file in place
+- Weft never deletes spill files: not at task exit, not when a reader consumes the reference, and not by any monitor. Retaining or removing them is the caller's responsibility. A task whose large output must be kept or shared should write it as a side effect to a location its caller or reader knows and return a small result naming that location; spills are the automatic fallback for unexpectedly large results
 
 ### Large-Output Reference Format [MF-2.1]
 
@@ -1744,12 +1750,13 @@ Reference envelope (all fields present):
 ```json
 {
   "type": "large_output",
-  "path": "/tmp/weft/outputs/{tid}/output.dat",
+  "path": "/tmp/weft/outputs/{tid}/{seq}.dat",
   "size": 12345678,
   "size_mb": 11.77,
   "truncated_preview": "<first 1024 bytes decoded as UTF-8 with replacement>",
   "sha256": "<hex-encoded SHA-256 of the raw encoded bytes>",
-  "message": "Output too large (12345678 bytes); saved to /tmp/weft/outputs/{tid}/output.dat"
+  "hostname": "<producer socket.gethostname()>",
+  "message": "Output too large (12345678 bytes); saved to /tmp/weft/outputs/{tid}/{seq}.dat"
 }
 ```
 
@@ -1763,15 +1770,19 @@ Field definitions:
 | `size_mb` | float | `size / (1024 * 1024)`, rounded to 2 decimal places |
 | `truncated_preview` | string | First 1024 bytes decoded as UTF-8 with error replacement |
 | `sha256` | string | Hex-encoded SHA-256 digest of the full encoded output |
+| `hostname` | string | Producer host (`socket.gethostname()`); the file is readable only on that host. Absent in references written before this field existed |
 | `message` | string | Human-readable summary for display in CLI output |
 
 Path locality rules:
 
 - If `spec.weft_context` is set, the spill directory is
-  `{weft_context}/{WEFT_DIRECTORY_NAME}/outputs/{tid}/output.dat`, where
+  `{weft_context}/{WEFT_DIRECTORY_NAME}/outputs/{tid}/`, where
   `WEFT_DIRECTORY_NAME` defaults to `.weft`.
-- Otherwise it falls back to `{tempdir}/weft/outputs/{tid}/output.dat`
+- Otherwise it falls back to `{tempdir}/weft/outputs/{tid}/`
   (where `{tempdir}` is the platform temporary directory).
+- Each spill is a separate file `{seq}.dat` in that directory, where `seq`
+  is a per-process counter starting at 1. The file is created exclusively,
+  with the process umask applied; on collision the next number is used.
 - The file path is always absolute and points to the file written for that
   task's spill directory.
 
@@ -1779,9 +1790,15 @@ Consumers reading the outbox must inspect `type` to detect a reference before
 treating the payload as inline output. The `sha256` field can be used to verify
 file integrity after dereferencing.
 
+Spill files are never deleted by Weft. Task exit, `cleanup_on_exit`, result readers, pipelines and monitors leave them in place, so a reference stays valid wherever it is forwarded or copied. Retaining or removing spill files is the caller's responsibility. Multiple outputs, persistent work items and repeated direct calls each get their own `{seq}.dat` and cannot overwrite one another. The spilled bytes are exactly the UTF-8 encoding of the serialized result. The file is written and closed before the outbox reference is written; a failure in between leaves an unreferenced file, which is caller-owned like any spill. The reference's path is local to the producer's host, and the reference carries the producer's `hostname`. References written before `hostname` existed remain readable by path.
+
 _Implementation mapping_: `weft/core/tasks/base.py` `_spill_large_output`,
 `_outputs_base_dir`; `weft/core/tasks/consumer.py` `_emit_single_output`;
-`weft/commands/result.py` result rendering. Spill files and per-tid directories
+`weft/commands/_output.py::render_text_output` owns shared text delivery;
+`weft/commands/result.py` and `weft/commands/run.py` carry the actual outputs
+root through result types and result events to the CLI renderers.
+Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
+Spill files and per-tid directories
 use ordinary filesystem creation defaults under OS and operator policy ([CTX.5]);
 existing permissions are not changed.
 
@@ -1882,7 +1899,7 @@ self-maintenance, and explicit operator commands for force and compaction:
   and KILL. It retains standard `T{tid}.ctrl_out` as completion evidence until
   the [MF-5] retention policy permits deletion. Outbox remains outside task-owned
   cleanup. A retained standard `ctrl_out` after terminal completion is expected.
-- task-owned cleanup may remove spilled output when `cleanup_on_exit` is enabled
+- no owner removes spilled output: `cleanup_on_exit` does not affect it, and spill files are the caller's responsibility under [MF-2.1]
 - the supervised task monitor additionally owns a default-on self-maintenance
   pass on a monotonic deadline (hourly by default): backend vacuum of claimed
   rows plus conservative runtime-state pruning of the
