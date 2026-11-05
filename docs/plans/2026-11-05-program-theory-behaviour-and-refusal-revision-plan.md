@@ -1,6 +1,6 @@
 # Program Theory Revision: Published Refusals, Wake Predicates, Observable Quiet, and Behaviour Probes
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]
 Superseded by: none
 
@@ -619,6 +619,32 @@ Open: none.
   revised [WT-2a.15] exception still requires causal necessity and does not
   admit arbitrary holds; all twelve Replacement blocks match. Round-2
   verification of F1 to F3: **PASS**, no new defect.
+- Two-factor fit test, Task 7 (2026-11-05), first run under the adopted
+  rule. Boundary `44d7f900..b60eeae3`; theory at `b60eeae3`. Author account
+  written first. Other-family account: codex-cli 0.161.0, read-only, fresh
+  context; its commands read only the theory at `b60eeae3` and that diff
+  (the six log lines matching `docs/plans/` are path strings inside the
+  theory text, not reads of plan files). Both accounts valid.
+  - Agreement: verdict fits with strain; foundations; the same refusals;
+    the same predictions, including recognition of a new request while
+    admission blocks the public lane, which both derived independently.
+  - Divergence 1. Codex's worst-fit sentence: "Where two valid accounts
+    agree, the theory transfers what the author intended" overstates;
+    agreement is evidence of transfer, not proof, since both readers share
+    the same inputs. The author predicted the same failure mode but did not
+    name the sentence. Proposed classification: document deficiency.
+    Proposed fix: "agreement is evidence that the theory transfers what
+    the author intended". Not applied; owner to decide.
+  - Divergence 2. Codex: replacing the keyed probe loses a distinct check,
+    placing a fresh demand and refusing a category error against an
+    expectation chosen independently of the change. The author did not
+    raise it. Proposed classification: document deficiency, in the form of
+    an accepted trade-off the theory does not state. Raised to the owner.
+  - Divergence 3. The author named [WT-2a.15]'s placement among identity
+    invariants and the undefined release-level boundary; codex did not.
+    Author-only items; recorded as strains, not contested.
+  - Both: "costs nothing an operator can see" has no numeric threshold.
+    Recorded strain.
 
 ## Execution log
 
@@ -656,3 +682,4 @@ Open: none.
 | 2026-11-05 | `90e1de3f` | Section 6 [WT-2a.15] row; Task 5 | An outside review of the repair plan (relayed by the owner) found that the repair plan defers scoped dispatch (its D1) and the published refusal (its D5), so it cannot close [WT-2a.15]. The row now names no closing plan and stays drifted. | No |
 | 2026-11-05 | `2d8c33a3` plus the main session's section 9 edit | A, C, new Revision 2 delta, Task 7, Review Log | Owner adopted the two-factor fit test in place of the keyed probe and the two strain fixes. Theory edits H, H2, I, J; A and C rewritten; Task 7 now runs the fit test. | Yes: one cross-family round over Revision 2 |
 | 2026-11-05 | Revision 2 as reviewed | I (the [WT-7] bullet) | Round on Revision 2 (codex): blocker F1, F2, plus F3. The bullet now fixes one change boundary and theory version, gives the second agent a fresh context excluding plans, logs and the author's account (F3), records a failed account as supporting no conclusion and makes agreement count only between two valid accounts (F2), and has the author propose classifications with any divergence blamed on the other agent recorded as contested (F1). | Round-2 verification of F1, F2 |
+| 2026-11-05 | `b60eeae3` | Status, Review Log | Task 7 ran the two-factor fit test; two document deficiencies are proposed to the owner, not applied. Plan closed as `completed`. | No |
