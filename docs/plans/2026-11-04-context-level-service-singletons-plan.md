@@ -1434,6 +1434,42 @@ to launchd, from `test_run_inline_wait_succeeds` and
 terminating them was refused by the tool policy, so they remain for the
 owner, and the leak is a follow-up.
 
+The leaked test children, root-caused (owner question, 2026-11-05): every
+orphan is a LivenessMonitor (earlier ones also a heartbeat) from the three
+tests in tests/commands/test_run.py that drive `_execute_inline` without
+the harness and end with `_stop_active_manager`, which force-stopped only
+the Manager. Reproduced with one of them alone: after the test, the
+heartbeat idle-exited at five minutes but the LivenessMonitor was still
+running after 490 s with no Manager registered. Its state shows why: the
+completed task's terminal mapping row is still present, a user-work row
+counts as work by presence (ruling 10.4), and the LivenessMonitor itself
+retires a terminal row only after `TASK_OBSERVATION_RETENTION_SECONDS`
+(default 172800 s, two days), so an abandoned context keeps its
+LivenessMonitor for two days. Under the harness this never shows: it stops
+the services after the Manager. The three tests now do the same
+(`stop_internal_services` after the Manager stop); run alone they leave no
+process. Design observation for the owner, not changed here: a terminal
+latest row has no liveness work until its retention expires, so counting
+it by presence keeps a LivenessMonitor alive through the whole retention
+window in any context whose last task has completed; counting only
+non-terminal user rows (or terminal rows with retirement due) would let it
+idle five minutes after the last task ends and come back on the next
+Manager's ensure.
+
+Release run 14 (`a2ec6ac4`, launched as a top-level background job so the
+default SIGINT handler is inherited; the SIGINT watch test passed): the
+full suite passed (6587) but took 13:11 against 4:32 in run 9, and the
+PostgreSQL leg stopped on
+`tests/commands/test_control_observation_connections.py::test_status_watch_reuses_connections_and_observes_external_updates`
+(`watch_task_status` timed out at the 2 s `CONTROL_SURFACE_WAIT_TIMEOUT`
+waiting for an externally published revision; 2068 passed; the long-session
+test also hit the 12-minute faulthandler dump against its usual 293 s).
+The whole machine was running about three times slower than earlier in the
+day with no comparable load: the power log shows no full wake since 22:54,
+only dark wakes, so the suite has been running inside a dark-wake power
+state since the keep-awake hold began at 02:03. Nothing in weft changed
+between run 9 and run 14 except test files.
+
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
 which ended its session with `weft manager stop` and asserted an empty

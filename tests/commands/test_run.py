@@ -50,6 +50,7 @@ from weft._constants import (
 )
 from weft._exceptions import CommandUsageError, ManagerStartFailed, SubmissionError
 from weft.cli.run import render_run_result
+from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
     SpawnSubmissionReconciliation,
@@ -684,17 +685,25 @@ def test_task_status_uses_task_owned_snapshot_without_raw_history(
 
 
 def _stop_active_manager(context: WeftContext) -> None:
+    """Stop the context's Manager, then its services, as the harness does.
+
+    A Manager only ensures the context's services; they outlive it and the
+    LivenessMonitor waits out the observation retention window for the
+    completed task's terminal row, so a test that stops only the Manager
+    leaves a service process behind for days ([MA-1] item 7).
+    """
+
     record = core_manager_runtime.select_active_manager(context)
-    if record is None:
-        return
-    stopped, error = core_manager_runtime.stop_manager(
-        context,
-        record,
-        timeout=30.0,
-        force=True,
-        stop_if_absent=True,
-    )
-    assert stopped, error
+    if record is not None:
+        stopped, error = core_manager_runtime.stop_manager(
+            context,
+            record,
+            timeout=30.0,
+            force=True,
+            stop_if_absent=True,
+        )
+        assert stopped, error
+    system_cmd.stop_internal_services(context, timeout=30.0)
 
 
 def _make_post_success_ack_failure(
