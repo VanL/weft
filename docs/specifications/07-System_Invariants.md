@@ -948,7 +948,13 @@ the sole exact-delete executor for TID mappings),
   child-exit handling, joins, and process-tree escalation consume the same absolute
   cleanup deadline with within-budget SIGKILL escalation for TERM-resistant
   descendants; `Manager._run_child_launch_service_worker()` owns the
-  after-deadline zero-wait tree kill for newly completed launches. Cleanup
+  after-deadline zero-wait tree kill for newly completed launches through
+  `Manager._reap_unaccepted_launch()`: a completed launch is handed to the
+  reactor under `Manager._launch_handoff_lock` while acceptance is open
+  (the accepted slot is committed by `Manager._handle_accepted_launch_results()`),
+  and once cleanup closes acceptance the worker reaps any launch the reactor
+  did not accept, so no completed launch is left neither committed nor
+  reaped. Cleanup
   diagnostics retain any still-live managed PIDs even
   after the direct wrapper exits or the deadline expires. Lifecycle, signal,
   managed-survivor, multi-child deadline, wait-owner,
