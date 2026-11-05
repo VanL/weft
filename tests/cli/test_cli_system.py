@@ -10,11 +10,13 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import psutil
 import pytest
 from typer.testing import CliRunner
 
+from simplebroker.ext import BrokerError
 from tests.conftest import run_cli
 from tests.helpers.task_observation import write_task_observation
 from tests.helpers.test_backend import prepare_project_root
@@ -23,13 +25,16 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEYS,
     LIVE_SERVICE_STATUSES,
+    MANAGER_CHILD_STOP_ESCALATION_SECONDS,
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
     SERVICE_TYPE_MANAGED,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
+from weft._exceptions import CommandExecutionError, ControlRejected
 from weft.cli.app import app
 from weft.commands import TaskMonitorSummary
+from weft.commands import system as system_commands
 from weft.context import WeftContext, build_context
 from weft.core.manager_runtime import generate_tid
 from weft.core.service_convergence import build_service_owner_payload
@@ -515,6 +520,9 @@ def test_system_prune_rejects_invalid_retention_options(workdir: Path) -> None:
 SYSTEM_STOP_TEST_WAIT_SECONDS = 60.0
 """Bound for services to appear and for stopped processes to be reaped."""
 
+SYSTEM_STOP_REJECTION_TIMEOUT = MANAGER_CHILD_STOP_ESCALATION_SECONDS + 1.0
+"""A stop window long enough for both escalation rungs to come due."""
+
 
 def _wait_for(predicate: Callable[[], object], *, message: str) -> object:
     deadline = time.monotonic() + SYSTEM_STOP_TEST_WAIT_SECONDS
@@ -598,11 +606,22 @@ def _write_fake_service_record(
     process: subprocess.Popen[bytes],
     *,
     ctrl_in: bool,
+    hostname: str | None = None,
+    create_time_offset: float | None = 0.0,
 ) -> str:
-    """Publish a live heartbeat registry row and snapshot for ``process``."""
+    """Publish a live heartbeat registry row and snapshot for ``process``.
+
+    ``hostname`` defaults to this host; ``create_time_offset`` of ``None``
+    omits the recorded creation time, a non-zero offset records a wrong one.
+    """
 
     tid = generate_tid(context)
     pid = process.pid
+    observed = process_create_time(pid)
+    assert observed is not None
+    process_entry: dict[str, object] = {"pid": pid}
+    if create_time_offset is not None:
+        process_entry["create_time"] = observed + create_time_offset
     payload = build_service_owner_payload(
         service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
         service_type=SERVICE_TYPE_MANAGED,
@@ -617,9 +636,7 @@ def _write_fake_service_record(
             "control": {"authority": "host-pid"},
             "observations": {
                 "host_pids": [pid],
-                "host_processes": [
-                    {"pid": pid, "create_time": process_create_time(pid)}
-                ],
+                "host_processes": [process_entry],
             },
             "metadata": {},
         },
@@ -628,7 +645,7 @@ def _write_fake_service_record(
     snapshot = {
         "full": tid,
         "short": tid[-10:],
-        "hostname": socket.gethostname(),
+        "hostname": hostname or socket.gethostname(),
         "terminal": False,
     }
     _write_message(context, task_state_queue_name(tid), json.dumps(snapshot))
@@ -732,6 +749,136 @@ def test_system_stop_force_escalates_a_service_that_ignores_stop(
     assert rc == 0, (rc, out, err)
     assert f"Stopped service {INTERNAL_SERVICE_KEY_HEARTBEAT} {tid} (escalated)" in out
     assert sleeper.wait(timeout=SYSTEM_STOP_TEST_WAIT_SECONDS) is not None
+
+
+def _settle_fake_service(context: WeftContext, tid: str) -> None:
+    """Publish terminal proof so harness cleanup does not wait on the record."""
+
+    snapshot = {"full": tid, "short": tid[-10:], "terminal": True}
+    _write_message(context, task_state_queue_name(tid), json.dumps(snapshot))
+
+
+def _failing_registry_reads(
+    monkeypatch: pytest.MonkeyPatch, *, succeed_first: int
+) -> list[str]:
+    """Make registry reads after the first ``succeed_first`` fail to open.
+
+    The real reader runs against a broker whose generator cannot open, so the
+    reader's own ``strict`` mode decides whether the failure is raised.
+    """
+
+    calls: list[str] = []
+    real = system_commands.iter_broker_queue_json_entries
+
+    class _UnreadableBroker:
+        def peek_generator(self, *_args: object, **_kwargs: object) -> None:
+            raise BrokerError("injected registry read failure")
+
+    def reader(
+        broker: object, queue_name: str, **kwargs: Any
+    ) -> Iterator[tuple[dict[str, Any], int]]:
+        calls.append(queue_name)
+        if len(calls) > succeed_first:
+            broker = _UnreadableBroker()
+        return real(broker, queue_name, **kwargs)
+
+    monkeypatch.setattr(system_commands, "iter_broker_queue_json_entries", reader)
+    return calls
+
+
+def test_system_stop_registry_read_failure_at_collection_is_an_error(
+    workdir: Path,
+    sleeper: subprocess.Popen[bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry that cannot be read is never "nothing to stop" [MA-3]."""
+
+    context = build_context(spec_context=workdir)
+    _write_fake_service_record(context, sleeper, ctrl_in=True)
+    calls = _failing_registry_reads(monkeypatch, succeed_first=0)
+
+    with pytest.raises(CommandExecutionError, match="injected registry"):
+        system_commands.stop_system(context, timeout=5.0)
+
+    assert calls
+    assert sleeper.poll() is None
+
+
+def test_system_stop_registry_read_failure_at_settlement_is_an_error(
+    workdir: Path,
+    sleeper: subprocess.Popen[bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed settlement read never confirms a pending service stopped [MA-3]."""
+
+    context = build_context(spec_context=workdir)
+    tid = _write_fake_service_record(
+        context, sleeper, ctrl_in=True, create_time_offset=None
+    )
+    calls = _failing_registry_reads(monkeypatch, succeed_first=1)
+
+    with pytest.raises(CommandExecutionError, match="injected registry"):
+        system_commands.stop_system(context, timeout=5.0)
+
+    assert len(calls) >= 2
+    assert sleeper.poll() is None
+    _settle_fake_service(context, tid)
+
+
+def test_system_stop_rejects_a_service_that_does_not_settle(
+    workdir: Path, sleeper: subprocess.Popen[bytes]
+) -> None:
+    """A reachable service that ignores STOP past the timeout is rejected.
+
+    Its recorded identity has no creation time, so it is unverifiable and
+    neither escalation rung may signal it ([MA-3]; LIVENESS.R5).
+    """
+
+    context = build_context(spec_context=workdir)
+    tid = _write_fake_service_record(
+        context, sleeper, ctrl_in=True, create_time_offset=None
+    )
+
+    with pytest.raises(ControlRejected, match=tid):
+        system_commands.stop_system(context, timeout=SYSTEM_STOP_REJECTION_TIMEOUT)
+
+    assert sleeper.poll() is None
+    _settle_fake_service(context, tid)
+
+
+def test_system_stop_never_signals_a_foreign_host_service(
+    workdir: Path, sleeper: subprocess.Popen[bytes]
+) -> None:
+    """A snapshot naming another host disables both escalation rungs [MA-3]."""
+
+    context = build_context(spec_context=workdir)
+    tid = _write_fake_service_record(
+        context, sleeper, ctrl_in=True, hostname="weft-foreign-host.invalid"
+    )
+
+    with pytest.raises(ControlRejected, match=tid):
+        system_commands.stop_system(context, timeout=SYSTEM_STOP_REJECTION_TIMEOUT)
+
+    assert sleeper.poll() is None
+    _settle_fake_service(context, tid)
+
+
+def test_system_stop_never_signals_a_reused_pid(
+    workdir: Path, sleeper: subprocess.Popen[bytes]
+) -> None:
+    """A recorded identity whose creation time differs names an exited service.
+
+    The PID now belongs to another process: the record is settled, not a
+    target, and that process is never signalled (LIVENESS.R5).
+    """
+
+    context = build_context(spec_context=workdir)
+    _write_fake_service_record(context, sleeper, ctrl_in=True, create_time_offset=5.0)
+
+    result = system_commands.stop_system(context, timeout=SYSTEM_STOP_REJECTION_TIMEOUT)
+
+    assert (result.stopped, result.escalated, result.unreachable) == ((), (), ())
+    assert sleeper.poll() is None
 
 
 def test_system_dump_exports_messages(workdir: Path) -> None:

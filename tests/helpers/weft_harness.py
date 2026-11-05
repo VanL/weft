@@ -1300,6 +1300,11 @@ class WeftTestHarness:
             # must be polled. Same family as wait_for_completion.
             time.sleep(0.05)
 
+        # The blocking service stop can spend the whole budget before the loop
+        # samples anything; the raise paths judge what survives now.
+        self._collect_pid_mappings()
+        last_live_task_tids = self._live_task_tids_from_mappings()
+        last_live_pids = self._live_registered_pids()
         if last_live_task_tids:
             raise RuntimeError(
                 "Cleanup left live task processes while preserve_database=True: "
