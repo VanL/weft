@@ -100,8 +100,8 @@ Current structure:
 - No new tooling, gate, or script. The behaviour probes are procedures
   recorded in the audit table.
 - Review gates: fresh-eyes self-review; one cross-family round before
-  promotion (class 5+P); owner-keyed possession probe and audit-table
-  refresh at completion ([WT-7]).
+  promotion (class 5+P); two-factor fit test and audit-table refresh
+  at completion ([WT-7], as revised by [REV-WT-006]).
 
 ## Deviation Log
 
@@ -136,8 +136,9 @@ Replacement (`docs/program-theory.md`):
   pass, the refusal, its reason, and the records that cause it are published
   as a queue fact that an ordinary status read shows. A refusal caused by
   one record holds that record; it does not hold unrelated work unless a
-  measured resource says it must. Every standing refusal names the evidence
-  or the operator action that ends it. (Owner, 2026-11-05.)
+  measured resource, or a custody or durability barrier that the published
+  fact names, requires it. Every standing refusal names the evidence or the
+  operator action that ends it. (Owner, 2026-11-05.)
 ```
 
 ### B. [WT-4.1] — insert one table row after the row "Keep an identity you already have"
@@ -157,7 +158,7 @@ Current text (verbatim, one line):
 Replacement (`docs/program-theory.md`):
 
 ```text
-| A quiet task costs nothing an operator can see | When no event arrives and no deadline is due, a reactor runs no turns and publishes no deadline that is already due. A task that is only supervising (waiting on a child, a session, or a timer in the future) is quiet in this sense. Idle and supervising cost is bounded by the strategy's own polling pass and is measured, not inferred. A new input is acted on within one strategy pass; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17; owner, 2026-11-05; 2026-11-05 review | [CC-2.2.1] |
+| A quiet task costs nothing an operator can see | When no event arrives and no deadline is due, a reactor runs no turns and publishes no deadline that is already due. A task that is only supervising (waiting on a child, a session, or a timer in the future) is quiet in this sense. Idle and supervising cost is bounded by the strategy's own polling pass and is measured, not inferred. A new input is recognised within one strategy pass; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17; owner, 2026-11-05; 2026-11-05 review | [CC-2.2.1] |
 ```
 
 Carried forward: no turns while quiet; one strategy pass as the bound; the
@@ -273,6 +274,114 @@ Replacement (`docs/program-theory.md`):
   invariants and point to [WT-2a] for the rest. [WT-2a.15] does not belong
   in that quick list; no edit.
 
+## Proposed Theory Delta, Revision 2
+
+Owner, 2026-11-05: "Yes, we adopt it, and the fix", after two trial runs of
+the two-factor fit test (Review Log). Strategy D, text lands as active.
+Revision 2 also changes the text of blocks A and C above (marked there);
+those blocks show the current text.
+
+### H. Header Verification paragraph — replace the "Transfer probe:" sentence
+
+Replacement (`docs/program-theory.md`):
+
+```text
+record; endorsement is not a demonstration of possession. Two-factor fit
+test: at each class-5 change, and once per release across that release's
+changes, the author writes an account of how the change does or does not fit
+this theory, and then an agent of another family writes its own from this
+document and the diff alone, without seeing the author's; both use the
+[WT-7] structure, and the divergence between them is the finding, classified
+as document deficiency, change deficiency, or agent reasoning, with this
+document changed only for a document deficiency. Transfer log:
+```
+
+### H2. Header Governing process — replace "the keyed possession probe"
+
+Replacement (`docs/program-theory.md`):
+
+```text
+review round (a second only after a block or a scope change), the two-factor
+fit test and the theory-versus-code audit refresh at each release or
+class-5 completion ([WT-7]),
+```
+
+### I. [WT-7] — replace the bullet "Possession probe, keyed"
+
+Replacement (`docs/program-theory.md`):
+
+```text
+- **Two-factor fit test:** At each class-5 change, and once per release
+  across that release's changes, two accounts are written of how the change
+  does or does not fit this theory, over one fixed change boundary and one
+  theory version. The author writes the first. An agent of another family
+  writes the second in a fresh context whose only inputs are this document
+  and the diff of that boundary, excluding plan files, review logs, and the
+  author's account. Both use one structure: a verdict (fits, does not fit,
+  or fits with strain); the sections the change rests on; what it refuses
+  and the entry that refuses it; what it predicts that could prove it wrong;
+  and the sentence that fits worst. An account that names no refusal, no
+  falsifiable prediction, and no tension is a failed account; it is recorded
+  as failed and supports no conclusion. Where two valid accounts agree, the
+  theory transfers what the author intended. Where they diverge, the author
+  proposes a classification for each divergence: a document deficiency, a
+  change deficiency, or agent reasoning; this document changes only for a
+  document deficiency. A divergence the author attributes to the other
+  agent's reasoning is recorded as contested, not resolved. Both accounts
+  and the classifications go in the plan's review log. The test does not
+  gate closure; the owner reads the comparison, and any contested item, when
+  they choose.
+  Refresh the `[WT-0]` **theory-versus-code audit table** at the same
+  trigger, carrying unchanged rows forward by reference and re-auditing
+  touched claims.
+```
+
+### J. [WT-9] — append
+
+Replacement (`docs/program-theory.md`):
+
+```text
+### [REV-WT-006] The two-factor fit test replaces the owner-keyed possession probe
+
+- Current account: transfer is measured by two independent accounts of how
+  each class-5 change fits this theory, one by the author and one by an
+  agent of another family that sees only this document and the diff, in one
+  five-part structure ([WT-7]). Their divergence is the finding. The test
+  runs at each class-5 change and once per release, and does not gate
+  closure. [WT-2a.15] also admits a named custody or durability barrier as
+  a reason for a broad hold, and the [WT-4.3] quiet row bounds recognition of
+  a new input, not service.
+- Supersedes: a possession probe whose key the owner wrote before each
+  release or class-5 completion, graded by agreement with that key, with
+  each drawn key item spent.
+- Pressure: the keyed probe put the owner on the closure path of every
+  class-5 plan, and practice had already departed from the text (key items
+  drawn and reused from a bank held outside the repository). A trial of the
+  two-factor test on [REV-WT-005] found a logic defect in the new wake
+  predicate row that two review rounds had passed, and a repeat after the
+  fix found both accounts converging on the same four strains, two of which
+  this record resolves.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md`,
+    Review Log (fit test trials 1 and 2, and the revision rows)
+  - owner-recalled: owner session 2026-11-05 ("Perhaps it is a two-factor
+    test: One from the author and one from an other-family model, where they
+    each describe how the change does or does not fit with the theory";
+    "Yes, we adopt it, and the fix")
+```
+
+### Changes to A and C (fit-test strains resolved)
+
+- A: "unless a measured resource says it must" became "unless a measured
+  resource, or a custody or durability barrier that the published fact
+  names, requires it". Both fit accounts found that the resource-only
+  exception would forbid the existing bootstrap gate.
+- C: "A new input is acted on within one strategy pass" became "A new input
+  is recognised within one strategy pass". Both accounts found that "acted
+  on" conflicts with admission and custody, which may delay service.
+- Not changed: "one maintenance pass" stays in [WT-2a.15]; both accounts
+  flagged its altitude, and the owner's ruling covered the two fixes above.
+
 ## 5. Tasks
 
 0. Preconditions.
@@ -339,12 +448,13 @@ Replacement (`docs/program-theory.md`):
      timestamp or a description of the theory that is now stale, update it.
      If not, record "no change needed" in the Execution log.
 
-7. Completion gate ([WT-7]).
-   - The owner writes a possession-probe key (one feature to place, one
-     category error to refuse, one predicted defect class). An agent that
-     did not author this plan answers from the revised theory alone. Record
-     key and result in the Review Log.
-   - Set Status and the index row to `completed`.
+7. Completion gate ([WT-7], as revised by [REV-WT-006]).
+   - Run the two-factor fit test on the whole change (`44d7f900` to the
+     closing commit): author account first, then an other-family account
+     from the theory and the diff alone. Record both and classify each
+     divergence in the Review Log.
+   - Set Status and the index row to `completed`. The test does not gate
+     closure on the owner's reading.
 
 ## 6. Audit Table Refresh and Behaviour Probes
 
@@ -415,9 +525,12 @@ plan cites them.
 
 ## 9. Out of Scope
 
-- Any code change. The three drifted rows are closed by the repair plan.
-- The [MA-1.8] behaviour sentence on ambiguous launches. The repair plan
-  carries that delta, with the owner's rulings of 2026-11-05.
+- Any code change. The repair plan closes the [WT-4.1] wake-predicate and
+  [WT-4.3] quiet-cost rows. The [WT-2a.15] refusal row stays drifted until
+  a separate plan carries scoped dispatch and the published refusal.
+- The [MA-1.8] behaviour sentence on ambiguous launches. Its delta belongs
+  to that separate closing plan once the remaining D1 and D5 decisions in
+  the repair plan are ruled.
 - Proposal E (inspectability as an invariant). Not adopted.
 - Restoring process titles for internal services, the moved-directory
   bootstrap rule, and the documentation of distinct contexts. Owner rulings
@@ -479,7 +592,33 @@ Open: none.
   unprobed row as aligned, and that the comprehension step is gone.
 - Review state: complete for implementation. Task 1 is satisfied by rounds
   1 and 2; the next step is Task 2.
-- Possession probe: pending (Task 7).
+- Two-factor fit test, trial 1 (2026-11-05, owner: "Yes, try it"), on
+  `7e9c6106`. Author account written first and sealed; codex-cli 0.161.0
+  read-only, given only the theory and the diff, wrote the second. Both
+  verdicts: fits with strain. Agreement on foundations, refusals and the
+  three behaviour predictions. Divergence: the author named [WT-2a.15]'s
+  altitude as the worst fit; codex named the [WT-4.1] row, which stated only
+  a soundness condition and so did not prevent the lost wake that motivated
+  it, and which required queue rows although [WT-2a.6] admits local inputs.
+  Classification: document deficiency. Fixed in `90e1de3f`.
+- Fit test, trial 2, on `44d7f900..90e1de3f`, same method with a fresh
+  author account. Codex cited the corrected row as sound. Both accounts
+  independently named the same four strains: [WT-2a.15]'s resource-only
+  exception; "one maintenance pass" inside an invariant; "acted on" versus
+  recognised; and "costs nothing" without a numeric bound. Classification:
+  document deficiency for the first and third, resolved in Revision 2;
+  recorded strains for the second and fourth.
+- Owner decision, 2026-11-05: the two-factor fit test replaces the keyed
+  probe, with the two wording fixes ("Yes, we adopt it, and the fix").
+- Cross-family round on Revision 2 (codex-cli 0.161.0, read-only):
+  **blocker: F1, F2**, plus F3. F1: nobody owned classification. F2: two
+  failed accounts that agree counted as transfer. F3: the second agent's
+  inputs could carry the author's account through the plan diff. All
+  accepted and fixed in the [WT-7] bullet (Revision Log). Reviewer
+  observations: no current keyed-probe text remains in the theory; the
+  revised [WT-2a.15] exception still requires causal necessity and does not
+  admit arbitrary holds; all twelve Replacement blocks match. Round-2
+  verification of F1 to F3: **PASS**, no new defect.
 
 ## Execution log
 
@@ -505,12 +644,15 @@ Open: none.
   read order and document inventory, neither of which this revision
   changes; its `updated_at` was not advanced by the 2026-11-04 theory edit
   (`60d758d0`) either.
-- Remaining: Task 7 (owner-written possession-probe key, a non-author
-  agent's answers, then `completed`). Nothing is committed.
+- Remaining (superseded by Revision 2): Task 7 now runs the two-factor fit
+  test instead of an owner-written key.
 
 ## Revision Log
 
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
+| 2026-11-05 | reviewed plan before this revision | Section 9 | Removed the two stale claims that the repair plan closes all three drifted rows and carries the ambiguous-launch delta. The scope now matches Task 5 and the section 6 audit table: [WT-2a.15] remains drifted pending a separate closing plan. | No: scope clarification only; no theory or spec delta changed |
 | 2026-11-05 | `7e9c6106` | Change B ([WT-4.1] wake-predicate row) | Owner-approved fix ("Make that change", 2026-11-05) after the two-factor fit trial. The other-family account showed the row stated only a soundness condition ("true only when ..."), which does not prevent the lost wake that motivated it, and that "answered from queue rows" contradicted [WT-2a.6] local inputs. The row now states completeness ("true whenever actionable work is present"), scopes itself to predicates over queued work, and names local completions and deadlines as arbiter inputs. | No cross-family round; the fix applies the reviewer's own finding and is re-checked by the repeated fit trial |
 | 2026-11-05 | `90e1de3f` | Section 6 [WT-2a.15] row; Task 5 | An outside review of the repair plan (relayed by the owner) found that the repair plan defers scoped dispatch (its D1) and the published refusal (its D5), so it cannot close [WT-2a.15]. The row now names no closing plan and stays drifted. | No |
+| 2026-11-05 | `2d8c33a3` plus the main session's section 9 edit | A, C, new Revision 2 delta, Task 7, Review Log | Owner adopted the two-factor fit test in place of the keyed probe and the two strain fixes. Theory edits H, H2, I, J; A and C rewritten; Task 7 now runs the fit test. | Yes: one cross-family round over Revision 2 |
+| 2026-11-05 | Revision 2 as reviewed | I (the [WT-7] bullet) | Round on Revision 2 (codex): blocker F1, F2, plus F3. The bullet now fixes one change boundary and theory version, gives the second agent a fresh context excluding plans, logs and the author's account (F3), records a failed account as supporting no conclusion and makes agreement count only between two valid accounts (F2), and has the author propose classifications with any divergence blamed on the other agent recorded as contested (F1). | Round-2 verification of F1, F2 |

@@ -10,14 +10,14 @@ exact current behavior.
 Verification: Five measures, each named for what it measures. Owner
 endorsement: the owner can defend each sentence of [WT-2a], [WT-4], [WT-5],
 and [WT-6] as their own, confirmed at adoption and at each [REV-WT-*]
-record; endorsement is not a demonstration of possession. Transfer probe:
-at each release or class-5 completion, a possession probe with an
-owner-written key (the feature to place, the category error to refuse, and
-the predicted bug class are fixed before the probe runs), executed by an
-agent that did not author the plan and graded against the key; on FAIL,
-classify after disposition as document deficiency, key fault, or agent
-reasoning, and record a document deficiency only when the evidence supports
-it. Transfer log: a review proposal of a [WT-6] alternative that does not
+record; endorsement is not a demonstration of possession. Two-factor fit
+test: at each class-5 change, and once per release across that release's
+changes, the author writes an account of how the change does or does not fit
+this theory, and then an agent of another family writes its own from this
+document and the diff alone, without seeing the author's; both use the
+[WT-7] structure, and the divergence between them is the finding, classified
+as document deficiency, change deficiency, or agent reasoning, with this
+document changed only for a document deficiency. Transfer log: a review proposal of a [WT-6] alternative that does not
 cite the entry's recorded reopening condition is logged against that entry
 (see [WT-7]). Theory-versus-code audit table: at each release or class-5
 completion, the table that maps each [WT-2a] invariant and [WT-4] principle
@@ -34,8 +34,8 @@ not aligned.
 Required action: Read this document before you make a product-scope or
 design decision. Obey it, or propose a theory revision as a class-5 change.
 Governing process: Theory revisions are class-5 plans with one cross-family
-review round (a second only after a block or a scope change), the keyed
-possession probe and the theory-versus-code audit refresh at each release or
+review round (a second only after a block or a scope change), the two-factor
+fit test and the theory-versus-code audit refresh at each release or
 class-5 completion ([WT-7]), and the Replacement-sync gate in
 `bin/check-doc-paths` for promoted plans. SimpleBroker uses `[DOM-16]` in its
 operating-model specification for the same purpose.
@@ -383,8 +383,9 @@ theory revision, not a spec edit.
   pass, the refusal, its reason, and the records that cause it are published
   as a queue fact that an ordinary status read shows. A refusal caused by
   one record holds that record; it does not hold unrelated work unless a
-  measured resource says it must. Every standing refusal names the evidence
-  or the operator action that ends it. (Owner, 2026-11-05.)
+  measured resource, or a custody or durability barrier that the published
+  fact names, requires it. Every standing refusal names the evidence or the
+  operator action that ends it. (Owner, 2026-11-05.)
 
 ## Core concepts and ownership [WT-3]
 
@@ -463,7 +464,7 @@ engineering rule.
 | Principle | Design consequence | Evidence | Contract |
 |-----------|--------------------|----------|----------|
 | One reactor, one arbiter, a closed set of inputs | Every task waits at one `PollingStrategy` arbiter driven by backend hints/notifications, local `notify_activity()` events, OS sentinel adapters, and explicit deadlines—never defensive polling wait-caps. The principle names today's realization (`PollingStrategy` and the four input origins); the identity statement is [WT-2a.6]. | Owner, 2026-09-17: "we are all event driven, with just a limited number of types of events" | [CC-2.2.1]; IMPL.8 to IMPL.11; [WT-2a.6] |
-| A quiet task costs nothing an operator can see | When no event arrives and no deadline is due, a reactor runs no turns and publishes no deadline that is already due. A task that is only supervising (waiting on a child, a session, or a timer in the future) is quiet in this sense. Idle and supervising cost is bounded by the strategy's own polling pass and is measured, not inferred. A new input is acted on within one strategy pass; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17; owner, 2026-11-05; 2026-11-05 review | [CC-2.2.1] |
+| A quiet task costs nothing an operator can see | When no event arrives and no deadline is due, a reactor runs no turns and publishes no deadline that is already due. A task that is only supervising (waiting on a child, a session, or a timer in the future) is quiet in this sense. Idle and supervising cost is bounded by the strategy's own polling pass and is measured, not inferred. A new input is recognised within one strategy pass; the strategy, not Weft, owns the pass length and burst behavior ([CC-2.2.1]). | Owner, 2026-09-17; owner, 2026-11-05; 2026-11-05 review | [CC-2.2.1] |
 | Subprocess and stream supervision is readiness-driven, not timer-polled | When a runner supervises child stdio pipes alongside timeouts and resource limits, the platform readiness adapter drives wakeups; the supervision timeout is only the protective ceiling until the next deadline. Post-exit stream drain stops immediately when the kernel pipe reports EOF or empty rather than sleeping out a fixed drain window when an inherited grandchild descriptor remains open, and is otherwise bounded by the private drain budget while a descendant keeps writing. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5], [CC-3.4] |
 | Bounded per-turn stream work and backpressure over unbounded buffering | Active stream drainage reads a bounded chunk budget per turn so output floods cannot starve timeout, cancellation, or resource-limit checks, and slow downstream sinks apply OS pipe backpressure to the child rather than growing parent memory without bound. At process termination, remaining kernel pipe bytes are captured into memory before slow sink delivery. | Owner, 2026-10-29 | `06-Resource_Management.md` [RM-5.2]; `01-Core_Components.md` [CC-2.5] |
 | Availability and death are different questions | A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death. Task-owned terminal proof wins over a Manager `wrapper_lost` record, and reservation/checkpoint custody survives until task-snapshot handoff or positive settlement. | Owner, 2026-09-08; `2026-09-17` discovery plan; `2026-10-14` family scheduling plan | [MA-1.6a], [MA-3], [MF-5], LIVENESS.R3–R7; [WT-2a.13] |
@@ -1028,18 +1029,29 @@ alternative. An agent must not propose the alternative again unless the
 
 ## Tensions and falsifiers [WT-7]
 
-- **Possession probe, keyed:** At each release or class-5 completion, the
-  owner writes the key first: one hypothetical feature and where it belongs,
-  one category error and the entry that refuses it, and the class of defect
-  an audit of a named subsystem should find. An agent that did not author
-  the plan, from a different family where one is available, answers from
-  this document alone and is graded against the key. The key and the result
-  go in the plan's review log; a drawn key item is then spent. On FAIL,
-  classify after disposition as a document deficiency, a key fault, or
-  agent reasoning, and change this document only for a document deficiency.
-  A self-graded probe is not a probe. Refresh the `[WT-0]`
-  **theory-versus-code audit table** at the same trigger, carrying unchanged
-  rows forward by reference and re-auditing touched claims.
+- **Two-factor fit test:** At each class-5 change, and once per release
+  across that release's changes, two accounts are written of how the change
+  does or does not fit this theory, over one fixed change boundary and one
+  theory version. The author writes the first. An agent of another family
+  writes the second in a fresh context whose only inputs are this document
+  and the diff of that boundary, excluding plan files, review logs, and the
+  author's account. Both use one structure: a verdict (fits, does not fit,
+  or fits with strain); the sections the change rests on; what it refuses
+  and the entry that refuses it; what it predicts that could prove it wrong;
+  and the sentence that fits worst. An account that names no refusal, no
+  falsifiable prediction, and no tension is a failed account; it is recorded
+  as failed and supports no conclusion. Where two valid accounts agree, the
+  theory transfers what the author intended. Where they diverge, the author
+  proposes a classification for each divergence: a document deficiency, a
+  change deficiency, or agent reasoning; this document changes only for a
+  document deficiency. A divergence the author attributes to the other
+  agent's reasoning is recorded as contested, not resolved. Both accounts
+  and the classifications go in the plan's review log. The test does not
+  gate closure; the owner reads the comparison, and any contested item, when
+  they choose.
+  Refresh the `[WT-0]` **theory-versus-code audit table** at the same
+  trigger, carrying unchanged rows forward by reference and re-auditing
+  touched claims.
 - **Contention failures test possession of the theory:** Wanting fewer workers,
   serialization, or another reduction in contention to make tests pass is an
   immediate stop condition. State the behavior the theory predicted and locate
@@ -1288,6 +1300,34 @@ evidence of why the theory evolved rather than a competing model.
   - owner-recalled: owner session 2026-11-05 ("I agree with the theory
     changes, and those should be made first"; "No E, otherwise good and
     accepted as is")
+
+### [REV-WT-006] The two-factor fit test replaces the owner-keyed possession probe
+
+- Current account: transfer is measured by two independent accounts of how
+  each class-5 change fits this theory, one by the author and one by an
+  agent of another family that sees only this document and the diff, in one
+  five-part structure ([WT-7]). Their divergence is the finding. The test
+  runs at each class-5 change and once per release, and does not gate
+  closure. [WT-2a.15] also admits a named custody or durability barrier as
+  a reason for a broad hold, and the [WT-4.3] quiet row bounds recognition of
+  a new input, not service.
+- Supersedes: a possession probe whose key the owner wrote before each
+  release or class-5 completion, graded by agreement with that key, with
+  each drawn key item spent.
+- Pressure: the keyed probe put the owner on the closure path of every
+  class-5 plan, and practice had already departed from the text (key items
+  drawn and reused from a bank held outside the repository). A trial of the
+  two-factor test on [REV-WT-005] found a logic defect in the new wake
+  predicate row that two review rounds had passed, and a repeat after the
+  fix found both accounts converging on the same four strains, two of which
+  this record resolves.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md`,
+    Review Log (fit test trials 1 and 2, and the revision rows)
+  - owner-recalled: owner session 2026-11-05 ("Perhaps it is a two-factor
+    test: One from the author and one from an other-family model, where they
+    each describe how the change does or does not fit with the theory";
+    "Yes, we adopt it, and the fix")
 
 ## Sources
 
