@@ -691,10 +691,10 @@ LivenessMonitor cases of §10.4.
   warning branch in `_continue_shutdown_drain` goes).
   `_finish_graceful_shutdown` runs once phase 1 is done.
 - `_detach_launched_services`: drop every supervision-only child from
-  `_child_processes` without signalling, and remove each one's `Process`
-  from the `multiprocessing` children set
-  (`multiprocessing.process._children.discard(process)`; private, see
-  §6b; comment names this plan and the hazard). No terminal envelope is
+  `_child_processes` without signalling, and register each one's `Process`
+  for the exit-time discard from the `multiprocessing` children set
+  (`_register_detached_service`, `_discard_live_detached_services`; the
+  private set is touched only at exit, see §6b). No terminal envelope is
   written for a live detached service. Called from
   `_finish_graceful_shutdown` and from `_cleanup_task_resources` before
   any terminate call; `_cleanup_task_resources` then terminates user work
@@ -898,9 +898,16 @@ alive, a Windows Manager would hang for as long as a service has work,
 which can be indefinite. There is no public `multiprocessing.Process`
 operation for detaching a started live child (`close()` rejects a live
 process; `daemon` cannot change after start; round-1 reviewer concurred).
-Task 3's detach removes the `Process` from the `multiprocessing` children
-set on every platform. The proof is Task 3 (f), the real CLI boundary,
-not a membership assertion alone.
+Task 3's detach registers the `Process` in a module-level set; one atexit
+hook, registered after `multiprocessing`'s own exit function so it runs
+first, drops every still-live detached service from the children set at
+exit. The `Process` stays in the children set until then so the library
+reaps it once it exits: an immediate discard (the first implementation)
+left every exited service a zombie in a host that outlives its services,
+which is every inline Manager in the test suite and any embedding host,
+and the harness waited its full PID timeouts on those zombies (the suite
+slowdown; see the Execution log). The proof is Task 3 (f), the real CLI
+boundary, plus the exit-hook test.
 
 ## 7. Verification
 
@@ -1232,6 +1239,24 @@ Teardown of `test_manager_leadership_yields_to_canonical_lower_manager`:
 sentinel is `_launch_result_accepted = object()` (the constants test
 treats an upper-case module name as a production constant; the house
 sentinel form is lower case, as in `weft/core/tasks/service.py`).
+
+Root cause of the suite slowdown (`a1c20ef3`): after the harness reorder
+the fast suite was still 9:37 against 4:20 before the plan. A durations
+profile showed dozens of tests with a ~14 s teardown or call phase, all
+running an inline Manager in the test process, and a `<defunct>` child of
+the pytest worker holding every harness PID wait to its timeout (1 s x 3,
+then 5 s, then 5 s). The immediate `_children.discard` at detach removed
+the only joiner of an inline Manager's service: when the service exited
+after the registry STOP it stayed a zombie, and `pid_matches_create_time`
+counted a zombie as a match. Fix: the detach keeps the `Process` in the
+children set and one atexit hook drops only still-live detached services
+at exit (`_discard_live_detached_services`), so exited services are reaped
+by the library and the exit-time join is still prevented;
+`pid_matches_create_time` returns False for a zombie, as `pid_is_live` and
+the host inspection already do; the harness reaps its exited children
+before judging liveness. Measured: inline-Manager client test call 14.0 s
+to 0.76 s; CLI Manager test teardown 13.7 s to 0.35 s. Suite timing on
+`a1c20ef3` recorded below once measured.
 
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
