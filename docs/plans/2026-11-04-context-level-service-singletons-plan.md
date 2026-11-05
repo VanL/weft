@@ -1256,7 +1256,18 @@ by the library and the exit-time join is still prevented;
 the host inspection already do; the harness reaps its exited children
 before judging liveness. Measured: inline-Manager client test call 14.0 s
 to 0.76 s; CLI Manager test teardown 13.7 s to 0.35 s. Suite timing on
-`a1c20ef3` recorded below once measured.
+`a1c20ef3`: fast suite 4:19 (pre-plan 4:20; 12:52 at the first merge),
+PostgreSQL leg `./bin/pytest-pg --fast` 5:24 with 6430 passed. Left for
+a later class-1 pass: two `tests/tasks/test_service_task.py` oracles
+write a fake active Manager row naming this process, so harness cleanup
+waits its 10 s Manager-stop timeout on it (20 s per suite run).
+
+Release run 7 runs with `WEFT_LIVE_PROVIDER_CLI_TARGETS=claude_code,opencode,qwen`:
+the owner's Codex quota is exhausted until it is reset (owner, 2026-11-04,
+"I am out of codex quota for now"), so the codex live canary is excluded
+from this release's precheck and is to be run on its own against the
+released commit once the quota returns. The codex adapter is untouched by
+this plan and the series.
 
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
