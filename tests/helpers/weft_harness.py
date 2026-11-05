@@ -1768,7 +1768,41 @@ class WeftTestHarness:
             if self._is_locked_harness_artifact_cleanup_error(last_error):
                 self._detach_tempdir_finalizer()
                 return
+            last_error.add_note(
+                "Processes holding the harness root at cleanup: "
+                + "; ".join(self._root_holders() or ["none found"])
+            )
             raise last_error
+
+    def _root_holders(self) -> list[str]:
+        """Describe every process whose cwd or open files lie under the root.
+
+        Windows refuses to remove a directory that is any process's cwd or
+        holds any open file, so a cleanup failure names the holders, with
+        their command lines, instead of only the path.
+        """
+
+        root = os.path.realpath(str(self.root))
+        holders: list[str] = []
+        for proc in psutil.process_iter(["pid", "ppid"]):
+            try:
+                cwd = proc.cwd() or ""
+                under_root = bool(cwd) and os.path.realpath(cwd).startswith(root)
+                files = [
+                    os.path.basename(item.path)
+                    for item in proc.open_files()
+                    if os.path.realpath(item.path).startswith(root)
+                ]
+                if not under_root and not files:
+                    continue
+                command = " ".join(proc.cmdline())[:120]
+                holders.append(
+                    f"pid={proc.pid} ppid={proc.info['ppid']} cwd_under_root={under_root} "
+                    f"files={files[:6]} cmd={command!r}"
+                )
+            except psutil.Error:
+                continue
+        return holders
 
     def _is_locked_harness_artifact_cleanup_error(self, exc: OSError) -> bool:
         return self._is_locked_database_cleanup_error(
