@@ -42,6 +42,8 @@ from weft.helpers import (
     log_info,
     log_warning,
     pid_is_live,
+    pid_matches_create_time,
+    process_create_time,
     reload_config,
     resolve_broker_max_message_size,
     safe_cancel,
@@ -162,6 +164,24 @@ def test_pid_is_live_rejects_zombie_process() -> None:
                 break
             time.sleep(0.01)
         assert pid_is_live(process.pid) is False
+    finally:
+        process.wait()
+
+
+def test_pid_matches_create_time_rejects_zombie_process() -> None:
+    """A zombie keeps its creation time but is no process: identity needs life."""
+
+    process = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"])
+    try:
+        create_time = process_create_time(process.pid)
+        assert create_time is not None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not pid_is_live(process.pid):
+                break
+            time.sleep(0.01)
+        assert pid_is_live(process.pid) is False
+        assert pid_matches_create_time(process.pid, create_time) is False
     finally:
         process.wait()
 

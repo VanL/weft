@@ -124,6 +124,14 @@ def pid_matches_create_time(pid: int, create_time: float | None) -> bool:
         return False
     if create_time is None:
         return pid_is_live(pid)
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            # An exited child nobody has reaped yet keeps its creation time
+            # but is no process: identity without life is not a match.
+            return False
+    except psutil.Error:
+        return False
     current_create_time = process_create_time(pid)
     if current_create_time is None:
         return False

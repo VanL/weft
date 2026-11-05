@@ -2305,13 +2305,7 @@ class Manager(ServiceTask):
                 continue
             self._child_processes.pop(tid)
             self._child_sentinel_adapter.remove(tid)
-            # Plan 2026-11-04-context-level-service-singletons section 6b:
-            # multiprocessing joins every live non-daemon child it still
-            # tracks at interpreter exit, so a Windows Manager (no POSIX hard
-            # exit) would hang for as long as the service lives. No public
-            # API detaches a started live Process; drop it from the private
-            # children set instead.
-            multiprocessing.process._children.discard(child.process)  # type: ignore[attr-defined]
+            _register_detached_service(child.process)
 
     def _drain_phase_children(self) -> dict[str, ManagedChild]:
         """Return this Manager's user-work children that the drain stops.
@@ -9353,6 +9347,58 @@ class Manager(ServiceTask):
             atexit.unregister(callback)
         except Exception:  # pragma: no cover - best-effort normal cleanup  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-284] exception
             logger.warning("Failed to unregister manager atexit callback")
+
+
+_detached_service_processes: set[BaseProcess] = set()
+_detached_services_lock = threading.Lock()
+_detached_services_hook_registered = False
+
+
+def _register_detached_service(process: BaseProcess) -> None:
+    """Keep a detached service process reapable without ever joining it at exit.
+
+    The process stays in ``multiprocessing``'s children set so the library
+    reaps it once it has exited (on its next ``active_children()`` or process
+    start); an exited child never lingers as a zombie in a host that outlives
+    its services (an inline Manager in a test or an embedding process). What
+    must never happen is the interpreter's exit-time join of a *live*
+    detached service: on Windows a Manager exits through normal interpreter
+    shutdown (no POSIX hard exit), and an embedding host exits whenever it
+    likes. ``_discard_live_detached_services`` runs at exit, registered after
+    ``multiprocessing``'s own exit function so it runs first, and drops every
+    still-live detached service from that set. No public API detaches a
+    started live Process (plan 2026-11-04-context-level-service-singletons,
+    section 6b).
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+    """
+
+    global _detached_services_hook_registered
+    with _detached_services_lock:
+        _detached_service_processes.add(process)
+        if not _detached_services_hook_registered:
+            atexit.register(_discard_live_detached_services)
+            _detached_services_hook_registered = True
+
+
+def _discard_live_detached_services() -> None:
+    """Drop live detached services from the exit join; reap the exited ones."""
+
+    with _detached_services_lock:
+        processes = tuple(_detached_service_processes)
+        _detached_service_processes.clear()
+    for process in processes:
+        try:
+            if process.is_alive():
+                multiprocessing.process._children.discard(process)  # type: ignore[attr-defined]
+            else:
+                process.join(0)
+        except (
+            AssertionError,
+            OSError,
+            ValueError,
+        ):  # pragma: no cover - exit-time best effort
+            logger.debug("Detached service bookkeeping failed at exit", exc_info=True)
 
 
 __all__ = ["Manager"]

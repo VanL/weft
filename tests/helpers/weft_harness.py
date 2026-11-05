@@ -9,6 +9,7 @@ import errno
 import gc
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -1447,6 +1448,10 @@ class WeftTestHarness:
         self._registered_pid_create_times.clear()
 
     def _live_registered_pids(self) -> list[int]:
+        # Reap this process's exited multiprocessing children first: a detached
+        # service of an inline Manager is one, and until reaped it is a zombie
+        # that still answers to its PID.
+        multiprocessing.active_children()
         return [
             pid
             for pid in self._registered_pids

@@ -6837,6 +6837,7 @@ def test_manager_idle_exit_detaches_launched_service(
         manager.cleanup()
 
         assert service.is_alive()
+        manager_mod._discard_live_detached_services()
         assert service not in multiprocessing.active_children()
         assert service_tid not in manager._child_processes
         assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
@@ -8981,7 +8982,8 @@ def test_manager_stop_drains_user_work_then_manager_leaving_services(
     Check 2: the drained event follows the user task's terminal event and
     is the last event of the Manager and the user task after the STOP.
     Check 3: final cleanup detaches the services: still alive, no longer
-    tracked, and no longer in ``multiprocessing.active_children()``. Fires
+    tracked, and dropped from ``multiprocessing.active_children()`` by the
+    exit-time discard (they stay reapable until then). Fires
     on the mutation "final cleanup terminates everything still tracked".
     """
 
@@ -9087,6 +9089,7 @@ def test_manager_stop_drains_user_work_then_manager_leaving_services(
 
         # Check 3: final cleanup detaches the services, unsignalled.
         manager.cleanup()
+        manager_mod._discard_live_detached_services()
         tracked = multiprocessing.active_children()
         for service_tid, process in services.items():
             assert _process_running(process.pid), (
@@ -11054,6 +11057,7 @@ def test_manager_superseded_without_user_work_exits_leaving_service_running(
         manager.cleanup()
 
         assert service.is_alive()
+        manager_mod._discard_live_detached_services()
         assert service not in multiprocessing.active_children()
         assert service_tid not in manager._child_processes
         assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
@@ -11111,6 +11115,7 @@ def test_manager_superseded_drain_waits_on_user_work_not_services(
         assert manager.should_stop is True
         assert manager.taskspec.state.status == "cancelled"
         assert service.is_alive()
+        manager_mod._discard_live_detached_services()
         assert service not in multiprocessing.active_children()
         assert manager._child_processes == {}
         assert make_queue(f"T{service_tid}.ctrl_in").peek_one() is None
