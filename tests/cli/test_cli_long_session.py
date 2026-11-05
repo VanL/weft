@@ -432,15 +432,17 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
         workdir,
         weft_harness,
         env,
-        "manager",
+        "system",
         "stop",
-        manager_tid,
         "--timeout",
         "10",
         timeout=30.0,
     )
     assert rc == 0, err
 
+    # `weft system stop` is the one command that empties a context: it stops
+    # the Manager and then the internal services, which outlive a Manager
+    # stop ([MA-1] item 7).
     final_status_payload = _status_payload(workdir, weft_harness, env)
     assert final_status_payload["managers"] == []
     assert final_status_payload["tasks"] == []
