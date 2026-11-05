@@ -14288,3 +14288,142 @@ def test_task_monitor_empty_cycles_cross_the_deadline_and_a_substantive_one_rese
         assert task.taskspec.state.status == "completed"
     finally:
         task.stop()
+
+
+def _marked_task_monitor_spec(tid: str) -> TaskSpec:
+    """Return a TaskMonitor spec carrying the Manager's internal-service markers."""
+
+    spec = make_task_monitor_taskspec(tid)
+    return spec.model_copy(
+        update={
+            "metadata": {
+                **spec.metadata,
+                "role": "task_monitor",
+                INTERNAL_RUNTIME_TASK_CLASS_KEY: (
+                    INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR
+                ),
+            }
+        }
+    )
+
+
+def _drive_monitor_across_idle_window(
+    task: TaskMonitor,
+    service_clock: dict[str, int],
+) -> bool:
+    """Drive cycles across more than one idle window; return whether it exited."""
+
+    task.process_once()
+    drive_task_monitor_until_idle(task)
+    task.process_once()
+    for _ in range(5):
+        if task.should_stop:
+            break
+        service_clock["ns"] += _MONITOR_IDLE_WINDOW_NS // 3
+        _drive_one_monitor_cycle(task)
+    return task.should_stop
+
+
+@pytest.mark.parametrize("young_row", [False, True])
+def test_task_monitor_raw_mode_young_rows_keep_it_past_the_idle_window(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    young_row: bool,
+) -> None:
+    """Raw external-log rows awaiting their retention deadline are work (R4).
+
+    Owner ruling 10.3: a row the raw cycle will export and delete once its
+    retention window ends keeps the Monitor active; with no such row the
+    Monitor idle-exits after the window.
+    """
+
+    db_path, make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    config = _idle_monitor_config(
+        WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS="3600",
+        WEFT_LOG_TASKS_EXTERNAL_ENABLED="1",
+        WEFT_LOG_TASKS_EXTERNAL_MODE="raw",
+        WEFT_LOG_TASKS_EXTERNAL_PATH=str(tmp_path / "raw.jsonl"),
+    )
+    if young_row:
+        make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+            json.dumps(
+                {
+                    "event": "work_completed",
+                    "status": "completed",
+                    "tid": str(time.time_ns()),
+                }
+            )
+        )
+    task = TaskMonitor(
+        db_path, _marked_task_monitor_spec("1778089999999999707"), config=config
+    )
+    try:
+        exited = _drive_monitor_across_idle_window(task, service_clock)
+        assert exited is (not young_row)
+        if young_row:
+            assert task.taskspec.state.status == "running"
+    finally:
+        task.stop()
+
+
+@pytest.mark.parametrize("owner_state", ["crashed", "active"])
+def test_task_monitor_stale_service_family_awaiting_cleanup_is_work(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_state: str,
+) -> None:
+    """A crashed service's open family keeps the Monitor; a live one does not (R5).
+
+    A heartbeat that died without a terminal publication leaves a
+    non-terminal service family that stale-service-owner cleanup will close
+    once registry evidence proves it stale (here: a replacement owner is
+    live). That future cleanup is retained work (owner ruling 10.3). The same
+    family with its owner still active is a live lifecycle, not work.
+    """
+
+    db_path, make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    service_tid = "1778089999999999708"
+    replacement_tid = "1778089999999999709"
+    taskspec = _projection_taskspec(service_tid)
+    taskspec["metadata"] = {"role": "heartbeat_service"}
+    make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
+        json.dumps(
+            {
+                "event": "work_started",
+                "status": "running",
+                "tid": service_tid,
+                "taskspec": taskspec,
+            }
+        )
+    )
+    owner_tid = replacement_tid if owner_state == "crashed" else service_tid
+    make_queue(WEFT_SERVICES_REGISTRY_QUEUE).write(
+        json.dumps(
+            build_service_owner_payload(
+                service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+                service_type=SERVICE_TYPE_MANAGED,
+                owner_tid=owner_tid,
+                status=SERVICE_STATUS_ACTIVE,
+                name="heartbeat-service",
+            )
+        )
+    )
+    task = TaskMonitor(
+        db_path,
+        _marked_task_monitor_spec("1778089999999999710"),
+        config=_idle_monitor_config(),
+    )
+    try:
+        exited = _drive_monitor_across_idle_window(task, service_clock)
+        assert exited is (owner_state == "active")
+    finally:
+        task.stop()

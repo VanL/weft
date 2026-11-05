@@ -829,6 +829,7 @@ class MaintenanceWorker:
         self._control_deadline: float | None = None
         self._control_reconciliation_observed = False
         self._open_families_present = False
+        self._raw_external_rows_pending = False
 
     def _open_resources(self, *, borrowed_session: BrokerSession | None = None) -> None:
         """Acquire resources under the enclosing cleanup scope ([IMPL.11])."""
@@ -958,10 +959,12 @@ class MaintenanceWorker:
         """Return whether retained state still awaits a future Monitor action.
 
         Inputs, all produced or carried by this invocation: the open-family
-        presence check (run beside family retirement), pending control
-        cleanup, reserved cleanup skipped because a retention window is still
-        running, pending deferred writes, scan candidates seen but not yet
-        safe to delete, and runtime prune candidates not yet deleted.
+        presence check (run beside family retirement), raw task-log rows the
+        raw external-log cycle skipped because their retention window is still
+        running, pending control cleanup, reserved cleanup skipped because a
+        retention window is still running, pending deferred writes, scan
+        candidates seen but not yet safe to delete, and runtime prune
+        candidates not yet deleted.
 
         Spec: [MF-5], [OBS.13]; owner ruling 10.3 (2026-11-04)
         """
@@ -969,6 +972,7 @@ class MaintenanceWorker:
         maintenance = self._maintenance_state
         return bool(
             self._open_families_present
+            or self._raw_external_rows_pending
             or self._collation_state.last_control_cleanup_pending
             or self._cleanup_state.last_reserved_skipped_not_ready > 0
             or self._deferred_task_log_pending > 0
@@ -982,16 +986,20 @@ class MaintenanceWorker:
         """Return whether any collation family awaits retirement by this Monitor.
 
         The open-family presence check: pages retained families in TID order
-        and stops at the first that counts. A terminal family of any kind
-        counts until it is retired; a non-terminal family counts unless it is
-        a live Manager or service lifecycle row (those end only when their
-        process does, so they are not retained work).
+        and stops at the first that counts. A terminal family of any kind and
+        a non-terminal user family count until retired. A non-terminal
+        Manager or service family counts only when the stale-service-owner
+        evidence (``_stale_service_owner_eligible``, without its retention
+        age) already marks it for future stale-owner cleanup; an active
+        internal lifecycle ends only when its process does and is not
+        retained work.
 
         Spec: [MF-5], [OBS.13]; owner ruling 10.3 (2026-11-04)
         """
 
         page = max(1, int(self._monitor_config.batch_size))
         after_tid: str | None = None
+        service_families: list[MonitorTaskCollationRecord] = []
         while True:
             records = store.list_task_collations(limit=page, after_tid=after_tid)
             for record in records:
@@ -1000,9 +1008,13 @@ class MaintenanceWorker:
                     or not record.service_classification().is_service_record
                 ):
                     return True
+                service_families.append(record)
             if len(records) < page:
-                return False
+                break
             after_tid = records[-1].tid
+        return bool(
+            service_families and self._stale_service_owner_eligible(service_families)
+        )
 
     def run_collation(self, work: _TaskMonitorCollationWork) -> bool:
         """Prepare custom collation without a second sink probe or processor.
@@ -2868,8 +2880,25 @@ class MaintenanceWorker:
             now_ns=now_ns,
             retention_seconds=self._monitor_config.task_log_retention_period_seconds,
         )
+        return tuple(
+            MonitorSummaryReadyTask(record=record, close_reason="stale_service_owner")
+            for record in self._stale_service_owner_eligible(candidates)
+        )
+
+    def _stale_service_owner_eligible(
+        self,
+        candidates: Sequence[MonitorTaskCollationRecord],
+    ) -> list[MonitorTaskCollationRecord]:
+        """Return the open service-owner families live evidence proves stale.
+
+        Shared by stale-owner summary selection and the open-family presence
+        check: a family is eligible when no non-terminal mapping or live
+        service owner names its TID and same-service registry rows prove it
+        stale ([OBS.13.7]).
+        """
+
         if not candidates:
-            return ()
+            return []
         latest_services = self._latest_service_owner_records()
         active_tids = self._active_runtime_tids(
             {record.tid for record in candidates}, latest_services=latest_services
@@ -2885,7 +2914,7 @@ class MaintenanceWorker:
                 service_record.service_key,
                 [],
             ).append(service_record)
-        ready: list[MonitorSummaryReadyTask] = []
+        eligible: list[MonitorTaskCollationRecord] = []
         for record in candidates:
             if record.tid in active_tids or record.tid in live_service_owner_tids:
                 continue
@@ -2898,13 +2927,8 @@ class MaintenanceWorker:
                 service_records=service_records,
             ):
                 continue
-            ready.append(
-                MonitorSummaryReadyTask(
-                    record=record,
-                    close_reason="stale_service_owner",
-                )
-            )
-        return tuple(ready)
+            eligible.append(record)
+        return eligible
 
     def _stale_service_owner_key(
         self,
@@ -4156,6 +4180,9 @@ class MaintenanceWorker:
                 now_ns,
                 self._monitor_config.task_log_retention_period_seconds,
             ):
+                # Awaits export and deletion once its retention window ends
+                # (owner ruling 10.3): retained work for the idle rule.
+                self._raw_external_rows_pending = True
                 continue
             try:
                 self._begin_external_task_log_sink_observation()
