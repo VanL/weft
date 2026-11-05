@@ -1198,6 +1198,11 @@ class WeftTestHarness:
         for tid, record in sorted(manager_records.items()):
             self._send_manager_stop(tid, record=record)
 
+        # Services outlive a Manager stop ([MA-1] item 7) and their mapped
+        # PIDs would otherwise hold every pass of the wait loop below for its
+        # full second; stop them by registry record first, so the loop waits
+        # only for the Manager and user tasks.
+        self._stop_context_services(timeout=stop_timeout, force=force)
         for _ in range(3):
             self._collect_pid_mappings()
             if stop_tasks:
@@ -1234,8 +1239,6 @@ class WeftTestHarness:
                     timeout=stop_timeout,
                     stop_if_absent=True,
                 )
-
-        self._stop_context_services(timeout=stop_timeout, force=force)
 
         if issued_task_stops or manager_records:
             self._collect_pid_mappings()

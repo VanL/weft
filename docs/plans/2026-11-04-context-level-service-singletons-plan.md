@@ -1232,3 +1232,21 @@ Teardown of `test_manager_leadership_yields_to_canonical_lower_manager`:
 sentinel is `_launch_result_accepted = object()` (the constants test
 treats an upper-case module name as a production constant; the house
 sentinel form is lower case, as in `weft/core/tasks/service.py`).
+
+Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
+`test_cli_long_session_produces_identical_transcript_across_backends`,
+which ended its session with `weft manager stop` and asserted an empty
+task list; it now ends with `weft system stop` (`534d2268`); the
+complete suite with slow tests then passed. Run 5 passed the full suite
+(6583) and stopped on the PostgreSQL leg's
+`test_queue_watch_sigint_exits_cleanly` (SIGINT to exit over 10 s under
+twelve-worker load; 50 ms measured alone, and the module passes alone
+under PostgreSQL). The full suite had grown from 260 s to 772 s: in
+`WeftTestHarness._stop_active_managers` the three-pass PID wait held its
+full second on every pass because the services' mapped PIDs stayed live
+after the Manager STOP (they outlive it now) until the registry stop ran
+after the loop. The registry stop now runs right after the Manager STOPs
+are sent, before the loop (teardown of a CLI Manager test: 3.8 s to
+0.7 s); the preserve path already did so. The SIGINT flakes are load
+starvation of a subprocess, not a change in exit latency, and are
+watched in the next release run.
