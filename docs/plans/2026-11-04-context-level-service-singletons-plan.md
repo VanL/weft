@@ -1156,3 +1156,63 @@ question 2, A9: `start_resource_tracker_detached` called from
 `communicate`; test `test_serve_pipes_reach_eof_at_exit_while_its_services_live`.
 (3) Spec 03 test names updated for S2's renames; spec 09 [IP-1] mapping for
 `client.system.stop`.
+
+### Lead, 2026-11-04, independent implementation review and fix round
+
+Cross-family implementation review (codex, read-only, range
+`0923b35d..d00aae2f`): verdict BLOCKED, R1-R7; everything else in (a)-(g)
+confirmed (idle order, restart under a live Manager, the three work
+definitions, detachment, the retained termination paths, system stop's
+targeting, broadcast, settlement and escalation, the tracker fix, the
+plan-4 resync, the oracles). Fixes, one branch per slice from `d00aae2f`,
+merged as `88231ef4` (s3-fix), `948a84f6` (s2-fix), `6c66679f` (s1-fix),
+plus lead commits `12c2ab91` (R7) and `1c881907` (mappings):
+
+- R1 (`893e7341`): `_live_internal_service_records` reads the registry
+  with `strict=True`; a failed read raises through the typed boundary as
+  `CommandExecutionError` at collection and at settlement (two oracles,
+  RED with `strict=False`). Added: a service that never settles raises
+  `ControlRejected` naming the TID; a foreign-host snapshot and a reused
+  PID are never signalled.
+- R2 (`c5d8e77e`): `_launch_handoff_lock`, `_launch_acceptance_closed`
+  and an accepted-results slot: the worker, under the lock, appends its
+  result and returns `_LAUNCH_RESULT_ACCEPTED` (the framework's completion
+  notice follows), or reaps through `_reap_unaccepted_launch` once
+  acceptance is closed, the deadline passed or stop requested; cleanup
+  closes acceptance under the lock after its wait, then drains queued
+  results and the slot without blocking. Publishing from inside the lock
+  was rejected because the thread's completion mark follows publication
+  and a same-turn dispatch could hit "already active" on the lane. RED
+  shown on `d00aae2f` by gating the old publication until the reactor had
+  drained; GREEN `test_manager_launch_result_after_acceptance_close_is_reaped`.
+- R3 (`f6722609`): `_manager_owner_record_live` reuses the Manager
+  reader's three-valued `manager_registry_record_liveness` through the
+  accessor `weft/core/deferred.py::get_manager_registry_record_liveness`
+  (direct import is a real cycle); `unknown` keeps the service within
+  `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS`. Oracle: with
+  `psutil.Process` raising `AccessDenied`, a fresh Manager row keeps the
+  service, an expired one lets it exit.
+- R4 (`f6722609`): raw external-log mode sets `_raw_external_rows_pending`
+  when it skips a retention-young row; `_retained_work_pending` reads it.
+  Oracle: a young user row keeps the Monitor past the window.
+- R5 (`f6722609`): `_retained_families_present` counts a non-terminal
+  service family only when `_stale_service_owner_eligible` (extracted from
+  the stale-owner summary path, without its retention-age filter) returns
+  it; a crashed service whose mapping row is still non-terminal does not
+  count, so an orphaned Monitor cannot wait for ever on a row nobody will
+  retire. Oracle: a heartbeat family with no terminal row whose owner was
+  replaced keeps the Monitor; the same family with its owner active lets
+  it exit.
+- R6 (`893e7341`): `_cleanup_preserving_database` re-samples live PIDs and
+  task mappings after its loop, before the raise checks (RED with the
+  re-sample removed).
+- R7 (`12c2ab91`): the stop-ordering backlink and the [MA-3] mapping's
+  cleanup sentence.
+- Suite failure `test_production_constants_live_in_constants_module`: the
+  two nanosecond constants left `service.py`; values derive at use from
+  the seconds constants.
+- `tests/cli/test_status.py::test_task_status_watch_sigint_exits_cleanly`
+  failed once under the twelve-worker merged run and passes alone;
+  treated as a load flake, watched in the release run.
+
+Scoped re-review of `d00aae2f..6c66679f` requested (one round).
