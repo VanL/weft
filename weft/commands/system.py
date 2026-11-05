@@ -1475,11 +1475,17 @@ class _ServiceStopTarget:
 def _live_internal_service_records(broker: Any) -> dict[str, ServiceOwnerRecord]:
     """Return the latest live registry row per internal service owner TID.
 
+    The read is strict: a registry that cannot be read raises, so neither
+    target collection nor settlement mistakes a failed read for an empty
+    registry ("nothing to stop", "already stopped").
+
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3]
     """
 
     read = collect_service_owner_records(
-        iter_broker_queue_json_entries(broker, WEFT_SERVICES_REGISTRY_QUEUE),
+        iter_broker_queue_json_entries(
+            broker, WEFT_SERVICES_REGISTRY_QUEUE, strict=True
+        ),
         service_type=SERVICE_TYPE_MANAGED,
     )
     return {
@@ -1712,6 +1718,8 @@ def stop_system(
     Raises:
         ControlRejected: The Manager, or a reachable service, did not stop.
         ManagerNotRunning: The active Manager record has no TID.
+        CommandExecutionError: The registry or a task snapshot could not be
+            read, during target collection or settlement.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
     docs/specifications/10-CLI_Interface.md (system stop);

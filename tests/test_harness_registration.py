@@ -2019,6 +2019,46 @@ def test_harness_cleanup_terminates_and_records_an_unstoppable_service() -> None
 
 
 @pytest.mark.shared
+def test_preserve_cleanup_samples_survivors_after_service_stop_exhausts_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service stop that spends the whole budget still leaves survivors visible.
+
+    The final raise paths sample live PIDs after the loop, so a cleanup whose
+    first blocking call exhausts the deadline cannot pass on empty evidence.
+    """
+    harness = WeftTestHarness(manager_timeout=6.0)
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        harness.__enter__()
+        harness.register_pid(sleeper.pid, kind="managed")
+        clock = [time.time()]
+        monkeypatch.setattr(
+            harness_mod,
+            "time",
+            SimpleNamespace(
+                time=lambda: clock[0],
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+                time_ns=time.time_ns,
+            ),
+        )
+
+        def exhaust_budget(*, timeout: float, force: bool) -> None:
+            clock[0] += timeout + 1.0
+
+        monkeypatch.setattr(harness, "_stop_context_services", exhaust_budget)
+
+        with pytest.raises(RuntimeError, match="left live processes"):
+            harness._cleanup_preserving_database()
+    finally:
+        monkeypatch.undo()
+        sleeper.kill()
+        sleeper.wait(timeout=10)
+        harness.cleanup()
+
+
+@pytest.mark.shared
 def test_original_failure_survives_blocked_inline_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
