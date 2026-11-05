@@ -145,7 +145,7 @@ Replacement (`docs/program-theory.md`):
 Replacement (`docs/program-theory.md`):
 
 ```text
-| A wake predicate reads facts and guarantees progress | The test that grants a reactor turn is answered from queue rows, never from memory that only a turn can update. It is true only when the granted turn will change its inputs, so it can neither lose a wake nor spin. | Owner, 2026-11-05; 2026-11-05 review: the Manager's inbox predicate read the in-memory scheduler and dropped every new request until a periodic turn | [CC-2.1]; [MA-1.8] |
+| A wake predicate reads facts and guarantees progress | A predicate that decides whether queued work grants a turn is answered from queue rows, never from memory that only a turn can update. It is true whenever actionable work is present, and true only when the granted turn can act on it, so it neither loses a wake nor spins. Local completions and deadlines remain arbiter inputs ([WT-2a.6]). | Owner, 2026-11-05; 2026-11-05 review: the Manager's inbox predicate read the in-memory scheduler and dropped every new request until a periodic turn | [CC-2.1]; [MA-1.8] |
 ```
 
 ### C. [WT-4.3] — replace the row that opens "| A quiet task does nothing |"
@@ -505,3 +505,9 @@ Open: none.
   (`60d758d0`) either.
 - Remaining: Task 7 (owner-written possession-probe key, a non-author
   agent's answers, then `completed`). Nothing is committed.
+
+## Revision Log
+
+| Date | Baseline | Section | Change and reason | Re-review required? |
+|------|----------|---------|-------------------|---------------------|
+| 2026-11-05 | `7e9c6106` | Change B ([WT-4.1] wake-predicate row) | Owner-approved fix ("Make that change", 2026-11-05) after the two-factor fit trial. The other-family account showed the row stated only a soundness condition ("true only when ..."), which does not prevent the lost wake that motivated it, and that "answered from queue rows" contradicted [WT-2a.6] local inputs. The row now states completeness ("true whenever actionable work is present"), scopes itself to predicates over queued work, and names local completions and deadlines as arbiter inputs. | No cross-family round; the fix applies the reviewer's own finding and is re-checked by the repeated fit trial |
