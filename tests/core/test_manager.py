@@ -1710,6 +1710,7 @@ def test_manager_enqueues_one_internal_task_monitor_spawn(
     assert len(monitor_payloads) == 1
     monitor_payload = monitor_payloads[0]
     assert monitor_payload["taskspec"]["name"] == "task-monitor"
+    assert "enable_process_title" not in monitor_payload["taskspec"]["spec"]
     assert (
         INTERNAL_RUNTIME_TASK_CLASS_KEY not in monitor_payload["taskspec"]["metadata"]
     )
@@ -1750,7 +1751,7 @@ def test_manager_enqueues_liveness_monitor_when_independently_enabled(
         == INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR
     )
     assert payload["taskspec"]["name"] == "liveness-monitor"
-    assert payload["taskspec"]["spec"]["enable_process_title"] is False
+    assert "enable_process_title" not in payload["taskspec"]["spec"]
     assert payload["inbox_message"] is None
     assert (
         payload["taskspec"]["metadata"][INTERNAL_SERVICE_KEY_METADATA_KEY]
@@ -2498,7 +2499,7 @@ def test_manager_admission_retains_both_lanes_at_internal_limit(
             manager._queue_counts_as_wait_activity(
                 manager._queues[WEFT_SPAWN_REQUESTS_QUEUE]
             )
-            is False
+            is True
         )
     finally:
         manager.stop(join=False)

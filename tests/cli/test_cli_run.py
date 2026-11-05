@@ -3094,3 +3094,27 @@ def test_weft_harness_cleanup_preserves_sqlite_integrity_for_parallel_manager_re
                     harness._tempdir.cleanup()
                 except PermissionError:
                     pass
+
+
+def test_cli_run_failed_command_records_return_code(
+    workdir: Path, weft_harness: WeftTestHarness
+) -> None:
+    """Failed commands retain the child's exit code in task status [TS-2]."""
+    rc, out, err = run_cli(
+        "run",
+        "--json",
+        "--",
+        sys.executable,
+        "-c",
+        "import sys; sys.exit(3)",
+        cwd=workdir,
+        stdin="",
+        harness=weft_harness,
+    )
+    assert rc == 1, (out, err)
+    tid = json.loads(out)["tid"]
+    rc, out, err = run_cli(
+        "task", "status", tid, "--json", cwd=workdir, stdin="", harness=weft_harness
+    )
+    assert rc == 0, (out, err)
+    assert json.loads(out)["return_code"] == 3

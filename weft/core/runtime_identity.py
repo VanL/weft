@@ -85,6 +85,10 @@ def connection_owner_label(tid: str, context: str) -> str:
     return f"weft-{digest}-{tid}"
 
 
+class RuntimeIdentityMismatch(ValueError):
+    """Evidence names a runtime identity other than the one reading it."""
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeIdentity:
     """Identity installed once in a dedicated wrapper or host worker [MF-1]."""
@@ -140,7 +144,9 @@ class RuntimeIdentity:
             raise ValueError("unsupported runtime scheduling class")
         owner = connection_owner_label(self.tid, self.context)
         if self.connection_owner is not None and self.connection_owner != owner:
-            raise ValueError("connection owner does not match runtime identity")
+            raise RuntimeIdentityMismatch(
+                "connection owner does not match runtime identity"
+            )
         object.__setattr__(self, "connection_owner", owner)
 
     def to_dict(self) -> dict[str, Any]:

@@ -1096,7 +1096,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if outcome.status == "error":
             error_exc = RuntimeError(outcome.error or "Target execution failed")
-            self.taskspec.mark_failed(error=str(error_exc))
+            self.taskspec.mark_failed(
+                error=str(error_exc), return_code=outcome.returncode
+            )
             self._finalize_terminal_outcome(
                 title_state="failed",
                 title_detail=None,

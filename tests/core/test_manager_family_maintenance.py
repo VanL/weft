@@ -1757,3 +1757,92 @@ def test_manager_services_control_while_real_launch_receipt_is_held(
             release_receipt.set()
             retire_dispatch_workers(manager, releases)
             _join_waiting_processes(evidence.processes)
+
+
+def test_new_source_row_wakes_idle_manager_wait(
+    manager: Manager, broker_env: BrokerEnv
+) -> None:
+    """An unindexed source row must grant a turn without a maintenance wake [MA-1.8]."""
+    drive_until(
+        lambda: manager._admission_bootstrapped,
+        bool,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=10,
+    )
+    deadline = time.monotonic() + 20
+    while True:
+        manager.process_once()
+        started = time.monotonic()
+        manager.wait_for_activity(timeout=3.0)
+        if time.monotonic() - started >= 2.9:
+            break
+        assert time.monotonic() < deadline
+    _, queues = broker_env
+    source = queues(manager._queue_names["inbox"])
+    request_id = source.write(request_body())
+    assert manager._has_pending_messages(), (
+        "new source row must be actionable before classification"
+    )
+    started = time.monotonic()
+    manager.wait_for_activity(timeout=3.0)
+    assert time.monotonic() - started < 1.5
+    manager.process_once()
+    assert source.peek_one(exact_timestamp=request_id) is None
+
+
+def test_new_source_row_wakes_admission_blocked_manager(
+    broker_env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Classification remains actionable while indexed dispatch waits for capacity [MA-1.8]."""
+    target, queues = broker_env
+    monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
+    manager = Manager(
+        target,
+        make_manager_spec(
+            str(queues("blocked-ids").generate_timestamp()), idle_timeout=0
+        ),
+        config=load_config(
+            {
+                "WEFT_ADMISSION_MAX_CONNECTIONS": 5,
+                "WEFT_ADMISSION_RESERVE_FRACTION": 0.0,
+                "WEFT_AUTOSTART_TASKS": False,
+                "WEFT_TASK_MONITOR_ENABLED": False,
+                "WEFT_LIVENESS_MONITOR_ENABLED": False,
+                "WEFT_HEARTBEAT_ENABLED": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 5)
+    source = queues(manager._queue_names["inbox"])
+    try:
+        source.write(request_body())
+        drive_until(
+            lambda: "public" in manager._admission_blocked_lanes,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=10,
+        )
+        deadline = time.monotonic() + 20
+        while True:
+            manager.process_once()
+            started = time.monotonic()
+            manager.wait_for_activity(timeout=3)
+            if time.monotonic() - started >= 2.9:
+                break
+            assert time.monotonic() < deadline
+        source.write(request_body())
+        assert manager._has_pending_messages()
+        started = time.monotonic()
+        manager.wait_for_activity(timeout=3)
+        assert time.monotonic() - started < 1.5
+        manager.process_once()
+        assert not manager._unclassified_source_row_pending()
+        assert source.has_pending()
+        started = time.monotonic()
+        manager.wait_for_activity(timeout=3)
+        assert time.monotonic() - started >= 2.9
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()

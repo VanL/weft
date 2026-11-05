@@ -8,9 +8,13 @@ import socket
 import subprocess
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
+from simplebroker.ext import BrokerError
+from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import resolve_runtime_config
 from weft.core.manager import (
@@ -24,9 +28,10 @@ from weft.core.spawn_requests import submit_spawn_request
 from weft.core.task_state import (
     manager_launch_custody_pending,
     read_task_state_snapshot,
+    task_state_queue_name,
 )
 from weft.core.tasks import Consumer
-from weft.helpers import process_create_time
+from weft.helpers import encode_tid, process_create_time
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(45)]
 
@@ -64,7 +69,7 @@ def recovery_manager(
 
 
 def _reserve_and_checkpoint(
-    manager: Manager, harness: WeftTestHarness
+    manager: Manager, harness: WeftTestHarness, ctrl_out: str | None = None
 ) -> _ManagerChildLaunchRequest:
     """Generate acceptance and resolved identity through production boundaries."""
     ctx = harness.context
@@ -72,6 +77,13 @@ def _reserve_and_checkpoint(
         ctx.broker_target,
         taskspec={
             "name": "recovery-fixture",
+            "io": {
+                "inputs": {"inbox": "recovery.custom.inbox"},
+                "outputs": {"outbox": "recovery.custom.outbox"},
+                "control": {"ctrl_in": "recovery.custom.ctrl_in", "ctrl_out": ctrl_out},
+            }
+            if ctrl_out
+            else {},
             "spec": {
                 "type": "function",
                 "function_target": "tests.tasks.sample_targets:echo_payload",
@@ -299,3 +311,276 @@ def test_wrapper_checkpoint_preserves_already_observed_live_worker(
             assert worker.stdin is not None
             worker.stdin.close()
             worker.wait(timeout=10.0)
+
+
+@pytest.mark.parametrize("task_proof", [False, True])
+@pytest.mark.parametrize("ctrl_out", [None, "recovery.custom.ctrl_out"])
+def test_unhanded_launch_settlement_publishes_terminal_before_ack(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    task_proof: bool,
+    ctrl_out: str | None,
+) -> None:
+    """Positive wrapper exit cannot discard custody without terminal evidence [MA-1.6a]."""
+    manager = recovery_manager
+    request = _reserve_and_checkpoint(manager, weft_harness, ctrl_out)
+    manager._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(request, multiprocessing.current_process())
+    )
+    tid = request.child_spec.tid
+    assert tid is not None
+    evidence = manager._scheduler_residents[tid]
+    evidence["host_processes"][0]["create_time"] -= 100.0
+    with weft_harness.context.queue(
+        ctrl_out or f"T{tid}.ctrl_out", persistent=True
+    ) as output:
+        if task_proof:
+            output.write(
+                json.dumps(
+                    {
+                        "type": "terminal",
+                        "tid": tid,
+                        "source": "task",
+                        "status": "completed",
+                    }
+                )
+            )
+        manager._retire_scheduler_residents()
+        rows = [json.loads(body) for body in output.peek_generator()]
+    assert len(rows) == 1
+    assert rows[0]["source"] == ("task" if task_proof else "manager")
+    assert rows[0]["status"] == ("completed" if task_proof else "failed")
+    if not task_proof:
+        assert (
+            rows[0]["error"] == "Task wrapper exited before publishing terminal state"
+        )
+    assert request.reserved_queue is not None
+    with weft_harness.context.queue(request.reserved_queue, persistent=True) as queue:
+        assert (
+            queue.peek_one(
+                exact_timestamp=request.message_timestamp, include_claimed=True
+            )
+            is None
+        )
+
+
+def test_unhanded_launch_keeps_custody_until_publication_succeeds(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal-write failure must preserve the exact durable reservation [MA-1.6a]."""
+    manager = recovery_manager
+    request = _reserve_and_checkpoint(manager, weft_harness)
+    manager._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(request, multiprocessing.current_process())
+    )
+    tid = request.child_spec.tid
+    assert tid is not None and request.reserved_queue is not None
+    manager._scheduler_residents[tid]["host_processes"][0]["create_time"] -= 100
+    manager._publish_scheduler_checkpoint()
+    queue = manager._get_connected_queue()
+    original = queue.get_connection
+
+    class FailingTerminalWrite:
+        def __init__(self, broker: Any) -> None:
+            self.broker = broker
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.broker, name)
+
+        def write(self, name: str, body: str, **kwargs: Any) -> Any:
+            if name == f"T{tid}.ctrl_out":
+                raise BrokerError("terminal publication unavailable")
+            return self.broker.write(name, body, **kwargs)
+
+    @contextmanager
+    def failed_connection() -> Iterator[Any]:
+        with original() as broker:
+            yield FailingTerminalWrite(broker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, "get_connection", failed_connection)
+        manager._retire_scheduler_residents()
+    with weft_harness.context.queue(
+        request.reserved_queue, persistent=True
+    ) as reserved:
+        assert (
+            reserved.peek_one(
+                exact_timestamp=request.message_timestamp, include_claimed=True
+            )
+            is not None
+        )
+    snapshot = read_task_state_snapshot(weft_harness.context, manager.tid)
+    assert snapshot is not None
+    assert tid in snapshot[1]["scheduler_frontiers"]["residents"]
+    with weft_harness.context.queue(f"T{tid}.ctrl_out", persistent=True) as output:
+        assert output.peek_one() is None
+        manager._retire_scheduler_residents()
+        body = output.peek_one()
+        assert body is not None
+        assert json.loads(body)["source"] == "manager"
+    with weft_harness.context.queue(
+        request.reserved_queue, persistent=True
+    ) as reserved:
+        assert (
+            reserved.peek_one(
+                exact_timestamp=request.message_timestamp, include_claimed=True
+            )
+            is None
+        )
+
+
+def test_unhanded_launch_unresolved_route_keeps_custody_and_settles_sibling(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unreadable route holds only its own settlement and warns once [MF-5]."""
+    manager = recovery_manager
+    first = _reserve_and_checkpoint(manager, weft_harness)
+    second = _reserve_and_checkpoint(manager, weft_harness)
+    for request in (first, second):
+        assert request.child_spec.tid is not None
+        manager._checkpoint_spawned_admission(
+            _ManagerChildLaunchResult(request, multiprocessing.current_process())
+        )
+        manager._scheduler_residents[request.child_spec.tid]["host_processes"][0][
+            "create_time"
+        ] -= 100
+    tid = first.child_spec.tid
+    assert tid is not None and first.reserved_queue is not None
+    with weft_harness.context.queue(first.reserved_queue, persistent=True) as reserved:
+        bad_id = reserved.write("{}")
+        manager._scheduler_residents[tid]["request_id"] = bad_id
+        manager._publish_scheduler_checkpoint()
+        manager._retire_scheduler_residents()
+        manager._retire_scheduler_residents()
+        assert (
+            reserved.peek_one(exact_timestamp=bad_id, include_claimed=True) is not None
+        )
+        assert (
+            reserved.peek_one(
+                exact_timestamp=second.message_timestamp, include_claimed=True
+            )
+            is None
+        )
+    assert tid in manager._scheduler_residents
+    assert second.child_spec.tid not in manager._scheduler_residents
+    assert (
+        len(
+            [
+                r
+                for r in caplog.records
+                if tid in r.getMessage()
+                and "held because its terminal route" in r.getMessage()
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("bad_snapshot", [False, True])
+def test_successor_skips_mismatched_identity_and_preserves_reservation(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    caplog: pytest.LogCaptureFixture,
+    bad_snapshot: bool,
+) -> None:
+    """Persisted foreign evidence cannot block refresh or replay another launch [MA-1.8]."""
+    first = recovery_manager
+    request = _reserve_and_checkpoint(first, weft_harness)
+    first._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(request, multiprocessing.current_process())
+    )
+    tid = request.child_spec.tid
+    assert (
+        tid is not None
+        and request.reserved_queue is not None
+        and request.source_queue is not None
+    )
+    snapshot = read_task_state_snapshot(weft_harness.context, first.tid)
+    assert snapshot is not None
+    payload = snapshot[1]
+    payload["runtime_handle"]["observations"]["host_processes"][0]["create_time"] -= 100
+    evidence = payload["scheduler_frontiers"]["residents"][tid]
+    if bad_snapshot:
+        child = {
+            **evidence,
+            "full": tid,
+            "short": encode_tid(tid),
+            "connection_owner": "mismatched-owner",
+        }
+        with weft_harness.context.queue(
+            task_state_queue_name(tid), persistent=True
+        ) as state:
+            state.write(json.dumps(child))
+    else:
+        evidence["connection_owner"] = "mismatched-owner"
+    first._unregister_manager(status="stopped")
+    with weft_harness.context.queue(
+        task_state_queue_name(first.tid), persistent=True
+    ) as state:
+        state.write(json.dumps(payload))
+    with weft_harness.context.queue("successor.ids", persistent=True) as ids:
+        successor_tid = str(ids.generate_timestamp())
+    successor = Manager(
+        weft_harness.context.broker_target,
+        build_manager_spec(
+            weft_harness.context, successor_tid, idle_timeout_override=0
+        ),
+        config=first._manager_context().config,
+    )
+    try:
+        unrelated = submit_spawn_request(
+            weft_harness.context.broker_target,
+            taskspec={
+                "name": "unrelated",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                },
+            },
+            work_payload="unrelated",
+            config=weft_harness.context.config,
+        )
+        with weft_harness.context.queue(
+            request.source_queue, persistent=True
+        ) as source:
+            drive_until(
+                lambda: source.peek_one(exact_timestamp=unrelated),
+                lambda row: row is None,
+                step=successor.process_once,
+                wait=successor.wait_for_activity,
+                timeout=15,
+            )
+            assert source.peek_one(exact_timestamp=request.message_timestamp) is None
+        assert successor._admission_bootstrapped
+        assert tid in successor._bootstrap_skipped
+        # Re-enter the real reconciliation owner, including its per-resident reread.
+        for _ in range(2):
+            successor._admission_refresh_after = 0
+            successor.process_once()
+            assert successor._admission_bootstrapped
+        assert (
+            len(
+                [
+                    r
+                    for r in caplog.records
+                    if "Manager bootstrap ignored" in r.getMessage()
+                ]
+            )
+            == 1
+        )
+        with weft_harness.context.queue(
+            request.reserved_queue, persistent=True
+        ) as reserved:
+            assert (
+                reserved.peek_one(
+                    exact_timestamp=request.message_timestamp, include_claimed=True
+                )
+                is not None
+            )
+    finally:
+        successor.stop(join=False)
+        successor.cleanup()

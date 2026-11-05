@@ -575,6 +575,14 @@ Weft's metadata to another directory. A supplied Config snapshot is authoritativ
 and does not reload `WEFT_CONTEXT` from the environment. Empty `WEFT_CONTEXT`
 means discovery; relative paths and `~` are resolved when building the context.
 
+A Weft context is its resolved broker identity. Moving a project
+directory, reaching the same `.weft` through a different resolved path
+(such as a new container mount point), or reaching the same PostgreSQL
+database through a different host, user, database or options spelling
+creates a different context (a password change does not); runtime
+state left by the old one is ignored. Using two contexts against one
+database is not supported and may behave inconsistently across tasks.
+
 `weft init` follows the same targeting model as tools like `git init`: it
 defaults to the current directory, or you can pass a positional directory to
 initialize another root explicitly. It does not take `--context`; `--context`

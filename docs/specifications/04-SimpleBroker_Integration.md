@@ -669,6 +669,20 @@ Current boundary notes:
   agent-runtime health metadata, not a broker target source
 - TaskSpec `metadata` is caller-owned runtime metadata, not a broker target
   source
+- a runtime context is the resolved broker identity: for SQLite the
+  resolved database path, for PostgreSQL the sanitized target and backend
+  options as given. A moved Weft directory, the same `.weft` reached at a
+  different resolved path (for example a container volume at a new mount
+  point), and the same PostgreSQL database reached through a differently
+  spelled DSN or different backend options are different contexts by
+  definition, wherever the resolved path or the sanitized target and
+  options differ (a changed password alone does not change the context).
+  Runtime state retained under one context is not adopted by
+  another; a Manager skips it at bootstrap with a warning ([MA-1.8])
+- using two contexts against one database is unsupported and may result in
+  inconsistent behavior across tasks; for example, a Manager may return
+  another context's unlaunched reserved requests to the shared request
+  queue
 
 Current project structure:
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Manager idle deadlines pause while user-work children are live, avoiding
+  immediate-wake spinning during supervision ([MA-1]).
+- Unclassified spawn requests wake the Manager promptly, including while
+  launch admission is blocked ([MA-1.8]).
+- Successor settlement commits terminal evidence before releasing launch
+  custody; an unreadable terminal route retains its reservation ([MA-1.6a]).
+- Failed one-shot commands retain the child's return code in task status.
+- Foreign retained runtime identities are skipped with one warning without
+  releasing their launch custody ([MA-1.8]).
+- Supervised internal services use ordinary task process titles ([OBS.4]).
+- Context documentation explains relocated targets and unsupported use of
+  multiple context identities against one database ([SB-0.4]).
+
 ## [0.9.120] - 2026-11-04
 
 ### Added

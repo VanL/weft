@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 68 plan files in this directory.
+There are currently 69 plan files in this directory.
 
 ## Curation Policy
 
@@ -28,6 +28,7 @@ There are currently 68 plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md`](./2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md) | Program Theory Revision: Published Refusals, Wake Predicates, Observable Quiet, and Behaviour Probes | `promoted` | none |
+| [`2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md`](./2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md) | Manager Wake, Idle Clock, and Launch Settlement Repairs | `completed` | none |
 | [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `completed` | none |
 | [`2026-11-04-manager-drain-and-service-bookkeeping-plan.md`](./2026-11-04-manager-drain-and-service-bookkeeping-plan.md) | Manager Drain and Service Bookkeeping: One Record, One Clock, One Enablement Rule | `completed` | none |
 | [`2026-11-04-system-stop-snapshot-targets-plan.md`](./2026-11-04-system-stop-snapshot-targets-plan.md) | System STOP Targets Every Live Task by Snapshot | `completed` | none |
