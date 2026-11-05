@@ -1441,7 +1441,10 @@ def system_status(
     )
     return SystemStatusSnapshot(
         broker=collect_broker_status(context).to_dict(),
-        managers=[_manager_snapshot(record) for record in managers],
+        managers=[
+            _manager_snapshot(record, state=tid_state_entries.get(str(record["tid"])))
+            for record in managers
+        ],
         tasks=[
             _public_task_snapshot(record.snapshot)
             for record in task_records

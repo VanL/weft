@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import pytest
 
+from simplebroker.ext import BrokerError
 from tests.conftest import run_cli
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
@@ -930,11 +931,47 @@ def test_manager_stop_reaches_task_of_peer_that_died_after_bootstrap(
     assert rc == 0, (rc, out, err)
     weft_harness.wait_for_terminal_state(task_b, expected_status="cancelled")
     assert _first_log_id(context, manager_b, {"manager_stop_drained"}) is not None
-    _wait_until(
-        lambda: _first_log_id(context, task_a, {"control_stop"}) is not None,
-        timeout=20.0,
-        message="B's STOP reaching the dead Manager's task",
-    )
+    try:
+        _wait_until(
+            lambda: _first_log_id(context, task_a, {"control_stop"}) is not None,
+            timeout=20.0,
+            message="B's STOP reaching the dead Manager's task",
+        )
+    except AssertionError as failure:
+        # The yielded harness fixture otherwise resumes without this exception,
+        # so preserve the live evidence before its normal teardown removes it.
+        weft_harness._attach_failure_diagnostics(failure)
+        try:
+            facts: dict[str, Any] = {
+                "task_a_latest": read_task_state_snapshot(context, task_a),
+                "task_b_latest": read_task_state_snapshot(context, task_b),
+                "manager_b_latest": read_task_state_snapshot(context, manager_b),
+                "task_a_first_terminal": _first_terminal_log_id(context, task_a),
+                "manager_b_drained": _first_log_id(
+                    context, manager_b, {"manager_stop_drained"}
+                ),
+                "control_queues": {},
+            }
+            for tid in (task_a, task_b, manager_b):
+                name = f"T{tid}.ctrl_in"
+                with context.queue(name, persistent=True) as queue:
+                    facts["control_queues"][name] = queue.peek_many(
+                        limit=10, with_timestamps=True, include_claimed=True
+                    )
+            failure.add_note(
+                "STOP delivery evidence: " + json.dumps(facts, sort_keys=True)
+            )
+        except (
+            BrokerError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as diagnostic_error:
+            failure.add_note(
+                f"STOP delivery diagnostics unavailable: {diagnostic_error}"
+            )
+        raise
     weft_harness.wait_for_terminal_state(task_a, expected_status="cancelled")
 
 

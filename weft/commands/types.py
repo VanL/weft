@@ -322,6 +322,10 @@ class ManagerSnapshot:
     canonical_candidate: bool | None = None
     canonical: bool | None = None
     started_here: bool | None = None
+    dispatch_refusals: dict[str, Any] = field(
+        default_factory=lambda: {"assessment": "unavailable", "items": []}
+    )
+    dispatch_refusals_source: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

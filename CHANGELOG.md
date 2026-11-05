@@ -4,6 +4,18 @@
 
 ### Changed
 
+- Ordinary status and Manager list/status expose scoped standing dispatch
+  refusals from complete Manager task-state snapshots, with ending evidence,
+  lossless causal IDs, owner-indexed lane counts and bounded human samples.
+  Diagnostic publication preserves custody and existing dispatch authority
+  without another queue or retry timer ([MA-1.8], [MF-5], [CLI-1.2.1]).
+
+- Ambiguous launch custody holds only ancestry-dependent work; unrelated work
+  remains eligible, while real checkpoint publication failures still gate
+  dispatch ([MA-1.8], [MF-5]).
+- Live wrapper death publishes one supervisor failure with its OS exit code,
+  including when resident retirement runs before local cleanup ([MA-1.6a]).
+
 - Manager idle deadlines pause while user-work children are live, avoiding
   immediate-wake spinning during supervision ([MA-1]).
 - Unclassified spawn requests wake the Manager promptly, including while

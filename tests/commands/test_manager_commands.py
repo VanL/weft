@@ -32,12 +32,19 @@ from weft._exceptions import (
     ManagerStartFailed,
     WeftError,
 )
+from weft.cli.app import (
+    _manager_json_record,
+    _status_json_payload,
+    manager_status_command,
+)
 from weft.commands import manager as manager_cmd
+from weft.commands import system as status_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
+from weft.core.dispatch_refusals import refusal_item
 from weft.core.manager import Manager
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -376,6 +383,10 @@ def test_manager_commands_return_structured_broker_ids(
         lambda *_args, **_kwargs: record,
     )
 
+    # The separate real-broker refusal test covers the new selected-state read.
+    monkeypatch.setattr(
+        manager_cmd, "latest_task_state_rows", lambda *args, **kwargs: {}
+    )
     listed = manager_cmd.cmd_manager_list()
     tid = record["tid"]
     assert isinstance(tid, str)
@@ -2942,3 +2953,79 @@ def test_force_stop_noncanonical_tid_is_rejected_not_usage_error(
         manager_cmd.cmd_manager_stop(
             tid=tid, force=True, timeout=0.0, context=context_root
         )
+
+
+def test_manager_refusals_read_matching_snapshot_and_preserve_causal_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Public status reads matching task facts, never registry diagnostics."""
+    root = prepare_project_root(tmp_path / "refusals")
+    context = build_context(root)
+    tid = "1793900000000000001"
+    ids = [1793900000000000100 + offset for offset in range(4)]
+    items = [
+        refusal_item(
+            "launch_receipt_missing",
+            scope="family_path",
+            lane="public",
+            subjects=[str(message_id)],
+            evidence=[{"queue": "retained.reserved", "message_id": message_id}],
+        )
+        for message_id in ids
+    ]
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True) as queue:
+        queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    context, tid, runtime_handle=_host_runtime_handle(os.getpid())
+                )
+            )
+        )
+    with context.queue(task_state_queue_name(tid), persistent=True) as queue:
+        stamp = queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": encode_tid(tid),
+                    "role": "manager",
+                    "dispatch_refusals": {"assessment": "known", "items": items},
+                }
+            )
+        )
+    snapshot = manager_cmd.cmd_manager_status(tid, context=root)
+    assert snapshot.dispatch_refusals["items"] == items
+    assert snapshot.dispatch_refusals_source == {
+        "queue": task_state_queue_name(tid),
+        "message_id": stamp,
+    }
+    projected = _manager_json_record(snapshot)
+    assert [
+        item["evidence"][0]["message_id"]
+        for item in projected["dispatch_refusals"]["items"]
+    ] == list(map(str, ids))
+    assert projected["dispatch_refusals_source"]["message_id"] == str(stamp)
+    manager_status_command(tid, context=root)
+    text = capsys.readouterr().out
+    assert "4 total" in text and "--json" in text
+    assert str(ids[0]) in text and str(ids[2]) in text and str(ids[3]) not in text
+    original = manager_cmd.latest_task_state_rows
+    calls: list[list[str]] = []
+
+    def unreadable(ctx: WeftContext, *, tids: list[str]) -> Any:
+        calls.append(tids)
+        raise BrokerError("injected Manager state read failure")
+
+    monkeypatch.setattr(manager_cmd, "latest_task_state_rows", unreadable)
+    unavailable = manager_cmd.cmd_manager_status(tid, context=root)
+    assert calls == [[tid]]
+    assert unavailable.dispatch_refusals == {"assessment": "unavailable", "items": []}
+    project = status_cmd.system_status(context)
+    matching = next(item for item in project.managers if item.tid == tid)
+    assert matching.dispatch_refusals["items"] == items
+    assert calls == [[tid]], "project status performed an extra selected-Manager read"
+    project_json = _status_json_payload(project)
+    external = next(item for item in project_json["managers"] if item["tid"] == tid)
+    assert external["dispatch_refusals"]["items"][3]["evidence"][0][
+        "message_id"
+    ] == str(ids[3])
+    monkeypatch.setattr(manager_cmd, "latest_task_state_rows", original)

@@ -1083,3 +1083,65 @@ def test_launch_under_a_deferred_parent_with_a_retained_pointer_attaches_to_the_
     scheduler.finish_recovery()
     assert scheduler.frontiers == (("100", "101", "102"), ("100", "101", "103"))
     assert scheduler._live_parent("103") == "101"
+
+
+def test_ambiguous_ancestor_holds_only_dependent_pending_requests() -> None:
+    scheduler = FamilyScheduler()
+    scheduler.recover("100", "100", ())
+    scheduler.recover("101", "100", ("100",))
+    dependent = pending(102, "100", ("100", "101"))
+    sibling = pending(103, "100", ("100",))
+    independent = pending(200, "200")
+    for request in (dependent, sibling, independent):
+        scheduler.add_pending(request)
+    scheduler.hold("101")
+    assert scheduler.pending(102) == dependent
+    assert selected(scheduler) == independent
+    scheduler.remove_pending(200)
+    assert selected(scheduler) == sibling
+    scheduler.hold("100")
+    assert scheduler.select() is None
+    scheduler.release("101")
+    assert scheduler.select() is None
+    assert scheduler.remove_pending(102) == dependent
+    scheduler.release("100")
+    assert selected(scheduler) == sibling
+    assert scheduler.frontiers == (("100", "101"),)
+
+
+def test_repeated_hold_release_keeps_exact_pending_index_membership() -> None:
+    scheduler = FamilyScheduler()
+    scheduler.recover("100", "100", ())
+    requests = [pending(i, "100", ("100",)) for i in range(101, 151)]
+    for request in requests:
+        scheduler.add_pending(request)
+    for _ in range(100):
+        scheduler.hold("100")
+        for request in requests:
+            scheduler.add_pending(request)
+        assert scheduler.select() is None
+        scheduler.release("100")
+        assert selected(scheduler).request_id == 150
+        family = scheduler._family_pending["100"]
+        assert len(family.ids) == len(family.positions) == len(requests)
+        assert len(set(family.ids)) == len(requests)
+    assert [
+        scheduler.remove_pending(request.request_id) for request in requests
+    ] == requests
+    assert scheduler.select() is None
+
+
+def test_eligible_selection_does_not_scan_large_held_prefix() -> None:
+    scheduler = FamilyScheduler()
+    scheduler.recover("100", "100", ())
+    scheduler.hold("100")
+    for request_id in range(101, 10_101):
+        scheduler.add_pending(pending(request_id, "100", ("100",)))
+    # Same real map and request objects, but forbid a backlog scan at selection.
+    scheduler._held_pending = _LookupOnlyDict(scheduler._held_pending)
+    for request_id in range(20_000, 20_100):
+        request = pending(request_id, str(request_id))
+        scheduler.add_pending(request)
+        assert selected(scheduler) == request
+        assert scheduler.remove_pending(request_id) == request
+    assert scheduler.select() is None

@@ -64,6 +64,7 @@ from weft.core.runtime_identity import (
     runtime_identity_for_task,
     submission_lineage,
 )
+from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.tasks.consumer import Consumer
 from weft.core.tasks.multiqueue_watcher import (
     QueueMessageContext,
@@ -490,7 +491,7 @@ def _check_missing_publication_settles_only_one_startup(
     manager._ensure_wait_strategy_started()
     records = dict(manager._startup_feedback)
     interests = {other_tid: record.queue for other_tid, record in records.items()}
-    manager._scheduler_residents[tid]["launched_ns"] = time.time_ns() - int(
+    manager._scheduler_residents[tid]["launched_ns"] = manager_mod.time.time_ns() - int(
         2 * MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
     )
     # Reconcile this exact owner boundary. Enabling full periodic maintenance
@@ -516,6 +517,17 @@ def test_startup_window_overlaps_but_bounds_unobserved_processes(
     Fence before Consumer construction so neither attributed broker connections
     nor task-state publication can settle startup before the intended release.
     """
+    now_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            time_ns=lambda: now_ns,
+            monotonic=time.monotonic,
+            perf_counter=time.perf_counter,
+            sleep=time.sleep,
+        ),
+    )
     manager, harness = startup_pg_manager
     window = (
         MANAGER_STARTUP_FAST_PATH_WINDOW if active_test_backend() == "postgres" else 1
@@ -611,6 +623,20 @@ def test_startup_window_overlaps_but_bounds_unobserved_processes(
         assert not started[tids[window]].is_set(), "startup exceeded the window"
         assert source.peek_one(exact_timestamp=request_ids[window]) is not None
         assert reserved.peek_one(exact_timestamp=request_ids[window]) is None
+        # Hold the wall-clock absence fallback while two actual maintenance
+        # generations establish the still-closed startup window.
+        manager._admission_refresh_after = 0
+        manager.process_once()
+        manager._admission_refresh_after = 0
+        manager.process_once()
+        startup = [
+            item
+            for item in manager._dispatch_observation["items"]
+            if item["reason"] == "startup_feedback_pending"
+        ]
+        assert len(startup) == 1
+        assert startup[0]["oldest_request"] == request_ids[window]
+        assert startup[0]["ends_when"] == "startup_window_available"
         if window > 1:
             _check_rejected_publication_keeps_startup_window(
                 manager, tids[:window], reserved
@@ -967,10 +993,16 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
         assert manager._retry_stale_child_launches()
         if late_snapshot:
             assert manager._family_scheduler.frontiers == ()
-            assert str(parent_id) in manager._startup_feedback
+            assert str(parent_id) in manager._held_launch_feedback
+            assert str(parent_id) not in manager._startup_feedback
+            manager._ensure_wait_strategy_started()
+            observer = manager._held_launch_feedback[str(parent_id)]
+            assert observer.queue is not None
+            manager._admission_refresh_after = time.monotonic() + 60
             before_publish.set()
             assert ready.wait(timeout=30.0)
-            manager._admission_refresh_after = 0.0
+            # Late evidence must be observable without a maintenance tick.
+            assert manager._has_pending_observation()
             if unknown_create_time:
                 with manager._get_connected_queue().get_connection() as broker:
                     broker_type = type(broker)
@@ -985,9 +1017,9 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
 
                 with monkeypatch.context() as patch:
                     patch.setattr(broker_type, "write", fail_checkpoint)
-                    manager._refresh_scheduler_evidence()
+                    manager.process_once()
                     assert str(parent_id) in manager._scheduler_undurable
-                    assert str(parent_id) in manager._startup_feedback
+                    assert str(parent_id) in manager._held_launch_feedback
                 manager._admission_refresh_after = 0.0
                 manager._refresh_scheduler_evidence()
                 # Publication releases durability first; the next bounded
@@ -1004,7 +1036,14 @@ def test_missing_launch_result_retains_finite_path_and_late_commit_is_idempotent
                     is not None
                 )
             else:
-                manager._refresh_scheduler_evidence()
+                drive_until(
+                    lambda: str(parent_id) in manager._held_launch_feedback,
+                    lambda held: not held,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=0.5,
+                )
+                assert manager._admission_refresh_after > time.monotonic()
         assert manager._family_scheduler.frontiers == ((str(parent_id),),)
         independent_id = int(source.write(request_body()))
         manager._classify_family_requests()
@@ -1846,3 +1885,388 @@ def test_new_source_row_wakes_admission_blocked_manager(
     finally:
         manager.stop(join=False)
         manager.cleanup()
+
+
+@pytest.mark.parametrize("alternating", [False, True])
+def test_resource_refusal_continuity_coalesces_real_retry_turns(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    alternating: bool,
+) -> None:
+    """Actual clear/re-deny passes cannot restart standing age or add clear pairs."""
+    manager, harness = startup_pg_manager
+    used: list[int | None] = [280]
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: used[0])
+    source = manager._queue(manager._queue_names["inbox"])
+    ids = [int(source.write(request_body())) for _ in range(4)]
+    state = manager._queue(f"weft.state.tasks.{manager.tid}")
+    manager.process_once()
+    appends: list[int] = []
+    for generation in range(3):
+        used[0] = None if alternating and generation == 1 else 280 + generation
+        manager._admission_refresh_after = 0
+        manager._admission_retry_after_ns = 1
+        before = len(list(state.peek_generator()))
+        manager.process_once()
+        appends.append(len(list(state.peek_generator())) - before)
+        row = read_task_state_snapshot(harness.context, manager.tid)
+        assert row is not None
+        resource = [
+            item
+            for item in row[1]["dispatch_refusals"]["items"]
+            if item["barrier"] == "measured_resource"
+        ]
+        assert len(resource) == 1
+        item = resource[0]
+        assert item["scope"] == "dispatch_lane" and item["lane"] == "public"
+        assert item["oldest_request"] == ids[0]
+        assert (
+            item["known_pending_count"] == 4
+            and item["count_basis"] == "manager_indexed"
+        )
+        assert "subjects" not in item
+        assert item["reason"] == (
+            "admission_usage_unavailable"
+            if used[0] is None
+            else "measured_capacity_exhausted"
+        )
+        assert item["ends_when"] == (
+            "fresh_usage_available" if used[0] is None else "fresh_capacity_permits"
+        )
+    assert appends == ([1, 1, 1] if alternating else [1, 0, 0])
+    # The internal lane remains allowed by the same global capacity sample.
+    used[0] = 282
+    manager._admission_retry_after_ns = 1
+    manager._expire_admission_retry_if_due()
+    assert manager._admission_allows_queue(manager._queue_names["internal_inbox"])
+    assert "public" in manager._admission_blocked_lanes
+    assert manager._dispatch_admission_reason == "measured_capacity_exhausted"
+
+
+def test_classification_refusal_names_failed_request_while_indexed_work_proceeds(
+    manager: Manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    indexed, failed = [int(source.write(request_body())) for _ in range(2)]
+    with manager._get_connected_queue().get_connection() as broker:
+        broker_type = type(broker)
+    original_write = broker_type.write
+
+    def fail_second_index(self: Any, queue_name: str, *args: Any, **kwargs: Any) -> Any:
+        if queue_name == f"weft.state.labels.{failed}.pending.{failed}":
+            raise BrokerError("injected second request index failure")
+        return original_write(self, queue_name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "write", fail_second_index)
+        for _ in range(2):
+            manager._admission_refresh_after = 0
+            manager.process_once()
+        assert source.peek_one(exact_timestamp=indexed) is None
+        assert source.peek_one(exact_timestamp=failed) is not None
+        items = manager._dispatch_observation["items"]
+        refusal = next(
+            item for item in items if item["reason"] == "classification_unavailable"
+        )
+        assert refusal["subjects"] == [str(failed)]
+        assert refusal["ends_when"] == "classification_succeeded"
+        assert refusal["evidence"] == [{"queue": source.name, "message_id": failed}]
+    # Another dispatcher can remove the failed row. An empty successful repair
+    # is positive absence, so it must retire this exact diagnostic cause.
+    with source.get_connection() as broker:
+        broker.delete_message_ids(source.name, [failed])
+    manager._family_index_retry_after = 0
+    manager._admission_refresh_after = 0
+    manager.process_once()
+    assert not any(
+        item["reason"] == "classification_unavailable"
+        for item in manager._dispatch_observation["items"]
+    )
+
+
+@pytest.mark.parametrize("count", [4, 8])
+def test_refusal_serialization_has_no_source_reads_or_queued_subject_copies(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+) -> None:
+    manager, harness = startup_pg_manager
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 280)
+    source = manager._queue(manager._queue_names["inbox"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    for _ in range(count):
+        harness.register_tid(str(source.write(body)))
+    manager.process_once()
+    manager._admission_refresh_after = 0
+    manager._admission_retry_after_ns = 1
+    manager.process_once()
+    original_peek = Queue.peek_one
+    witnesses: list[str] = []
+
+    def counted_peek(self: Queue, *args: Any, **kwargs: Any) -> Any:
+        if self.name == source.name:
+            witnesses.append(self.name)
+        return original_peek(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Queue, "peek_one", counted_peek)
+        manager._dispatch_lane_refusals()
+    assert witnesses == [source.name]
+
+    # Normal complete checkpoints serialize only already captured observations.
+    def forbidden_read(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("diagnostic serialization queried queue contents")
+
+    lengths: list[int] = []
+    with monkeypatch.context() as patch:
+        for operation in ("peek_one", "peek_many", "peek_generator", "stats"):
+            patch.setattr(Queue, operation, forbidden_read)
+        for _ in range(count):
+            assert manager._publish_scheduler_checkpoint()
+            observation = manager._build_tid_state_payload()["dispatch_refusals"]
+            assert len(observation["items"]) == 1
+            item = observation["items"][0]
+            assert item["known_pending_count"] == count
+            assert "subjects" not in item
+            lengths.append(len(json.dumps(observation)))
+    assert len(set(lengths)) == 1
+    assert sum(lengths) == count * lengths[0]
+    assert lengths[0] < 700
+    row = read_task_state_snapshot(harness.context, manager.tid)
+    assert (
+        row is not None
+        and row[1]["dispatch_refusals"]["items"][0]["known_pending_count"] == count
+    )
+
+    serialized: list[int] = []
+    original_write = Queue.write
+
+    def record_checkpoint(self: Queue, body: str, *args: Any, **kwargs: Any) -> Any:
+        if self.name == f"weft.state.tasks.{manager.tid}":
+            diagnostic = json.loads(body)["dispatch_refusals"]
+            serialized.append(len(json.dumps(diagnostic)))
+            assert all("subjects" not in item for item in diagnostic["items"])
+        return original_write(self, body, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 0)
+    manager._admission_retry_after_ns = 1
+    with monkeypatch.context() as patch:
+        patch.setattr(Queue, "write", record_checkpoint)
+        drive_until(
+            lambda: (
+                not source.has_pending()
+                and not manager._active_child_launches
+                and not manager._child_processes
+            ),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30,
+        )
+    assert len(serialized) >= count
+    assert sum(serialized) <= 700 * len(serialized)
+
+
+def test_normal_startup_within_one_generation_forces_no_refusal_snapshot(
+    manager: Manager,
+) -> None:
+    """Normal task creation does not publish transient closed/open reports."""
+    manager._refresh_scheduler_evidence()
+    manager._admission_refresh_after = time.monotonic() + 60
+    source = manager._queue(manager._queue_names["inbox"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    for _ in range(2):
+        source.write(body)
+    drive_until(
+        lambda: (
+            not source.has_pending()
+            and not manager._active_child_launches
+            and not manager._child_processes
+        ),
+        bool,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=30,
+    )
+    state = manager._queue(f"weft.state.tasks.{manager.tid}")
+    assert all(
+        not json.loads(body)["dispatch_refusals"]["items"]
+        for body in state.peek_generator()
+    )
+    assert manager._dispatch_emitted_generation == -1
+
+
+def test_returned_request_repair_refusal_clears_on_bounded_positive_absence(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older indexed head neither hides a repair fault nor keeps its removed cause."""
+    manager, _harness = startup_pg_manager
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 280)
+    source = manager._queue(manager._queue_names["inbox"])
+    older, returned, newer = [int(source.write(request_body())) for _ in range(3)]
+    parked = manager._queue("fixture.unlaunched.returned")
+    assert source.move_one(parked.name, exact_timestamp=returned) is not None
+    manager.process_once()
+    assert manager._family_classify_after >= newer
+    assert parked.move_one(source.name, exact_timestamp=returned) is not None
+    with source.get_connection() as broker:
+        broker_type = type(broker)
+    original = broker_type.write
+
+    def fail_returned_hint(
+        self: Any, queue_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        if queue_name == f"weft.state.labels.{returned}.pending.{returned}":
+            raise BrokerError("injected returned-row pending-index failure")
+        return original(self, queue_name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_type, "write", fail_returned_hint)
+        for _ in range(2):
+            manager._admission_refresh_after = 0
+            manager._family_index_retry_after = 0
+            manager._family_repair_due = 0
+            manager.process_once()
+        head = source.peek_one(with_timestamps=True)
+        assert head is not None and head[1] == older
+        items = manager._dispatch_observation["items"]
+        cause = next(
+            item for item in items if item["reason"] == "classification_unavailable"
+        )
+        assert cause["subjects"] == [str(returned)]
+    with source.get_connection() as broker:
+        broker.delete_message_ids(source.name, [returned])
+    manager._admission_refresh_after = 0
+    manager._family_index_retry_after = 0
+    manager._family_repair_due = 0
+    manager.process_once()
+    head = source.peek_one(with_timestamps=True)
+    assert head is not None and head[1] == older
+    assert not any(
+        item["reason"] == "classification_unavailable"
+        for item in manager._dispatch_observation["items"]
+    )
+    assert any(
+        item["reason"] == "measured_capacity_exhausted"
+        for item in manager._dispatch_observation["items"]
+    )
+
+
+def test_initial_nullable_lane_witness_and_head_count_churn_do_not_republish(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, harness = startup_pg_manager
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: 280)
+    source = manager._queue(manager._queue_names["inbox"])
+    ids = [int(source.write(request_body())) for _ in range(4)]
+    original = Queue.peek_one
+
+    def unreadable_head(self: Queue, *args: Any, **kwargs: Any) -> Any:
+        if self.name == source.name:
+            raise BrokerError("injected source witness read failure")
+        return original(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Queue, "peek_one", unreadable_head)
+        for _ in range(2):
+            manager._admission_refresh_after = 0
+            manager._admission_retry_after_ns = 1
+            manager.process_once()
+        item = manager._dispatch_observation["items"][0]
+        assert item["known_pending_count"] == 4 and item["oldest_request"] is None
+        assert manager._dispatch_observation["assessment"] == "unavailable"
+    manager._admission_refresh_after = 0
+    manager._admission_retry_after_ns = 1
+    manager.process_once()
+    before = read_task_state_snapshot(harness.context, manager.tid)
+    assert before is not None
+    with source.get_connection() as broker:
+        broker.delete_message_ids(source.name, [ids[0]])
+    source.write(request_body())
+    source.write(request_body())
+    manager._admission_refresh_after = 0
+    manager._admission_retry_after_ns = 1
+    manager._family_repair_due = 0
+    manager.process_once()
+    item = manager._dispatch_observation["items"][0]
+    # The Manager's index still contains the externally consumed row until its
+    # ordinary candidate reconciliation. This is deliberately not source COUNT.
+    assert item["oldest_request"] == ids[1] and item["known_pending_count"] == 6
+    assert item["count_basis"] == "manager_indexed"
+    assert read_task_state_snapshot(harness.context, manager.tid) == before
+    assert manager._publish_scheduler_checkpoint()
+    after = read_task_state_snapshot(harness.context, manager.tid)
+    assert (
+        after is not None
+        and after[1]["dispatch_refusals"]["items"][0]["known_pending_count"] == 6
+    )
+
+
+def test_flapping_resource_barriers_force_at_most_one_append_per_due_generation(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, harness = startup_pg_manager
+    used = [280]
+    monkeypatch.setattr(manager, "_observe_admission_usage", lambda: used[0])
+    source = manager._queue(manager._queue_names["inbox"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    for _ in range(8):
+        harness.register_tid(str(source.write(body)))
+    assessing = [False]
+    forced: list[int] = []
+    original_assess, original_write = manager._assess_dispatch_refusals, Queue.write
+
+    def assess() -> None:
+        assessing[0] = True
+        try:
+            original_assess()
+        finally:
+            assessing[0] = False
+
+    def write(self: Queue, *args: Any, **kwargs: Any) -> Any:
+        if self.name == task_state_queue_name(manager.tid) and assessing[0]:
+            forced.append(manager._dispatch_generation)
+        return original_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_assess_dispatch_refusals", assess)
+    monkeypatch.setattr(Queue, "write", write)
+    for usage in (280, 280, 0, 280, 280, 0):
+        used[0] = usage
+        manager._admission_retry_after_ns = 1
+        manager._expire_admission_retry_if_due()
+        manager._admission_allows_queue(manager._queue_names["internal_inbox"])
+        manager._admission_refresh_after = 0
+        manager.process_once()
+        generation, before = manager._dispatch_generation, len(forced)
+        assert forced.count(generation) <= 1
+        manager._admission_refresh_after = time.monotonic() + 60
+        for _ in range(2):
+            manager.process_once()
+        assert manager._dispatch_generation == generation and len(forced) == before
+    assert 1 <= len(forced) <= 6

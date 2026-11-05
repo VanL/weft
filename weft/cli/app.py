@@ -37,6 +37,7 @@ from weft._constants import (
 )
 from weft.commands._resources import command_resource_scope
 from weft.commands._streaming import decode_stream_text
+from weft.commands.manager import dispatch_refusal_lines, dispatch_refusals_json
 from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.commands.types import SpecValidationResult
 from weft.context import build_context
@@ -168,6 +169,9 @@ def _status_json_payload(snapshot: commands.SystemStatusSnapshot) -> dict[str, A
     for manager in payload["managers"]:
         if manager["timestamp"] is not None:
             manager["timestamp"] = format_message_id(manager["timestamp"])
+        for key in ("dispatch_refusals", "dispatch_refusals_source"):
+            if key in manager:
+                manager[key] = dispatch_refusals_json(manager[key])
     for service in payload["services"]:
         if service["updated_at"] is not None:
             service["updated_at"] = format_message_id(service["updated_at"])
@@ -227,6 +231,7 @@ def _render_status_snapshot(
                     f"    timestamp: {manager.timestamp or 0}",
                 )
             )
+            lines.extend("    " + line for line in dispatch_refusal_lines(manager))
     else:
         lines.append("Managers: none registered")
     if snapshot.services:
@@ -327,6 +332,9 @@ def _manager_json_record(snapshot: commands.ManagerSnapshot) -> dict[str, Any]:
     }
     if snapshot.timestamp is not None:
         payload["timestamp"] = format_message_id(snapshot.timestamp)
+    for key in ("dispatch_refusals", "dispatch_refusals_source"):
+        if key in payload:
+            payload[key] = dispatch_refusals_json(payload[key])
     return payload
 
 
@@ -2702,6 +2710,10 @@ def manager_list_command(
                 f"{(record.liveness or 'unknown'):<9} {canonical:<10} "
                 f"{(record.proof_source or ''):<19} {record.name}"
             )
+        for record in sorted(records, key=lambda item: item.tid):
+            lines.extend(
+                f"{record.tid} {line}" for line in dispatch_refusal_lines(record)
+            )
         typer.echo("\n".join(lines))
     else:
         lines = ["TID        STATUS    NAME"]
@@ -2709,6 +2721,10 @@ def manager_list_command(
             f"{record.tid}  {record.status:<9} {record.name}"
             for record in sorted(records, key=lambda item: item.tid)
         )
+        for record in sorted(records, key=lambda item: item.tid):
+            lines.extend(
+                f"{record.tid} {line}" for line in dispatch_refusal_lines(record)
+            )
         typer.echo("\n".join(lines))
 
 
@@ -2738,6 +2754,7 @@ def manager_status_command(
     ]
     if result.runtime_handle is not None:
         lines.append(f"Runtime: {json.dumps(result.runtime_handle, sort_keys=True)}")
+    lines.extend(dispatch_refusal_lines(result))
     typer.echo("\n".join(lines))
 
 

@@ -396,6 +396,15 @@ sections below.
 
 ### `status` - Show project status [CLI-1.2.1]
 
+Ordinary status exposes dispatch_refusals from the matching Manager's complete task-state snapshot. Project status reuses its captured task-state map; Manager list/status read only selected Manager TIDs. The shared Python ManagerSnapshot uses the same observation and source queue/message identity. Human output shows reason, scope, lane, ending condition, count basis and observed lane head, plus up to three causal subject/evidence references per request/path reason with total causal counts and an explicit --json continuation. JSON retains all actual held-cause references but does not expand a lane aggregate into queued-task IDs. Known broker message identities use lossless SB-0.2 strings externally and ints in Python; TIDs stay strings. Count/head data are last-observed, not a current global backlog guarantee. Missing/malformed/unreadable Manager observations are unavailable, not a known empty set or permission to dispatch. Historical owners are never merged into the canonical live owner's refusal set. No active probe, global task-log replay or Monitor-private lookup is added.
+
+Implementation mapping: `weft/commands/manager.py::_manager_snapshot` validates
+the matching captured Manager observation; Manager list/status acquire selected
+TIDs, while `weft/commands/system.py::system_status` reuses its captured map.
+`weft/cli/app.py::_render_status_snapshot`, `manager_list_command` and
+`manager_status_command` render shared bounded samples and lossless JSON.
+`tests/commands/test_manager_commands.py` covers actual queue-to-public wiring.
+
 Status/list/stats default to current nonterminal snapshots. `--all` includes
 retained terminal snapshots. `--log` explicitly unions retained raw history and
 implies historical inclusion; `--log --watch` is a usage error. Bulk reads use
@@ -626,6 +635,8 @@ These commands exist because project-level status and task-level inspection are
 different operator questions.
 
 ## Control Commands [CLI-1.3]
+
+Manager list/status additionally expose the shared dispatch_refusals observation from the matching Manager-owned task-state snapshot under CLI-1.2.1. It is not part of the service-owner registry schema and does not change dispatch_eligible, canonical selection or bootstrap readiness. This observation adds no retry, delete or custody-release verb.
 
 Control resource scopes receive the exact task-state queue even before it
 exists. Include that queue in identity and route-rebuild decisions, open its
@@ -1115,6 +1126,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `weft system stop`, the one command that stops the manager and the context's internal services.
 - [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.

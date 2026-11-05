@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import threading
 import time
 from collections.abc import Callable
 from contextlib import closing
@@ -14,7 +13,6 @@ from typing import Any
 import psutil
 import pytest
 
-from simplebroker import Queue
 from tests.helpers.family_matrix import PostlaunchCheckpointFaultManager
 from tests.helpers.family_workload import FAMILY_EVENTS
 from tests.helpers.weft_harness import WeftTestHarness
@@ -24,6 +22,7 @@ from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec, generate_tid
 from weft.core.monitor.task_monitor import make_task_monitor_taskspec
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.runtime_identity import RuntimeIdentity, submission_lineage
 from weft.core.task_state import read_task_state_snapshot
 from weft.core.tasks.liveness_monitor import LivenessMonitor
 
@@ -114,8 +113,11 @@ def _crash_and_retire(harness: WeftTestHarness, process: Any, tid: str) -> None:
 
 
 def _empty_reservation(harness: WeftTestHarness, tid: str) -> bool:
-    with harness.context.queue(f"T{tid}.reserved", persistent=True) as queue:
-        return queue.peek_one(include_claimed=True) is None
+    for suffix in ("reserved", "internal_reserved"):
+        with harness.context.queue(f"T{tid}.{suffix}", persistent=True) as queue:
+            if queue.peek_one(include_claimed=True) is not None:
+                return False
+    return True
 
 
 def test_background_residents_recover_without_manager_checkpoint(
@@ -371,10 +373,10 @@ def test_sibling_rendezvous_completes_with_measured_headroom(
             assert {row["index"] for row in waiting} == {0, 1}
 
 
-def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_root(
+def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_allows_new_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown post-spawn process custody blocks ordinary work without a family cap.
+    """Unknown post-spawn custody holds its own work while unrelated roots run.
 
     Fault only the publication boundary after actual process creation. The
     successor must retain uncertainty; teardown alone stops fixture processes.
@@ -427,8 +429,9 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                 process.join(timeout=10.0)
                 assert not process.is_alive()
                 successor = harness.ensure_foreground_manager()
-                successor_tid = successor["tid"]
-                assert isinstance(successor_tid, str)
+                successor_value = successor["tid"]
+                assert isinstance(successor_value, str)
+                successor_tid = successor_value
 
                 def retained() -> Any:
                     row = read_task_state_snapshot(harness.context, successor_tid)
@@ -443,36 +446,46 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                 assert not recovered["scheduler_frontiers"]["residents"][
                     parent.tid
                 ].get("host_processes")
-                successor_task = next(
-                    manager
-                    for manager, _thread, _stop in harness._inline_managers
-                    if manager.tid == successor_tid
+                resident = recovered["scheduler_frontiers"]["residents"][parent.tid]
+                identity = RuntimeIdentity(
+                    tid=parent.tid,
+                    backend_name=harness.context.broker_target.backend_name,
+                    ancestry_tids=tuple(resident["ancestry_tids"]),
+                    **{
+                        key: resident[key]
+                        for key in (
+                            "context",
+                            "root_tid",
+                            "submitter_tid",
+                            "scheduling_class",
+                            "connection_owner",
+                        )
+                    },
                 )
-                target_request_id: int | None = None
-                considered = threading.Event()
-                readiness: list[bool] = []
-                original_pending = successor_task._queue_has_pending
-
-                def observe_primary_gate(queue: Queue) -> bool:
-                    ready = original_pending(queue)
-                    if (
-                        queue.name == successor_task._queue_names["inbox"]
-                        and target_request_id is not None
-                        and successor_task._family_scheduler.pending(target_request_id)
-                        is not None
-                    ):
-                        readiness.append(ready)
-                        considered.set()
-                    return ready
-
-                # Observe the real owner's eligibility decision, not merely
-                # publication earlier in a turn that may not dispatch yet.
-                monkeypatch.setattr(
-                    successor_task, "_queue_has_pending", observe_primary_gate
-                )
+                with harness.context.queue(
+                    "weft.spawn.requests", persistent=True
+                ) as source:
+                    held_id = int(
+                        source.write(
+                            json.dumps(
+                                {
+                                    "taskspec": {
+                                        "name": "held-dependent",
+                                        "spec": {
+                                            "type": "function",
+                                            "function_target": "tests.helpers.family_workload:family_leaf",
+                                        },
+                                    },
+                                    "submitted_by": submission_lineage(identity),
+                                    "inbox_message": {"index": 999},
+                                }
+                            )
+                        )
+                    )
+                harness.register_tid(str(held_id))
                 independent = client.submit(
                     {
-                        "name": "must-remain-pending",
+                        "name": "independent-must-run",
                         "spec": {
                             "type": "function",
                             "function_target": "tests.helpers.family_workload:family_leaf",
@@ -482,18 +495,17 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                 )
                 harness.register_tid(independent.tid)
                 target_request_id = int(independent.tid)
-                assert considered.wait(timeout=60.0), (
-                    "successor did not consider request"
-                )
-                assert readiness and not any(readiness), (
-                    "unknown custody permitted dispatch"
+                _wait(
+                    harness,
+                    lambda: any(
+                        row["event"] == "leaf_started" and row.get("index") == 100
+                        for row in _events(harness)
+                    ),
                 )
                 with harness.context.queue(
                     "weft.spawn.requests", persistent=True
                 ) as source:
-                    assert (
-                        source.peek_one(exact_timestamp=target_request_id) is not None
-                    )
+                    assert source.peek_one(exact_timestamp=target_request_id) is None
                     assert source.peek_one(exact_timestamp=int(parent.tid)) is None
                 with harness.context.queue(
                     f"T{old_tid}.reserved", persistent=True
@@ -510,8 +522,45 @@ def test_postspawn_no_pid_checkpoint_preserves_unknown_frontier_and_stalls_new_r
                     )
                     == 1
                 )
+                assert independent.result(timeout=30).status == "completed"
+                harness._stop_inline_managers()
+                second = harness.ensure_foreground_manager()
+                assert second["tid"] != successor_tid
+                successor_tid = str(second["tid"])
+                reconstructed = _wait(harness, retained)
+                assert not reconstructed["scheduler_frontiers"]["residents"][
+                    parent.tid
+                ].get("host_processes")
+                next_root = client.submit(
+                    {
+                        "name": "independent-after-second-turnover",
+                        "spec": {
+                            "type": "function",
+                            "function_target": "tests.helpers.family_workload:family_leaf",
+                        },
+                    },
+                    payload={"index": 101},
+                )
+                harness.register_tid(next_root.tid)
+                assert next_root.result(timeout=30).status == "completed"
+                with harness.context.queue(
+                    "weft.spawn.requests", persistent=True
+                ) as source:
+                    assert source.peek_one(exact_timestamp=held_id) is not None
+                with harness.context.queue(
+                    f"T{old_tid}.reserved", persistent=True
+                ) as reserved:
+                    assert (
+                        reserved.peek_one(
+                            exact_timestamp=int(parent.tid), include_claimed=True
+                        )
+                        is not None
+                    )
+                rows = _events(harness)
+                assert sum(row["event"] == "enrichment_started" for row in rows) == 1
                 assert not any(
-                    row["event"] == "leaf_started" for row in _events(harness)
+                    row["event"] == "leaf_started" and row.get("index") == 999
+                    for row in rows
                 )
         finally:
             if process.is_alive():

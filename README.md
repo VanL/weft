@@ -728,6 +728,22 @@ retained until validated task-snapshot handoff or positive settlement. Cleanup
 preserves that reservation/checkpoint pair, so a cold successor can adopt the
 live branch before admitting fresh roots.
 
+A launch whose durable pre-launch reservation has no process receipt stays held
+without replay. Its accepted descendants remain held too; unrelated roots and
+sibling branches can run under normal measured admission. A valid task snapshot
+can establish that it started even when its process creation time is unknown,
+but exact reservation handoff still requires scoped process identity. This does
+not bypass a failed required checkpoint write or add a manual-release command.
+
+`weft status`, `weft manager list`, and `weft manager status TID` show standing
+dispatch refusals from each Manager's complete task-state snapshot. Reports name
+the reason, lane or held ancestry, ending evidence, and source snapshot. Lane
+counts use the Manager's index and can lag the shared source; the observed head
+and measurements are last-published facts. Human output samples three causal
+references per reason; `--json` retains every causal reference and exact broker
+ID. An unavailable observation is not evidence that dispatch is open. Historical
+owners keep their own observations.
+
 Finite independent-subtree workloads such as rollup → enrichment → LLM can drain
 when leaves terminate, descendants are eventually submitted, broker maintenance
 is fair, and measured headroom eventually permits each required launch. Known

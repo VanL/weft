@@ -7,12 +7,14 @@ Spec references:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from simplebroker import format_message_id
+from simplebroker.ext import BrokerError
 from weft._constants import MANAGER_STOP_CONFIRMATION_TIMEOUT_SECONDS
 from weft._exceptions import (
     ControlRejected,
@@ -26,6 +28,21 @@ from weft.commands.submission import normalize_tid
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
+from weft.core.dispatch_refusals import (
+    dispatch_refusal_lines as format_dispatch_refusal_lines,
+)
+from weft.core.dispatch_refusals import (
+    dispatch_refusals_json,
+    dispatch_refusals_observation,
+)
+from weft.core.task_state import latest_task_state_rows, task_state_queue_name
+
+
+def dispatch_refusal_lines(snapshot: ManagerSnapshot) -> list[str]:
+    """Render the shared Manager observation at the CLI capability boundary."""
+    return format_dispatch_refusal_lines(
+        snapshot.dispatch_refusals, snapshot.dispatch_refusals_source
+    )
 
 
 def _manager_record_to_json(record: dict[str, Any]) -> dict[str, Any]:
@@ -50,11 +67,25 @@ def _manager_record_to_json(record: dict[str, Any]) -> dict[str, Any]:
                 supersession_timestamp
             )
         payload["metadata"] = projected_metadata
+    for key in ("dispatch_refusals", "dispatch_refusals_source"):
+        if key in payload:
+            payload[key] = dispatch_refusals_json(payload[key])
     return payload
 
 
-def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
+def _manager_snapshot(
+    record: dict[str, Any], *, state: Mapping[str, Any] | None = None
+) -> ManagerSnapshot:
     return ManagerSnapshot(
+        dispatch_refusals=dispatch_refusals_observation(
+            state.get("dispatch_refusals") if state else None
+        ),
+        dispatch_refusals_source={
+            "queue": task_state_queue_name(str(record["tid"])),
+            "message_id": state["timestamp"],
+        }
+        if state and type(state.get("timestamp")) is int
+        else None,
         tid=str(record.get("tid", "")),
         status=str(record.get("status", "unknown")),
         name=str(record.get("name", "")),
@@ -126,6 +157,34 @@ def _manager_snapshot(record: dict[str, Any]) -> ManagerSnapshot:
     )
 
 
+def _observed_manager_snapshots(
+    context: WeftContext, records: Sequence[dict[str, Any]]
+) -> list[ManagerSnapshot]:
+    """Read only selected Manager snapshots, retaining unavailable on read failure."""
+    try:
+        rows = (
+            latest_task_state_rows(
+                context, tids=[str(record["tid"]) for record in records]
+            )
+            if records
+            else {}
+        )
+    except (BrokerError, OSError, RuntimeError):
+        rows = {}
+    return [
+        _manager_snapshot(
+            record,
+            state={
+                **rows[str(record["tid"])][1],
+                "timestamp": rows[str(record["tid"])][0],
+            }
+            if str(record["tid"]) in rows
+            else None,
+        )
+        for record in records
+    ]
+
+
 @typed_command_errors
 def cmd_manager_list(
     *,
@@ -151,7 +210,7 @@ def cmd_manager_list(
             canonical_only=False,
         )
     )
-    return tuple(_manager_snapshot(record) for record in records)
+    return tuple(_observed_manager_snapshots(resolved, records))
 
 
 def start_manager(context: WeftContext) -> ManagerSnapshot:
@@ -286,14 +345,12 @@ def list_managers(
 ) -> list[ManagerSnapshot]:
     """Return manager registry rows as typed snapshots."""
 
-    return [
-        _manager_snapshot(record)
-        for record in manager_runtime.list_manager_records(
-            context,
-            include_stopped=include_stopped,
-            canonical_only=False,
-        )
-    ]
+    return _observed_manager_snapshots(
+        context,
+        manager_runtime.list_manager_records(
+            context, include_stopped=include_stopped, canonical_only=False
+        ),
+    )
 
 
 def manager_status(
@@ -305,7 +362,7 @@ def manager_status(
     record = manager_runtime.manager_record(context, tid)
     if record is None:
         return None
-    return _manager_snapshot(record)
+    return _observed_manager_snapshots(context, [record])[0]
 
 
 @typed_command_errors
@@ -322,10 +379,11 @@ def cmd_manager_status(
     # An unknown spelling keeps the existing not-found path [CLI-1.2.3].
     with suppress(InvalidTID):
         tid = normalize_tid(tid)
-    record = manager_runtime.manager_record(build_context(context), tid)
+    resolved = build_context(context)
+    record = manager_runtime.manager_record(resolved, tid)
     if record is None:
         raise ManagerNotRunning(f"Manager {tid} not found")
-    return _manager_snapshot(record)
+    return _observed_manager_snapshots(resolved, [record])[0]
 
 
 __all__ = [

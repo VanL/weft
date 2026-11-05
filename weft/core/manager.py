@@ -34,7 +34,7 @@ from collections.abc import (
 from dataclasses import dataclass, replace
 from functools import cache, partial
 from heapq import nsmallest
-from itertools import islice
+from itertools import chain, islice
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
@@ -137,6 +137,7 @@ from weft._constants import (
     get_weft_directory_name,
 )
 from weft.context import WeftContext
+from weft.core.dispatch_refusals import refusal_item, refusal_semantics
 from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
@@ -658,6 +659,22 @@ class Manager(ServiceTask):
             )
         )
         self._startup_feedback: dict[str, _ManagerStartupFeedback] = {}
+        self._held_launch_feedback: dict[str, _ManagerStartupFeedback] = {}
+        self._dispatch_observation: dict[str, Any] = {
+            "assessment": "unavailable",
+            "items": [],
+        }
+        self._dispatch_generation = 0
+        self._dispatch_assessed_generation = 0
+        self._dispatch_emitted_generation = -1
+        self._dispatch_first_seen: dict[tuple[Any, ...], int] = {}
+        self._dispatch_published_semantics: tuple[Any, ...] | None = None
+        self._dispatch_source_witnesses: dict[str, int | None] = {}
+        self._dispatch_admission_blocked: set[str] = set()
+        self._dispatch_admission_reason = "admission_usage_unavailable"
+        self._dispatch_admission_measurements: dict[str, Any] | None = None
+        self._dispatch_classification_request: int | None = None
+        self._dispatch_classification_failed = False
         self._startup_blocked = False
         self._child_processes: dict[str, ManagedChild] = {}
         self._child_sentinel_adapter = _ManagerChildSentinelAdapter(
@@ -1291,7 +1308,168 @@ class Manager(ServiceTask):
             "source_queue": self._queue_names["inbox"],
             "reserved_queue": self._queue_names["reserved"],
         }
+        payload["dispatch_refusals"] = copy.deepcopy(
+            getattr(
+                self,
+                "_dispatch_observation",
+                {"assessment": "unavailable", "items": []},
+            )
+        )
         return payload
+
+    def _register_tid_state(self) -> bool:
+        """Track successful complete publications without reading or granting custody [OBS.6a]."""
+        written = super()._register_tid_state()
+        if written and hasattr(self, "_dispatch_observation"):
+            self._dispatch_published_semantics = refusal_semantics(
+                self._dispatch_observation
+            )
+        return written
+
+    def _assess_dispatch_refusals(self) -> None:
+        """Publish standing owner decisions once per due maintenance generation [MA-1.8]."""
+        if self.should_stop or self._draining:
+            return
+        generation = self._dispatch_generation
+        if generation <= self._dispatch_assessed_generation:
+            return
+        self._dispatch_assessed_generation = generation
+        candidates, assessment = self._dispatch_lane_refusals()
+        candidates.update(self._dispatch_causal_refusals())
+        self._dispatch_first_seen = {
+            key: self._dispatch_first_seen.get(key, generation) for key in candidates
+        }
+        self._dispatch_observation = {
+            "assessment": assessment,
+            "items": [
+                item
+                for key, item in candidates.items()
+                if self._dispatch_first_seen[key] < generation
+            ],
+        }
+        semantics = refusal_semantics(self._dispatch_observation)
+        previous = self._dispatch_published_semantics
+        if not self._dispatch_observation["items"] and (
+            previous is None or not previous[1]
+        ):
+            return
+        if semantics != previous and self._dispatch_emitted_generation != generation:
+            self._dispatch_emitted_generation = generation
+            self._register_tid_state()
+
+    def _dispatch_lane_reasons(self, lane: str) -> list[str]:
+        """Project existing final dispatch gates; diagnostics grant no authority."""
+        reasons = []
+        if lane == "public":
+            if not self._admission_bootstrapped:
+                reasons.append("bootstrap_incomplete")
+            if self._scheduler_undurable:
+                reasons.append("checkpoint_uncommitted")
+            if self._active_child_launches or self._startup_dispatch_blocked():
+                reasons.append("startup_feedback_pending")
+        if (
+            lane in self._admission_blocked_lanes
+            and lane in self._dispatch_admission_blocked
+        ):
+            reasons.append(self._dispatch_admission_reason)
+        return reasons
+
+    def _dispatch_lane_refusals(
+        self,
+    ) -> tuple[dict[tuple[Any, ...], dict[str, Any]], str]:
+        """Capture fixed lane aggregates, reading each refused source at most once."""
+        candidates: dict[tuple[Any, ...], dict[str, Any]] = {}
+        assessment = "known"
+        lanes = {
+            lane: self._queue_names[key]
+            for lane, key in (("public", "inbox"), ("internal", "internal_inbox"))
+            if key in self._queue_names
+        }
+        for lane, queue_name in lanes.items():
+            reasons = self._dispatch_lane_reasons(lane)
+            if not reasons and not (
+                lane == "public" and self._dispatch_classification_failed
+            ):
+                continue
+            witnessed = True
+            try:
+                row = self._queue(queue_name).peek_one(
+                    with_timestamps=True, include_claimed=False
+                )
+                self._dispatch_source_witnesses[lane] = int(row[1]) if row else None
+            except (BrokerError, OSError, RuntimeError):
+                assessment = "unavailable"
+                witnessed = False
+            witness = self._dispatch_source_witnesses.get(lane)
+            if lane == "public" and self._dispatch_classification_failed and witnessed:
+                if witness is None:
+                    self._dispatch_classification_request = None
+                elif witness > self._family_classify_after:
+                    self._dispatch_classification_request = witness
+            indexed = (
+                self._family_scheduler.indexed_pending_count
+                if lane == "public" and self._admission_bootstrapped
+                else None
+            )
+            if witness is None and (witnessed or not indexed):
+                continue
+            for reason in reasons:
+                item = refusal_item(
+                    reason,
+                    scope="dispatch_lane",
+                    lane=lane,
+                    queue=queue_name,
+                    known_pending_count=indexed,
+                    count_basis="manager_indexed",
+                    oldest_request=witness,
+                    measurements=copy.deepcopy(self._dispatch_admission_measurements)
+                    if reason
+                    in {"admission_usage_unavailable", "measured_capacity_exhausted"}
+                    else None,
+                )
+                candidates[(item["barrier"], lane, queue_name)] = item
+        return candidates, assessment
+
+    def _dispatch_causal_refusals(self) -> dict[tuple[Any, ...], dict[str, Any]]:
+        """Name held ancestors and witnessed classification failures, not descendants."""
+        candidates: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for tid in sorted(self._held_launch_feedback):
+            evidence = self._scheduler_residents.get(tid)
+            if evidence is None or evidence.get("host_processes"):
+                continue
+            internal_queue = self._queue_names.get("internal_inbox")
+            lane = (
+                "internal"
+                if internal_queue is not None
+                and evidence.get("source_queue") == internal_queue
+                else "public"
+            )
+            item = refusal_item(
+                "launch_receipt_missing",
+                scope="request" if lane == "internal" else "family_path",
+                lane=lane,
+                subjects=[tid],
+                evidence=[
+                    {
+                        "queue": evidence["reserved_queue"],
+                        "message_id": evidence["request_id"],
+                    }
+                ]
+                if evidence.get("reserved_queue")
+                else [],
+            )
+            candidates[(item["barrier"], lane, tid)] = item
+        failed = self._dispatch_classification_request
+        if failed is not None:
+            item = refusal_item(
+                "classification_unavailable",
+                scope="request",
+                lane="public",
+                subjects=[str(failed)],
+                evidence=[{"queue": self._queue_names["inbox"], "message_id": failed}],
+            )
+            candidates[(item["barrier"], "public", failed)] = item
+        return candidates
 
     def _control_snapshot_fields(self) -> dict[str, Any]:
         """Include manager-selection fields in STATUS/PING control snapshots."""
@@ -1358,14 +1536,11 @@ class Manager(ServiceTask):
             ):
                 continue
             request = self._clear_active_child_launch(tid)
-            if request is not None:
-                self._scheduler_undurable.add(tid)
-                if (
-                    request.runtime_identity is not None
-                    and request.runtime_identity.scheduling_class != "internal"
-                ):
-                    self._startup_feedback.setdefault(tid, _ManagerStartupFeedback())
             self._reconcile_launch_now(tid)
+            if request is not None:
+                evidence = self._scheduler_residents.get(tid)
+                if evidence is not None and not evidence.get("host_processes"):
+                    self._hold_ambiguous_launch(tid)
             logger.warning(
                 "Launch result missing for %s; retained reservation requires reconciliation",
                 tid,
@@ -1627,7 +1802,10 @@ class Manager(ServiceTask):
         evidence["launched_ns"] = result.launched_ns or time.time_ns()
         self._scheduler_undurable.add(identity.tid)
         if identity.scheduling_class != "internal":
-            self._startup_feedback.setdefault(identity.tid, _ManagerStartupFeedback())
+            record = self._held_launch_feedback.pop(identity.tid, None)
+            self._startup_feedback.setdefault(
+                identity.tid, record or _ManagerStartupFeedback()
+            )
         self._publish_scheduler_checkpoint()
         return {
             key: copy.deepcopy(value)
@@ -1876,6 +2054,8 @@ class Manager(ServiceTask):
                 tid = str(child_spec.tid)
                 self._scheduler_residents.pop(tid, None)
                 self._scheduler_undurable.discard(tid)
+                self._family_scheduler.release(tid)
+                self._family_candidate = None
                 self._release_startup_feedback(tid)
                 self._register_tid_state()
             else:
@@ -1970,18 +2150,39 @@ class Manager(ServiceTask):
             # wake may already be consumed; readiness needs its own local wake.
             self._strategy.notify_activity()
 
+    def _startup_observation_items(
+        self,
+    ) -> Iterator[tuple[str, _ManagerStartupFeedback]]:
+        """Observe fresh and retained launches; only fresh ones charge readiness."""
+        return chain(
+            getattr(self, "_startup_feedback", {}).items(),
+            getattr(self, "_held_launch_feedback", {}).items(),
+        )
+
+    def _hold_ambiguous_launch(self, tid: str) -> None:
+        """Retain custody and late observation without blocking unrelated work [MA-1.8]."""
+        self._family_scheduler.hold(tid)
+        self._family_candidate = None
+        record = self._startup_feedback.pop(tid, None)
+        self._held_launch_feedback.setdefault(tid, record or _ManagerStartupFeedback())
+        self._resume_startup_dispatch()
+
     def _release_startup_feedback(self, tid: str) -> None:
         """Release only this launch's transient observation, never its custody."""
-        if tid not in self._startup_feedback:
+        if tid not in self._startup_feedback and tid not in self._held_launch_feedback:
             return
         self._clear_startup_notification_interest(tid)
-        self._startup_feedback.pop(tid)
+        self._startup_feedback.pop(tid, None)
+        self._held_launch_feedback.pop(tid, None)
         self._resume_startup_dispatch()
 
     def _clear_startup_notification_interest(self, tid: str | None = None) -> None:
         """Close one or all reactor-owned startup observation handles [MA-1.8]."""
-        feedback = getattr(self, "_startup_feedback", {})
-        records = tuple(feedback.values()) if tid is None else (feedback[tid],)
+        records = tuple(
+            record
+            for observed_tid, record in self._startup_observation_items()
+            if tid is None or observed_tid == tid
+        )
         for record in records:
             queue, record.queue = record.queue, None
             record.publication_id = None
@@ -1994,7 +2195,7 @@ class Manager(ServiceTask):
         queues = super()._activity_wait_queues()
         # System-STOP drain targets wake the reactor on their own snapshots [MA-3].
         queues.extend(self._drain_stop_target_queues())
-        for tid, record in getattr(self, "_startup_feedback", {}).items():
+        for tid, record in self._startup_observation_items():
             if tid in self._active_child_launches:
                 continue
             if record.queue is None:
@@ -2012,10 +2213,10 @@ class Manager(ServiceTask):
         # System-STOP drain targets: a new snapshot row is a pending turn [MA-3].
         if self._has_pending_drain_stop_observation():
             return True
-        records = getattr(self, "_startup_feedback", {})
-        if any(record.publication_pending for record in records.values()):
+        records = tuple(self._startup_observation_items())
+        if any(record.publication_pending for _tid, record in records):
             return True
-        interested = [(tid, record) for tid, record in records.items() if record.queue]
+        interested = [(tid, record) for tid, record in records if record.queue]
         if not interested:
             return False
         try:
@@ -2430,16 +2631,18 @@ class Manager(ServiceTask):
                 "scheduler evidence belongs to another context"
             )
         previous = self._scheduler_residents.get(tid, {})
-        for key in (
-            "root_tid",
-            "submitter_tid",
-            "ancestry_tids",
-            "scheduling_class",
-            "connection_owner",
-            "context",
+        if any(
+            key in previous and previous[key] != evidence.get(key)
+            for key in (
+                "root_tid",
+                "submitter_tid",
+                "ancestry_tids",
+                "scheduling_class",
+                "connection_owner",
+                "context",
+            )
         ):
-            if key in previous and previous[key] != evidence.get(key):
-                raise ValueError("task scheduling identity changed")
+            raise ValueError("task scheduling identity changed")
         merged = {**previous, **evidence}
         processes = self._admission_host_processes(previous)
         processes.update(self._admission_host_processes(evidence))
@@ -2454,6 +2657,8 @@ class Manager(ServiceTask):
         self._scheduler_residents[tid] = merged
         if merged["host_processes"] != previous.get("host_processes"):
             self._scheduler_checkpoint_dirty = True
+            if processes and previous.get("reserved_queue") is not None:
+                self._scheduler_undurable.add(tid)
         if (
             self._admission_bootstrapped
             and processes
@@ -2511,6 +2716,8 @@ class Manager(ServiceTask):
         """Exact ACK before dropping its checkpoint reference [MANAGER.11]."""
         evidence = self._scheduler_residents.get(tid)
         self._scheduler_undurable.discard(tid)
+        self._family_scheduler.release(tid)
+        self._family_candidate = None
         if evidence is None or evidence.get("reserved_queue") is None:
             return
         queue_name, request_id = evidence["reserved_queue"], evidence["request_id"]
@@ -2554,7 +2761,12 @@ class Manager(ServiceTask):
                 )
                 self._family_candidate = None
             self._ack_launch_custody(tid, broker=broker)
-        if tid not in self._startup_feedback or tid in self._active_child_launches:
+        if evidence.get("host_processes"):
+            self._family_scheduler.release(tid)
+            self._family_candidate = None
+        if (
+            tid not in self._startup_feedback and tid not in self._held_launch_feedback
+        ) or tid in self._active_child_launches:
             return
         elapsed = (time.time_ns() - evidence.get("launched_ns", time.time_ns())) / 1e9
         ready = handoff
@@ -2626,6 +2838,7 @@ class Manager(ServiceTask):
         """Bootstrap once, then reconcile a bounded round-robin batch [MF-5]."""
         if time.monotonic() < self._admission_refresh_after:
             return
+        self._dispatch_generation += 1
         try:
             # Share only within this maintenance pass, and sample lazily so a
             # usage-observer failure cannot obstruct an already valid handoff.
@@ -2644,7 +2857,15 @@ class Manager(ServiceTask):
                             MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
                         )
                     )
-                selected = tuple(dict.fromkeys((*self._startup_feedback, *selected)))
+                selected = tuple(
+                    dict.fromkeys(
+                        (
+                            *self._startup_feedback,
+                            *self._held_launch_feedback,
+                            *selected,
+                        )
+                    )
+                )
                 self._maintain_orphan_reservations(broker)
                 for tid in selected:
                     latest = read_task_state_snapshot(
@@ -2685,10 +2906,12 @@ class Manager(ServiceTask):
             if tid not in self._bootstrap_skipped
         }
         if new:
+            example_tid, example_reason = next(iter(new.items()))
             logger.warning(
-                "Manager bootstrap ignored %s retained row(s) that name another runtime identity: %s. Retained state written under another context is not adopted.",
+                "Manager bootstrap ignored %s retained row(s) that name another runtime identity (for example %s: %s). Retained state written under another context is not adopted.",
                 len(new),
-                new,
+                example_tid,
+                example_reason,
             )
             self._bootstrap_skipped.update(new)
 
@@ -2823,9 +3046,9 @@ class Manager(ServiceTask):
         """Build maximal live ancestry paths once during bootstrap [MF-5]."""
         for tid, evidence in self._scheduler_residents.items():
             if not evidence.get("host_processes"):
-                # Process.start may have succeeded after the durable pre-launch
-                # fence. Without a receipt, neither replay nor new admission is safe.
-                self._scheduler_undurable.add(tid)
+                # Missing receipt forbids replay and dependent work, not unrelated
+                # measured admission. Rebuild derived holds from durable custody.
+                self._hold_ambiguous_launch(tid)
             if self._scheduler_evidence_live(tid, evidence):
                 self._family_scheduler.recover(
                     tid,
@@ -2985,7 +3208,13 @@ class Manager(ServiceTask):
         changed = False
         for tid in tuple(self._scheduler_residents if tids is None else tids):
             evidence = self._scheduler_residents.get(tid)
-            if evidence is None or tid in self._active_child_launches:
+            # Local cleanup owns the Process exit code and commits before its
+            # reap callback retires admission; periodic recovery must not race it.
+            if (
+                evidence is None
+                or tid in self._active_child_launches
+                or tid in self._child_processes
+            ):
                 continue
             if not evidence.get("host_processes") or self._scheduler_evidence_live(
                 tid, evidence
@@ -3020,6 +3249,7 @@ class Manager(ServiceTask):
             self._unresolved_terminal_routes.discard(tid)
             self._family_scheduler.retire(tid)
             self._scheduler_residents.pop(tid, None)
+            self._family_scheduler.release(tid)
             self._release_startup_feedback(tid)
             changed = True
         if changed:
@@ -3086,6 +3316,15 @@ class Manager(ServiceTask):
             else 0
         )
         unavailable = decision.capacity is None
+        self._dispatch_admission_blocked = set(decision.blocked_lanes)
+        self._dispatch_admission_reason = (
+            "admission_usage_unavailable"
+            if unavailable
+            else "measured_capacity_exhausted"
+        )
+        self._dispatch_admission_measurements = (
+            dict(decision.capacity) if decision.capacity is not None else None
+        )
         state = self._admission_state(blocked_lanes, unavailable=unavailable)
         self._admission_last_decision_state = (state, decision.wait_phase)
         if self._admission_last_decision_state == previous_state and not unavailable:
@@ -4666,6 +4905,14 @@ class Manager(ServiceTask):
 
     def _terminal_proof_visible(self, tid: str, ctrl_out_name: str) -> bool | None:
         """Read task-owned terminal proof on the configured route [MA-1.6a]."""
+        return self._terminal_envelope_visible(
+            tid, ctrl_out_name, include_wrapper_lost=False
+        )
+
+    def _terminal_envelope_visible(
+        self, tid: str, ctrl_out_name: str, *, include_wrapper_lost: bool
+    ) -> bool | None:
+        """Recognize committed terminal evidence without changing task-proof grace [MA-1.6a]."""
         # Dynamic child queues borrow the connection, never a cached queue handle.
         try:
             with self._get_connected_queue().get_connection() as broker:
@@ -4682,7 +4929,15 @@ class Manager(ServiceTask):
                         if (
                             payload.get("type") == TERMINAL_ENVELOPE_TYPE
                             and payload.get("tid") == tid
-                            and payload.get("source") == "task"
+                            and (
+                                payload.get("source") == "task"
+                                or (
+                                    include_wrapper_lost
+                                    and payload.get("source") == "manager"
+                                    and payload.get("status") == "failed"
+                                    and payload.get("error") == WRAPPER_LOST_ERROR
+                                )
+                            )
                             and isinstance(payload.get("status"), str)
                             and payload.get("status") in TERMINAL_TASK_STATUSES
                         ):
@@ -4743,7 +4998,12 @@ class Manager(ServiceTask):
         deadline: float | None = None,
     ) -> bool:
         """Commit terminal evidence before releasing launch custody [MA-1.6a]."""
-        if self._terminal_proof_visible(tid, ctrl_out_name) is True:
+        if (
+            self._terminal_envelope_visible(
+                tid, ctrl_out_name, include_wrapper_lost=True
+            )
+            is True
+        ):
             return True
         payload: dict[str, Any] = {
             "type": TERMINAL_ENVELOPE_TYPE,
@@ -6392,10 +6652,29 @@ class Manager(ServiceTask):
             )
         )
 
+    def _reconcile_classification_refusal_page(
+        self, after: int, page: list[tuple[str, int]]
+    ) -> None:
+        """Reuse a completed bounded owner read as classification/absence evidence."""
+        failed = self._dispatch_classification_request
+        if failed is None:
+            return
+        classified = (
+            self._family_scheduler.pending(failed) is not None
+            or failed in self._family_invalid
+        )
+        passed = failed > after and (
+            len(page) < MANAGER_FAMILY_CLASSIFY_PAGE_SIZE or failed <= page[-1][1]
+        )
+        if classified or passed:
+            self._dispatch_classification_request = None
+
     def _classify_family_requests(self) -> None:
         """Advance bounded discovery even when admission or custody gates close [MF-6]."""
         if not self._family_classification_can_advance():
             return
+        failed_request: int | None = None
+        classify_after = self._family_classify_after
         try:
             with self._get_connected_queue().get_connection() as broker:
                 queue_name = self._queue_names["inbox"]
@@ -6413,12 +6692,16 @@ class Manager(ServiceTask):
                         )
                     )
                 for body, stamp in page:
+                    failed_request = stamp
                     self._index_family_request(body, stamp, broker=broker)
                     self._family_classify_after = stamp
+                    failed_request = None
                 self._family_classification_pending = (
                     len(page) == MANAGER_FAMILY_CLASSIFY_PAGE_SIZE
                 )
+                self._reconcile_classification_refusal_page(classify_after, page)
                 if time.monotonic() >= self._family_repair_due:
+                    repair_after = self._family_repair_after
                     with closing_queue_iterator(
                         broker.peek_generator(
                             queue_name,
@@ -6433,15 +6716,24 @@ class Manager(ServiceTask):
                             )
                         )
                     for body, stamp in repair:
+                        failed_request = stamp
                         self._index_family_request(body, stamp, broker=broker)
                         self._family_repair_after = stamp
+                        failed_request = None
+                    self._reconcile_classification_refusal_page(repair_after, repair)
                     if len(repair) < MANAGER_FAMILY_CLASSIFY_PAGE_SIZE:
                         self._family_repair_after = 0
                     self._repair_family_pending(broker)
                     self._family_repair_due = (
                         time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
                     )
+                self._dispatch_classification_failed = (
+                    self._dispatch_classification_request is not None
+                )
         except (BrokerError, OSError, RuntimeError):
+            self._dispatch_classification_failed = True
+            if failed_request is not None:
+                self._dispatch_classification_request = failed_request
             self._family_classification_pending = False
             self._family_index_retry_after = (
                 time.monotonic() + MANAGER_ADMISSION_RECHECK_SECONDS
@@ -9049,6 +9341,7 @@ class Manager(ServiceTask):
 
         self._drain_child_sentinel_events()
         self._timed_manager_call("turn", self._process_manager_reactor_turn)
+        self._assess_dispatch_refusals()
 
     def _wait_for_reactor_activity(self, timeout: float | None) -> None:
         """Measure the existing arbiter wait, without adding a deadline [MA-3]."""
@@ -9074,7 +9367,7 @@ class Manager(ServiceTask):
         self._leader_actionable_work_cache = None
         self._leader_check_turn = None
         self._timed_manager_call("worker_results", self._drain_worker_results)
-        for tid, feedback in tuple(self._startup_feedback.items()):
+        for tid, feedback in tuple(self._startup_observation_items()):
             if feedback.publication_pending:
                 feedback.publication_pending = False
                 self._timed_manager_call(
@@ -9083,6 +9376,8 @@ class Manager(ServiceTask):
                     child_tid=tid,
                 )
         self._retry_stale_child_launches()
+        if self._last_public_dispatch_stall_log_ns:
+            self._maybe_log_public_dispatch_stall(self._queue_names["inbox"])
         self._drain_control_queue_first()
         if self._draining:
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
@@ -9249,7 +9544,12 @@ class Manager(ServiceTask):
         if not self._manager_log_allows("info"):
             return
         try:
-            backlog_pending = self._queue(public_inbox).has_pending()
+            backlog_pending = (
+                bool(self._family_invalid)
+                or self._peek_family_candidate() is not None
+                or self._family_classification_pending
+                or self._unclassified_source_row_pending()
+            )
         except (BrokerError, OSError, RuntimeError):
             backlog_pending = False
         if not backlog_pending:

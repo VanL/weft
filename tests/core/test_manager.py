@@ -1383,7 +1383,8 @@ def test_manager_stale_child_launch_result_never_replays_ambiguous_execution(
     monkeypatch.setattr(manager, "_has_worker_activity", lambda: False)
     assert manager._retry_stale_child_launches() is True
     assert len(starts) == 1
-    assert child_spec.tid in manager._startup_feedback
+    assert child_spec.tid in manager._held_launch_feedback
+    assert child_spec.tid not in manager._startup_feedback
     assert child_spec.tid not in manager._active_child_launches
     assert child_spec.tid not in manager._child_launch_started_ns
     assert manager._retry_stale_child_launches() is False

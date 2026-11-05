@@ -3122,3 +3122,15 @@ def get_weft_directory_name(config: Mapping[str, Any] | None = None) -> str:
     """Return the configured Weft metadata directory name."""
     source = config if config is not None else load_config()
     return str(source.get("DIRECTORY_NAME", WEFT_DIRECTORY_NAME_DEFAULT))
+
+
+# Dispatch observations describe existing gates, never grant execution authority.
+DISPATCH_REFUSAL_DESCRIPTORS: Final[dict[str, tuple[str, str]]] = {
+    "bootstrap_incomplete": ("bootstrap", "bootstrap_complete"),
+    "checkpoint_uncommitted": ("checkpoint", "checkpoint_committed"),
+    "launch_receipt_missing": ("launch_receipt", "matching_started_evidence"),
+    "admission_usage_unavailable": ("measured_resource", "fresh_usage_available"),
+    "measured_capacity_exhausted": ("measured_resource", "fresh_capacity_permits"),
+    "startup_feedback_pending": ("startup_window", "startup_window_available"),
+    "classification_unavailable": ("classification", "classification_succeeded"),
+}

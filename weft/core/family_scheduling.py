@@ -249,6 +249,8 @@ class FamilyScheduler:
 
     def __init__(self) -> None:
         self._pending: dict[int, PendingRequest] = {}
+        self._held_pending: dict[int, PendingRequest] = {}
+        self._held_ancestors: set[str] = set()
         self._parents: dict[str, _PendingIndex] = {}
         self._family_pending: dict[str, _FamilyPending] = {}
         self._request_indexes: dict[int, _PendingIndex] = {}
@@ -264,6 +266,11 @@ class FamilyScheduler:
         self._tip_stack: dict[str, int] = {}
         self._turn: int | None = None
         self._next_stack_id = 0
+
+    @property
+    def indexed_pending_count(self) -> int:
+        """Return this owner's indexed observation, not a shared-source count [MF-5]."""
+        return len(self._pending) + len(self._held_pending)
 
     @property
     def frontiers(self) -> tuple[tuple[str, ...], ...]:
@@ -285,7 +292,27 @@ class FamilyScheduler:
         return frozenset(self._residents)
 
     def pending(self, request_id: int) -> PendingRequest | None:
-        return self._pending.get(request_id)
+        return self._pending.get(request_id) or self._held_pending.get(request_id)
+
+    def hold(self, tid: str) -> None:
+        """Park the ancestry-dependent closure without consuming requests [MA-1.8]."""
+        if tid in self._held_ancestors:
+            return
+        self._held_ancestors.add(tid)
+        for request in tuple(self._pending.values()):
+            if tid in request.ancestry_tids:
+                self.remove_pending(request.request_id)
+                self._held_pending[request.request_id] = request
+
+    def release(self, tid: str) -> None:
+        """Restore ordinary ordering after positive started/settlement evidence."""
+        if tid not in self._held_ancestors:
+            return
+        self._held_ancestors.remove(tid)
+        for request in tuple(self._held_pending.values()):
+            if not self._held_ancestors.intersection(request.ancestry_tids):
+                self._held_pending.pop(request.request_id)
+                self.add_pending(request)
 
     def _parent(self, root_tid: str, ancestry_tids: tuple[str, ...]) -> str:
         return next(
@@ -382,7 +409,10 @@ class FamilyScheduler:
 
     def add_pending(self, request: PendingRequest) -> None:
         """Index accepted work once; a repeated projection is idempotent."""
-        if request.request_id in self._pending:
+        if self.pending(request.request_id) is not None:
+            return
+        if self._held_ancestors.intersection(request.ancestry_tids):
+            self._held_pending[request.request_id] = request
             return
         self._pending[request.request_id] = request
         parent = self._parent(request.root_tid, request.ancestry_tids)
@@ -399,6 +429,9 @@ class FamilyScheduler:
 
     def remove_pending(self, request_id: int) -> PendingRequest | None:
         """Forget exact reserved/absent work and bound bucket-local history [MA-1.8]."""
+        held = self._held_pending.pop(request_id, None)
+        if held is not None:
+            return held
         request = self._pending.pop(request_id, None)
         if request is not None:
             self._family_counts[request.root_tid] -= 1
