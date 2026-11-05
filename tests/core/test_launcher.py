@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
 )
 from weft.core.launcher import service_working_directory
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
+
+pytestmark = pytest.mark.shared
 
 
 def _spec(

@@ -307,7 +307,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    ([IMPL.10]). Each service defines its own work and ends itself after
    `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
    manager in the context ([MF-3.2]); checking for work is not work. An
-   explicit STOP on a service's `ctrl_in` stops it as for any task. `weft
+   explicit STOP on a service's `ctrl_in` stops it as for any task. A service process runs with its context root as
+   its working directory (`weft/core/launcher.py::service_working_directory`),
+   never the directory its launcher happened to be in. `weft
    system stop` stops the manager and then the context's internal services by
    registry record; it is the one command that empties a context. The
    manager neither reads nor deletes `weft.state.heartbeats`; the heartbeat

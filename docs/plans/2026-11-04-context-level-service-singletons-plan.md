@@ -341,9 +341,9 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
    ([IMPL.10]). Each service defines its own work and ends itself after
    `SERVICE_IDLE_EXIT_SECONDS` without work and without a live non-superseded
    manager in the context ([MF-3.2]); checking for work is not work. An
-   explicit STOP on a service's `ctrl_in` stops it as for any task. `weft
-   system stop` stops the manager and then the context's internal services by
-   registry record; it is the one command that empties a context. The
+   explicit STOP on a service's `ctrl_in` stops it as for any task. A service process runs with its context root as
+   its working directory (`weft/core/launcher.py::service_working_directory`),
+   never the directory its launcher happened to be in. `weft
 ```
 
 ```text
@@ -1294,6 +1294,25 @@ record naming the test process (now publishes the stopped row directly)
 or on a placeholder with no registry row (now passed as no record), and
 KILL escalation on a fabricated task row with no process (now only for
 tasks whose process still runs).
+
+Release run 8 (`6efcc145`, CI run 41961360613): all Linux, macOS and
+PostgreSQL lanes green; the same two Windows failures persisted with the
+harness reporting no live service, so the holder was not a service of
+that context. Local evidence (a probe listing processes whose cwd lies
+under each root before its removal): the holders are processes spawned
+while the pytest worker's cwd was another harness's root. The harness
+`chdir`s into its root on enter; with two harnesses in one test (`with
+first, second:`), the Manager started afterwards launches its services
+with cwd = the second root, and a Windows directory that is any live
+process's cwd cannot be removed. The same mechanism explains the
+alternate-roots client test, which failed on Windows in the very first
+series CI run (plan 6's always-on heartbeat). Fix (`eda46063`,
+`weft/core/launcher.py::service_working_directory`, `_task_process_entry`):
+an internal service process `chdir`s to its own absolute, existing context
+root at entry; user work keeps the inherited cwd and its `working_dir`.
+Spec [MA-1] item 7 gains the sentence; tests/core/test_launcher.py holds
+the firing tests. Also: a failed root removal now names the processes
+holding the root (cwd or open files) in its note (`0abb6289`).
 
 Release runs 4 and 5 (local gates): run 4 stopped on the slow-marked
 `test_cli_long_session_produces_identical_transcript_across_backends`,
