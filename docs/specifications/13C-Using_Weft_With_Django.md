@@ -1015,7 +1015,7 @@ streams retain their task-owned evidence contract; custody adds no stream wait
 or probe. Compatibility coverage in
 `integrations/weft_django/tests/test_weft_django.py` waits for published task
 metadata before asserting task names and output events.
-Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md).
+Implementation plan: `2026-10-16-public-submission-custody-observation-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 The URLs are convenience views over the Python client. They are not a second
 source of truth and should not have their own persistence.
@@ -1553,13 +1553,13 @@ Once the package is split into a sibling repo:
 
 ## Backlinks
 
-- [Unbounded dependency compatibility](../plans/2026-10-21-unbounded-dependency-compatibility.md)
+- retired: 2026-10-21-unbounded-dependency-compatibility — source 0ff8cfbf; see docs/plans/README.md
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
 
-- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+- retired: 2026-09-15-explicit-broker-session-lifetimes-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
@@ -1583,4 +1583,4 @@ Once the package is split into a sibling repo:
 - Current CLI contract:
   [10-CLI_Interface.md](10-CLI_Interface.md)
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).

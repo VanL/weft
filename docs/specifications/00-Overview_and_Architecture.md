@@ -353,7 +353,7 @@ The companion file answers "what may exist later."
 
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-07-29-import-boundary-remediation-plan — source 396c3b85; see docs/plans/README.md
-- [Docs and the broker boundary](../plans/2026-11-02-docs-and-broker-boundary-plan.md)
+- retired: 2026-11-02-docs-and-broker-boundary-plan — source 0ff8cfbf; see docs/plans/README.md
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`00A-Overview_and_Architecture_Planned.md`](00A-Overview_and_Architecture_Planned.md)
 - [`03-Manager_Architecture.md`](03-Manager_Architecture.md)

@@ -570,7 +570,7 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     valid-row rule under collated ownership; no separate newest-launch-hint
     set or per-launch lifetime report is retained by the collated exporter,
     while existing deferred launch-event reports remain deliverable.
-    Implementation plan: [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md).
+    Implementation plan: `2026-10-14-task-monitor-ingest-and-retirement-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
   - **OBS.13.4**: Family disposition and parent retirement are explicit,
     retryable table state. Parents may be physically retired only after raw
     deletion, summary emission, disposition, task-local control cleanup, any
@@ -1025,8 +1025,8 @@ the sole exact-delete executor for TID mappings),
   `tests/core/test_monitor_external_log.py`, and
   `tests/core/test_monitor_store.py` fire this invariant.
 
-  Implementation plans: [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md);
-  [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+  Implementation plans: `2026-09-22-task-monitor-maintenance-worker-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`);
+  `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 Monitor scheduling implementation notes: `MaintenanceWorker.run_collation`
 owns collation-family retirement independently of ingestion catchup, using
@@ -1462,18 +1462,18 @@ doc:
 - [Scoped Dispatch Around Ambiguous Launches](../plans/2026-11-05-scoped-ambiguous-launch-dispatch-plan.md) holds retained no-receipt launches and their dependent ancestry closure while unrelated work remains eligible; required checkpoint durability barriers remain ([MA-1.8], [MF-5], [MF-6], [OBS.6]).
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) renames manager-owned singleton services to manager-ensured in [MANAGER.13] and [MANAGER.15]; the reducer is unchanged.
-- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) replaces the lossy short form with the 13-character encoded TID under [OBS.4], [OBS.5], [OBS.6], and [OBS.8], and removes title corroboration from host liveness under [LIVENESS.R5].
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([QUEUE.7]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([QUEUE.7]).
-- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).
-- [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MANAGER.18].
+- retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces the lossy short form with the 13-character encoded TID under [OBS.4], [OBS.5], [OBS.6], and [OBS.8], and removes title corroboration from host liveness under [LIVENESS.R5].
+- retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([QUEUE.7]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([QUEUE.7]).
+- retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([QUEUE.2a], OBS.12a).
+- retired: `2026-11-03-family-scheduler-frontier-ring-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MANAGER.18].
 
-- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+- retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
-- [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
+- retired: `2026-10-22-bounded-concurrent-manager-launches` (source 0ff8cfbf; see `docs/plans/README.md`) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
-- [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs bounded startup feedback under [MA-1.8].
+- retired: `2026-10-20-bounded-startup-fast-path` (source 0ff8cfbf; see `docs/plans/README.md`) governs bounded startup feedback under [MA-1.8].
 
-- [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
+- retired: `2026-10-15-operator-owned-permissions` (source 0ff8cfbf; see `docs/plans/README.md`) records removal of Weft permission enforcement under [CTX.5].
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
@@ -1481,18 +1481,18 @@ doc:
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) implements revisions to [MANAGER.16], [MANAGER.18], and [OBS.6].
 
-- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements queue-based local completion and matching retention.
+- retired: `2026-10-12-burst-submission-complexity-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - implements queue-based local completion and matching retention.
 
-- [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
+- retired: `2026-09-22-task-monitor-maintenance-worker-plan` (source 0ff8cfbf; see `docs/plans/README.md`): explicit maintenance construction and reactor-owned state under [IMPL.11].
 
 - retired: `2026-09-21-owner-thread-topology-mutation-plan` (source 396c3b85; see `docs/plans/README.md`) - enables synchronous membership refresh between dispatch passes under [QUEUE.8].
 - retired: `2026-09-21-watcher-sigint-lock-safety-plan` (source 396c3b85; see `docs/plans/README.md`) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
-- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.
+- retired: `2026-09-17-watcher-reactor-restoration-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - restores one task wake arbiter, classifies backend/local/timer inputs, and removes task-reactor polling caps.
 
 - retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
-- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+- retired: 2026-09-15-explicit-broker-session-lifetimes-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
@@ -1500,7 +1500,7 @@ doc:
 
 - retired: 2026-09-10-deferred-macos-process-title-plan — source 396c3b85; see docs/plans/README.md
 
-- [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
+- retired: 2026-08-31-reserved-disposition-and-requeue-removal-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-08-25-bounded-tid-mapping-publication-plan — source 396c3b85; see docs/plans/README.md
 - [`docs/plans/2026-08-25-manager-admission-control-plan.md`](../plans/2026-08-25-manager-admission-control-plan.md)
@@ -1566,17 +1566,17 @@ doc:
 - retired: 2026-05-15-manager-reactor-hot-loop-follow-up-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-05-16-monitor-durable-collation-store-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-05-18-reactive-task-loop-hot-probe-plan — source 396c3b85; see docs/plans/README.md
-- [`docs/plans/2026-09-18-event-routed-manager-pong-plan.md`](../plans/2026-09-18-event-routed-manager-pong-plan.md)
+- retired: 2026-09-18-event-routed-manager-pong-plan — source 0ff8cfbf; see docs/plans/README.md
 - retired: 2026-06-09-evaluation-findings-remediation-plan — source 396c3b85; see docs/plans/README.md
 
 ## Related Documents
 
-- Implementation plan: [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md), implementing [OBS.13.13] without broadening [OBS.13.7].
+- Implementation plan: `2026-10-13-supervisor-terminal-projection` (retired — source 0ff8cfbf; see `docs/plans/README.md`), implementing [OBS.13.13] without broadening [OBS.13.7].
 - [`01-Core_Components.md`](01-Core_Components.md)
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`06-Resource_Management.md`](06-Resource_Management.md)
 
 Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) removes the unused dead-TID raw-log coalescing chain and its SQL/store accessors. Live orphan recovery and store-cycle ingestion remain owned by `weft/core/monitor/task_monitor.py::TaskMonitor`; dead-TID cleanup does not coalesce task logs.
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
-- [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md) unifies valid-row fold-before-exact-delete ingestion across collated destructive modes, separates exact raw-reference retry from FIFO high-water summary completion, and retires the separate manager `task_spawned` compactor under [OBS.13] and [OBS.17].
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
+- retired: `2026-10-14-task-monitor-ingest-and-retirement-plan` (source 0ff8cfbf; see `docs/plans/README.md`) unifies valid-row fold-before-exact-delete ingestion across collated destructive modes, separates exact raw-reference retry from FIFO high-water summary completion, and retires the separate manager `task_spawned` compactor under [OBS.13] and [OBS.17].

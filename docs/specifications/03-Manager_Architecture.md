@@ -41,33 +41,33 @@ always be rolled back from the public request queue.
 - [Program Theory Revision: Published Refusals, Wake Predicates, Observable Quiet, and Behaviour Probes](../plans/2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md) moves frontier and bucket compaction mechanics from program theory [ALT-WT-016] into [MA-1.8]; no behaviour change.
 - [Manager Wake, Idle Clock, and Launch Settlement Repairs](../plans/2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md) publishes the idle deadlines only while the idle clock runs, counts a source row above the classification watermark as pending reactor work, binds a successor's launch settlement to the `wrapper_lost` rule, skips retained rows of another runtime identity at bootstrap, and titles internal services, under [MA-1] and [MA-1.8].
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) makes internal services context-level singletons: a manager ensures them and never stops them, the STOP drain has no services phase, and `weft system stop` empties a context ([MA-1] item 7, [MA-3]).
-- [System STOP Targets Every Live Task by Snapshot](../plans/2026-11-04-system-stop-snapshot-targets-plan.md) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
-- [Admission Evidence: A Failed Read Changes No Mode](../plans/2026-11-04-admission-evidence-read-failure-plan.md) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MA-1] item 7).
+- retired: `2026-11-04-system-stop-snapshot-targets-plan` (source 0ff8cfbf; see `docs/plans/README.md`) makes phase 1 of a system STOP find every live user-work task through its own snapshot, whichever Manager launched it and whether that Manager is alive, and sends the first STOP rung as one exact-name broadcast under [MA-3].
+- retired: `2026-11-04-admission-evidence-read-failure-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the Manager's admission-evidence mode: a failed read of a task's state snapshot during reconciliation or reap is logged and changes nothing under [MA-1.8]; a failed post-launch checkpoint publication keeps gating dispatch through the undurable set, and a successor's failed first publication keeps gating it through the incomplete bootstrap.
+- retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([MA-1] item 7). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([MA-1] item 7).
 - [System STOP ordering](../plans/2026-11-02-system-stop-ordering-plan.md) ordered a Manager STOP drain as user work, then internal services, then the Manager, under [MA-3]; the services phase is since removed (internal services are context-level singletons, see the first entry above), and its user-work phase and snapshot targets stand.
 
-- [Family Scheduler: Frontier Ring and Contracted Ancestry](../plans/2026-11-03-family-scheduler-frontier-ring-plan.md) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MA-1.8].
+- retired: `2026-11-03-family-scheduler-frontier-ring-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces the quadratic frontier rebuild with a cursor ring over childless residents and contracted scheduling-parent pointers, and states the branch rotation order under [MA-1.8].
 
-- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+- retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
-- [Measured Manager dispatch batching](../plans/2026-10-22-bounded-concurrent-manager-launches.md) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
+- retired: `2026-10-22-bounded-concurrent-manager-launches` (source 0ff8cfbf; see `docs/plans/README.md`) compares duplicate-sweep removal and serial dispatch batching before any concurrent-worker revision.
 
-- [Bounded startup no-wait fast path](../plans/2026-10-20-bounded-startup-fast-path.md) governs the bounded low-usage startup window under [MA-1.8].
+- retired: `2026-10-20-bounded-startup-fast-path` (source 0ff8cfbf; see `docs/plans/README.md`) governs the bounded low-usage startup window under [MA-1.8].
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
-- [Supervisor terminal observations in operational collations](../plans/2026-10-13-supervisor-terminal-projection.md) implements Monitor projection of retained supervisor evidence under [MA-1.6a] and [MF-5].
+- retired: `2026-10-13-supervisor-terminal-projection` (source 0ff8cfbf; see `docs/plans/README.md`) implements Monitor projection of retained supervisor evidence under [MA-1.6a] and [MF-5].
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md) is superseded by measured admission under [MA-1.8].
 
-- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements local completion proof, incremental sentinel membership, and exact pending service-request references.
+- retired: `2026-10-12-burst-submission-complexity-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - implements local completion proof, incremental sentinel membership, and exact pending service-request references.
 
 - [AdmissionController: Progress-Aware Admission Waiting](../plans/2026-10-06-admission-controller-plan.md) - isolates admission policy and tracks bounded PG resource-drain diagnostics.
 
-- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes Manager and service probe replies through the Manager's existing control watcher and removes probe-specific polling deadlines.
+- retired: `2026-09-18-event-routed-manager-pong-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - routes Manager and service probe replies through the Manager's existing control watcher and removes probe-specific polling deadlines.
 
-- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the Manager to the shared watcher reactor, publishes the remaining service clocks as deadlines, and routes child exit through one local sentinel adapter.
+- retired: `2026-09-17-watcher-reactor-restoration-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - restores the Manager to the shared watcher reactor, publishes the remaining service clocks as deadlines, and routes child exit through one local sentinel adapter.
 
 - retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
@@ -759,7 +759,7 @@ retains private compatibility bootstrap. Coverage:
 `tests/commands/test_submission.py` and
 `tests/commands/test_submission_observation.py`.
 
-Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
+Implementation plan: `2026-10-16-public-submission-custody-observation-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
 
 Current leadership-view rules:
 
@@ -1054,7 +1054,7 @@ inside this ordinary delivery scope. Reusing this child cleanup does not change
 the normal phases or deadlines of other maintenance owners or make a serviced
 classification-page continuation a veto on the first eligible dispatch.
 
-See the [measured dispatch plan](../plans/2026-10-22-bounded-concurrent-manager-launches.md),
+See the `2026-10-22-bounded-concurrent-manager-launches` (retired — source 0ff8cfbf; see `docs/plans/README.md`),
 B promotion against baseline `8123b129`.
 
 _Implementation mapping_: `weft/core/manager.py::Manager._process_manager_reactor_turn`

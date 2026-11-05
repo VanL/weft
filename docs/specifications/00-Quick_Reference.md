@@ -250,15 +250,15 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 ## Related Plans
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) restates the `weft.state.heartbeats` row: the heartbeat is a context-level singleton any canonical manager ensures.
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock (the `WEFT_TASK_MONITOR_INTERVAL_SECONDS` row). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it (the `weft.state.heartbeats` row).
-- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` (the Queue Names and Control Messages tables).
+- retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock (the `WEFT_TASK_MONITOR_INTERVAL_SECONDS` row). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it (the `weft.state.heartbeats` row).
+- retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` (the Queue Names and Control Messages tables).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
 - [Connection-aware admission and child progress](../plans/2026-10-13-connection-aware-child-admission-plan.md)
 
-- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
+- retired: 2026-09-18-event-routed-manager-pong-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 
@@ -281,4 +281,4 @@ The collation-store toggle was retired by `2026-08-31-collation-store-toggle-rem
 
 `WEFT_SCHEDULER_MAX_FRONTIERS` was removed. Unset it before upgrading all producers and consumers; it is an actionable configuration error.
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).

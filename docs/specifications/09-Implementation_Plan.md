@@ -223,7 +223,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
-- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
+- retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md
 

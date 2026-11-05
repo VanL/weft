@@ -96,7 +96,7 @@ stays separate.
 
 ## Related Plans
 
-- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
+- retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-04-14-builtin-taskspecs-and-spec-resolution-plan — source 396c3b85; see docs/plans/README.md

@@ -35,21 +35,21 @@ See also:
 
 ## Related Plans
 
-- [TaskMonitor: One Clock, Not Two](../plans/2026-11-02-task-monitor-heartbeat-clock-plan.md) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([CC-2.3]).
-- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
+- retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([CC-2.3]).
+- retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
 
-- [Burst submission complexity](../plans/2026-10-12-burst-submission-complexity-plan.md) - implements task-local completion publication and matching retention.
+- retired: `2026-10-12-burst-submission-complexity-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - implements task-local completion publication and matching retention.
 
 - retired: `2026-09-21-watcher-sigint-lock-safety-plan` (source 396c3b85; see `docs/plans/README.md`) - keeps deferred standalone SIGINT handling free of lock-taking operations.
 
 - retired: `2026-09-19-interactive-source-integration-plan` (source 396c3b85; see `docs/plans/README.md`) - routes interactive stream and process-exit events through the retained watcher and publishes resource checks as reactor deadlines.
 
-- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
+- retired: `2026-09-18-event-routed-manager-pong-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - routes each PONG to the requester's own watched `ctrl_in` and removes target-`ctrl_out` polling.
 
-- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - restores the retained SimpleBroker strategy as the task reactor's single wake arbiter, routes local events through its notification seam, and publishes service clocks as explicit deadlines.
+- retired: `2026-09-17-watcher-reactor-restoration-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - restores the retained SimpleBroker strategy as the task reactor's single wake arbiter, routes local events through its notification seam, and publishes service clocks as explicit deadlines.
 
-- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+- retired: 2026-09-15-explicit-broker-session-lifetimes-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 
@@ -453,7 +453,7 @@ full task finalization. First-party constructors cover broker-using or fallible
 post-super setup; downstream constructors use the protected initialization
 scope for equivalent work.
 
-Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+Related plan: `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 A live task reactor has fixed, declared delivery topology. Notification-only interests remain reactor-owned and may change independently under [QUEUE.7–8]; they do not become delivery routes. The Manager startup interest is defined in [MA-1.8]. BaseTask declares
 `inbox`, `reserved`, `outbox`, `ctrl_in`, and `ctrl_out`, plus its fixed support
@@ -1146,7 +1146,7 @@ provenance and selected-row revalidation. Coverage:
 `tests/liveness/test_analysis.py`, `tests/liveness/test_registry.py`, and
 `tests/commands/test_runtime_liveness_observation.py`.
 
-Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md), runtime-liveness slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
+Implementation plan: `2026-10-16-public-submission-custody-observation-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`), runtime-liveness slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
 
 The runtime-generation fingerprint is the SHA-256 of canonical JSON containing
 exactly `runner`, `kind`, `id`, `control.authority`, normalized
@@ -1334,10 +1334,10 @@ observations, apply effects, and own cleanup.
 
 ## Related Plans
 
-- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) removes process-title corroboration from host-pid liveness evidence under [CC-3.2]; a title is observability only.
-- [TaskMonitor MaintenanceWorker](../plans/2026-09-22-task-monitor-maintenance-worker-plan.md): explicit maintenance construction and reactor-owned state under [IMPL.11].
-- [Reactor edge timer floors](../plans/2026-11-02-reactor-edge-timer-floors-plan.md) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).
-- [Reactor wait observation gate](../plans/2026-11-03-watcher-hint-gated-observation-plan.md) reads notification-only observation evidence only on strategy returns that can carry it ([CC-2.1], [QUEUE.7]).
+- retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes process-title corroboration from host-pid liveness evidence under [CC-3.2]; a title is observability only.
+- retired: `2026-09-22-task-monitor-maintenance-worker-plan` (source 0ff8cfbf; see `docs/plans/README.md`): explicit maintenance construction and reactor-owned state under [IMPL.11].
+- retired: `2026-11-02-reactor-edge-timer-floors-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).
+- retired: `2026-11-03-watcher-hint-gated-observation-plan` (source 0ff8cfbf; see `docs/plans/README.md`) reads notification-only observation evidence only on strategy returns that can carry it ([CC-2.1], [QUEUE.7]).
 
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-08-terminal-handoff-adapter-refactor-plan — source 396c3b85; see docs/plans/README.md
@@ -1370,4 +1370,4 @@ observations, apply effects, and own cleanup.
 - [`06-Resource_Management.md`](06-Resource_Management.md)
 - [`13-Agent_Runtime.md`](13-Agent_Runtime.md)
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).

@@ -554,7 +554,7 @@ registration: `_register_plugin_modules`. Backend is registered via
 `weft/core/agents/backends/__init__.py` when the host/runtime boundary
 explicitly requests built-in registration; importing schema or validation
 modules alone does not load backend adapters. Plan backlink:
-[`2026-11-02-python-craft-late-imports-plan.md`](../plans/2026-11-02-python-craft-late-imports-plan.md).
+`2026-11-02-python-craft-late-imports-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 ### `provider_cli` backend
 
@@ -884,7 +884,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
-- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+- retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
 - retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md
 

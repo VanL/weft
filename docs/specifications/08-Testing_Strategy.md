@@ -68,8 +68,8 @@ the host port and an in-container loopback TCP query succeeds; its subsequent
 (`queue.peek_one()`) through the consumer's host target before tests start.
 Constructing and closing a lazy Queue is not a schema or connectivity check.
 Repair and verification:
-[`2026-10-27-runtime-and-test-repair-plan.md`, CI-D3](../plans/2026-10-27-runtime-and-test-repair-plan.md)
-and [`2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md`](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md).
+`2026-10-27-runtime-and-test-repair-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`)
+and `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 _Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated physical PostgreSQL proof fixtures through the canonical `bin/pytest-pg` lifecycle. `tests/helpers/reactor_driver.py::drive_until` owns
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
@@ -434,9 +434,9 @@ bug evidence.
 
 ## Related Plans
 
-- [PR48 reactor and test hygiene repairs](../plans/2026-10-29-pr48-reactor-and-test-hygiene-repair-plan.md) records the `[TS-0]` PostgreSQL readiness poll cadence (monotonic deadline, `POSTGRES_READY_POLL_INTERVAL_SECONDS`) and removal of the redundant 96-second negative schema-preflight test.
+- retired: `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) records the `[TS-0]` PostgreSQL readiness poll cadence (monotonic deadline, `POSTGRES_READY_POLL_INTERVAL_SECONDS`) and removal of the redundant 96-second negative schema-preflight test.
 
-- [Runtime ownership and test evidence repairs](../plans/2026-10-27-runtime-and-test-repair-plan.md) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
+- retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
 - [Contention theory stop condition](../plans/2026-10-14-contention-theory-stop-condition.md) records the owner correction and its investigation rule.
 

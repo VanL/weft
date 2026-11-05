@@ -31,7 +31,7 @@ See also:
 - validated dependency floor alignment:
   `2026-10-07-dependency-floor-alignment-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - explicit broker session lifetime plan:
-  [`docs/plans/2026-09-15-explicit-broker-session-lifetimes-plan.md`](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+  `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`)
 - cleanup policy convergence plan:
   `2026-05-23-monitor-cleanup-policy-convergence-plan` (retired — source 396c3b85; see `docs/plans/README.md`)
 - monitor policy progress contract plan:
@@ -69,7 +69,7 @@ _Implementation mapping_: `weft/commands/queue.py` delegates to
 `weft/core/tasks/base.py` and `weft/core/tasks/multiqueue_watcher.py` build
 task-local queue handles from the same broker target.
 
-Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+Related plan: `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 Current consequences:
 
@@ -372,7 +372,7 @@ holding that transaction.
 Implementation: `MonitorStore._sidecar_session`, `_raw_message_is_absent`, and
 the TaskMonitor store-opening paths. Audit and repair evidence lives in the
 [connection-reuse plan](../plans/2026-09-14-bounded-registry-connection-reuse-plan.md)
-and the [explicit session lifetime plan](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+and the `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 Monitor relational message-ID and checkpoint columns remain integers. Exact
 broker IDs embedded in Monitor-owned JSON text are canonical strings at rest:
@@ -535,7 +535,7 @@ row is deleted or reconciled as already absent, the Monitor physically deletes
 the child row. Exact raw-message reference retry runs in bounded batches
 independently of FIFO high-water completion, and `weft_monitor_deferred_writes`
 is a durable export outbox whose accepted report bodies survive raw-row and
-collation-family retirement ([MF-5], [OBS.13.3]; see [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md)). Reserved-queue cleanup proof for terminal non-completed families
+collation-family retirement ([MF-5], [OBS.13.3]; see `2026-10-14-task-monitor-ingest-and-retirement-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`)). Reserved-queue cleanup proof for terminal non-completed families
 is also stored on the collation row as
 `reserved_cleanup_checked_at_ns`; it is set after the standard reserved queue is
 deleted or proved already absent, and left unset on probe/delete errors. The
@@ -884,7 +884,7 @@ connection-pooling designs are tracked in the companion doc:
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - reuses SimpleBroker's process-shared session machinery without retaining operation checkouts.
 
-- [Watcher Reactor Restoration Plan](../plans/2026-09-17-watcher-reactor-restoration-plan.md) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
+- retired: `2026-09-17-watcher-reactor-restoration-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
 
 - retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
@@ -923,5 +923,5 @@ connection-pooling designs are tracked in the companion doc:
 - [`05-Message_Flow_and_State.md`](05-Message_Flow_and_State.md)
 - [`10-CLI_Interface.md`](10-CLI_Interface.md)
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md) removes public Monitor-store lookup under [SB-0.4a]; private collation ownership remains unchanged.
-- [TaskMonitor Ingest and Retirement](../plans/2026-10-14-task-monitor-ingest-and-retirement-plan.md) preserves the four schema-6 Monitor tables and deferred-write outbox across unified valid-row raw ingestion and reference retry under [SB-0.4a].
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`) removes public Monitor-store lookup under [SB-0.4a]; private collation ownership remains unchanged.
+- retired: `2026-10-14-task-monitor-ingest-and-retirement-plan` (source 0ff8cfbf; see `docs/plans/README.md`) preserves the four schema-6 Monitor tables and deferred-write outbox across unified valid-row raw ingestion and reference retry under [SB-0.4a].

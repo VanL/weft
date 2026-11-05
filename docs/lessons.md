@@ -154,6 +154,22 @@ incident log; these are the durable rules distilled from it. _(2026-06-30)_
     tests never signal unrelated processes or leak containers
     (`tests/helpers/weft_harness.py`). (distilled from 11 entries,
     2026-04-12..2026-09-11, source 396c3b85)
+19. **Keep one task reactor as the wake arbiter and give every broker session,
+    iterator, and OS wait a single owner.** Route task waiting through
+    `BaseTask.next_wait_timeout()` and the retained `MultiQueueWatcher`
+    strategy (`weft/core/tasks/base.py`,
+    `weft/core/tasks/multiqueue_watcher.py`), placing rate gates before
+    expensive proof work, keeping worker-result queues and per-turn drains
+    bounded, and evaluating non-blocking event-routed PING/PONG probes on
+    existing leadership and active-service cadences (`weft/core/manager.py`).
+    Give every OS-level wait source (pipes, PTYs, child exit, console reads,
+    worker sentinels) an explicit source adapter that records local state
+    before waking the strategy (`[CC-2.2.1]`), keep broker-free worker lanes
+    free of indirect database access (`[IMPL.9]`), and serialize each
+    `BrokerSession`, thread-local broker core, and synchronous queue iterator
+    on one owning thread with explicit cleanup before session exit (`[SB-0.4]`,
+    `[IMPL.8]`–`[IMPL.11]`). (distilled from 3 entries, 2026-05-15..2026-09-17,
+    source 0ff8cfbf)
 
 ## Fold Records
 
@@ -249,6 +265,23 @@ index is not a dated section and does not count toward the coalescing trigger.
   "Migration Fixtures Must Come From Release Lineage" (2026-08-25),
   "Load-Sensitive Harness Ownership" (2026-09-09), "Test Typing and Oracle
   Audit" (2026-09-11). Raw entries: `git show 396c3b85:docs/lessons.md`.
+- 2026-11-05 — folded 3 cold TaskMonitor checkpoint, same-domain ID comparison,
+  and premise-falsification sections already covered by Golden Rules 10 and 17,
+  `docs/agent-context/runbooks/writing-plans.md` ("stop and report instead of
+  quietly rewriting"), `docs/specifications/05-Message_Flow_and_State.md`
+  `[MF-5]`, and `docs/specifications/07-System_Invariants.md` `[OBS.13]`,
+  `[OBS.13.3]`: "Monitor Checkpoints And Status" (2026-05-31), "Same-Domain
+  Comparisons And Verified Deletion Markers" (2026-06-10), "Return With
+  Falsified Premises" (2026-06-11). Raw entries:
+  `git show 0ff8cfbf:docs/lessons.md`.
+- 2026-11-05 — distilled 3 cold reactor-waiting, hot-loop rate-gating, and
+  broker-session lifetime ownership sections into Golden Rule 19 (and
+  `01-Core_Components.md` `[CC-2.1]`, `[CC-2.2.1]`, `[CC-2.3]`;
+  `03-Manager_Architecture.md` `[MA-1.6a]`; `04-SimpleBroker_Integration.md`
+  `[SB-0.4]`; `07-System_Invariants.md` `[IMPL.8]`–`[IMPL.11]`): "Manager Hot
+  Loops" (2026-05-15, revised 2026-09-19), "Resource Lifetimes Need Distinct
+  Owners" (2026-09-16), "Reactor Waiting and Polling Policy" (2026-09-17). Raw
+  entries: `git show 0ff8cfbf:docs/lessons.md`.
 
 ## 2026-07-02 Verification-Lessons Fold
 
@@ -290,53 +323,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   `weft run` or `weft manager start`. Using nested `uv` for one-shot commands
   like `init`, `queue`, `status`, or `spec validate` adds material test
   runtime without buying correctness.
-
-## 2026-05-15 Manager Hot Loops
-
-- Rate gates must sit before expensive proof work. A manager loop that checks
-  leadership, service terminal proof, pending service rows, or global task-log
-  evidence before deciding whether that work is due can burn CPU even though
-  the nominal convergence interval looks correct.
-- Reusable task-loop timing belongs at `BaseTask`, not inside one special task.
-  Long-lived tasks should expose due work through `next_wait_timeout()` and let
-  the shared `MultiQueueWatcher` activity path wake them early for queue work.
-- Keep the state-machine boundary clean: collect evidence on a due cadence,
-  then pass that snapshot through the reducer. Do not move lifecycle decisions
-  into timer code, and do not scan global logs just to discover that no reducer
-  turn is due.
-- Broker-free worker lanes must stay broker-free through the full call graph.
-  Passing broker context into a runner or resource monitor from a worker thread
-  can reintroduce database access indirectly, even when the worker body itself
-  has no queue calls.
-- A worker result committed at the start of a manager turn still counts as
-  launch work for that turn. Do not accept another spawn request before control
-  has had a chance to run; otherwise a fast child-launch worker can recreate a
-  same-turn STOP race.
-- Revised 2026-09-19: Manager-to-manager liveness probes are non-blocking
-  reactor state. A stale-looking registry row with a keyed PING in flight stays
-  unknown until a matching PONG or the next ordinary leadership evaluation; a
-  PONG-specific deadline is unnecessary once the reply is routed through the
-  Manager's watched `ctrl_in`.
-- Revised 2026-09-19: service-owner PING fallback follows the same rule. A
-  `ping_pending` candidate stays uncertain until a matching PONG or the next
-  ordinary active-service evaluation. The active-service cadence owns absence;
-  the probe does not add another timer.
-- TaskMonitor custom processors can be worker-lane work only after the reactor
-  has built a complete candidate snapshot. Checkpoint advancement, cached PONG
-  diagnostics, built-in cleanup, and exact deletes must stay on the
-  TaskMonitor reactor.
-- Timer-driven service tasks should not hide private wait loops inside
-  `process_once()`. Put due-time math in `next_wait_timeout()` and let the
-  shared task runner wait, otherwise one task silently bypasses the same
-  control and worker-result wake rules the rest of the runtime uses.
-- Service status is a selected-owner read model, not a latest-event display.
-  When singleton convergence creates a terminal duplicate and a separate live
-  owner, status must report the live owner. Terminal proof should only
-  override launch evidence for the same TID.
-- A reactor worker-result lane needs both a bounded queue and a bounded
-  per-turn drain. Without the queue bound, high-volume live streaming can grow
-  memory without limit; without the drain budget, the reactor can process local
-  worker progress indefinitely before task-local control gets a turn.
 
 ## 2026-04-27 Test Sleep Hygiene
 
@@ -500,62 +486,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   must re-check for concurrent supersede before pruning self history, or it can
   erase the operator's replacement evidence and resurrect itself as active.
 
-## 2026-05-31 Monitor Checkpoints And Status
-
-- A forward Monitor checkpoint is not a proof that every older raw broker row
-  is represented in the Monitor store. Partial rollouts and legacy cleanup can
-  leave pre-checkpoint `weft.log.tasks` rows with no
-  `weft_monitor_task_messages` ref. Recovery for that case must be a bounded
-  backfill that leaves the checkpoint forward-only, folds valid rows into the
-  existing Monitor-store report/delete path, and reports malformed rows before
-  exact deletion in `jsonl_then_delete`.
-- Internal service task-log rows are only one evidence source. Status must not
-  let `internal=true` bypass stale runtime reconciliation forever. When the
-  service registry proves a newer same-service owner, or no runtime proof
-  supports an old service child after the stale window, the public read model
-  should stop presenting that old TID as active without writing synthetic
-  lifecycle events.
-
-## 2026-06-10 Same-Domain Comparisons And Verified Deletion Markers
-
-- Never compare broker hybrid message IDs against host wall-clock time in
-  readiness or cleanup gates. The broker ID domain is durably monotonic and
-  can run ahead of any single host's clock after a clock regression or a
-  fast-clocked writer; a wall-clock bound over a moving ID head can stall a
-  summary-gated pipeline silently, with zero errors, for days. Zero-retention
-  "ready once ingested" gates must be bound by the ingest checkpoint
-  (ID domain against ID domain); wall-clock cutoffs are only correct for
-  observed-staleness windows over a fixed ID. See
-  docs/specifications/05-Message_Flow_and_State.md [MF-5] and
-  `2026-06-10-self-healing-runtime-maintenance-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
-- A completion marker whose writer can be satisfied vacuously will eventually
-  lie. Deletion markers such as `raw_deleted_at_ns` must be coupled to
-  verified per-row deletion in the same pass (the exact-row apply layer
-  re-verifies per ID on batch under-deletion), and audit-mode recovery paths
-  must carry the same summary gate as the main deletion path.
-
-## 2026-06-11 Return With Falsified Premises
-
-- While writing a plan to scale monitor cleanup budgets, successive
-  code-grounding checks falsified the diagnosis the plan was scoped on
-  (the deferral was a routing bucket, not a budget; the "stalled backlog"
-  was service-family event streams plus a false-positive body-substring
-  oracle) and surfaced a different real question entirely. The author
-  stopped and returned with the evidence and a corrected scope instead of
-  delivering the agreed-but-wrong plan.
-- Durable rule, owner-endorsed: returning mid-task with falsified premises,
-  new issues, or reasonable uncertainty is the correct outcome, not a
-  failure. Bring what was attempted, each falsification with evidence, the
-  corrected picture, and a proposed corrected scope — then wait for
-  direction. The fresh-eyes clause in
-  `docs/agent-context/runbooks/writing-plans.md` ("stop and report instead
-  of quietly rewriting") is a success path; treat plan-writing as an
-  experiment that may invalidate its own premise.
-- Corollary for diagnostics: never match TIDs by body substring over
-  `weft.log.tasks` — service event bodies embed other tasks' TIDs and
-  produce false positives. Join through the Monitor store refs
-  (`weft_monitor_task_messages`) or parse the JSON `tid` field exactly.
-
 ## 2026-08-26 Admission Belongs Before Reservation
 
 - A capacity check is simplest when denial leaves the spawn row in its source
@@ -643,66 +573,6 @@ index is not a dated section and does not count toward the coalescing trigger.
   during finalization. Isolate a run-ID test's module-local OS view instead of
   changing process identity for every dependency. See the
   [connection reuse repair](plans/2026-09-14-bounded-registry-connection-reuse-plan.md).
-
-## 2026-09-16 Resource Lifetimes Need Distinct Owners
-
-- A queue lease, a caller-thread broker cache, and a transaction are three
-  different lifetimes. Closing a persistent queue does not prove the executing
-  thread released its cached core, while holding a session does not justify a
-  transaction across a wait or yield. Put one explicit session at the real
-  operation or driver boundary, keep transactions short, close active
-  iterators before session exit, and verify physical cleanup with a surviving
-  sibling handle on both backends.
-- Session-close refusal is thread-and-broker-key-wide, not handle-local. Its
-  private upstream exception type is not a Weft contract. End all same-key
-  operations on the owner thread before session exit and keep cleanup ordered
-  so queue leases are attempted even if session close later refuses. A task's
-  `CLOSED` state means finalization was attempted; it is not proof that every
-  resource was released when cleanup recorded a failure.
-- Async delivery does not transfer ownership of a synchronous broker iterator.
-  Creation, every `next()`, and final `close()` must stay serialized on one
-  owner thread. A disconnect deadline only bounds the event-loop caller; it
-  does not prove a blocked worker stopped. Retain the cleanup future until it
-  unwinds, and give exactly one boundary responsibility for propagating or
-  logging cleanup failure. See the
-  [explicit broker session lifetime plan](plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
-
-## 2026-09-17 Reactor Waiting and Polling Policy
-
-- The manager latency investigation found that BaseTask started SimpleBroker's
-  adaptive strategy but manually waited through a different native-or-sleep
-  path; synchronous PONG callers had a third scan/sleep loop. A shorter sleep
-  improved latency while increasing full reactor turns, so it measured a
-  different cost from cheap data-version polling. Follow the actual production
-  wait path before choosing intervals. Single-thread ownership alone does not
-  prove that wake sources share one policy.
-- An apparently redundant periodic rescan may mask incomplete subscriptions or
-  a dead native observer. Repair interest coverage, local interruption, deadline
-  composition and failure fallback before removing that rescan.
-- Keep task-reactor deadlines distinct from source-adapter and finalization
-  bounds. A parent watcher may poll the OS and a bounded worker queue may use a
-  timed operation without scheduling task policy turns. The source adapter must
-  record authoritative local state before notifying the retained strategy. See
-  the [watcher reactor restoration plan](plans/2026-09-17-watcher-reactor-restoration-plan.md).
-- Do not preserve a polling fallback by relabeling it as a domain timeout after
-  the missing event route is repaired. Manager PONG arrival is backend activity;
-  unanswered-probe policy already has leadership and active-service reactor
-  timers. Reuse those owning-policy turns for absence, and keep reply-driven or
-  incidental work from resetting the timer or concluding another probe early.
-  Measured queue-wakeup latency is diagnostic evidence, not a reason to create
-  a response deadline. See the
-  [event-routed Manager PONG plan](plans/2026-09-18-event-routed-manager-pong-plan.md).
-- Classifying an input as a "local event" does not make anything publish it.
-  Removing the task wait caps left interactive stdout, stderr and child exit
-  with no publisher, and `54874c2f` restored a 50 ms cap to recover liveness
-  before `e6023028` connected the real sources. Wait inputs have three
-  observable classes but four origins: broker, in-process completion, an
-  OS-level source, and the clock. Only the OS-level origin cannot notify for
-  itself, so audit it separately: before deleting a cap, name the adapter for
-  every pipe, PTY, process exit, console read or sentinel the cap was covering,
-  and test quiet exit and inherited-descriptor cases through the production
-  driver. The rule is recorded in
-  [CC-2.2.1](specifications/01-Core_Components.md).
 
 ## 2026-10-06 Test Clocks Have Their Own Boundary
 

@@ -653,7 +653,7 @@ bounded by the dead-task cleanup age. `--timeout` must be finite and satisfy
 inclusive range is rejected with `CommandUsageError` before any queue is
 created; it is not clamped and is distinct from a probe that times out.
 
-Implementation plan: [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md).
+Implementation plan: `2026-09-18-event-routed-manager-pong-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 Current task-control surfaces:
 
@@ -1130,15 +1130,15 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `weft system stop`, the one command that stops the manager and the context's internal services.
-- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.
-- [Control Replies Only on Request: Outcomes Are Broadcast](../plans/2026-11-03-control-replies-only-on-request-plan.md) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CLI-1.1.1], [CLI-1.3]).
-- [Operator-Owned Filesystem Permissions](../plans/2026-10-15-operator-owned-permissions.md) records removal of Weft permission enforcement under [CTX.5].
+- retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) restates [CLI-1.2.3]: TID arguments accept the full or the 13-character encoded TID, and the retained-name candidate search and the ambiguity error are removed.
+- retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CLI-1.1.1], [CLI-1.3]).
+- retired: `2026-10-15-operator-owned-permissions` (source 0ff8cfbf; see `docs/plans/README.md`) records removal of Weft permission enforcement under [CTX.5].
 
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 
 - [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
-- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
+- retired: 2026-09-18-event-routed-manager-pong-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
@@ -1197,4 +1197,4 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 Implementation maintenance: `2026-08-31-dead-generation-retirement-plan` (retired — source 396c3b85; see `docs/plans/README.md`) removes legacy tuple adapters, keeps typed command owners, and restores owned-ID JSON projection and claimed-result reconciliation in the live CLI adapter.
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).

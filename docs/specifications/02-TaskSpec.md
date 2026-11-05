@@ -691,7 +691,7 @@ its internal spawn-request `requeue` policy.
 
 - [Audit regression fixes](../plans/2026-09-11-audit-regression-fixes-plan.md)
 
-- [Reserved disposition and task requeue removal](../plans/2026-08-31-reserved-disposition-and-requeue-removal-plan.md)
+- retired: 2026-08-31-reserved-disposition-and-requeue-removal-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-08-25-compatibility-contract-hardening-plan — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md

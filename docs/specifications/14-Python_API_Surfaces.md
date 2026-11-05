@@ -97,7 +97,7 @@ real-backend task/session cleanup is covered by
 `tests/core/test_task_runtime_connections.py`.
 
 Related plan: `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
-Related plan: [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md).
+Related plan: `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
 
 Extension value types preserve their existing fields and behavior.
 `CommandSessionProtocol` exposes readonly `pid`, `handle`, `last_metrics`;
@@ -153,7 +153,7 @@ re-export it. `weft/client/_task.py::Task.runtime_liveness` and
 `tests/commands/test_submission_observation.py`, and
 `tests/commands/test_runtime_liveness_observation.py`.
 
-Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md), slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
+Implementation plan: `2026-10-16-public-submission-custody-observation-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`), slice 5 (contract promoted 2026-10-19; implemented 2026-10-19).
 
 ## Commands surface contract [PY-2]
 
@@ -284,7 +284,7 @@ Related plan: [Direct result observation spec changes](../plans/2026-10-09-direc
 Implementation repair plan: [Direct result observation](../plans/2026-10-09-direct-result-observation-implementation-plan.md).
 Related plan: [Result observation simplification](../plans/2026-10-10-result-observation-simplification-plan.md).
 
-Implementation plan: [Public submission custody observation](../plans/2026-10-16-public-submission-custody-observation-plan.md) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
+Implementation plan: `2026-10-16-public-submission-custody-observation-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`) (custody contract promoted 2026-10-19; implemented 2026-10-19; runtime-liveness slice 5 promoted 2026-10-19; implemented 2026-10-19).
 
 The exact signature exceptions are: `cmd_run` has `spec_args=()`,
 `describe=False`, and `stdin_text=None`;
@@ -603,8 +603,8 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 ## Related Plans
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
-- [TID display encoding](../plans/2026-11-02-tid-display-encoding-plan.md) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.
-- [CLI and client surface parity](../plans/2026-11-02-cli-client-surface-parity-plan.md)
+- retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.
+- retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.
 
@@ -620,11 +620,11 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 
-- [Event-routed PING/PONG](../plans/2026-09-18-event-routed-manager-pong-plan.md)
+- retired: 2026-09-18-event-routed-manager-pong-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-17-manager-discovery-and-durable-submission-plan — source 396c3b85; see docs/plans/README.md
 
-- [Explicit broker session lifetimes](../plans/2026-09-15-explicit-broker-session-lifetimes-plan.md)
+- retired: 2026-09-15-explicit-broker-session-lifetimes-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-14-django-core-context-resolution-plan — source 396c3b85; see docs/plans/README.md
 
@@ -636,4 +636,4 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 - retired: 2026-08-12-public-api-surface-remediation — source 396c3b85; see docs/plans/README.md
 - retired: 2026-09-08-django-override-normalization-seam-plan — source 396c3b85; see docs/plans/README.md
 
-Implementation plan: [Task-owned observation and read separation](../plans/2026-10-14-task-monitor-read-separation-and-simplification-plan.md).
+Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
