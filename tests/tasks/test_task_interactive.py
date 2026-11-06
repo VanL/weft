@@ -357,6 +357,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
     output_queue = make_queue(
         spec.io.outputs["outbox"] if stream == "stdout" else spec.io.control["ctrl_out"]
     )
+    expected_data = f"ready{os.linesep}" if stream == "stdout" else "ready\n"
     try:
         make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
         task.process_once()
@@ -378,7 +379,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
             lambda messages: any(
                 message.get("type") == "stream"
                 and message.get("stream") == stream
-                and message.get("data") == f"ready{os.linesep}"
+                and message.get("data") == expected_data
                 for message in messages
             ),
             step=task.process_once,
@@ -391,7 +392,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
         assert any(
             message.get("type") == "stream"
             and message.get("stream") == stream
-            and message.get("data") == f"ready{os.linesep}"
+            and message.get("data") == expected_data
             for message in messages
         )
         assert task._interactive_session.is_alive()
@@ -1041,9 +1042,7 @@ def test_interactive_command_control_unwinds_before_terminal(
             assert stderr_finals[0] < terminal_timestamp
             assert stdout_finals[0] < terminal_timestamp
             assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
-            assert any(
-                row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
-            )
+            assert any(row.get("data") == "final stderr\n" for row, _ in rows)
             assert any(
                 json.loads(raw).get("data") == f"final stdout{os.linesep}"
                 for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
