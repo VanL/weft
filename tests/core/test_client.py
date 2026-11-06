@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -1288,7 +1289,15 @@ def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:
         system_manager = next(
             item for item in status_snapshot.managers if item.tid == manager_tid
         )
-        assert system_manager == manager_snapshot
+        assert replace(system_manager, dispatch_refusals_source=None) == replace(
+            manager_snapshot, dispatch_refusals_source=None
+        )
+        assert system_manager.dispatch_refusals_source is not None
+        assert manager_snapshot.dispatch_refusals_source is not None
+        assert (
+            system_manager.dispatch_refusals_source["queue"]
+            == manager_snapshot.dispatch_refusals_source["queue"]
+        )
 
 
 def test_tasks_watch_yields_terminal_snapshot() -> None:
