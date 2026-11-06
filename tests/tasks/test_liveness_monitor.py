@@ -1300,11 +1300,11 @@ def test_retirement_missing_queue_discards_unprobed_work(
 
 
 @pytest.mark.parametrize("claimed", [False, True])
-def test_manager_launch_custody_retains_retirable_checkpoint(
+def test_manager_launch_custody_follows_pending_visibility(
     namespace_case: tuple[WeftContext, LivenessMonitor, Queue, str, list[float]],
     claimed: bool,
 ) -> None:
-    """A dead Manager's only launch evidence survives until exact ACK."""
+    """Pending evidence retains custody; operator consumption permits retirement."""
     context, monitor, queue, tid, _now = namespace_case
     reserved = context.queue(f"T{tid}.reserved", persistent=False)
     try:
@@ -1331,11 +1331,13 @@ def test_manager_launch_custody_retains_retirable_checkpoint(
         queue.write(json.dumps(payload))
         monitor._reconcile_mapping_rows(full=True)
         row = monitor._latest_rows[tid]
-        assert monitor._retire_mapping_row(row) is False
-        assert queue.peek() is not None
-        reserved.delete(message_id=request_id)
-        assert monitor._retire_mapping_row(row) is True
-        assert queue.peek() is None
+        retired = monitor._retire_mapping_row(row)
+        assert retired is claimed
+        assert (queue.peek() is None) is claimed
+        if not claimed:
+            reserved.delete(message_id=request_id)
+            assert monitor._retire_mapping_row(row) is True
+            assert queue.peek() is None
     finally:
         reserved.close()
 
