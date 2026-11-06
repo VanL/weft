@@ -562,7 +562,7 @@ def test_result_stream_keeps_live_stderr_off_stdout(
         assert _wait_for_stream_chunk(
             weft_harness,
             tid,
-            f"live stderr{os.linesep}",
+            "live stderr\n",
             stream="stderr",
             control=interactive,
         )
