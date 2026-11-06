@@ -3410,10 +3410,38 @@ def test_task_monitor_overrun_builtin_cycle_with_control_cleanup_runs_exactly_on
         config=config,
     )
     inbox = make_queue(task.taskspec.io.inputs["inbox"])
+    first_cycle_started = threading.Event()
+    release_first_cycle = threading.Event()
+    cycle_calls: list[None] = []
+    real_cycle = MaintenanceWorker._run_monitor_store_cycle
+
+    def controlled_cycle(
+        worker: MaintenanceWorker,
+        *,
+        now_ns: int,
+        task_log_owner: str,
+    ) -> bool:
+        cycle_calls.append(None)
+        if len(cycle_calls) == 1:
+            first_cycle_started.set()
+            assert release_first_cycle.wait(timeout=5.0)
+        return real_cycle(
+            worker,
+            now_ns=now_ns,
+            task_log_owner=task_log_owner,
+        )
+
+    monkeypatch.setattr(
+        MaintenanceWorker,
+        "_run_monitor_store_cycle",
+        controlled_cycle,
+    )
     try:
         task.process_once()
+        assert first_cycle_started.wait(timeout=5.0)
         assert task._builtin_cycle_work_in_flight is not None
         clock["value"] = 1070.0
+        release_first_cycle.set()
         _drain_task_monitor_workers_without_turns(task)
         assert task._last_processor_success is True
 
@@ -3426,14 +3454,15 @@ def test_task_monitor_overrun_builtin_cycle_with_control_cleanup_runs_exactly_on
         assert inbox.peek_one() is None
         cycles_before = task._last_cycle_at
         task.process_once()
-        assert task._builtin_cycle_work_in_flight is not None
         drive_task_monitor_until_idle(task)
+        assert len(cycle_calls) == 2
         assert task._last_cycle_at != cycles_before
         wait_timeout = task.next_wait_timeout()
         assert wait_timeout is not None
         assert wait_timeout > 0.0
         assert task._next_cycle_due_monotonic == pytest.approx(1120.0)
     finally:
+        release_first_cycle.set()
         task.stop()
 
 
