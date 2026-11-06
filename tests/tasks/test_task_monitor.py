@@ -14277,6 +14277,8 @@ def test_task_monitor_empty_cycles_cross_the_deadline_and_a_substantive_one_rese
         }
     )
     task = TaskMonitor(db_path, spec, config=_idle_monitor_config())
+    deadline_cycle_started = threading.Event()
+    release_deadline_cycle = threading.Event()
     try:
         task.process_once()
         drive_task_monitor_until_idle(task)
@@ -14314,16 +14316,40 @@ def test_task_monitor_empty_cycles_cross_the_deadline_and_a_substantive_one_rese
             assert task._idle_since_monotonic_ns is None
             return
 
+        real_cycle = MaintenanceWorker._run_monitor_store_cycle
+
+        def blocked_deadline_cycle(
+            worker: MaintenanceWorker,
+            *,
+            now_ns: int,
+            task_log_owner: str,
+        ) -> bool:
+            deadline_cycle_started.set()
+            assert release_deadline_cycle.wait(timeout=5.0)
+            return real_cycle(
+                worker,
+                now_ns=now_ns,
+                task_log_owner=task_log_owner,
+            )
+
+        monkeypatch.setattr(
+            MaintenanceWorker,
+            "_run_monitor_store_cycle",
+            blocked_deadline_cycle,
+        )
         service_clock["ns"] = started + _MONITOR_IDLE_WINDOW_NS
         task._wake_requested = True
         task.process_once()
-        assert task._work_undetermined() or not task.should_stop
+        assert deadline_cycle_started.wait(timeout=5.0)
+        assert task._work_undetermined()
         assert not task.should_stop
+        release_deadline_cycle.set()
         drive_task_monitor_until_idle(task)
         task.process_once()
         assert task.should_stop
         assert task.taskspec.state.status == "completed"
     finally:
+        release_deadline_cycle.set()
         task.stop()
 
 
