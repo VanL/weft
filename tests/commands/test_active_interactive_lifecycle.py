@@ -361,7 +361,7 @@ def test_active_cli_eof_closes_input_and_renders_final_frames_without_stop(
 
     def echo(message: Any = None, **kwargs: Any) -> None:
         original_echo(message, **kwargs)
-        if kwargs.get("err") and f"final stderr{os.linesep}" in str(message):
+        if kwargs.get("err") and "final stderr\n" in str(message):
             observed_stderr.set()
 
     monkeypatch.setattr(cli_run.typer, "echo", echo)
@@ -431,7 +431,7 @@ def test_active_cli_eof_closes_input_and_renders_final_frames_without_stop(
         ).status == ("completed" if exit_code == 0 else "failed")
     captured = capsys.readouterr()
     assert f"final stdout{os.linesep}" in captured.out
-    assert f"final stderr{os.linesep}" in captured.err
+    assert "final stderr\n" in captured.err
 
 
 @pytest.mark.parametrize("terminal_after", [None, 1.5])
