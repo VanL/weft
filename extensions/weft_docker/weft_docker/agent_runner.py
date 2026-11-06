@@ -23,6 +23,7 @@ from simplebroker import BrokerTarget
 from weft.core.agents.provider_cli.container_runtime import (
     ProviderContainerRuntimeResolution,
     ResolvedProviderContainerMount,
+    format_provider_container_runtime_diagnostics,
     resolve_provider_container_runtime,
 )
 from weft.core.agents.provider_cli.execution import (
@@ -129,6 +130,14 @@ class DockerProviderCLIRunner:
             provider.name,
             work_item_mounts=resolved_work_item_mounts,
         )
+        if runtime_requirements.has_missing_required:
+            detail = format_provider_container_runtime_diagnostics(
+                runtime_requirements.diagnostics
+            )
+            raise ValueError(
+                "Docker-backed provider_cli agent runtime requirements are not "
+                f"satisfied for provider '{provider.name}': {detail}"
+            )
         image_result = ensure_agent_image(provider.name)
         host_workdir, container_workdir = self._working_dir_mapping()
         container_name = _container_name(self._tid)

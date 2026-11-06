@@ -6,13 +6,13 @@ Spec references:
 
 from __future__ import annotations
 
-import importlib
 import json
 from collections.abc import Sequence
 from typing import Any
 
 import llm
 
+from weft.core.imports import import_module_ref, import_ref
 from weft.core.taskspec import AgentSection
 
 from ..runtime import (
@@ -37,8 +37,7 @@ class LLMBackend:
         tid: str | None,
         bundle_root: str | None = None,
     ) -> AgentExecutionResult:
-        del bundle_root
-        model = self._resolve_model(agent)
+        model = self._resolve_model(agent, bundle_root=bundle_root)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return self._execute_with_conversation(
             agent=agent,
@@ -46,6 +45,7 @@ class LLMBackend:
             work_item=work_item,
             tools=tools,
             tid=tid,
+            bundle_root=bundle_root,
         )
 
     def start_session(
@@ -55,13 +55,13 @@ class LLMBackend:
         tid: str | None,
         bundle_root: str | None = None,
     ) -> AgentRuntimeSession:
-        del bundle_root
-        model = self._resolve_model(agent)
+        model = self._resolve_model(agent, bundle_root=bundle_root)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return LLMBackendSession(
             agent=agent,
             conversation=conversation,
             tid=tid,
+            bundle_root=bundle_root,
         )
 
     def validate(
@@ -71,17 +71,27 @@ class LLMBackend:
         preflight: bool = False,
         bundle_root: str | None = None,
     ) -> None:
-        del bundle_root
         self._validate_agent(agent)
-        self._register_plugin_modules(agent.runtime_config.get("plugin_modules"))
+        self._register_plugin_modules(
+            agent.runtime_config.get("plugin_modules"),
+            bundle_root=bundle_root,
+        )
         if not agent.model:
             raise ValueError("llm backend requires spec.agent.model")
         if preflight:
             llm.get_model(agent.model)
 
-    def _resolve_model(self, agent: AgentSection) -> Any:
+    def _resolve_model(
+        self,
+        agent: AgentSection,
+        *,
+        bundle_root: str | None = None,
+    ) -> Any:
         self._validate_agent(agent)
-        self._register_plugin_modules(agent.runtime_config.get("plugin_modules"))
+        self._register_plugin_modules(
+            agent.runtime_config.get("plugin_modules"),
+            bundle_root=bundle_root,
+        )
         if not agent.model:
             raise ValueError("llm backend requires spec.agent.model")
         return llm.get_model(agent.model)
@@ -92,7 +102,11 @@ class LLMBackend:
             raise ValueError(f"Unsupported llm output_mode in MVP: {agent.output_mode}")
 
     @staticmethod
-    def _register_plugin_modules(plugin_modules: Any) -> None:
+    def _register_plugin_modules(
+        plugin_modules: Any,
+        *,
+        bundle_root: str | None = None,
+    ) -> None:
         if plugin_modules is None:
             return
         if isinstance(plugin_modules, str) or not isinstance(plugin_modules, Sequence):
@@ -100,20 +114,22 @@ class LLMBackend:
         for module_name in plugin_modules:
             if not isinstance(module_name, str) or not module_name:
                 raise TypeError("llm runtime_config.plugin_modules must be a list")
-            module = importlib.import_module(module_name)
+            module = import_module_ref(module_name, bundle_root=bundle_root)
             if module not in llm.plugins.pm.get_plugins():
                 llm.plugins.pm.register(module, name=module.__name__)
 
     @staticmethod
-    def _resolve_output_schema(schema: dict[str, Any] | str | None) -> Any:
+    def _resolve_output_schema(
+        schema: dict[str, Any] | str | None,
+        *,
+        bundle_root: str | None = None,
+    ) -> Any:
         if schema is None:
             return None
         if isinstance(schema, dict):
             return schema
         if isinstance(schema, str):
-            module_name, attr_name = schema.rsplit(":", 1)
-            module = importlib.import_module(module_name)
-            return getattr(module, attr_name)
+            return import_ref(schema, bundle_root=bundle_root)
         raise TypeError("Unsupported output_schema type")
 
     @staticmethod
@@ -133,13 +149,17 @@ class LLMBackend:
         work_item: NormalizedAgentWorkItem,
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
+        bundle_root: str | None = None,
     ) -> AgentExecutionResult:
         del tid
         model = conversation.model
         if tools and not model.supports_tools:
             raise ValueError(f"Model does not support tools: {agent.model}")
 
-        schema = self._resolve_output_schema(agent.output_schema)
+        schema = self._resolve_output_schema(
+            agent.output_schema,
+            bundle_root=bundle_root,
+        )
         if schema is not None and not model.supports_schema:
             raise ValueError(f"Model does not support schema output: {agent.model}")
 
@@ -239,10 +259,12 @@ class LLMBackendSession:
         agent: AgentSection,
         conversation: Any,
         tid: str | None,
+        bundle_root: str | None = None,
     ) -> None:
         self._agent = agent
         self._conversation = conversation
         self._tid = tid
+        self._bundle_root = bundle_root
         self._backend = LLMBackend()
 
     def execute(self, work_item: NormalizedAgentWorkItem) -> AgentExecutionResult:
@@ -250,6 +272,7 @@ class LLMBackendSession:
             self._agent.tools,
             allow=work_item.tool_allow,
             deny=work_item.tool_deny,
+            bundle_root=self._bundle_root,
         )
         return self._backend._execute_with_conversation(
             agent=self._agent,
@@ -257,6 +280,7 @@ class LLMBackendSession:
             work_item=work_item,
             tools=tools,
             tid=self._tid,
+            bundle_root=self._bundle_root,
         )
 
     def close(self) -> None:

@@ -16,6 +16,11 @@ from weft_docker.agent_runner import (
     _resolve_work_item_mounts,
 )
 
+from weft.core.agents.provider_cli.container_runtime import (
+    ProviderContainerRuntimeDescriptor,
+    ProviderContainerRuntimeDiagnostic,
+    ProviderContainerRuntimeResolution,
+)
 from weft.core.agents.provider_cli.registry import (
     ProviderCLIInvocation,
     ProviderCLIResult,
@@ -261,7 +266,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
     monkeypatch.setattr(
         "weft_docker.agent_runner.resolve_provider_container_runtime",
         lambda provider_name, task_env, working_dir, explicit_mounts: SimpleNamespace(
-            env={}, mounts=()
+            env={}, mounts=(), has_missing_required=False, diagnostics=()
         ),
     )
     monkeypatch.setattr(
@@ -458,7 +463,7 @@ def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 appro
     monkeypatch.setattr(
         "weft_docker.agent_runner.resolve_provider_container_runtime",
         lambda provider_name, task_env, working_dir, explicit_mounts: SimpleNamespace(
-            env={}, mounts=()
+            env={}, mounts=(), has_missing_required=False, diagnostics=()
         ),
     )
     monkeypatch.setattr(
@@ -519,3 +524,59 @@ def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 appro
     assert killed == [True]
     assert outcome.status == "cancelled"
     assert outcome.error == "Target execution cancelled"
+
+
+def test_docker_provider_cli_runner_rejects_missing_required_provider_runtime_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Docker image or client should not be reached")
+
+    monkeypatch.setattr(
+        "weft_docker.agent_runner.resolve_provider_container_runtime",
+        lambda provider_name, task_env, working_dir, explicit_mounts: (
+            ProviderContainerRuntimeResolution(
+                descriptor=ProviderContainerRuntimeDescriptor(
+                    version="v2",
+                    provider=provider_name,
+                ),
+                diagnostics=(
+                    ProviderContainerRuntimeDiagnostic(
+                        kind="missing_mount_source",
+                        requirement_name="codex_home",
+                        message="Required mount source ~/.codex does not exist",
+                        required=True,
+                    ),
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr("weft_docker.agent_runner.ensure_agent_image", fail_if_called)
+    monkeypatch.setattr("weft_docker.agent_runner.docker_client", fail_if_called)
+
+    runner = DockerProviderCLIRunner(
+        tid="1234567890",
+        agent={
+            "runtime": "provider_cli",
+            "authority_class": "general",
+            "conversation_scope": "per_message",
+            "runtime_config": {"provider": "codex"},
+        },
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_interval=0.01,
+        runner_options={"container_workdir": "/tmp", "mount_workdir": False},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^Docker-backed provider_cli agent runtime requirements are not "
+            r"satisfied for provider 'codex': Required mount source "
+            r"~/\.codex does not exist$"
+        ),
+    ):
+        runner.run_with_hooks({"task": "Explain this document"})
+

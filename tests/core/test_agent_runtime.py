@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 
+import llm
 import pytest
 
+from weft.core.agents.backends.llm import LLMBackend
 from weft.core.agents.runtime import (
     AgentExecutionResult,
     AgentRuntimeAdapter,
@@ -20,8 +23,8 @@ from weft.core.agents.runtime import (
     register_agent_runtime,
     start_agent_runtime_session,
 )
-from weft.core.agents.tools import ResolvedAgentTool
-from weft.core.taskspec import AgentSection
+from weft.core.agents.tools import ResolvedAgentTool, resolve_agent_tools
+from weft.core.taskspec import AgentSection, AgentToolSection
 
 
 class EchoRuntime:
@@ -255,3 +258,238 @@ def test_execute_agent_target_returns_internal_execution_result(
         json.loads(json.dumps(result.to_private_payload()))
         == result.to_private_payload()
     )
+
+
+def _write_bundle_llm_files(
+    bundle_dir: Path,
+    *,
+    model_id: str,
+    schema_field: str,
+    tool_prefix: str,
+) -> None:
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "bundle_plugin_mod.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "from collections.abc import Callable, Iterator",
+                "from typing import Any",
+                "import llm",
+                "from llm.models import Model, Prompt, Response, ToolCall",
+                "",
+                "class BundleTestModel(Model):",
+                f"    model_id = {model_id!r}",
+                "    supports_schema = True",
+                "    supports_tools = True",
+                "",
+                "    def execute(",
+                "        self,",
+                "        prompt: Prompt,",
+                "        stream: bool,",
+                "        response: Response,",
+                "        conversation: Any,",
+                "    ) -> Iterator[str]:",
+                "        del stream, conversation",
+                "        response.set_resolved_model(self.model_id)",
+                "        if prompt.tool_results:",
+                "            value = prompt.tool_results[0].output",
+                "        elif prompt.tools:",
+                "            response.add_tool_call(",
+                "                ToolCall(",
+                "                    name=prompt.tools[0].name,",
+                "                    arguments={'payload': prompt.prompt},",
+                "                    tool_call_id='bundle-call-1',",
+                "                )",
+                "            )",
+                "            return",
+                "        else:",
+                "            value = prompt.prompt",
+                f"        payload = {{{schema_field!r}: value}}",
+                "        response.response_json = payload",
+                "        yield json.dumps(payload)",
+                "",
+                "@llm.hookimpl",
+                "def register_models(register: Callable[[Model], None]) -> None:",
+                "    register(BundleTestModel())",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (bundle_dir / "bundle_schema_mod.py").write_text(
+        "\n".join(
+            [
+                "from pydantic import BaseModel",
+                "",
+                "class OutputSchema(BaseModel):",
+                f"    {schema_field}: str",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (bundle_dir / "bundle_tool_mod.py").write_text(
+        "\n".join(
+            [
+                "def format_payload(payload: str) -> str:",
+                '    """Format payload for bundle test."""',
+                f"    return f'{tool_prefix}:{{payload}}'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _unregister_bundle_llm_plugins() -> None:
+    for plugin in list(llm.plugins.pm.get_plugins()):
+        name = getattr(plugin, "__name__", "")
+        if name.startswith("_weft_bundle_"):
+            llm.plugins.pm.unregister(plugin=plugin)
+
+
+def test_llm_backend_resolves_bundle_plugin_and_output_schema_in_one_shot(
+    tmp_path: Path,
+) -> None:
+    bundle_a = tmp_path / "bundle_a"
+    _write_bundle_llm_files(
+        bundle_a,
+        model_id="weft-bundle-one-shot-model",
+        schema_field="bundle_a_value",
+        tool_prefix="bundle-a",
+    )
+    agent = AgentSection(
+        runtime="llm",
+        model="weft-bundle-one-shot-model",
+        output_mode="json",
+        output_schema="bundle_schema_mod:OutputSchema",
+        runtime_config={"plugin_modules": ["bundle_plugin_mod"]},
+    )
+    backend = LLMBackend()
+    try:
+        backend.validate(agent=agent, preflight=True, bundle_root=str(bundle_a))
+        result = backend.execute(
+            agent=agent,
+            work_item=normalize_agent_work_item(agent, "hello-bundle"),
+            tools=(),
+            tid="123",
+            bundle_root=str(bundle_a),
+        )
+        assert result.aggregate_public_output() == {"bundle_a_value": "hello-bundle"}
+    finally:
+        _unregister_bundle_llm_plugins()
+
+
+def test_llm_backend_session_propagates_bundle_root_for_tools_and_schema(
+    tmp_path: Path,
+) -> None:
+    bundle_a = tmp_path / "bundle_session"
+    _write_bundle_llm_files(
+        bundle_a,
+        model_id="weft-bundle-session-model",
+        schema_field="session_value",
+        tool_prefix="session-tool",
+    )
+    agent = AgentSection(
+        runtime="llm",
+        model="weft-bundle-session-model",
+        conversation_scope="per_task",
+        max_turns=3,
+        output_mode="json",
+        output_schema="bundle_schema_mod:OutputSchema",
+        runtime_config={"plugin_modules": ["bundle_plugin_mod"]},
+        tools=(
+            AgentToolSection(
+                name="format_payload",
+                kind="python",
+                ref="bundle_tool_mod:format_payload",
+            ),
+        ),
+    )
+    backend = LLMBackend()
+    try:
+        session = backend.start_session(
+            agent=agent,
+            tid="456",
+            bundle_root=str(bundle_a),
+        )
+        try:
+            result = session.execute(normalize_agent_work_item(agent, "turn-1"))
+        finally:
+            session.close()
+        assert result.aggregate_public_output() == {
+            "session_value": "session-tool:turn-1"
+        }
+    finally:
+        _unregister_bundle_llm_plugins()
+
+
+def test_llm_backend_isolates_colliding_bundle_module_names_across_bundles(
+    tmp_path: Path,
+) -> None:
+    bundle_a = tmp_path / "bundle_iso_a"
+    bundle_b = tmp_path / "bundle_iso_b"
+    _write_bundle_llm_files(
+        bundle_a,
+        model_id="weft-bundle-iso-model-a",
+        schema_field="alpha_field",
+        tool_prefix="alpha-tool",
+    )
+    _write_bundle_llm_files(
+        bundle_b,
+        model_id="weft-bundle-iso-model-b",
+        schema_field="beta_field",
+        tool_prefix="beta-tool",
+    )
+    backend = LLMBackend()
+    try:
+        agent_a = AgentSection(
+            runtime="llm",
+            model="weft-bundle-iso-model-a",
+            max_turns=3,
+            output_mode="json",
+            output_schema="bundle_schema_mod:OutputSchema",
+            runtime_config={"plugin_modules": ["bundle_plugin_mod"]},
+            tools=(
+                AgentToolSection(
+                    name="format_payload",
+                    kind="python",
+                    ref="bundle_tool_mod:format_payload",
+                ),
+            ),
+        )
+        agent_b = AgentSection(
+            runtime="llm",
+            model="weft-bundle-iso-model-b",
+            max_turns=3,
+            output_mode="json",
+            output_schema="bundle_schema_mod:OutputSchema",
+            runtime_config={"plugin_modules": ["bundle_plugin_mod"]},
+            tools=(
+                AgentToolSection(
+                    name="format_payload",
+                    kind="python",
+                    ref="bundle_tool_mod:format_payload",
+                ),
+            ),
+        )
+        result_a = backend.execute(
+            agent=agent_a,
+            work_item=normalize_agent_work_item(agent_a, "check"),
+            tools=resolve_agent_tools(agent_a.tools, bundle_root=str(bundle_a)),
+            tid="789",
+            bundle_root=str(bundle_a),
+        )
+        result_b = backend.execute(
+            agent=agent_b,
+            work_item=normalize_agent_work_item(agent_b, "check"),
+            tools=resolve_agent_tools(agent_b.tools, bundle_root=str(bundle_b)),
+            tid="790",
+            bundle_root=str(bundle_b),
+        )
+        assert result_a.aggregate_public_output() == {"alpha_field": "alpha-tool:check"}
+        assert result_b.aggregate_public_output() == {"beta_field": "beta-tool:check"}
+    finally:
+        _unregister_bundle_llm_plugins()
+
