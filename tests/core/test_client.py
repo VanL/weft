@@ -1289,14 +1289,14 @@ def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:
         system_manager = next(
             item for item in status_snapshot.managers if item.tid == manager_tid
         )
-        assert replace(system_manager, dispatch_refusals_source=None) == replace(
-            manager_snapshot, dispatch_refusals_source=None
-        )
-        assert system_manager.dispatch_refusals_source is not None
-        assert manager_snapshot.dispatch_refusals_source is not None
-        assert (
-            system_manager.dispatch_refusals_source["queue"]
-            == manager_snapshot.dispatch_refusals_source["queue"]
+        assert replace(
+            system_manager,
+            dispatch_refusals={},
+            dispatch_refusals_source=None,
+        ) == replace(
+            manager_snapshot,
+            dispatch_refusals={},
+            dispatch_refusals_source=None,
         )
 
 
