@@ -925,3 +925,50 @@ def test_postgres_readiness_rejects_bootstrap_then_initializes_schema(
     finally:
         (probe / "release").touch()
         runtime._cleanup_container(name)
+
+
+@pytest.mark.skipif(
+    os.environ.get("BROKER_TEST_BACKEND") != "postgres", reason="requires bin/pytest-pg"
+)
+def test_cleanup_container_removes_the_anonymous_data_volume() -> None:
+    """The Postgres image declares its data directory a volume, so every
+    container gets an anonymous one; cleanup must remove it with the container
+    or each run leaks a database cluster's worth of disk."""
+    runtime = _load_pytest_pg_module()
+    name = f"weft-cleanup-test-{uuid.uuid4().hex[:8]}"
+    subprocess.run(
+        ["docker", "create", "--name", name, runtime.POSTGRES_IMAGE],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        mounts = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}',
+                name,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        volumes = mounts.stdout.split()
+        assert volumes, "the Postgres image no longer declares a data volume"
+    finally:
+        runtime._cleanup_container(name)
+
+    leftover = [
+        volume
+        for volume in volumes
+        if subprocess.run(
+            ["docker", "volume", "inspect", volume], check=False, capture_output=True
+        ).returncode
+        == 0
+    ]
+    for volume in leftover:
+        subprocess.run(
+            ["docker", "volume", "rm", volume], check=False, capture_output=True
+        )
+    assert leftover == []
