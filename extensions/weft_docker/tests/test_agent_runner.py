@@ -579,4 +579,3 @@ def test_docker_provider_cli_runner_rejects_missing_required_provider_runtime_re
         ),
     ):
         runner.run_with_hooks({"task": "Explain this document"})
-

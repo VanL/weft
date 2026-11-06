@@ -709,6 +709,7 @@ class Manager(ServiceTask):
         self._admission_refresh_after = 0.0
         self._admission_observation: dict[str, int] = {}
         self._admission_blocked_lanes: set[AdmissionLane] = set()
+        self._admission_blocked_queues: set[str] = set()
         self._admission_retry_after_ns = 0
         self._admission_last_decision_state: tuple[str, str | None] = ("open", None)
         self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
@@ -3309,7 +3310,8 @@ class Manager(ServiceTask):
 
         previous_state = self._admission_last_decision_state
         blocked_lanes = set(decision.blocked_lanes)
-        self._admission_blocked_lanes = blocked_lanes
+        self._admission_blocked_lanes = set()
+        self._record_admission_blocked_lanes(blocked_lanes)
         self._admission_retry_after_ns = (
             time.time_ns() + int(MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000)
             if blocked_lanes
@@ -3373,20 +3375,27 @@ class Manager(ServiceTask):
             log_fields=fields,
         )
 
+    def _record_admission_blocked_lanes(self, lanes: Iterable[AdmissionLane]) -> None:
+        """Record blocked lanes and any currently active spawn queues on those lanes."""
+
+        blocked = set(lanes)
+        self._admission_blocked_lanes.update(blocked)
+        for queue_name in getattr(self, "_active_queues", ()):
+            if self._admission_lane_for_queue(queue_name) in blocked:
+                self._admission_blocked_queues.add(queue_name)
+
     def _clear_admission_retry(self) -> None:
         """Make blocked lanes eligible for an immediate fresh observation."""
 
-        was_blocked = bool(
-            self._admission_blocked_lanes
-            or self._startup_blocked
-            or self._admission_retry_after_ns > 0
-        )
+        blocked_queues = tuple(self._admission_blocked_queues)
+        self._admission_blocked_queues.clear()
         self._admission_blocked_lanes.clear()
         self._startup_blocked = False
         self._admission_retry_after_ns = 0
-        if was_blocked:
-            self._mark_pending_messages_prechecked()
-            self._strategy.notify_activity()
+        for queue_name in blocked_queues:
+            config = self._queues.get(queue_name)
+            if config is not None and self._queue_has_pending(config.queue):
+                self._mark_queue_active(queue_name)
 
     def _schedule_admission_retry_for_source(self, source_queue: str | None) -> None:
         """Backstop a restored launch request with one bounded lane retry."""
@@ -3396,10 +3405,11 @@ class Manager(ServiceTask):
         lane = self._admission_lane_for_queue(source_queue)
         if lane is None:
             return
+        self._admission_blocked_queues.add(source_queue)
         if lane == "internal":
-            self._admission_blocked_lanes.update(("public", "internal"))
+            self._record_admission_blocked_lanes(("public", "internal"))
         else:
-            self._admission_blocked_lanes.add(lane)
+            self._record_admission_blocked_lanes((lane,))
         self._admission_retry_after_ns = time.time_ns() + int(
             MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
         )
@@ -3436,8 +3446,10 @@ class Manager(ServiceTask):
         if lane is None or not self._admission_enabled():
             return True
         if lane in self._admission_blocked_lanes:
+            self._admission_blocked_queues.add(queue_name)
             return False
         if lane == "public" and self._startup_dispatch_blocked():
+            self._admission_blocked_queues.add(queue_name)
             return False
 
         backend = self._admission_backend_name()
@@ -3447,6 +3459,7 @@ class Manager(ServiceTask):
         )
         self._record_admission_decision(lane=lane, backend=backend, decision=decision)
         if lane in decision.blocked_lanes:
+            self._admission_blocked_queues.add(queue_name)
             return False
         if lane == "public" and not _startup_window_allows_launch(
             unfinished=len(self._startup_feedback),
@@ -3454,6 +3467,7 @@ class Manager(ServiceTask):
             capacity=decision.capacity,
         ):
             self._startup_blocked = True
+            self._admission_blocked_queues.add(queue_name)
             self._admission_retry_after_ns = time.time_ns() + int(
                 MANAGER_ADMISSION_RECHECK_SECONDS * 1_000_000_000
             )

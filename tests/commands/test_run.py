@@ -3920,3 +3920,48 @@ def test_spawn_state_subscription_observes_first_write(tmp_path: Path) -> None:
         publisher.write(json.dumps({"full": tid, "short": encode_tid(tid)}))
         assert monitor.wait(5.0)
         assert spawn_submission_cmd._mapping_exists_for_tid(context, tid)
+
+
+def test_apply_explicit_run_name_allows_human_readable_non_persistent_pipeline_name_and_rejects_reserved_prefix() -> (
+    None
+):
+    non_persistent_spec = TaskSpec.model_validate(
+        {
+            "name": "pipeline-run",
+            "spec": {
+                "type": "function",
+                "function_target": "weft.core.tasks.pipeline:runtime",
+                "persistent": False,
+            },
+        },
+        context={"template": True, "auto_expand": False},
+    )
+    updated = run_cmd._apply_explicit_run_name(
+        non_persistent_spec,
+        "my human name",
+    )
+    assert updated.name == "my human name"
+    assert INTERNAL_RUNTIME_ENDPOINT_NAME_KEY not in updated.metadata
+
+    persistent_spec = TaskSpec.model_validate(
+        {
+            "name": "persistent-service",
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+                "persistent": True,
+            },
+        },
+        context={"template": True, "auto_expand": False},
+    )
+    with pytest.raises(RunUsageError):
+        run_cmd._apply_explicit_run_name(persistent_spec, "my human name")
+
+    with pytest.raises(RunUsageError):
+        run_cmd._apply_explicit_run_name(non_persistent_spec, "_weft.heartbeat")
+
+    with pytest.raises(RunUsageError):
+        run_cmd._derive_name("_weft.heartbeat", (), "tests.tasks:echo")
+
+    with pytest.raises(RunUsageError, match="Task name must not be empty"):
+        run_cmd._derive_name("   ", (), "tests.tasks:echo")

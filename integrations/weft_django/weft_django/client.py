@@ -95,6 +95,12 @@ class WeftDeferredSubmission:
             )
         return self.task
 
+    def snapshot(self) -> TaskSnapshot | None:
+        return self._require_task().snapshot()
+
+    def terminal_snapshot(self, timeout: float = 0.0) -> TaskTerminalSnapshot:
+        return self._require_task().terminal_snapshot(timeout=timeout)
+
     def status(self) -> str | None:
         return self._require_task().status()
 

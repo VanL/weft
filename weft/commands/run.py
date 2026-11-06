@@ -32,6 +32,7 @@ from weft._constants import (
     CONTROL_STOP,
     DEFAULT_STREAM_OUTPUT,
     INTERACTIVE_STOP_COMPLETION_TIMEOUT,
+    INTERNAL_ENDPOINT_NAMESPACE_PREFIX,
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
@@ -568,7 +569,15 @@ def _parse_env(values: Sequence[str]) -> dict[str, str]:
 def _derive_name(
     name: str | None, command: Sequence[str], function_target: str | None
 ) -> str:
-    if name:
+    if name is not None:
+        candidate = name.strip()
+        if not candidate:
+            raise RunUsageError("Task name must not be empty", param_hint="--name")
+        if candidate.startswith(INTERNAL_ENDPOINT_NAMESPACE_PREFIX):
+            try:
+                validate_endpoint_claim_name(candidate)
+            except ValueError as exc:
+                raise RunUsageError(str(exc), param_hint="--name") from exc
         return name
     if command:
         return Path(command[0]).name
@@ -707,6 +716,10 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
     if explicit_name is None:
         return taskspec
 
+    candidate = explicit_name.strip()
+    if not candidate:
+        raise RunUsageError("Task name must not be empty", param_hint="--name")
+
     payload = taskspec.model_dump(mode="json")
     payload["name"] = explicit_name
     metadata = payload.get("metadata")
@@ -715,13 +728,14 @@ def _apply_explicit_run_name(taskspec: TaskSpec, explicit_name: str | None) -> T
         payload["metadata"] = metadata
     metadata.pop(INTERNAL_RUNTIME_ENDPOINT_NAME_KEY, None)
 
-    try:
-        endpoint_name = validate_endpoint_claim_name(explicit_name)
-    except ValueError as exc:
-        raise RunUsageError(str(exc), param_hint="--name") from exc
-
-    if bool(getattr(taskspec.spec, "persistent", False)):
-        metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
+    is_persistent = bool(getattr(taskspec.spec, "persistent", False))
+    if is_persistent or candidate.startswith(INTERNAL_ENDPOINT_NAMESPACE_PREFIX):
+        try:
+            endpoint_name = validate_endpoint_claim_name(candidate)
+        except ValueError as exc:
+            raise RunUsageError(str(exc), param_hint="--name") from exc
+        if is_persistent:
+            metadata[INTERNAL_RUNTIME_ENDPOINT_NAME_KEY] = endpoint_name
 
     return validate_taskspec_payload(
         payload,

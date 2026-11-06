@@ -2309,7 +2309,7 @@ def cmd_task_tid(
     reverse: str | None = None,
     context: Path | None = None,
 ) -> str:
-    """Resolve one selector to a canonical full task ID.
+    """Resolve one selector to a canonical full task ID, or encode a full TID.
 
     Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2]
     """
@@ -2321,10 +2321,9 @@ def cmd_task_tid(
     if reverse is not None:
         candidate = reverse.strip().lstrip("T")
         try:
-            encode_tid(candidate)
+            return encode_tid(candidate)
         except ValueError as exc:
             raise InvalidTID(f"Invalid full task ID: {reverse!r}") from exc
-        return candidate
     resolved = resolve_tid(tid=tid, pid=pid, context=ctx)
     if resolved is None:
         raise TaskNotFound("No matching TID found")

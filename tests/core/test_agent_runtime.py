@@ -305,7 +305,15 @@ def _write_bundle_llm_files(
                 "            return",
                 "        else:",
                 "            value = prompt.prompt",
-                f"        payload = {{{schema_field!r}: value}}",
+                "        assert prompt.schema is not None, 'expected resolved output_schema on prompt'",
+                "        schema_dict = (",
+                "            prompt.schema",
+                "            if isinstance(prompt.schema, dict)",
+                "            else prompt.schema.model_json_schema()",
+                "        )",
+                "        schema_fields = list(schema_dict.get('properties', {}).keys())",
+                f"        assert schema_fields == [{schema_field!r}], schema_fields",
+                "        payload = {schema_fields[0]: value}",
                 "        response.response_json = payload",
                 "        yield json.dumps(payload)",
                 "",
@@ -342,10 +350,9 @@ def _write_bundle_llm_files(
     )
 
 
-def _unregister_bundle_llm_plugins() -> None:
+def _unregister_added_llm_plugins(before_plugins: set[object]) -> None:
     for plugin in list(llm.plugins.pm.get_plugins()):
-        name = getattr(plugin, "__name__", "")
-        if name.startswith("_weft_bundle_"):
+        if plugin not in before_plugins:
             llm.plugins.pm.unregister(plugin=plugin)
 
 
@@ -367,6 +374,7 @@ def test_llm_backend_resolves_bundle_plugin_and_output_schema_in_one_shot(
         runtime_config={"plugin_modules": ["bundle_plugin_mod"]},
     )
     backend = LLMBackend()
+    before_plugins = set(llm.plugins.pm.get_plugins())
     try:
         backend.validate(agent=agent, preflight=True, bundle_root=str(bundle_a))
         result = backend.execute(
@@ -378,7 +386,7 @@ def test_llm_backend_resolves_bundle_plugin_and_output_schema_in_one_shot(
         )
         assert result.aggregate_public_output() == {"bundle_a_value": "hello-bundle"}
     finally:
-        _unregister_bundle_llm_plugins()
+        _unregister_added_llm_plugins(before_plugins)
 
 
 def test_llm_backend_session_propagates_bundle_root_for_tools_and_schema(
@@ -408,6 +416,7 @@ def test_llm_backend_session_propagates_bundle_root_for_tools_and_schema(
         ),
     )
     backend = LLMBackend()
+    before_plugins = set(llm.plugins.pm.get_plugins())
     try:
         session = backend.start_session(
             agent=agent,
@@ -422,7 +431,7 @@ def test_llm_backend_session_propagates_bundle_root_for_tools_and_schema(
             "session_value": "session-tool:turn-1"
         }
     finally:
-        _unregister_bundle_llm_plugins()
+        _unregister_added_llm_plugins(before_plugins)
 
 
 def test_llm_backend_isolates_colliding_bundle_module_names_across_bundles(
@@ -443,6 +452,7 @@ def test_llm_backend_isolates_colliding_bundle_module_names_across_bundles(
         tool_prefix="beta-tool",
     )
     backend = LLMBackend()
+    before_plugins = set(llm.plugins.pm.get_plugins())
     try:
         agent_a = AgentSection(
             runtime="llm",
@@ -491,5 +501,4 @@ def test_llm_backend_isolates_colliding_bundle_module_names_across_bundles(
         assert result_a.aggregate_public_output() == {"alpha_field": "alpha-tool:check"}
         assert result_b.aggregate_public_output() == {"beta_field": "beta-tool:check"}
     finally:
-        _unregister_bundle_llm_plugins()
-
+        _unregister_added_llm_plugins(before_plugins)

@@ -8,7 +8,7 @@ from typing import Any
 from django.core.handlers.asgi import ASGIRequest
 from django.http import Http404, HttpRequest, HttpResponseForbidden, JsonResponse
 
-from weft_django.client import get_core_client
+from weft_django.client import _current_client
 from weft_django.conf import get_authz_callable, get_realtime_transport
 from weft_django.sse import sse_response
 
@@ -21,7 +21,7 @@ def _authorize(request: HttpRequest, tid: str, action: str) -> bool:
 
 def _task_snapshot_or_404(tid: str) -> Any:
     try:
-        task = get_core_client().task(tid)
+        task = _current_client().core_client.task(tid)
     except ValueError as exc:
         raise Http404(str(exc)) from exc
     snapshot = task.snapshot()

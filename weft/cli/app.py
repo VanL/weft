@@ -42,7 +42,6 @@ from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.commands.types import SpecValidationResult
 from weft.context import build_context
 from weft.helpers import (
-    encode_tid,
     resolve_broker_max_message_size,
     resolve_cli_message_content,
 )
@@ -1542,7 +1541,7 @@ def task_list(
     if json_output:
         typer.echo(
             json.dumps(
-                [_task_snapshot_payload(snap) for snap in snapshots],
+                [_status_task_json_payload(snap) for snap in snapshots],
                 ensure_ascii=False,
             )
         )
@@ -1555,22 +1554,6 @@ def task_list(
         typer.echo(
             f"{snap.tid} {snap.status} {snap.runner or '-'} {snap.name}{activity}"
         )
-
-
-def _task_snapshot_payload(snapshot: commands.TaskSnapshot) -> dict[str, Any]:
-    """Project a structured task snapshot into the established CLI JSON shape."""
-    payload = asdict(snapshot)
-    if isinstance(snapshot.last_timestamp, int):
-        payload["last_timestamp"] = format_message_id(snapshot.last_timestamp)
-    reconciliation = payload.get("reconciliation")
-    if isinstance(reconciliation, dict):
-        observed_at = reconciliation.get("observed_at")
-        if isinstance(observed_at, int):
-            reconciliation["observed_at"] = format_message_id(observed_at)
-    for field in ("host_pids", "managed_pids", "live_managed_pids"):
-        if payload.get(field) is not None:
-            payload[field] = list(payload[field])
-    return payload
 
 
 def _task_status_plain_lines(
@@ -1734,7 +1717,7 @@ def task_status(
             raise typer.Exit(code=2) from exc
         _command_exit(exc)
     task_snapshot = cast(commands.TaskSnapshot, snapshot)
-    status_payload = _task_snapshot_payload(task_snapshot)
+    status_payload = _status_task_json_payload(task_snapshot)
     if process:
         status_payload.update(
             {
@@ -1877,7 +1860,7 @@ def task_tid(
         )
     except (commands.CommandError, commands.InvalidTID, commands.TaskNotFound) as exc:
         _command_exit(exc)
-    typer.echo(encode_tid(result) if reverse is not None else result)
+    typer.echo(result)
 
 
 @app.command("init")

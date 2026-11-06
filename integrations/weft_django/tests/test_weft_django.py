@@ -69,7 +69,13 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.core.signals import request_finished, request_started
 from django.db import connections, transaction
-from django.test import AsyncClient, Client, TestCase, override_settings
+from django.test import (
+    AsyncClient,
+    Client,
+    RequestFactory,
+    TestCase,
+    override_settings,
+)
 from fixture_project import authz as fixture_authz
 from fixture_project import lifecycle_views, request_id_provider
 from testapp.models import EventRecord
@@ -106,7 +112,9 @@ from weft_django.client import get_core_client
 from weft_django.conf import get_realtime_transport
 from weft_django.registry import TaskRegistry, is_registered
 
+weft_django_lifecycle = importlib.import_module("weft_django.lifecycle")
 weft_django_sse = importlib.import_module("weft_django.sse")
+weft_django_views = importlib.import_module("weft_django.views")
 
 pytestmark = [pytest.mark.shared]
 
@@ -2780,3 +2788,71 @@ def test_as_taskspec_for_call_export_runs_like_enqueue() -> None:
     assert enqueued_snapshot.name == "renamed"
     assert exported_snapshot.metadata["k"] == "v"
     assert enqueued_snapshot.metadata["k"] == "v"
+
+
+def test_deferred_submission_delegates_snapshot_and_terminal_snapshot_once_bound() -> (
+    None
+):
+    deferred = weft_django_client.WeftDeferredSubmission(name="deferred-task")
+    with pytest.raises(RuntimeError, match="Submission has not been bound yet"):
+        deferred.snapshot()
+    with pytest.raises(RuntimeError, match="Submission has not been bound yet"):
+        deferred.terminal_snapshot()
+
+    expected_snapshot = Mock(spec=weft_django_client.TaskSnapshot)
+    expected_terminal = Mock(spec=TaskTerminalSnapshot)
+    fake_submission = Mock(spec=WeftSubmission)
+    fake_submission.snapshot.return_value = expected_snapshot
+    fake_submission.terminal_snapshot.return_value = expected_terminal
+    deferred.bind(fake_submission)
+
+    assert deferred.snapshot() is expected_snapshot
+    assert deferred.terminal_snapshot(timeout=2.5) is expected_terminal
+    fake_submission.snapshot.assert_called_once_with()
+    fake_submission.terminal_snapshot.assert_called_once_with(timeout=2.5)
+
+
+def test_task_detail_view_reuses_request_owned_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_snapshot = weft_django_client.TaskSnapshot(
+        tid="1770000000000000333",
+        name="detail-task",
+        status="completed",
+        return_code=0,
+        started_at=None,
+        completed_at=None,
+        error=None,
+        runtime_handle=None,
+        metadata={},
+    )
+    fake_task = Mock()
+    fake_task.snapshot.return_value = expected_snapshot
+    created_core_clients: list[Mock] = []
+
+    def build_core_client(*_args: Any, **_kwargs: Any) -> Mock:
+        core_client = Mock()
+        core_client.__enter__ = Mock(return_value=core_client)
+        core_client.__exit__ = Mock(return_value=None)
+        core_client.task.return_value = fake_task
+        created_core_clients.append(core_client)
+        return core_client
+
+    monkeypatch.setattr(weft_django_client, "get_core_client", build_core_client)
+    monkeypatch.setattr(
+        weft_django_views,
+        "_authorize",
+        lambda _request, _tid, _action: True,
+    )
+
+    weft_django_lifecycle.request_started_receiver(sender=object())
+    try:
+        active_client = weft_django_client._current_client()
+        assert len(created_core_clients) == 1
+        request = RequestFactory().get("/weft/tasks/1770000000000000333/")
+        response = weft_django_views.task_detail_view(request, "1770000000000000333")
+        assert response.status_code == 200
+        assert len(created_core_clients) == 1
+        active_client.core_client.task.assert_called_once_with("1770000000000000333")
+    finally:
+        weft_django_lifecycle.request_finished_receiver(sender=object())

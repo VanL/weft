@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 import psutil
 import pytest
+from typer.testing import CliRunner
 
 from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
@@ -26,6 +27,7 @@ from weft._exceptions import (
     ControlRejected,
     TaskNotFound,
 )
+from weft.cli.app import app
 from weft.commands import _observation as observation_cmd
 from weft.commands import events as event_cmd
 from weft.commands import tasks as task_cmd
@@ -2491,3 +2493,28 @@ def test_snapshot_watch_unresolved_selector_keeps_timeout_behavior(
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     with pytest.raises(TimeoutError, match="watching task unresolved"):
         list(task_cmd.watch_task_status("unresolved", timeout=0, context=ctx))
+
+
+def test_cmd_task_tid_reverse_returns_encoded_short_tid(
+    weft_harness: WeftTestHarness,
+) -> None:
+    full_tid = "1844674407370955161"
+    expected_short = "1K6CSK6CSK6CS"
+    assert encode_tid(full_tid) == expected_short
+    assert (
+        task_cmd.cmd_task_tid(reverse=full_tid, context=weft_harness.context.root)
+        == expected_short
+    )
+    cli_result = CliRunner().invoke(
+        app,
+        [
+            "task",
+            "tid",
+            "--reverse",
+            full_tid,
+            "--context",
+            str(weft_harness.context.root),
+        ],
+    )
+    assert cli_result.exit_code == 0
+    assert cli_result.stdout.strip() == expected_short

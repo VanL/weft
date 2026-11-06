@@ -175,8 +175,8 @@ Explicit event streams provide retained/live raw events without lossless history
 
 Every canonical CLI verb has one actual implementation exported from
 `weft.commands`: `cmd_` plus its full CLI path, joined with underscores and
-hyphens normalized to underscores. The initial bijection is 41 verbs: 4 root,
-14 queue, 6 spec, 6 task, 5 manager, and 6 system. The root callback and
+hyphenated segments normalized to underscores. The bijection covers 42 verbs: 4 root,
+14 queue, 6 spec, 6 task, 5 manager, and 7 system. The root callback and
 global `--version` are parser features, not verbs. The package resolves exports
 lazily and caches them.
 
@@ -295,7 +295,7 @@ spec-aware help metadata and never submits.
 
 ### Public command types
 
-`weft.commands.__all__` exports the 41 functions and these consumption types:
+`weft.commands.__all__` exports the 42 functions and these consumption types:
 `InitResult`, `RunSpecDescription`, `RunSession`, `CommandStream`,
 `RunExecutionResult`, `SubmittedTaskReceipt`, `TaskSnapshot`, `TaskResult`,
 `TaskEvent`, `ServiceSnapshot`, `TaskPingResult`, `TaskControlResult`,
@@ -304,7 +304,7 @@ spec-aware help metadata and never submits.
 `QueueDeleteReceipt`, `QueueBroadcastReceipt`, `QueueAliasRecord`,
 `EndpointResolution`, `ManagerSnapshot`, `SpecRecord`,
 `SpecValidationResult`, `SpecMutationResult`, `SystemStatusSnapshot`,
-`SystemTidyResult`, `SystemLoadResult`, `SystemDumpResult`,
+`SystemStopResult`, `SystemTidyResult`, `SystemLoadResult`, `SystemDumpResult`,
 `SystemPruneResult`, `BuiltinSpecRecord`, `TaskMonitorConfig`,
 `TaskMonitorResult`, `TaskMonitorRecord`, and `TaskMonitorSummary`.
 
@@ -437,10 +437,10 @@ and `integrations/weft_django/tests/test_weft_django.py`.
 | queue write/move/delete/broadcast | corresponding receipt/result |
 | queue list/exists/stats/resolve/alias | named `QueueInfo`, `EndpointResolution`, `QueueAliasRecord`, tuple, or `bool` |
 | spec create/delete/list/show/validate/generate | mutation, record tuple/record, validation, or mapping as named |
-| task list/status/ping/stop/kill/tid | snapshots/events, ping/control result, or full TID |
+| task list/status/ping/stop/kill/tid | snapshots/events, ping/control result, or full/encoded TID |
 | manager start/status/list | snapshot or tuple; serve blocks and returns `None` |
 | manager stop | terminal snapshot, or `None` when already absent |
-| system tidy/load/task-monitor/prune/dump/builtins | corresponding named outcome |
+| system tidy/load/task-monitor/prune/dump/builtins/stop | corresponding named outcome |
 
 Interactive run only changes session capabilities. Task monitor returns
 `CommandStream[TaskMonitorSummary]` iff `follow=True`, else
@@ -613,6 +613,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [Deep-dive review remediation plan](../plans/2026-11-06-deep-dive-review-remediation-plan.md) aligns `cmd_task_tid(reverse=...)` and the [PY-2] verb/type inventory (`42` verbs, `SystemStopResult`, and `system stop`).
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
 - retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.
 - retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md

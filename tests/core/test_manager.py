@@ -13346,7 +13346,16 @@ def test_cleanup_children_wrapper_lost_write_failure_schedules_reactor_retry_wit
         sleeps.append(seconds)
         raise AssertionError(f"Reactor turn must not sleep ({seconds}s)")
 
-    monkeypatch.setattr(manager_mod.time, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            monotonic=time.monotonic,
+            time_ns=time.time_ns,
+            time=time.time,
+            sleep=fail_sleep,
+        ),
+    )
 
     assert manager._cleanup_children() is False
     assert sleeps == []
@@ -13360,7 +13369,14 @@ def test_cleanup_children_wrapper_lost_write_failure_schedules_reactor_retry_wit
     write_attempts.clear()
     child.terminal_retry_after_ns = 0
     monkeypatch.setattr(
-        manager_mod.time, "sleep", lambda seconds: sleeps.append(seconds)
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            monotonic=time.monotonic,
+            time_ns=time.time_ns,
+            time=time.time,
+            sleep=lambda seconds: sleeps.append(seconds),
+        ),
     )
     assert manager._cleanup_children(deadline=time.monotonic() + 2.0) is False
     assert len(write_attempts) == manager_mod.TERMINAL_EVENT_WRITE_RETRIES
@@ -13420,7 +13436,7 @@ def test_clear_admission_retry_marks_evicted_spawn_lane_for_immediate_reprobe(
     assert inbox_name in manager._active_queues
 
     # Block public admission while family-index retry is in backoff so the wait-activity predicate turns False.
-    manager._admission_blocked_lanes.add("public")
+    manager._record_admission_blocked_lanes(("public",))
     manager._family_index_retry_after = time.monotonic() + 60.0
     manager._next_inactive_probe_at = time.monotonic() + 60.0
     manager._update_active_queues()

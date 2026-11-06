@@ -1,5 +1,40 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Paused `Consumer` and `PipelineEdgeTask` reactors no longer reserve and
+  requeue `inbox` work while paused, and `MultiQueueWatcher._update_active_queues`
+  evicts active queues whose `_queue_counts_as_wait_activity` predicate turns
+  `False`. Reopening a gated queue (`CONTROL_RESUME`, work completion, or
+  `Manager._clear_admission_retry`) marks pending messages for immediate
+  re-probe and wakes the watcher strategy ([CC-2.1], [CC-2.4], [PL-2.3],
+  [MA-1.8], [QUEUE.8]). This changes the standalone
+  `weft/core/tasks/multiqueue_watcher.py` copy boundary (new whole-file SHA-256
+  `713060f2880b401220505e82f9fad11916740a8355cad026f869ac61dfdbf086`); Taut
+  should re-pin its vendored file after this change is released.
+- Endpoint resolution rejects retained terminal `weft.state.tasks.<tid>`
+  snapshots before runtime-handle fallback ([MF-3.1], [OBS.6]), Manager
+  supervised-service terminal proof checks `weft.state.tasks.<tid>` before
+  scanning `weft.log.tasks`, and steady-state `wrapper_lost` write failures
+  schedule retries via the Manager reactor deadline rather than sleeping
+  synchronously ([MA-1.6a]).
+- `PipelineTask` retains the broker append ID from `weft.state.pipelines`
+  writes ([PL-2.2]), and `HeartbeatTask` reads only the newest row of
+  `weft.state.endpoints` to detect endpoint version changes ([MF-3.2]).
+- `LLMBackend` propagates `bundle_root` to `plugin_modules` and `output_schema`
+  in one-shot and session modes ([AR-2.2], [AR-5]), and
+  `DockerProviderCLIRunner` enforces required provider container runtime mounts
+  before container startup ([AR-5]).
+- `cmd_task_tid(reverse=...)` matches `weft task tid --reverse` ([PY-2], [PY-3]),
+  `weft run --pipeline --name` allows free-form non-persistent names while
+  rejecting the reserved `_weft.` prefix, CLI `task list --json` and
+  `task status --json` project integer wall-clock nanosecond timestamps
+  ([CLI-1.2.1]), and `weft_django` reuses the request-owned client in task
+  detail views and delegates `snapshot()`/`terminal_snapshot()` on bound
+  deferred submissions ([DJ-10.1], [DJ-13.2]).
+
 ## [0.9.121] - 2026-11-05
 
 ### Changed

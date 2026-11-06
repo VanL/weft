@@ -11,8 +11,14 @@ from typer.testing import CliRunner
 
 from tests.commands.test_status import _FakeQueueChangeMonitor
 from tests.helpers.test_backend import prepare_project_root
-from weft.cli.app import _render_status_snapshot, _status_json_payload, app
+from weft.cli.app import (
+    _render_status_snapshot,
+    _status_json_payload,
+    _status_task_json_payload,
+    app,
+)
 from weft.commands import system as status_cmd
+from weft.commands import tasks as task_cmd
 from weft.commands import types
 from weft.context import build_context
 
@@ -296,3 +302,52 @@ def test_status_service_health_warnings_are_rendered(
     assert "warning=external-log-unhealthy" in output
     assert "warning=deferred-writes-pending" in output
     assert "deferred_writes=3" in output
+
+
+def test_task_list_and_task_status_json_use_status_task_json_payload_for_wall_clock_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wall_clock_ns = 1_770_000_000_000_000_000
+    snap = status_cmd._public_task_snapshot(
+        status_cmd.TaskSnapshot(
+            tid="1770000000000000205",
+            tid_short="000205",
+            name="terminal-control-clock",
+            status="completed",
+            event="ctrl_out_terminal",
+            activity=None,
+            waiting_on=None,
+            started_at=wall_clock_ns,
+            completed_at=wall_clock_ns,
+            last_timestamp=wall_clock_ns,
+            duration_seconds=1.0,
+            runner="host",
+            runtime_handle=None,
+            runtime=None,
+            metadata={},
+            reconciliation={
+                "classification": "stale_created",
+                "observed_at": wall_clock_ns,
+            },
+        )
+    )
+    expected = _status_task_json_payload(snap)
+    assert expected["last_timestamp"] == wall_clock_ns
+    assert expected["reconciliation"]["observed_at"] == wall_clock_ns
+
+    monkeypatch.setattr(task_cmd, "cmd_task_list", lambda **_kwargs: (snap,))
+    monkeypatch.setattr(task_cmd, "cmd_task_status", lambda *_args, **_kwargs: snap)
+
+    list_result = CliRunner().invoke(app, ["task", "list", "--all", "--json"])
+    assert list_result.exit_code == 0
+    list_payload = json.loads(list_result.stdout)
+    assert list_payload == [expected]
+    assert isinstance(list_payload[0]["last_timestamp"], int)
+    assert isinstance(list_payload[0]["reconciliation"]["observed_at"], int)
+
+    status_result = CliRunner().invoke(app, ["task", "status", snap.tid, "--json"])
+    assert status_result.exit_code == 0
+    status_payload = json.loads(status_result.stdout)
+    assert status_payload == expected
+    assert isinstance(status_payload["last_timestamp"], int)
+    assert isinstance(status_payload["reconciliation"]["observed_at"], int)

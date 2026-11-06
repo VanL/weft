@@ -31,7 +31,7 @@ command grows beyond its owning module.
 | `manager` / `serve` | `weft/commands/manager.py`, `weft/commands/serve.py`, `weft/core/manager_runtime.py` | manage the canonical manager lifecycle and registry control |
 | `queue` | `weft/commands/queue.py` | direct SimpleBroker queue access |
 | `spec` | `weft/commands/specs.py`, `weft/cli/app.py` | stored spec management, resolution, builtin task-spec discovery, structured TaskSpec validation, and CLI rendering |
-| `system` | `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/task_monitor.py`, `weft/commands/prune.py` | builtin inventory plus maintenance, broker-state operations, foreground task monitoring, and explicit prune dispatch |
+| `system` | `weft/commands/system.py`, `weft/commands/builtins.py`, `weft/commands/tidy.py`, `weft/commands/dump.py`, `weft/commands/load.py`, `weft/commands/task_monitor.py`, `weft/commands/prune.py` | system-wide stop orchestration, builtin inventory, maintenance, broker-state operations, foreground task monitoring, and explicit prune dispatch |
 
 Every registered CLI verb maps bijectively to the public
 `weft.commands.cmd_<full_cli_path>` export defined by [PY-2]. The owning
@@ -96,6 +96,7 @@ stays separate.
 
 ## Related Plans
 
+- [Deep-dive review remediation plan](../plans/2026-11-06-deep-dive-review-remediation-plan.md)
 - retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md
 - retired: 2026-08-11-python-api-surfaces-sb-contract — source 396c3b85; see docs/plans/README.md
 - retired: 2026-08-10-canonical-contract-and-dead-code-cleanup-plan — source 396c3b85; see docs/plans/README.md

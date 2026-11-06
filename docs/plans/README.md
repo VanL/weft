@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 45 plan files in this directory.
+There are currently 46 plan files in this directory.
 
 ## Curation Policy
 
@@ -30,6 +30,7 @@ There are currently 45 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-06-deep-dive-review-remediation-plan.md`](./2026-11-06-deep-dive-review-remediation-plan.md) | Deep-Dive Review Multi-Phase Remediation Plan | `completed` | none |
 | [`2026-11-05-command-stdout-preservation-plan.md`](./2026-11-05-command-stdout-preservation-plan.md) | Command Stdout Preservation | `completed` | none |
 | [`2026-11-05-operator-consumption-of-launch-custody-plan.md`](./2026-11-05-operator-consumption-of-launch-custody-plan.md) | Operator Consumption Ends Pending Launch Custody | `completed` | none |
 | [`2026-11-05-result-output-fidelity-plan.md`](./2026-11-05-result-output-fidelity-plan.md) | Result Output Fidelity: Spilled Output Survives Its Reference, Failed Commands Keep Their Stdout | `completed` | none |
