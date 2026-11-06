@@ -3239,7 +3239,7 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
                 status="ok",
                 value="persistent-ok-result",
                 error=None,
-                stdout=None,
+                stdout="persistent-ok-result",
                 stderr=None,
                 returncode=0,
                 duration=0.0,
@@ -3285,7 +3285,10 @@ def test_deferred_stop_kill_finalizes_persistent_task_on_ok_outcome(
 
     result_messages = drain_queue(outbox)
     assert len(result_messages) == 1
-    assert result_messages[0] == "persistent-ok-result"
+    assert json.loads(result_messages[0]) == {
+        "type": "command_output",
+        "result": "persistent-ok-result",
+    }
 
     assert reserved.has_pending() is ack_fails
     assert len(delete_attempts) == 1
@@ -3339,7 +3342,7 @@ def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
                 status="ok",
                 value="one-shot-ok-result",
                 error=None,
-                stdout=None,
+                stdout="one-shot-ok-result",
                 stderr=None,
                 returncode=0,
                 duration=0.0,
@@ -3383,7 +3386,10 @@ def test_deferred_stop_finalizes_one_shot_task_without_double_terminal_emission(
 
     result_messages = drain_queue(outbox)
     assert len(result_messages) == 1
-    assert result_messages[0] == "one-shot-ok-result"
+    assert json.loads(result_messages[0]) == {
+        "type": "command_output",
+        "result": "one-shot-ok-result",
+    }
 
     task.cleanup()
 
@@ -3509,7 +3515,14 @@ def test_start_token_cleared_on_failure(broker_env: BrokerEnv, unique_tid: str) 
 
     assert task.taskspec.state.status == "failed"
     assert reserved.peek_one() is None
-    assert outbox.peek_one() is None
+    raw_output = outbox.peek_one()
+    assert raw_output is not None
+    assert json.loads(raw_output) == {
+        "type": "failed_output",
+        "return_code": 2,
+        "error": "Command exited with 2: ",
+        "result": "",
+    }
     terminal_raw = ctrl_out.peek_one()
     assert terminal_raw is not None
     terminal = json.loads(terminal_raw)
@@ -3773,7 +3786,12 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
             lambda: task.taskspec.state.status == "completed",
             timeout=5.0,
         )
-        assert outbox.read_one() == "reactor-done"
+        raw_output = outbox.read_one()
+        assert raw_output is not None
+        assert json.loads(raw_output) == {
+            "type": "command_output",
+            "result": f"reactor-done{os.linesep}",
+        }
     finally:
         release.touch()
         task.cleanup()
@@ -3819,16 +3837,22 @@ def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
     assert reserved.has_pending() is False
 
 
+@pytest.mark.parametrize("stream_output", [False, True])
 def test_consumer_worker_constructs_runner_without_broker_context(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
+    stream_output: bool,
 ) -> None:
     db_path, make_queue = broker_env
-    spec = make_command_taskspec(unique_tid, sys.executable)
+    spec = make_command_taskspec(
+        unique_tid, sys.executable, stream_output=stream_output
+    )
     task = Consumer(db_path, spec)
     inbox = make_queue(spec.io.inputs["inbox"])
     outbox = make_queue(spec.io.outputs["outbox"])
+    # Controlled runner API fixture: proves publication chooses actual callback
+    # capability, not third-party capability negotiation or process supervision.
     captured_context: list[tuple[Any, Any]] = []
 
     class FakeTaskRunner:
@@ -3848,7 +3872,7 @@ def test_consumer_worker_constructs_runner_without_broker_context(
                 status="ok",
                 value="broker-free",
                 error=None,
-                stdout=None,
+                stdout="broker-free",
                 stderr=None,
                 returncode=0,
                 duration=0.0,
@@ -3863,7 +3887,12 @@ def test_consumer_worker_constructs_runner_without_broker_context(
     )
 
     assert captured_context == [(None, None)]
-    assert outbox.read_one() == "broker-free"
+    raw_output = outbox.read_one()
+    assert raw_output is not None
+    assert json.loads(raw_output) == {
+        "type": "command_output",
+        "result": "broker-free",
+    }
 
 
 def test_consumer_active_wait_activity_ignores_reserved_work_queue(
@@ -4006,7 +4035,7 @@ def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
                 status="ok",
                 value=value,
                 error=None,
-                stdout=None,
+                stdout=value,
                 stderr=None,
                 returncode=0,
                 duration=0.0,
@@ -4028,10 +4057,20 @@ def test_consumer_keeps_one_inflight_item_and_commits_in_source_order(
 
         release_first.set()
         _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-        assert outbox.read_one() == "first"
+        raw_output = outbox.read_one()
+        assert raw_output is not None
+        assert json.loads(raw_output) == {
+            "type": "command_output",
+            "result": "first",
+        }
 
         _drive_consumer_until(task, lambda: outbox.peek_one() is not None)
-        assert outbox.read_one() == "second"
+        raw_output = outbox.read_one()
+        assert raw_output is not None
+        assert json.loads(raw_output) == {
+            "type": "command_output",
+            "result": "second",
+        }
         assert reserved.peek_one() is None
         assert inbox.peek_one() is None
     finally:
@@ -4899,7 +4938,12 @@ def test_command_target_executes_process(
         lambda: task.taskspec.state.status == "completed",
     )
 
-    assert outbox.read_one() == "command-done"
+    raw_output = outbox.read_one()
+    assert raw_output is not None
+    assert json.loads(raw_output) == {
+        "type": "command_output",
+        "result": "command-done",
+    }
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -5287,7 +5331,12 @@ def test_cleanup_on_exit_preserves_command_output(
     )
 
     task.cleanup()
-    assert make_queue(spec.io.outputs["outbox"]).read_one() == "done" + "X" * 1024
+    raw_output = make_queue(spec.io.outputs["outbox"]).read_one()
+    assert raw_output is not None
+    assert json.loads(raw_output) == {
+        "type": "command_output",
+        "result": "done" + "X" * 1024,
+    }
 
 
 def test_task_cleanup_retains_completion_and_clears_control_input_after_success(

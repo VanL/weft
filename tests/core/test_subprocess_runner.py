@@ -411,9 +411,9 @@ def _run_process_with_monitor(
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(b"\r\nnext\r", "\nnext\n"), ("€𐍈\r\n".encode(), "€𐍈\n"), (b"\xe2\x82", "�")],
+    [(b"\r\nnext\r", "\r\nnext\r"), ("€𐍈\r\n".encode(), "€𐍈\r\n"), (b"\xe2\x82", "�")],
 )
-def test_stream_reader_normalizes_crlf_split_across_chunks(
+def test_stream_reader_preserves_stdout_newlines_split_across_chunks(
     monkeypatch: pytest.MonkeyPatch, raw: bytes, expected: str
 ) -> None:
     # A one-byte read forces split codec/newline input without assuming how the
@@ -437,6 +437,7 @@ def test_stream_reader_normalizes_crlf_split_across_chunks(
             on_stdout_chunk=lambda chunk, final: callbacks.append((chunk, final)),
         )
         assert outcome.stdout == expected
+        assert outcome.value == expected
         assert "".join(chunk for chunk, _ in callbacks) == expected
         assert [chunk for chunk, final in callbacks if final] == [""], (
             "EOF must be published exactly once"
@@ -484,7 +485,7 @@ def test_completed_process_at_timeout_wake_boundary_returns_ok(
     assert kill_calls == []
     assert outcome.status == "ok"
     assert outcome.returncode == 0
-    assert outcome.stdout == "done\n"
+    assert outcome.stdout == f"done{os.linesep}"
 
 
 def test_start_callback_failures_are_logged_without_replacing_outcome(
@@ -524,7 +525,7 @@ def test_start_callback_failures_are_logged_without_replacing_outcome(
 
     assert outcome.status == "ok"
     assert outcome.returncode == 0
-    assert outcome.stdout == "done\n"
+    assert outcome.stdout == f"done{os.linesep}"
     assert [record.message for record in caplog.records] == [
         "Subprocess worker-start callback failed",
         "Subprocess runtime-handle callback failed",
@@ -788,7 +789,7 @@ def test_monitor_start_failure_attempts_stop_without_replacing_outcome(
         outcome = _run_process_with_monitor(Monitor())
 
     assert outcome.status == "ok"
-    assert outcome.stdout == "done\n"
+    assert outcome.stdout == f"done{os.linesep}"
     assert calls == ["start", "stop"]
     assert [record.message for record in caplog.records] == [
         "Subprocess resource monitor failed during startup",
@@ -836,7 +837,7 @@ def test_monitor_poll_failures_preserve_cached_metrics_and_primary_outcome(
         )
 
     assert outcome.status == "ok"
-    assert outcome.stdout == "done\n"
+    assert outcome.stdout == f"done{os.linesep}"
     assert outcome.metrics is metrics
     assert "check_limits" in calls
     assert calls[-1] == "stop"
@@ -932,7 +933,7 @@ def test_monitor_snapshot_and_stop_failures_do_not_replace_primary_outcome(
         outcome = _run_process_with_monitor(Monitor())
 
     assert outcome.status == "ok"
-    assert outcome.stdout == "done\n"
+    assert outcome.stdout == f"done{os.linesep}"
     assert outcome.metrics is None
     assert calls[0] == "start"
     assert "last_metrics" in calls
@@ -1240,7 +1241,7 @@ def test_idle_subprocess_waits_on_readiness_without_polling(
         barrier.release()
         outcome = _owner_outcome(owner, result)
         assert outcome.status == "ok"
-        assert outcome.stdout == "ready\necho\n"
+        assert outcome.stdout == f"ready{os.linesep}echo{os.linesep}"
         assert [session.owned_threads() for session in sessions] == [()]
         for spy in spies:
             # None waits for readiness alone; 0.0 only services queued delivery.
@@ -1639,7 +1640,7 @@ def test_root_completion_bounds_inherited_pipe_drain(
         assert isinstance(outcome, RunnerOutcome), repr(outcome)
         assert outcome.status == ("ok" if returncode == 0 else "error")
         assert outcome.returncode == returncode
-        assert (outcome.stdout or "").startswith("ROOT_OUT\n")
+        assert (outcome.stdout or "").startswith(f"ROOT_OUT{os.linesep}")
         assert (outcome.stderr or "").startswith("ROOT_ERR\n")
         if flood:
             _wait_for_child_marker(closed)
@@ -1742,17 +1743,22 @@ def test_stream_delivery_yields_with_queued_work(
         assert state.in_flight_bytes == 0
 
 
-def test_large_input_preserves_text_encoding_and_stream_separation() -> None:
+@pytest.mark.parametrize("line_separator", ["\n", "\r\n"])
+def test_large_input_preserves_text_encoding_and_stream_separation(
+    monkeypatch: pytest.MonkeyPatch, line_separator: str
+) -> None:
+    # Exercise the real encoder/pipe with either platform's separator policy.
+    monkeypatch.setattr(subprocess_runner.os, "linesep", line_separator)
     payload = ("é\r\nλ\nx\ry" * 100_000) + "\ud800"
     reference_bytes = io.BytesIO()
     reference_writer = io.TextIOWrapper(
-        reference_bytes, encoding="utf-8", errors="replace", newline=None
+        reference_bytes, encoding="utf-8", errors="replace", newline=""
     )
     reference_writer.write(payload)
     reference_writer.flush()
     encoded = reference_bytes.getvalue()
     reference_reader = io.TextIOWrapper(
-        io.BytesIO(encoded), encoding="utf-8", errors="replace", newline=None
+        io.BytesIO(encoded), encoding="utf-8", errors="replace", newline=""
     )
     expected = reference_reader.read()
     reference_reader.close()
@@ -2208,7 +2214,7 @@ def test_early_root_exit_does_not_turn_unread_input_into_failure(
             on_stdout_chunk=observe_output,
         )
         assert outcome.status == "ok"
-        assert outcome.stdout == "EARLY_EXIT\n"
+        assert outcome.stdout == f"EARLY_EXIT{os.linesep}"
         assert any(
             isinstance(exc, BrokenPipeError)
             or (
@@ -2268,7 +2274,7 @@ def test_closed_input_write_errors_partition_closed_pipe_from_faults(
         if ignore_error:
             outcome = _supervise_real_process(process, stdin_data="input")
             assert outcome.status == "ok"
-            assert outcome.stdout == "done\n"
+            assert outcome.stdout == f"done{os.linesep}"
         else:
             with pytest.raises(OSError) as caught:
                 _supervise_real_process(process, stdin_data="input")
@@ -2725,7 +2731,7 @@ def test_terminal_capture_applies_decoder_limit_and_preserves_small_shift(
                 session.finish_after_exit()
         else:
             stdout, stderr = session.finish_after_exit()
-            assert (stdout, stderr) == ("€\n", "")
+            assert (stdout, stderr) == ("€\r\n", "")
         _assert_owned_pipes_released(process)
     finally:
         barrier.close()

@@ -312,7 +312,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             live_command_streaming=live_command_streaming,
         )
         if live_command_streaming:
-            result_bytes = self._serialized_result_bytes(outcome.value)
+            result_bytes = self._serialized_result_bytes(outcome.stdout or "")
+        elif self.taskspec.spec.type == "command":
+            result_bytes = self._publish_command_output(outcome.stdout or "")
         else:
             result_bytes = self._emit_result(outcome.value)
         self._finalize_message(
@@ -322,7 +324,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             agent_execution=agent_execution,
             initial_transition=initial_transition,
         )
-        return outcome.value
+        return (
+            (outcome.stdout or "")
+            if self.taskspec.spec.type == "command"
+            else outcome.value
+        )
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
         """Release joined one-shot host workers before publishing idle identity.
@@ -612,8 +618,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             "encoding": "text",
             "data": event.chunk,
         }
-        if stream == "stdout" and event.final:
-            envelope["result_transform"] = "strip"
+        if stream == "stdout":
+            envelope["command_stdout"] = True
         self._queue(self._queue_names["outbox"]).write(json.dumps(envelope))
 
     def _uses_live_command_streaming(self) -> bool:
@@ -942,27 +948,38 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if (
             self.taskspec.spec.type != "command"
             or outcome.returncode in (None, 0)
-            or not outcome.stdout
             or live_command_streaming
         ):
             return
         try:
-            value, encoded, _limit = self._prepare_output(outcome.stdout)
-            envelope = {
-                "type": "failed_output",
-                "return_code": outcome.returncode,
-                "error": outcome.error or "Target execution failed",
-                "result": value,
-            }
-            wire = json.dumps(envelope)
-            if isinstance(value, str) and len(
-                wire.encode("utf-8")
-            ) > resolve_broker_max_message_size(self._broker_config):
-                envelope["result"] = self._spill_large_output(encoded)
-                wire = json.dumps(envelope)
-            self._queue(self._queue_names["outbox"]).write(wire)
+            self._publish_command_output(
+                outcome.stdout or "",
+                failure=(
+                    outcome.returncode,
+                    outcome.error or "Target execution failed",
+                ),
+            )
         except (BrokerError, OSError, ValueError, RuntimeError) as output_error:
             logger.error("Failed to publish command stdout: %s", output_error)
+
+    def _publish_command_output(
+        self, stdout: str, *, failure: tuple[int, str] | None = None
+    ) -> int:
+        """Prepare either command envelope once before its only write [MF-2]."""
+        value, encoded, _limit = self._prepare_output(stdout)
+        envelope: dict[str, Any] = {"type": "command_output", "result": value}
+        if failure is not None:
+            envelope.update(
+                type="failed_output", return_code=failure[0], error=failure[1]
+            )
+        wire = json.dumps(envelope)
+        if isinstance(value, str) and len(
+            wire.encode("utf-8")
+        ) > resolve_broker_max_message_size(self._broker_config):
+            envelope["result"] = self._spill_large_output(encoded)
+            wire = json.dumps(envelope)
+        self._queue(self._queue_names["outbox"]).write(wire)
+        return len(encoded)
 
     def _extract_metrics(self, outcome: RunnerOutcome) -> dict[str, Any] | None:
         metrics_payload: dict[str, Any] | None = None

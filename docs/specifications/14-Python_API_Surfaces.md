@@ -349,6 +349,13 @@ and `integrations/weft_django/tests/test_weft_django.py`.
 
 - `TaskResult` and `RunExecutionResult` additionally carry optional `return_code: int | None = None`. A decoded `failed_output` supplies its nonzero command return code, nested public value and error, and reports failed even without a terminal envelope. Existing result fields, reconciliation semantics and ordinary output decoding remain unchanged. Result-event projections preserve the same failure metadata; they do not expose the transport wrapper as the public value. Implementation mapping: `weft/commands/_result_wait.py` and `weft/commands/result.py` carry decoded failure metadata; `weft/commands/run.py::_LiveRunSession.wait` preserves it in execution results. Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
 
+- `TaskResult` and `RunExecutionResult` carry `command_stdout: bool = False`. It identifies captured command text for presentation without asserting success, completion or process death. Shared result/event projections preserve this origin separately from `return_code`. Inline command values are strings, including empty, whitespace-only and JSON-looking text; spill references remain references. The existing `stdout` and `stderr` fields remain projections from dict-shaped result values; command content stays in `value` or `result_value`. The boolean is origin metadata, not another content field. Function and agent values retain their current decoding and presentation.
+  Implementation: `weft/commands/types.py` owns both result types;
+  `weft/commands/_result_wait.py::_CollectedResult`,
+  `weft/commands/result.py::_task_result_event` and
+  `weft/commands/events.py::iter_task_realtime_events` preserve origin.
+  Plan: [Command stdout preservation](../plans/2026-11-05-command-stdout-preservation-plan.md).
+
 - `TaskResult` and `RunExecutionResult` carry optional `outputs_root: str | None = None`: the resolved outputs root of the context the command layer actually used for that read or run, including after stored-spec runtime-root rebinding. Text-mode CLI delivery uses it, with the temporary root, as the allowed roots under [MF-2.1]; Python callers receive large-output references as written and may ignore it. Implementation: `weft/commands/result.py` supplies the read context and result-event payload; `weft/commands/run.py::_LiveRunSession.wait` supplies the runtime context. Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
 - `TaskPingResult(tid: str, acknowledged: bool, timed_out: bool,
   error: str | None, observed_at: int | None, pong: Mapping[str, Any] | None,

@@ -335,6 +335,7 @@ class InteractiveTaskMixin(ABC):
             envelope = {
                 "type": "stream",
                 "stream": "stdout",
+                "command_stdout": True,
                 "chunk": self._interactive_stdout_index,
                 "final": False,
                 "encoding": "text",
@@ -456,6 +457,7 @@ class InteractiveTaskMixin(ABC):
             envelope = {
                 "type": "stream",
                 "stream": "stdout",
+                "command_stdout": True,
                 "chunk": self._interactive_stdout_index,
                 "final": True,
                 "encoding": "text",

@@ -152,6 +152,7 @@ def _read_outbox_task_result(
         stream_buffer: list[str] = []
         values: list[Any] = []
         failure: tuple[str | None, int] | None = None
+        command_stdout = False
         observed_timestamps: list[int] = []
         complete_prefix_length = 0
         iterator = queue.peek_generator(with_timestamps=True)
@@ -164,6 +165,7 @@ def _read_outbox_task_result(
                     emit_stream=False,
                 )
                 if final and decoded is not None:
+                    command_stdout |= decoded.command_stdout
                     append_public_value(values, decoded, show_stderr=False)
                     if decoded.return_code is not None:
                         failure = (decoded.error, decoded.return_code)
@@ -189,6 +191,7 @@ def _read_outbox_task_result(
         stderr=stderr,
         error=failure[0] if failure is not None else None,
         return_code=failure[1] if failure is not None else None,
+        command_stdout=command_stdout,
         outputs_root=str(context.outputs_dir.resolve()),
     )
 
@@ -236,6 +239,7 @@ def _task_result_event(result: TaskResult) -> TaskEvent:
             "stdout": result.stdout,
             "stderr": result.stderr,
             "error": result.error,
+            **({"command_stdout": True} if result.command_stdout else {}),
             **(
                 {"return_code": result.return_code}
                 if result.return_code is not None

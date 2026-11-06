@@ -23,6 +23,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import lru_cache
+from io import TextIOWrapper
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
@@ -1053,7 +1054,10 @@ class HostTaskRunner:
     def start_session(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-035] exception
         self, *, on_activity: Callable[[], None]
     ) -> CommandSession:
-        """Start a line-oriented interactive command session for streaming IO."""
+        """Start a line-oriented session with preserved text pipe newlines.
+
+        Spec: [CC-3.5], [RM-5.2].
+        """
         if self._spec_data["type"] != "command":
             raise ValueError(
                 "Interactive sessions are only supported for command targets"
@@ -1121,6 +1125,9 @@ class HostTaskRunner:
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("Failed to create pipes for interactive session")
 
+        # Preserve supplied stdin and captured stdout newline characters [RM-5.2].
+        cast(TextIOWrapper, process.stdin).reconfigure(newline="")
+        cast(TextIOWrapper, process.stdout).reconfigure(newline="")
         threading.Thread(
             target=_reader,
             args=(process.stdout, stdout_queue),

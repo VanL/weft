@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from weft.core.targets import (
     decode_work_message,
@@ -26,6 +30,66 @@ def test_decode_work_message_handles_json_and_plain_text() -> None:
     assert decode_work_message('"string"') == "string"
     assert decode_work_message("{'invalid': 'json'}") == "{'invalid': 'json'}"
     assert decode_work_message("") == {}
+
+
+@pytest.mark.parametrize("text", ["", "1\n", "true", '{"key": 1}\r\n', " \n\n"])
+def test_decode_work_message_unwraps_command_stdout_without_json_inference(
+    text: str,
+) -> None:
+    """Successful command transport delivers its text at the inbox [PL-4.1]."""
+
+    message = json.dumps({"type": "command_output", "result": text})
+    assert decode_work_message(message) == text
+
+
+def test_decode_work_message_preserves_command_spill_reference() -> None:
+    """Inbox recognition unwraps the reference without reading its file [MF-2.1]."""
+
+    reference = {
+        "type": "large_output",
+        "path": "/unavailable/output.txt",
+        "size": 7,
+        "sha256": "a" * 64,
+        "hostname": "other-host",
+    }
+    message = json.dumps({"type": "command_output", "result": reference})
+    assert decode_work_message(message) == reference
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "command_output"},
+        {"type": "command_output", "result": None},
+        {"type": "command_output", "result": 1},
+        {"type": "command_output", "result": True},
+        {"type": "command_output", "result": ["text"]},
+        {"type": "command_output", "result": "text", "extra": True},
+        {"type": "command_output", "result": {"type": "large_output"}},
+        {
+            "type": "command_output",
+            "result": {
+                "type": "large_output",
+                "path": "x",
+                "size": -1,
+                "sha256": "a" * 64,
+            },
+        },
+        {
+            "type": "failed_output",
+            "return_code": 7,
+            "error": "failed",
+            "result": "text",
+        },
+        {"type": "ordinary", "result": "text"},
+    ],
+)
+def test_decode_work_message_leaves_nonmatching_transport_as_ordinary_input(
+    payload: dict[str, Any],
+) -> None:
+    """Reserved-looking inbox data cannot raise a new pre-work error [MF-2]."""
+
+    assert decode_work_message(json.dumps(payload)) == payload
 
 
 def test_prepare_call_arguments_merges_spec_and_work_item() -> None:

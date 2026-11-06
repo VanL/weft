@@ -462,6 +462,7 @@ class _LiveRunSession:
             result_value=result.value,
             error_message=result.error,
             return_code=result.return_code,
+            command_stdout=result.command_stdout,
             outputs_root=str(self._context.outputs_dir.resolve()),
         )
         return self._result

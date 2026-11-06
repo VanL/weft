@@ -164,6 +164,15 @@ failed publication. For output you need to keep or share, have the task write
 to a known file path or artifact store and return a small result naming it.
 Automatic spills are a fallback for unexpectedly large results.
 
+Command stdout is preserved as text on success and failure: whitespace, LF,
+CRLF and bare CR remain intact, and text-mode `run` and single-task `result`
+add no newline. JSON-looking stdout remains a string in JSON/Python results
+and downstream pipeline input; parse it explicitly when structured data is
+wanted. Weft-owned pipe input writers also preserve the supplied newlines.
+This preserves text under the runner's configured codec, rather than
+promising arbitrary binary transport. Function and agent value rendering is
+unchanged.
+
 A failed command still delivers its captured stdout, preserving whitespace and
 trailing newlines; diagnostics go to stderr and the CLI exits nonzero. JSON
 results include the failure status, result, error and child return code. Pipeline

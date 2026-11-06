@@ -1,7 +1,7 @@
 """Shared outbox payload decoding helpers.
 
 Spec references:
-- docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-5]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-2.1], [MF-5]
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -23,9 +24,41 @@ class DecodedOutboxValue:
     streamed: bool = False
     return_code: int | None = None
     error: str | None = None
+    command_stdout: bool = False
 
 
 OutboxTextEmitter = Callable[[str, bool, bool], None]
+
+
+def is_large_output_reference(value: Any) -> bool:
+    """Recognize spill transport structurally, without filesystem access [MF-2.1]."""
+    return (
+        isinstance(value, dict)
+        and value.get("type") == "large_output"
+        and isinstance(value.get("path"), str)
+        and type(value.get("size")) is int
+        and value["size"] >= 0
+        and isinstance(value.get("sha256"), str)
+        and re.fullmatch(r"[0-9a-fA-F]{64}", value["sha256"]) is not None
+        and (
+            "hostname" not in value
+            or isinstance(value["hostname"], str)
+            and bool(value["hostname"])
+        )
+    )
+
+
+def is_command_output(value: Any) -> bool:
+    """Recognize exactly valid success transport for either queue boundary [MF-2]."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"type", "result"}
+        and value["type"] == "command_output"
+        and (
+            isinstance(value["result"], str)
+            or is_large_output_reference(value["result"])
+        )
+    )
 
 
 def decode_result_payload(raw: str) -> Any:
@@ -54,6 +87,7 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
     *,
     emit_stream: bool = True,
     emit_text: OutboxTextEmitter | None = None,
+    emit_command_stdout: Callable[[str], None] | None = None,
 ) -> tuple[bool, DecodedOutboxValue | None]:
     """Decode one outbox payload, accumulating stream fragments when needed.
 
@@ -65,6 +99,11 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
         envelope = json.loads(raw)
     except json.JSONDecodeError:
         return True, DecodedOutboxValue(decode_result_payload(raw))
+
+    if isinstance(envelope, dict) and envelope.get("type") == "command_output":
+        if not is_command_output(envelope):
+            raise ValueError("Malformed command_output envelope")
+        return True, DecodedOutboxValue(envelope["result"], command_stdout=True)
 
     if isinstance(envelope, dict) and envelope.get("type") == "failed_output":
         if (
@@ -78,13 +117,18 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
             envelope["result"],
             return_code=envelope["return_code"],
             error=envelope["error"],
+            command_stdout=True,
         )
 
     if isinstance(envelope, dict) and envelope.get("type") == "stream":
         stream_name = str(envelope.get("stream") or "stdout")
         text = decode_stream_text(envelope)
         is_stderr = stream_name == "stderr"
-        if text and is_stderr:
+        command_stdout = not is_stderr and envelope.get("command_stdout") is True
+        if text and command_stdout and emit_stream and emit_command_stdout is not None:
+            emit_command_stdout(text)
+            stream_buffer.append(text)
+        elif text and is_stderr:
             if emit_stream and emit_text is not None:
                 emit_text(text, is_stderr, False)
         elif text:
@@ -93,14 +137,14 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
             stream_buffer.append(text)
         if envelope.get("final"):
             if emit_stream and emit_text is not None:
-                emit_text("", is_stderr, True)
+                emit_text("", is_stderr, not command_stdout)
             if is_stderr:
                 return False, None
             value = "".join(stream_buffer)
-            if envelope.get("result_transform") == "strip":
-                value = value.strip()
             stream_buffer.clear()
-            return True, DecodedOutboxValue(value, emitted=emit_stream, streamed=True)
+            return True, DecodedOutboxValue(
+                value, emitted=emit_stream, streamed=True, command_stdout=command_stdout
+            )
         return False, None
 
     return True, DecodedOutboxValue(envelope)
@@ -122,5 +166,7 @@ __all__ = [
     "aggregate_public_outputs",
     "decode_result_payload",
     "decode_stream_text",
+    "is_command_output",
+    "is_large_output_reference",
     "process_outbox_message",
 ]

@@ -5,8 +5,11 @@ Python callables or external processes based on the TaskSpec configuration.
 This module centralizes the decoding logic so multiple task types can reuse the
 same behaviour without duplicating code.
 
-Spec references: docs/specifications/01-Core_Components.md [CC-2.3], [CC-3]
-and docs/specifications/02-TaskSpec.md [TS-1].
+Spec references:
+- docs/specifications/01-Core_Components.md [CC-2.3], [CC-3]
+- docs/specifications/02-TaskSpec.md [TS-1]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2]
+- docs/specifications/12-Pipeline_Composition_and_UX.md [PL-4.1]
 """
 
 from __future__ import annotations
@@ -19,16 +22,23 @@ from typing import Any
 
 from weft._constants import WORK_ENVELOPE_START
 from weft.core.imports import import_callable_ref
+from weft.core.outbox import is_command_output
 
 
 def decode_work_message(message: str) -> Any:
-    """Deserialize an inbox payload, tolerating plain-text bodies (Spec: [CC-2.3], [MF-2])."""
+    """Deserialize work, unwrapping exactly valid command output as raw text.
+
+    Nonmatching objects remain ordinary input, including malformed transport.
+    Spec: [CC-2.3], [MF-2], [PL-4.1].
+    """
     if not message:
         return {}
     try:
         payload = json.loads(message)
         if payload == WORK_ENVELOPE_START:
             return {}
+        if is_command_output(payload):
+            return payload["result"]
         return payload
     except json.JSONDecodeError:
         if message == WORK_ENVELOPE_START:

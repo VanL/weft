@@ -13,6 +13,7 @@ import time
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from io import TextIOWrapper
 from itertools import combinations
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -1807,7 +1808,7 @@ def test_run_monitored_subprocess_uses_supplied_monitor(
     )
 
     assert outcome.status == "ok"
-    assert outcome.value == "ok"
+    assert outcome.value == f"ok{os.linesep}"
     assert monitor.started_with == process.pid
     assert monitor.stopped is True
     assert outcome.metrics == monitor.metrics
@@ -1879,9 +1880,9 @@ def test_run_monitored_subprocess_emits_live_chunks_before_exit() -> None:
 
     outcome = outcome_holder["outcome"]
     assert outcome.status == "ok"
-    assert outcome.value == "first\nsecond"
+    assert outcome.value == f"first{os.linesep}second{os.linesep}"
     assert outcome.stderr == "warn\n"
-    assert stdout_chunks[0] == ("first\n", False)
+    assert "".join(chunk for chunk, _final in stdout_chunks) == outcome.value
     assert stdout_chunks[-1] == ("", True)
     assert stderr_chunks[0] == ("warn\n", False)
     assert stderr_chunks[-1] == ("", True)
@@ -1965,7 +1966,7 @@ def test_run_monitored_subprocess_ignores_late_limit_after_process_exit(
     )
 
     assert outcome.status == "ok"
-    assert outcome.value == "ok"
+    assert outcome.value == f"ok{os.linesep}"
     assert outcome.returncode == 0
     assert monitor.late_checks == 1
     assert monitor.stopped is True
@@ -2146,7 +2147,7 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
             "-c",
             (
                 "import sys; "
-                "sys.stdout.write('interactive-out'); sys.stdout.flush(); "
+                "sys.stdout.buffer.write(b'interactive-out\\r\\nnext\\rtail'); sys.stdout.flush(); "
                 "sys.stderr.write('interactive-err'); sys.stderr.flush()"
             ),
         ],
@@ -2177,7 +2178,7 @@ def test_interactive_session_collects_immediate_exit_stream_tail(
     finally:
         session.stop_monitor()
 
-    assert "".join(stdout) == "interactive-out"
+    assert "".join(stdout) == "interactive-out\r\nnext\rtail"
     assert "".join(stderr) == "interactive-err"
     assert session._stdout_closed is True
     assert session._stderr_closed is True
@@ -2208,6 +2209,44 @@ def _start_interactive_activity_session(
     return session, activity
 
 
+@pytest.mark.parametrize("pipe_newline", [None, "\r\n"])
+def test_interactive_session_preserves_supplied_stdin_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe_newline: str | None
+) -> None:
+    """Real text pipes preserve input even with Windows newline translation defaults."""
+    original_popen = subprocess.Popen
+
+    def open_process(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        process = original_popen(*args, **kwargs)
+        # Configure the real dependency's newline policy, not a fake process.
+        assert process.stdin is not None
+        cast(TextIOWrapper, process.stdin).reconfigure(newline=pipe_newline)
+        return process
+
+    monkeypatch.setattr(host_module.subprocess, "Popen", open_process)
+    session, activity = _start_interactive_activity_session(
+        tmp_path,
+        "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data)",
+    )
+    text = "CRLF\r\nLF\nCR\rΩ"
+    chunks: list[str] = []
+    deadline = time.monotonic() + 5.0
+    try:
+        session.send(text)
+        session.close_stdin()
+        while True:
+            activity.clear()
+            chunks.extend(session.poll_stdout())
+            if session._stdout_closed:
+                break
+            assert activity.wait(max(0.0, deadline - time.monotonic())), (
+                "interactive echo did not finish its stdout"
+            )
+        assert "".join(chunks) == text
+    finally:
+        session.terminate()
+
+
 def test_interactive_stdout_publication_notifies_activity(tmp_path: Path) -> None:
     session, activity = _start_interactive_activity_session(
         tmp_path,
@@ -2215,7 +2254,7 @@ def test_interactive_stdout_publication_notifies_activity(tmp_path: Path) -> Non
     )
     try:
         assert activity.wait(5.0)
-        assert "".join(session.poll_stdout()) == "ready\n"
+        assert "".join(session.poll_stdout()) == f"ready{os.linesep}"
         assert session.is_alive()
     finally:
         session.terminate()

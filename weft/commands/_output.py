@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import socket
 import sys
 import tempfile
@@ -14,23 +13,24 @@ from pathlib import Path
 from typing import Any
 
 from weft._constants import SPILL_OUTPUT_READ_SIZE
+from weft.core.outbox import is_large_output_reference
 
 
-def _spill_shape(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and value.get("type") == "large_output"
-        and isinstance(value.get("path"), str)
-        and type(value.get("size")) is int
-        and value["size"] >= 0
-        and isinstance(value.get("sha256"), str)
-        and re.fullmatch(r"[0-9a-fA-F]{64}", value["sha256"]) is not None
-        and (
-            "hostname" not in value
-            or isinstance(value["hostname"], str)
-            and bool(value["hostname"])
-        )
-    )
+def _write_stdout_bytes(data: bytes) -> None:
+    """Write a complete block even when stdout is an unbuffered file [CLI-1.2.2]."""
+    remaining = memoryview(data)
+    while remaining:
+        written = sys.stdout.buffer.write(remaining)
+        if written is None or written <= 0:
+            raise OSError("stdout did not accept output")
+        remaining = remaining[written:]
+
+
+def write_command_stdout(text: str) -> None:
+    """Deliver UTF-8 command text without platform newline conversion [MF-2]."""
+    sys.stdout.flush()
+    _write_stdout_bytes(text.encode("utf-8", errors="replace"))
+    sys.stdout.flush()
 
 
 def _deliver_spill(
@@ -67,7 +67,7 @@ def _stream_spill(value: dict[str, Any], resolved: Path, *, nl: bool) -> None:
             while chunk := source.read(SPILL_OUTPUT_READ_SIZE):
                 digest.update(chunk)
                 size += len(chunk)
-                sys.stdout.buffer.write(chunk)
+                _write_stdout_bytes(chunk)
         if size != value["size"]:
             raise OSError(f"size mismatch: expected {value['size']}, read {size}")
         if digest.hexdigest() != value["sha256"].lower():
@@ -90,8 +90,9 @@ def _render_output_value(
     outputs_root: str | None,
     nl: bool,
     emit_text: Callable[[str, bool], None],
+    command_stdout: bool = False,
 ) -> None:
-    if _spill_shape(value) and _deliver_spill(value, outputs_root, nl=nl):
+    if is_large_output_reference(value) and _deliver_spill(value, outputs_root, nl=nl):
         return
     if value is not None:
         text = (
@@ -99,7 +100,10 @@ def _render_output_value(
             if isinstance(value, (dict, list))
             else str(value)
         )
-        emit_text(text, nl)
+        if command_stdout:
+            write_command_stdout(text)
+        else:
+            emit_text(text, nl)
 
 
 def render_text_output(
@@ -108,12 +112,25 @@ def render_text_output(
     outputs_root: str | None,
     nl: bool = True,
     emit_text: Callable[[str, bool], None],
+    command_stdout: bool = False,
 ) -> None:
     """Deliver only top-level references, preserving nested values [MF-2.1]."""
-    if isinstance(value, list) and any(_spill_shape(item) for item in value):
+    if isinstance(value, list) and (
+        command_stdout or any(is_large_output_reference(item) for item in value)
+    ):
         for item in value:
             _render_output_value(
-                item, outputs_root=outputs_root, nl=True, emit_text=emit_text
+                item,
+                outputs_root=outputs_root,
+                nl=not command_stdout,
+                emit_text=emit_text,
+                command_stdout=command_stdout,
             )
         return
-    _render_output_value(value, outputs_root=outputs_root, nl=nl, emit_text=emit_text)
+    _render_output_value(
+        value,
+        outputs_root=outputs_root,
+        nl=nl and not command_stdout,
+        emit_text=emit_text,
+        command_stdout=command_stdout,
+    )

@@ -111,12 +111,13 @@ def _state_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _peek_result_value(
     rows: Sequence[tuple[str, int]],
-) -> tuple[Any, bool, int | None, str | None]:
+) -> tuple[Any, bool, int | None, str | None, bool]:
     """Assemble a read-only output window, including JSON null (Spec: [MF-5])."""
     stream_buffer: list[str] = []
     result_values: list[Any] = []
     return_code: int | None = None
     error: str | None = None
+    command_stdout = False
     for raw_payload, _timestamp in rows:
         final, value = process_outbox_message(
             raw_payload,
@@ -124,6 +125,7 @@ def _peek_result_value(
             emit_stream=False,
         )
         if final and value is not None:
+            command_stdout |= value.command_stdout
             append_public_value(result_values, value, show_stderr=False)
             if value.return_code is not None:
                 return_code, error = value.return_code, value.error
@@ -132,6 +134,7 @@ def _peek_result_value(
         bool(result_values),
         return_code,
         error,
+        command_stdout,
     )
 
 
@@ -555,11 +558,16 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             if observation_cancelled(cancel_event):
                 return
             with log_queue.get_connection() as broker:
-                value, final_output_seen, failure_code, failure_error = (
-                    _peek_result_value(output_rows)
-                )
+                (
+                    value,
+                    final_output_seen,
+                    failure_code,
+                    failure_error,
+                    command_stdout,
+                ) = _peek_result_value(output_rows)
                 collected.failure_code = failure_code
                 collected.failure_error = failure_error
+                collected.command_stdout = command_stdout
                 if observation_cancelled(cancel_event):
                     return
                 terminal_before_drain = _terminal_evidence_identity(
@@ -606,7 +614,9 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 return_code = (
                     failure_code
                     if failure_code is not None
-                    else command_failure_return_code(terminal)
+                    else command_failure_return_code(
+                        terminal, command_stdout=command_stdout
+                    )
                 )
                 payload = {"tid": normalized_tid, "status": status}
                 if decision.error is not None:
@@ -633,6 +643,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                             else {}
                         ),
                         "outputs_root": str(context.outputs_dir.resolve()),
+                        **({"command_stdout": True} if command_stdout else {}),
                     },
                 )
                 if observation_cancelled(cancel_event):

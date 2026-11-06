@@ -476,6 +476,8 @@ def _result_stream_payload(payload: dict[str, Any]) -> dict[str, Any]:
     encoding = payload.get("encoding")
     if isinstance(encoding, str) and encoding:
         normalized["encoding"] = encoding
+    if payload.get("command_stdout") is True:
+        normalized["command_stdout"] = True
     return normalized
 
 
@@ -579,6 +581,7 @@ class _CollectedResult:
     final_count: int = 0
     failure_code: int | None = None
     failure_error: str | None = None
+    command_stdout: bool = False
     first_final_seen: float | None = None
     latest_pending: int | None = None
     pending_changed_at: float | None = None
@@ -729,6 +732,7 @@ class _CollectedResult:
     ) -> bool:
         """Fold only the value decoded after a successful actual claim."""
         self.final_count += 1
+        self.command_stdout |= output.command_stdout
         if output.return_code is not None:
             self.failure_code = output.return_code
             self.failure_error = output.error
@@ -1053,9 +1057,11 @@ def _iter_consuming_result(
                     ),
                     reconciliation=decision.reconciliation,
                     outputs_root=str(context.outputs_dir.resolve()),
+                    command_stdout=collected.command_stdout,
                     return_code=collected.failure_code
                     or task_evidence.command_failure_return_code(
-                        materialized.terminal_evidence
+                        materialized.terminal_evidence,
+                        command_stdout=collected.command_stdout,
                     ),
                 )
                 return

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -39,7 +40,7 @@ from weft.commands.result import (
 )
 from weft.commands.types import TaskEvent, TaskResult
 from weft.context import WeftContext, build_context
-from weft.core import task_evidence
+from weft.core import outbox, task_evidence
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import TaskSpec
@@ -1682,7 +1683,7 @@ def test_failed_stdout_settles_failed_before_terminal_publication(
                         )
                     assert final.payload["status"] == "failed"
                     assert final.payload["return_code"] == 7
-                    assert final.payload["value"] == "held OUT\n"
+                    assert final.payload["value"] == f"held OUT{os.linesep}"
                     assert final.payload["outputs_root"] == str(
                         context.outputs_dir.resolve()
                     )
@@ -1690,7 +1691,7 @@ def test_failed_stdout_settles_failed_before_terminal_publication(
                     result = await_task_result(context, tid, timeout=10)
                     assert result.status == "failed"
                     assert result.return_code == 7
-                    assert result.value == "held OUT\n"
+                    assert result.value == f"held OUT{os.linesep}"
             finally:
                 release.set()
             with pytest.raises(RuntimeError, match="Command exited with 7"):
@@ -1790,7 +1791,7 @@ def test_live_failed_command_does_not_duplicate_stdout(workdir: Path) -> None:
         stdout = "".join(
             row.get("data", "") for row in rows if row.get("stream") == "stdout"
         )
-        assert stdout == "stream OUT\n"
+        assert stdout == f"stream OUT{os.linesep}"
         assert spec.state.return_code == 8
     finally:
         consumer.cleanup()
@@ -1837,7 +1838,10 @@ def test_stdout_publication_failure_preserves_command_terminal(
         consumer.cleanup()
 
 
-def test_failure_wire_size_uses_actual_small_broker_limit(workdir: Path) -> None:
+@pytest.mark.parametrize("exit_code", [0, 11])
+def test_command_wire_size_uses_actual_small_broker_limit(
+    workdir: Path, exit_code: int
+) -> None:
     """JSON escaping forces a spill even below the raw result threshold [MF-2]."""
     context = build_context(str(workdir))
     tid = str(time.time_ns())
@@ -1850,7 +1854,7 @@ def test_failure_wire_size_uses_actual_small_broker_limit(workdir: Path) -> None
                 "process_target": sys.executable,
                 "args": [
                     "-c",
-                    "import sys; sys.stdout.write('\\n'*3000); sys.exit(11)",
+                    f"import sys; sys.stdout.buffer.write(b'\\n'*3000); sys.exit({exit_code})",
                 ],
                 "weft_context": str(context.root),
             },
@@ -1859,18 +1863,85 @@ def test_failure_wire_size_uses_actual_small_broker_limit(workdir: Path) -> None
     config = {**context.config, "MAX_MESSAGE_SIZE": 4096}
     consumer = Consumer(context.broker_target, spec, config=config)
     try:
-        with pytest.raises(RuntimeError, match="Command exited with 11"):
-            consumer.run_work_item({})
+        if exit_code:
+            with pytest.raises(RuntimeError, match=f"Command exited with {exit_code}"):
+                consumer.run_work_item({})
+        else:
+            assert consumer.run_work_item({}) == "\n" * 3000
         with context.queue(f"T{tid}.outbox") as queue:
             rows = list(queue.peek_generator())
         assert len(rows) == 1
         wire = str(rows[0])
         assert len(wire.encode()) <= 4096
         envelope = json.loads(wire)
-        assert envelope["return_code"] == 11
+        assert envelope.get("return_code") == (exit_code or None)
         reference = envelope["result"]
         assert reference["type"] == "large_output"
         assert reference["size"] == 3000
         assert Path(reference["path"]).read_bytes() == b"\n" * 3000
     finally:
         consumer.cleanup()
+
+
+@pytest.mark.parametrize("text", ["", "1\n", " \r\n\r"])
+def test_command_output_preserves_text_and_origin_without_outcome(text: str) -> None:
+    final, decoded = process_outbox_message(
+        json.dumps({"type": "command_output", "result": text}), [], emit_stream=False
+    )
+    assert final and decoded is not None
+    assert decoded.value == text
+    assert decoded.command_stdout is True
+    assert decoded.return_code is None
+
+
+@pytest.mark.parametrize("result", [None, 1, True, [], {"type": "large_output"}])
+def test_command_output_rejects_invalid_reserved_results(result: Any) -> None:
+    with pytest.raises(ValueError, match="Malformed command_output"):
+        process_outbox_message(
+            json.dumps({"type": "command_output", "result": result}),
+            [],
+            emit_stream=False,
+        )
+
+
+@pytest.mark.parametrize("final", [False, True])
+def test_command_stream_origin_never_invents_an_outcome(final: bool) -> None:
+    emitted: list[str] = []
+    ordinary: list[tuple[str, bool, bool]] = []
+    is_final, decoded = outbox.process_outbox_message(
+        json.dumps(
+            {
+                "type": "stream",
+                "stream": "stdout",
+                "command_stdout": True,
+                "data": "CRLF\r\nCR\r",
+                "final": final,
+            }
+        ),
+        [],
+        emit_command_stdout=emitted.append,
+        emit_text=lambda text, err, nl: ordinary.append((text, err, nl)),
+    )
+    assert is_final is final
+    if final:
+        assert decoded is not None and decoded.command_stdout is True
+        assert decoded.return_code is None
+    else:
+        assert decoded is None
+    assert emitted == ["CRLF\r\nCR\r"]
+    assert ordinary == ([("", False, False)] if final else [])
+
+
+def test_command_aggregate_preserves_empty_and_json_looking_text(workdir: Path) -> None:
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    with context.queue(f"T{tid}.outbox") as queue:
+        for text in ("", "1\n", "true\r\n"):
+            queue.write(json.dumps({"type": "command_output", "result": text}))
+    result = result_cmd._read_outbox_task_result(
+        context, name=f"T{tid}.outbox", tid=tid, peek=True
+    )
+    assert result is not None and result.command_stdout is True
+    assert result.value == ["", "1\n", "true\r\n"]
+    assert result.return_code is None
+    assert result.status == "completed"

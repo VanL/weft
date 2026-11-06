@@ -265,7 +265,7 @@ output.
 
 A waiting `weft run` renders results under the same rules as single-task `weft result` ([CLI-1.2.2]): text mode delivers verified large-output content under the reservation and host rules of Large Output Handling; `--json` returns the reference as written.
 
-For a failed command, text mode delivers raw captured scalar stdout without an extra newline before exiting 1 with the error on stderr, and `--json` returns `{"tid", "status": "failed", "result", "error", "return_code"}`.
+For command stdout, text-mode waiting `weft run` preserves the captured text without stripping, newline conversion or an added newline, regardless of exit status. Inline text, retained spill content and live chunks follow the same rule. JSON preserves command stdout as a string, including empty strings and JSON-looking text; spilled values remain references. Failed commands retain the error on stderr and exit 1. Function and agent value presentation is unchanged.
 
 _Implementation mapping_: `weft/commands/_output.py::render_text_output`
 serves `weft/cli/run.py::render_run_result` and
@@ -273,6 +273,8 @@ serves `weft/cli/run.py::render_run_result` and
 owns their shared failed-command presentation. The command result carries its actual
 `outputs_root`, including stored-spec rebinding and `result --stream` events.
 Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
+Command stream chunks share `weft/cli/run.py::render_stream_event`.
+Plan: [Command stdout preservation](../plans/2026-11-05-command-stdout-preservation-plan.md).
 
 Plain rendering retains the existing `Error executing task: ` prefix before
 the category. JSON stores the category itself in `error` without that prefix.
@@ -551,7 +553,7 @@ Current behavior:
 - `--error` selects stderr-oriented output where available
 - `--json` includes metadata
 - in text mode a large-output reference that satisfies the reservation rules of Large Output Handling is delivered as its verified content; `--json` and `--all` return it as written ([MF-2.1])
-- a `failed_output` row delivers its raw captured scalar `result` to stdout without an extra newline, prints its error to stderr and exits 1; with `--json` it returns `{"tid", "status": "failed", "result", "error", "return_code"}`. With `--all`, references remain structured; failed items include failure metadata, text mode prints their errors to stderr, and any failed item makes the command exit 1.
+- Single-task text results deliver command stdout exactly as captured text, with no added newline or separators between an ordered aggregate's command outputs. Failure metadata remains separate: nonzero command outcomes print their error on stderr and exit 1. JSON preserves nested command text or spill references without exposing transport envelopes. `--all` retains its existing inspection presentation (task prefix and row newline in text mode, so embedded command newlines may display blank lines): failed items carry failure metadata, their text diagnostics go to stderr, and any failed item makes the command exit 1. Function and agent value rendering is unchanged.
 - if a known result row exists only as claimed outbox residue and no terminal
   lifecycle proof is visible, `weft result TID --json` returns promptly with
   `status="failed"`, `result=null`, `error`, and additive `reconciliation`

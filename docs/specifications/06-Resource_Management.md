@@ -290,18 +290,23 @@ before returning to other streams and supervision, and slow downstream sinks
 apply pipe backpressure rather than buffering child output without bound in
 parent memory. After capture is frozen, delivery drains the captured chunks
 without idle waits. The 64 KiB per-stream active in-flight accounting includes undecoded raw
-codec input and queued chunks' consumed bytes. Universal-newline decoding may
+codec input and queued chunks' consumed bytes. Newline recognition may
 also hold one CR character in fixed-size state. Consumed bytes that produce no
 text (for example `errors="ignore"`) release their capacity immediately.
 An incremental codec retaining 64 KiB without completing its sequence raises
 `UnicodeError` with a decoder-buffer-limit diagnostic, including during terminal
 capture. Valid stateful encodings whose single sequence exceeds this limit are
 rejected rather than buffering without bound or deadlocking on backpressure.
-Ordinary codec error-handler behavior and newline translation are unchanged.
+Command stdout decoding preserves CRLF, bare CR and LF, including across split reads. This applies to supervised capture and host interactive sessions. Supervised and host interactive stdin writers encode supplied text without platform newline substitution, so preserved CRLF is not doubled in a command pipeline. The configured text codec, error handling, input budgets and backpressure remain unchanged; stderr diagnostic decoding retains its current policy. This is a text-preservation contract, not a promise to transport arbitrary undecodable bytes losslessly.
 These rules do not preempt an arbitrarily blocking callback. A callback exception follows the existing execution-failure cleanup
 and exception-precedence contract; it does not guarantee delivery to the
 failed callback. Existing Consumer shutdown rules still govern a publisher
 that has stopped accepting worker events.
+
+Implementation mapping: `weft/core/runners/subprocess_runner.py::_OutputStreamState`
+and `_StdinStreamState` preserve supplied newline characters;
+`weft/core/runners/host.py::HostTaskRunner.start_session` configures its text pipes.
+Plan: [Command stdout preservation](../plans/2026-11-05-command-stdout-preservation-plan.md).
 
 Current behavior:
 

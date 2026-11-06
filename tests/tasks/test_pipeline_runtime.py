@@ -9,8 +9,10 @@ from __future__ import annotations
 import itertools
 import json
 import signal
+import sys
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,6 +41,7 @@ from weft._constants import (
 from weft.commands import specs as spec_cmd
 from weft.context import build_context
 from weft.core.control_messages import encode_control_message
+from weft.core.outbox import process_outbox_message
 from weft.core.pipelines import compile_linear_pipeline, load_pipeline_spec_payload
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
@@ -1828,3 +1831,87 @@ def test_failed_output_cannot_reach_downstream_before_stage_terminal(
         assert reserved.peek_one() == (failure if policy == "keep" else None)
     finally:
         edge.cleanup()
+
+
+@pytest.mark.parametrize("text", ["1\n", "", '{"key": 1}\r\n'])
+@pytest.mark.parametrize("downstream_kind", ["command", "function"])
+def test_command_stdout_survives_zero_copy_pipeline_handoff(
+    broker_env: BrokerEnv, text: str, downstream_kind: str
+) -> None:
+    """Actual stage processes receive exact command text after a queue move [PL-4.1].
+
+    The unchanged body and message ID prove transport is moved, not decoded and
+    republished by the edge. The downstream result proves its inbox unwraps it.
+    """
+
+    db_path, make_queue = broker_env
+    upstream_tid = "1775000000000000001"
+    downstream_tid = "1775000000000000002"
+    source = make_queue(f"T{upstream_tid}.outbox")
+    target = make_queue("P1775000000000000000.stage-to-next")
+    upstream_spec = _pipeline_owned_stage_spec(
+        upstream_tid, function_target="tests.tasks.sample_targets:echo_payload"
+    ).model_copy(
+        update={
+            "spec": SpecSection(
+                type="command",
+                process_target=sys.executable,
+                args=[
+                    "-c",
+                    f"import sys; sys.stdout.buffer.write({text.encode('utf-8')!r})",
+                ],
+            )
+        }
+    )
+    downstream_spec = _pipeline_owned_stage_spec(
+        downstream_tid, function_target="tests.tasks.sample_targets:provide_payload"
+    )
+    downstream_spec = downstream_spec.model_copy(
+        update={
+            "io": downstream_spec.io.model_copy(
+                update={"inputs": {"inbox": target.name}}
+            )
+        }
+    )
+    if downstream_kind == "command":
+        downstream_spec = downstream_spec.model_copy(
+            update={
+                "spec": SpecSection(
+                    type="command",
+                    process_target=sys.executable,
+                    args=[
+                        "-c",
+                        "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+                    ],
+                )
+            }
+        )
+
+    with ExitStack() as resources:
+        upstream = Consumer(db_path, upstream_spec)
+        resources.callback(upstream.cleanup)
+        edge = PipelineEdgeTask(db_path, _stage_output_edge_spec(str(time.time_ns())))
+        resources.callback(edge.cleanup)
+        downstream = Consumer(db_path, downstream_spec)
+        resources.callback(downstream.cleanup)
+        make_queue(upstream_spec.io.inputs["inbox"]).write("{}")
+        _drive_consumer_once_until_idle(upstream)
+        assert upstream.taskspec.state.status == "completed"
+        source_row = source.peek_one(with_timestamps=True)
+        assert source_row is not None
+        assert json.loads(source_row[0]) == {"type": "command_output", "result": text}
+
+        edge.process_once()
+        assert edge.taskspec.state.status == "completed"
+        assert source.peek_one() is None
+        assert target.peek_one(with_timestamps=True) == source_row
+
+        _drive_consumer_once_until_idle(downstream)
+        assert downstream.taskspec.state.status == "completed"
+        raw_result = make_queue(f"T{downstream_tid}.outbox").read_one()
+        assert raw_result is not None
+        final, decoded = process_outbox_message(raw_result, [], emit_stream=False)
+        assert final and decoded is not None
+        assert decoded.value == (
+            text if downstream_kind == "command" else {"data": text}
+        )

@@ -79,7 +79,7 @@ def test_result_closed_stdout_keeps_exit_code_and_spill(
     if spilled:
         assert "incomplete output" in error
         assert len(spills) == 1
-        assert spills[0].read_bytes() == b"p" * size
+        assert spills[0].read_bytes() == b"p" * size + os.linesep.encode()
         assert str(spills[0]) in error
     else:
         assert spills == []

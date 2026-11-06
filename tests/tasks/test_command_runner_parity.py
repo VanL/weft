@@ -1005,7 +1005,16 @@ def test_consumer_command_runners_share_basic_lifecycle(
 
         assert task.taskspec.state.status == "completed"
 
-        outbox_payload = json.loads(outbox.read_one() or "{}")
+        raw_output = outbox.read_one()
+        assert raw_output is not None
+        envelope = json.loads(raw_output)
+        assert set(envelope) == {"type", "result"}
+        assert envelope["type"] == "command_output"
+        text = envelope["result"]
+        assert isinstance(text, str)
+        outbox_payload = json.loads(text)
+        # The probe uses print(..., end=""): the runner adds no newline.
+        assert text == json.dumps(outbox_payload)
         assert outbox_payload["argv"] == ["--base-arg", "--work-item-arg"]
         assert outbox_payload["stdin"] == "hello lifecycle"
         assert outbox_payload["env"] == f"marker-{runner_name}"

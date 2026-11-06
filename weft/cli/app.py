@@ -37,7 +37,6 @@ from weft._constants import (
 )
 from weft.commands._output import render_text_output
 from weft.commands._resources import command_resource_scope
-from weft.commands._streaming import decode_stream_text
 from weft.commands.manager import dispatch_refusal_lines, dispatch_refusals_json
 from weft.commands.queue import _InvalidMessageIDUsageError
 from weft.commands.types import SpecValidationResult
@@ -54,6 +53,7 @@ from .run import (
     render_failed_result,
     render_run_description,
     render_run_result,
+    render_stream_event,
 )
 
 app = typer.Typer(
@@ -301,6 +301,7 @@ def _render_task_result(
             return_code=result.return_code,
             outputs_root=result.outputs_root,
             json_output=json_output,
+            command_stdout=result.command_stdout,
         )
     if result.status == "completed":
         if json_output:
@@ -317,6 +318,7 @@ def _render_task_result(
                     value,
                     outputs_root=result.outputs_root,
                     nl=nl,
+                    command_stdout=result.command_stdout,
                     emit_text=lambda text, newline: typer.echo(text, nl=newline),
                 )
             except BrokenPipeError:
@@ -2363,11 +2365,7 @@ def result_command(
                 for event in event_stream:
                     payload = event.payload
                     if event.event_type in {"stdout", "stderr"}:
-                        typer.echo(
-                            decode_stream_text(payload),
-                            err=event.event_type == "stderr",
-                            nl=False,
-                        )
+                        render_stream_event(event)
                     elif event.event_type == "result":
                         result = commands.TaskResult(
                             tid=event.tid,
@@ -2379,6 +2377,7 @@ def result_command(
                             reconciliation=payload.get("reconciliation"),
                             outputs_root=payload.get("outputs_root"),
                             return_code=payload.get("return_code"),
+                            command_stdout=payload.get("command_stdout") is True,
                         )
                         exit_code = _render_task_result(
                             result,

@@ -554,10 +554,15 @@ the edge as the failing child and preserves the command's error and return code
 in its diagnostic. Stages may already be launched; the guarantee is that failure
 output never becomes downstream input.
 
+Successful command output keeps its transport envelope during zero-copy handoff. The downstream task's shared work-message decoder unwraps only exactly valid `command_output` transport without parsing its nested text as JSON; malformed or nonmatching inbox objects retain ordinary-input semantics. Thus `1\n` is a string downstream, not integer `1`; callers wanting structured input parse explicitly. Spill references remain references. Override input remains authoritative after the edge has rejected failed transport. Existing `failed_output` rejection and reserved policies are unchanged.
+
 _Implementation mapping_: `weft/core/tasks/pipeline.py::PipelineEdgeTask._handle_work_message`
 checks `weft/core/outbox.py::process_outbox_message` before `_handoff_payload`;
 `PipelineEdgeTask._fail_edge` retains existing failure disposition.
+`weft/core/targets.py::decode_work_message` uses the shared
+`weft/core/outbox.py::is_command_output` validator before unwrapping inbox data.
 Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
+Plan: [Command stdout preservation](../plans/2026-11-05-command-stdout-preservation-plan.md).
 
 This conservative contract keeps recovery and debugging legible.
 

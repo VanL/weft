@@ -381,7 +381,7 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
 
         return RunnerOutcome(
             status="ok",
-            value=stdout.strip() if stdout is not None else "",
+            value=stdout if stdout is not None else "",
             error=None,
             stdout=stdout,
             stderr=stderr,
@@ -565,14 +565,20 @@ class _OutputStreamState:
     decoder's progress limit use SUBPROCESS_STREAM_TURN_READ_BYTES [RM-5.2].
     """
 
-    def __init__(self, stream: IO[str], on_chunk: _OutputCallback | None) -> None:
+    def __init__(
+        self,
+        stream: IO[str],
+        on_chunk: _OutputCallback | None,
+        *,
+        translate_newlines: bool = True,
+    ) -> None:
         self.stream = stream
         self.descriptor = stream.fileno()
         encoding: str = getattr(stream, "encoding", None) or "utf-8"
         errors: str = getattr(stream, "errors", None) or "replace"
         self.decoder = io.IncrementalNewlineDecoder(
             codecs.getincrementaldecoder(encoding)(errors=errors),
-            translate=True,
+            translate=translate_newlines,
         )
         self.collected: list[str] = []
         self.pending_chunks: collections.deque[str | None] = collections.deque()
@@ -665,14 +671,13 @@ class _StdinStreamState:
         self._encode_next()
 
     def _encode_next(self) -> bool:
+        """Encode supplied text without newline rewriting (Spec: [RM-5.2])."""
         if self.offset >= len(self.input_data):
             return False
         chunk = self.input_data[self.offset : self.offset + SUBPROCESS_STREAM_READ_SIZE]
         self.offset += len(chunk)
         final = self.offset == len(self.input_data)
-        # Popen's text=True wrapper defaults to newline=None: on Windows it
-        # translates every LF to CRLF, including the LF in an existing CRLF.
-        self.pending = self.encoder.encode(chunk.replace("\n", os.linesep), final)
+        self.pending = self.encoder.encode(chunk, final)
         return True
 
     def next_slice(self, budget: int) -> bytes | None:
@@ -837,7 +842,9 @@ class _PosixSelectorProcessIO:
     ) -> None:
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("Managed subprocess requires stdout and stderr pipes")
-        self._stdout = _OutputStreamState(process.stdout, on_stdout_chunk)
+        self._stdout = _OutputStreamState(
+            process.stdout, on_stdout_chunk, translate_newlines=False
+        )
         self._stderr = _OutputStreamState(process.stderr, on_stderr_chunk)
         self._stdin: _StdinStreamState | None = None
         self._selector: selectors.BaseSelector | None = None
@@ -1273,7 +1280,9 @@ if sys.platform == "win32":
                     "Managed subprocess requires stdout and stderr pipes"
                 )
             self._process_handle = int(cast(Any, process)._handle)
-            self._stdout = _OutputStreamState(process.stdout, on_stdout_chunk)
+            self._stdout = _OutputStreamState(
+                process.stdout, on_stdout_chunk, translate_newlines=False
+            )
             self._stderr = _OutputStreamState(process.stderr, on_stderr_chunk)
             self._outputs = (self._stdout, self._stderr)
             self._ops = {id(stream): _OverlappedOp() for stream in self._outputs}

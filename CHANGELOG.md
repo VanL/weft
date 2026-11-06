@@ -4,6 +4,17 @@
 
 ### Changed
 
+- Command stdout keeps its text exactly on success and failure, including
+  trailing whitespace, CRLF and bare CR. Windows pipe stdin keeps supplied
+  newline characters rather than expanding LF, preventing CRLF doubling.
+  Inline, streamed and spilled CLI
+  delivery adds no newline. JSON/Python results and downstream pipeline tasks
+  receive JSON-looking command stdout as a string; parse explicitly for
+  structured data. Empty command failures now report `result: ""`.
+  Upgrade producers/readers together for the new success-only `command_output`
+  envelope; existing `failed_output` records remain supported. Old generic
+  output rows keep their recorded values; stripped text cannot be recovered.
+
 - Failed non-streaming commands retain captured stdout, including whitespace,
   and report failure plus the child return code through result, event, run and
   client surfaces. Text mode adds no newline to scalar failed stdout. A typed

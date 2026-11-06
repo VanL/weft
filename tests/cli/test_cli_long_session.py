@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -227,7 +228,7 @@ def test_cli_long_session_produces_identical_transcript_across_backends(
         command_delay = f"{command_delay_ms / 1000:.3f}"
         command_label = f"cmd-{round_index:03d}"
         command_name = f"session-command-{round_index:03d}"
-        command_expected = f"cmd:{command_label}:{command_delay_ms}"
+        command_expected = f"cmd:{command_label}:{command_delay_ms}{os.linesep}"
         command_task = _submit_no_wait_task(
             workdir,
             weft_harness,

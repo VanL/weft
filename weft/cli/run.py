@@ -24,7 +24,7 @@ from weft.commands import (
     RunSpecDescription,
     TaskEvent,
 )
-from weft.commands._output import render_text_output
+from weft.commands._output import render_text_output, write_command_stdout
 from weft.commands._resources import command_resource_scope
 from weft.commands._streaming import decode_stream_text
 from weft.commands.run import _LiveRunSession, _stop_interactive_run_session
@@ -69,6 +69,7 @@ def render_failed_result(
     json_output: bool,
     error_prefix: str | None = None,
     suppress_value: bool = False,
+    command_stdout: bool = False,
 ) -> int:
     """Deliver failure-bearing stdout once with truthful metadata [MF-2]."""
     if json_output:
@@ -91,6 +92,7 @@ def render_failed_result(
                 value,
                 outputs_root=outputs_root,
                 nl=False,
+                command_stdout=command_stdout,
                 emit_text=lambda text, newline: typer.echo(text, nl=newline),
             )
         except BrokenPipeError:
@@ -143,6 +145,7 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
             json_output=json_output,
             error_prefix=execution.error_prefix,
             suppress_value=suppress_result_value,
+            command_stdout=execution.command_stdout,
         )
     if status == "completed":
         if json_output:
@@ -163,6 +166,7 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
                 render_text_output(
                     result_value,
                     outputs_root=execution.outputs_root,
+                    command_stdout=execution.command_stdout,
                     emit_text=lambda text, newline: typer.echo(text, nl=newline),
                 )
             except BrokenPipeError:
@@ -208,17 +212,22 @@ def consume_run_session(
         return session.wait()
 
 
+def render_stream_event(event: TaskEvent) -> None:
+    """Render one stdout/stderr frame under its producer's text policy [MF-3]."""
+    data = decode_stream_text(event.payload)
+    if event.event_type == "stdout" and event.payload.get("command_stdout") is True:
+        write_command_stdout(data)
+    else:
+        typer.echo(data, err=event.event_type == "stderr", nl=False)
+
+
 def _render_interactive_events(events: CommandStream[TaskEvent]) -> None:
     """Render structured stdout/stderr events without consuming result queues."""
-
     with command_resource_scope() as resources:
         resources.callback(events.close)
         for event in events:
-            if event.event_type not in {"stdout", "stderr"}:
-                continue
-            data = decode_stream_text(event.payload)
-            if data:
-                typer.echo(data, err=event.event_type == "stderr", nl=False)
+            if event.event_type in {"stdout", "stderr"}:
+                render_stream_event(event)
 
 
 def _wake_interactive_prompt(prompt: Any) -> None:

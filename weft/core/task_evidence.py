@@ -1615,14 +1615,16 @@ def _nonterminal_mapping_evidence(
     )
 
 
-def command_failure_return_code(evidence: TaskEvidenceSnapshot | None) -> int | None:
+def command_failure_return_code(
+    evidence: TaskEvidenceSnapshot | None, *, command_stdout: bool = False
+) -> int | None:
     """Expose a command exit code without changing function failure shapes [MF-2]."""
     if evidence is None or evidence.status != "failed":
         return None
     spec = (evidence.taskspec_payload or {}).get("spec")
     return (
         evidence.return_code
-        if isinstance(spec, dict) and spec.get("type") == "command"
+        if command_stdout or isinstance(spec, dict) and spec.get("type") == "command"
         else None
     )
 

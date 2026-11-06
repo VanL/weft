@@ -20,6 +20,8 @@ from weft.core.outbox import (
     process_outbox_message as _process_outbox_message,
 )
 
+from ._output import write_command_stdout
+
 __all__ = [
     "DecodedOutboxValue",
     "aggregate_public_outputs",
@@ -72,4 +74,5 @@ def process_outbox_message(
         stream_buffer,
         emit_stream=emit_stream,
         emit_text=lambda text, err, nl: _emit_text(text, err=err, nl=nl),
+        emit_command_stdout=write_command_stdout,
     )

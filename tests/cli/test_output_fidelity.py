@@ -22,6 +22,7 @@ from tests.helpers.weft_harness import WeftTestHarness
 from weft.cli.run import render_run_result
 from weft.commands import tasks as task_commands
 from weft.commands._output import render_text_output as _render_text_output
+from weft.commands._output import write_command_stdout
 from weft.commands.types import RunExecutionResult
 from weft.helpers import closing_queue_iterator
 
@@ -208,47 +209,36 @@ def test_ordinary_result_preserves_cli_ansi_rendering() -> None:
     assert captured.getvalue() == "red\n"
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "inline",
+        "whitespace",
+        "empty",
+        "crlf",
+        "bare_cr",
+        "json_scalar",
+        "large",
+        "escaping",
+    ],
+)
 @pytest.mark.parametrize("json_output", [False, True])
-def test_failed_run_delivers_captured_stdout(
-    weft_harness: WeftTestHarness, json_output: bool
-) -> None:
-    args: list[object] = ["run"]
-    if json_output:
-        args.append("--json")
-    args.extend(
-        [
-            sys.executable,
-            "-c",
-            "import sys; print('OUT'); print('ERR', file=sys.stderr); sys.exit(3)",
-        ]
-    )
-    rc, out, err = run_cli(*args, cwd=weft_harness.context.root, harness=weft_harness)
-    assert rc == 1
-    if json_output:
-        value = json.loads(out)
-        assert value["status"] == "failed"
-        assert value["result"] == "OUT\n"
-        assert value["return_code"] == 3
-        assert "ERR" in value["error"]
-    else:
-        assert out == "OUT"
-        assert "ERR" in err
-
-
-@pytest.mark.parametrize("case", ["inline", "whitespace", "empty", "large", "escaping"])
-@pytest.mark.parametrize("json_output", [False, True])
-def test_failed_command_scalar_fidelity_and_wire_fit(
-    weft_harness: WeftTestHarness, case: str, json_output: bool
+@pytest.mark.parametrize("exit_code", [0, 4])
+def test_captured_command_scalar_fidelity_and_wire_fit(
+    weft_harness: WeftTestHarness, case: str, json_output: bool, exit_code: int
 ) -> None:
     cases = {
         "inline": ("'OUT\\n'", "OUT\n"),
         "whitespace": ("' \\n'", " \n"),
         "empty": ("''", ""),
+        "crlf": ("'line\\r\\n'", "line\r\n"),
+        "bare_cr": ("'line\\r'", "line\r"),
+        "json_scalar": ("'1\\n'", "1\n"),
         "large": ("'x' * (11 * 1024 * 1024)", "x" * (11 * 1024 * 1024)),
         "escaping": ("'x\\n' * (4 * 1024 * 1024)", "x\n" * (4 * 1024 * 1024)),
     }
     expression, expected = cases[case]
-    script = f"import sys; sys.stdout.buffer.write(({expression}).encode()); sys.stderr.write('ERR'); sys.exit(4)"
+    script = f"import sys; sys.stdout.buffer.write(({expression}).encode()); sys.stderr.write('ERR'); sys.exit({exit_code})"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     command = [sys.executable, "-m", "weft", "run"]
@@ -259,27 +249,28 @@ def test_failed_command_scalar_fidelity_and_wire_fit(
         command,
         cwd=weft_harness.context.root,
         env=env,
-        input="",
+        input=b"",
         capture_output=True,
-        text=True,
         check=False,
         timeout=60,
     )
-    assert result.returncode == 1, result.stderr
+    assert result.returncode == (1 if exit_code else 0), result.stderr
     if json_output:
         payload = json.loads(result.stdout)
-        assert payload["status"] == "failed"
-        assert payload["return_code"] == 4
-        assert "ERR" in payload["error"]
+        assert payload["status"] == ("failed" if exit_code else "completed")
+        if exit_code:
+            assert payload["return_code"] == exit_code
+            assert "ERR" in payload["error"]
         if case in {"large", "escaping"}:
             reference = payload["result"]
             assert reference["type"] == "large_output"
             assert Path(reference["path"]).read_bytes() == expected.encode()
         else:
-            assert payload["result"] == (expected if expected else None)
+            assert payload["result"] == expected
     else:
-        assert result.stdout == expected
-        assert "ERR" in result.stderr
+        assert result.stdout == expected.encode("utf-8")
+        if exit_code:
+            assert b"ERR" in result.stderr
 
 
 @pytest.mark.parametrize("mode", ["single", "peek", "all"])
@@ -324,7 +315,94 @@ def test_background_failed_result_preserves_outcome_and_consumption(
         else next(value for value in payload["results"] if value["tid"] == tid)
     )
     assert item["status"] == "failed"
-    assert item["result"] == "background OUT\n"
+    assert item["result"] == f"background OUT{os.linesep}"
     assert item["return_code"] == 5
     with weft_harness.context.queue(f"T{tid}.outbox") as queue:
         assert (queue.peek_one() is not None) is (mode == "peek")
+
+
+@pytest.mark.parametrize("text", ["", "1\n", " \r\n\r"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_live_successful_command_preserves_stdout_text(
+    weft_harness: WeftTestHarness, text: str, json_output: bool
+) -> None:
+    """The producer owns text and newline bytes, including JSON-looking text."""
+    args = [sys.executable, "-m", "weft", "run", "--stream-output"]
+    if json_output:
+        args.append("--json")
+    args.extend(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.buffer.write({text.encode()!r})",
+        ]
+    )
+    result = subprocess.run(
+        args,
+        cwd=weft_harness.context.root,
+        input=b"",
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert payload["result"] == text
+        assert isinstance(payload["result"], str)
+    else:
+        assert result.stdout == text.encode("utf-8")
+
+
+def test_command_text_writer_handles_short_file_writes_without_translation(
+    tmp_path: Path,
+) -> None:
+    """A real unbuffered sink may accept a prefix; stdout must retain the rest."""
+
+    class ShortFile(io.FileIO):
+        def write(self, data: Any) -> int:
+            return super().write(memoryview(data)[:7])
+
+    path = tmp_path / "stdout.dat"
+    text = "CRLF\r\nCR\rLF\nΩ\ud800" * 5
+    with (
+        ShortFile(path, "w") as binary,
+        io.TextIOWrapper(binary, encoding="utf-8", newline="\r\n") as output,
+        redirect_stdout(output),
+    ):
+        write_command_stdout(text)
+    assert path.read_bytes() == text.encode("utf-8", errors="replace")
+
+
+@pytest.mark.parametrize("exit_code", [0, 5])
+@pytest.mark.parametrize("result_stream", [False, True])
+def test_background_command_result_preserves_raw_stream_text(
+    weft_harness: WeftTestHarness, exit_code: int, result_stream: bool
+) -> None:
+    text = " \r\nCR\r"
+    rc, tid, error = run_cli(
+        "run",
+        "--no-wait",
+        "--stream-output",
+        sys.executable,
+        "-c",
+        f"import sys; sys.stdout.buffer.write({text.encode()!r}); sys.exit({exit_code})",
+        cwd=weft_harness.context.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, error
+    args = [sys.executable, "-m", "weft", "result", tid, "--timeout", "20"]
+    if result_stream:
+        args.append("--stream")
+    result = subprocess.run(
+        args,
+        cwd=weft_harness.context.root,
+        input=b"",
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == (1 if exit_code else 0), result.stderr
+    assert result.stdout == text.encode("utf-8")

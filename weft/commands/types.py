@@ -164,6 +164,7 @@ class TaskResult:
     reconciliation: dict[str, Any] | None = None
     outputs_root: str | None = None
     return_code: int | None = None
+    command_stdout: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +210,7 @@ class RunExecutionResult:
     availability_warning: str | None = None
     outputs_root: str | None = None
     return_code: int | None = None
+    command_stdout: bool = False
 
 
 @dataclass(frozen=True, slots=True)

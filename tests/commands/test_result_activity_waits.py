@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sys
 import threading
 from base64 import b64encode
@@ -314,7 +316,7 @@ def _retire_actual_terminal_proof(
             if command_output
             else {"args": ["response"]}
         )
-        assert value == "response"
+        assert value == (f"response{os.linesep}" if command_output else "response")
     with context.queue(WEFT_GLOBAL_LOG_QUEUE) as log:
         for raw, message_id in list(log.peek_generator(with_timestamps=True)):
             payload = json.loads(raw)
@@ -454,3 +456,118 @@ def test_realtime_releases_stream_iterator_before_yielding_frame(
             else:
                 raise AssertionError("real producer's stdout frame was not yielded")
         assert active == 0
+
+
+def test_command_stdout_eof_waits_for_real_process_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child closes stdout, then waits at a real socket barrier before failing."""
+    text = "prefix\r\n"
+    final_frame_seen = threading.Event()
+    waiting_after_eof = threading.Event()
+    observation_ready = threading.Event()
+    observer_thread: list[int | None] = [None]
+    original_wait = QueueChangeMonitor.wait
+
+    def wait(monitor: QueueChangeMonitor, timeout: float | None) -> bool:
+        if threading.get_ident() == observer_thread[0] and final_frame_seen.is_set():
+            waiting_after_eof.set()
+            observation_ready.set()
+        return original_wait(monitor, timeout)
+
+    monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
+    with socket.socket() as listener, WeftTestHarness() as harness:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(20)
+        host, port = listener.getsockname()
+        with harness.context.queue("test.early-eof.tid") as queue:
+            tid = str(queue.generate_timestamp())
+        script = (
+            "import os,socket,sys; "
+            f"sys.stdout.buffer.write({text.encode()!r}); sys.stdout.flush(); os.close(sys.stdout.fileno()); sys.stdout=None; "
+            f"s=socket.create_connection(({host!r},{port}),timeout=20); "
+            "s.settimeout(None); s.sendall(b'live'); s.recv(1); s.close(); sys.exit(7)"
+        )
+        spec = validate_taskspec_payload(
+            {
+                "name": "early-stdout-eof",
+                "spec": {
+                    "type": "command",
+                    "process_target": sys.executable,
+                    "args": ["-c", script],
+                    "stream_output": True,
+                    "weft_context": str(harness.context.root),
+                },
+            },
+            resolved_tid=tid,
+        )
+        consumer = Consumer(
+            harness.context.broker_target, spec, config=harness.context.broker_config
+        )
+        frames: list[TaskEvent] = []
+
+        def observe() -> TaskResult:
+            observer_thread[0] = threading.get_ident()
+            with closing_queue_iterator(
+                _iter_task_result(
+                    harness.context,
+                    tid,
+                    timeout=20,
+                    _accepted_taskspec=spec,
+                    emit_stream=True,
+                    include_stream_events=True,
+                )
+            ) as results:
+                for item in results:
+                    if isinstance(item, TaskEvent):
+                        if item.event_type == "stdout":
+                            frames.append(item)
+                            if item.payload["final"]:
+                                final_frame_seen.set()
+                    else:
+                        return item
+            raise AssertionError("collector ended without an outcome")
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                producer = pool.submit(consumer.run_work_item, {})
+                connection, _address = listener.accept()
+                with connection:
+                    connection.settimeout(20)
+                    assert connection.recv(4) == b"live"
+                    observed = pool.submit(observe)
+                    producer.add_done_callback(lambda _future: observation_ready.set())
+                    observed.add_done_callback(lambda _future: observation_ready.set())
+                    try:
+                        assert observation_ready.wait(20), (
+                            f"no collector wait after stdout EOF; frames={frames!r}"
+                        )
+                        if producer.done():
+                            producer.result()
+                        if observed.done():
+                            premature = observed.result()
+                            raise AssertionError(
+                                f"collector settled before process outcome: {premature!r}"
+                            )
+                        assert waiting_after_eof.is_set()
+                        assert not producer.done(), (
+                            "barrier-held child finished before release"
+                        )
+                        assert not observed.done(), (
+                            "stdout EOF falsely settled the task"
+                        )
+                    finally:
+                        connection.sendall(b"release")
+                with pytest.raises(RuntimeError, match="Command exited with 7"):
+                    producer.result(timeout=20)
+                result = observed.result(timeout=20)
+                assert result.status == "failed"
+                assert result.return_code == 7
+                assert result.command_stdout is True
+                assert result.value is None
+                assert "".join(frame.payload["data"] for frame in frames) == text
+                assert all(frame.payload["command_stdout"] is True for frame in frames)
+                assert sum(frame.payload["final"] for frame in frames) == 1
+        finally:
+            consumer.cleanup()
