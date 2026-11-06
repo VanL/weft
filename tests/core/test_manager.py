@@ -7126,6 +7126,12 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
             if self._process.poll() is None:
                 self._process.kill()
 
+        def join(self, timeout: float | None = None) -> None:
+            try:
+                self._process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+
     launched: dict[str, RealLaunchProcess] = {}
 
     def blocked_launch(*args: object, **kwargs: object) -> RealLaunchProcess:
@@ -7236,12 +7242,18 @@ def test_manager_late_child_launch_self_reaps_after_cleanup_deadline(  # noqa: C
             process = process or launched.get("process")
             if process is not None and process.is_alive():
                 real_kill_process_tree(process.pid, timeout=2.0)
+            if process is not None:
+                process.join(timeout=2.0)
             if worker_pid is not None and _process_running(worker_pid):
                 try:
                     psutil.Process(worker_pid).kill()
                 except psutil.Error:
                     pass
-                _wait_for_pid_exit(worker_pid, timeout=2.0)
+            if worker_pid is not None:
+                try:
+                    psutil.Process(worker_pid).wait(timeout=2.0)
+                except psutil.NoSuchProcess:
+                    pass
             shutil.rmtree(locked_dir)
             if stop_thread is not None and stop_thread.is_alive():
                 assert stop_thread.ident is not None
