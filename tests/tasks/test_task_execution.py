@@ -3800,12 +3800,23 @@ def test_consumer_reactor_responds_to_ping_while_command_work_is_active(
 def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
     broker_env: BrokerEnv,
     unique_tid: str,
+    tmp_path: Path,
 ) -> None:
     db_path, make_queue = broker_env
+    ready = tmp_path / "active-command-ready"
+    script = tmp_path / "active_command.py"
+    script.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).write_text('ready', encoding='utf-8')\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf-8",
+    )
     spec = make_command_taskspec(
         unique_tid,
         sys.executable,
-        args=[PROCESS_SCRIPT, "--duration", "1.5", "--result", "should-not-finish"],
+        args=[str(script)],
         reserved_stop=ReservedPolicy.CLEAR,
     )
     task = Consumer(db_path, spec)
@@ -3816,25 +3827,29 @@ def test_consumer_reactor_stop_cancels_active_command_on_main_thread(
     reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
     inbox.write(json.dumps({"args": []}))
 
-    task.process_once()
-    assert task.taskspec.state.status == "running"
+    try:
+        task.process_once()
+        _drive_consumer_until(task, ready.exists, timeout=5.0)
+        assert task.taskspec.state.status == "running"
 
-    ctrl_in.write(encode_control_message(CONTROL_STOP))
-    task.process_once()
-    assert task.should_stop is True
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
+        task.process_once()
+        assert task.should_stop is True
 
-    _drive_consumer_until(
-        task,
-        lambda: task.taskspec.state.status == "cancelled",
-        timeout=5.0,
-    )
+        _drive_consumer_until(
+            task,
+            lambda: task.taskspec.state.status == "cancelled",
+            timeout=5.0,
+        )
 
-    responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
-    assert not any(
-        "command" in response and "status" in response for response in responses
-    ), responses
-    assert outbox.read_one() is None
-    assert reserved.has_pending() is False
+        responses = [json.loads(msg) for msg in drain_queue(ctrl_out)]
+        assert not any(
+            "command" in response and "status" in response for response in responses
+        ), responses
+        assert outbox.read_one() is None
+        assert reserved.has_pending() is False
+    finally:
+        task.cleanup()
 
 
 @pytest.mark.parametrize("stream_output", [False, True])
