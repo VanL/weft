@@ -164,6 +164,11 @@ failed publication. For output you need to keep or share, have the task write
 to a known file path or artifact store and return a small result naming it.
 Automatic spills are a fallback for unexpectedly large results.
 
+A failed command still delivers its captured stdout, preserving whitespace and
+trailing newlines; diagnostics go to stderr and the CLI exits nonzero. JSON
+results include the failure status, result, error and child return code. Pipeline
+edges reject failed output before handing it to the next stage.
+
 For a guided walkthrough, see [Your First Weft Task](docs/tutorials/first-task.md).
 
 ## Embedding Weft in Python

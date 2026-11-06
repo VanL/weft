@@ -1786,3 +1786,45 @@ def test_pipeline_task_pending_termination_signal_skips_bootstrap(
 
     spawn_queue = ctx.queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE, persistent=False)
     assert _drain_json(spawn_queue) == []
+
+
+@pytest.mark.parametrize("override", [None, {"payload": "override"}])
+@pytest.mark.parametrize("policy", ["keep", "clear"])
+def test_failed_output_cannot_reach_downstream_before_stage_terminal(
+    broker_env: BrokerEnv, override: Any, policy: str
+) -> None:
+    """Failure data fences handoff without an asynchronous stage event [MF-2]."""
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    payload = _stage_output_edge_spec(tid, override_input=override).model_dump(
+        mode="json"
+    )
+    payload["spec"]["reserved_policy_on_error"] = policy
+    edge = PipelineEdgeTask(db_path, TaskSpec.model_validate(payload))
+    source = make_queue("T1775000000000000001.outbox")
+    failure = json.dumps(
+        {
+            "type": "failed_output",
+            "return_code": 7,
+            "error": "Command exited with 7: diagnostic",
+            "result": "captured stdout\n",
+        }
+    )
+    source.write(failure)
+    try:
+        # No stage-terminal event is published. The edge must decide solely
+        # from the result already reserved from the stage's outbox.
+        initial_events = _drain_json(make_queue("P1775000000000000000.events"))
+        assert not any(item.get("type") == "stage_terminal" for item in initial_events)
+        edge.process_once()
+        assert make_queue("P1775000000000000000.stage-to-next").peek_one() is None
+        assert edge.taskspec.state.status == "failed"
+        events = _drain_json(make_queue("P1775000000000000000.events"))
+        assert not any(item.get("type") == "edge_checkpoint" for item in events)
+        terminal = next(item for item in events if item.get("type") == "edge_terminal")
+        assert terminal["status"] == "failed"
+        assert terminal["error"] == "Command exited with 7: diagnostic"
+        reserved = make_queue(edge._queue_names["reserved"])
+        assert reserved.peek_one() == (failure if policy == "keep" else None)
+    finally:
+        edge.cleanup()

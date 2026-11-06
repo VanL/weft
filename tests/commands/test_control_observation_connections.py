@@ -427,18 +427,25 @@ def test_status_watch_reuses_connections_and_observes_external_updates(
             },
         )
 
-    monkeypatch.setattr(QueueChangeMonitor, "wait", lambda *_args, **_kwargs: True)
-    iterator = iter(
-        task_cmd.watch_task_status(
-            tid, context=ctx, timeout=task_cmd.CONTROL_SURFACE_WAIT_TIMEOUT
-        )
-    )
+    waits = 0
+
+    def wait(_monitor: QueueChangeMonitor, timeout: float | None) -> bool:
+        nonlocal waits
+        waits += 1
+        # Every revision is committed before next(). One post-yield wait is
+        # allowed; a second means the watcher missed the visible revision.
+        assert waits <= 1, "watcher did not observe the committed revision"
+        return True
+
+    monkeypatch.setattr(QueueChangeMonitor, "wait", wait)
+    iterator = iter(task_cmd.watch_task_status(tid, context=ctx, timeout=None))
     repeated: list[int] = []
     with ThreadPoolExecutor(max_workers=1) as producer:
         try:
             for revision in range(4):
                 producer.submit(publish, revision).result(timeout=10)
                 before = len(connections)
+                waits = 0
                 snapshot = next(iterator)
                 assert snapshot.metadata["revision"] == revision
                 assert snapshot.status == "running"

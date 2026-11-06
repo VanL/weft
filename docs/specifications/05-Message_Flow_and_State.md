@@ -154,6 +154,7 @@ Current rules:
   that survive a failed application, or a failed success-path
   acknowledgement delete, are left in `T{tid}.reserved` for the explicit
   recovery path below
+- a command that exits non-zero with non-empty captured stdout, and is not live-streaming, writes one `failed_output` row to its outbox before its terminal failure is published: `{"type": "failed_output", "return_code", "error", "result"}`, where `result` passes through the same size check and spill path as a successful result. A result reader settles a `failed_output` row as failed with that error and return code, with or without terminal proof; it never settles it as completed. Only truly empty stdout writes no row; whitespace and trailing newlines are preserved. Measure the actual UTF-8 encoded failure envelope against the resolved broker maximum before publication; when JSON escaping/framing makes an inline result exceed that maximum, force the same result through the spill path and rebuild before its single write attempt. No guessed overhead reserve or post-write retry is introduced. Any top-level object with type `failed_output` is reserved. Malformed reserved rows fail result readers; background evidence treats them as unavailable evidence and does not abort observation or retirement. If stdout publication fails, the Consumer records that delivery error and still publishes the command's original failure and return code through its terminal path. Oversized framing/error alone remains a concrete publication failure without silent diagnostic truncation. stderr remains diagnostic, and a live-streaming command writes no second copy of its stdout frames. `failed_output` is a reserved, validated transport envelope; shared outbox decoding carries its failure metadata separately from its nested result through waiting collectors, all-results inspection, events, CLI and client adapters. `TaskResult` gains optional `return_code`. Pipeline edges inspect the envelope before any handoff or override-input processing and fail through their existing failure path instead of forwarding it. This rule does not wait for a stage-terminal event.
 - a successful work outcome uses only success acknowledgement for its
   input; deferred STOP/KILL completes task termination without applying
   reserved policy to that completed input,
@@ -186,6 +187,13 @@ peek/checkpoint example and is not part of ordinary Weft task delivery.
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/base.py`, `weft/core/outbox.py::decode_stream_text`,
 `tests/tasks/test_task_execution.py`.
+`Consumer._prepare_output` and `Consumer._emit_failed_command_output` own shared
+serialization/spilling and failure-envelope publication. Shared interpretation
+belongs to `weft/core/outbox.py::process_outbox_message`; result collectors,
+`weft/core/task_evidence.py::peek_final_outbox_evidence` and
+`weft/core/tasks/pipeline.py::PipelineEdgeTask._handle_work_message` consume its
+failure metadata. The edge rejects failure before both move and override.
+Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
 
 ### 3. Control Flow [MF-3]
 

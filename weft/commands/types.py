@@ -163,6 +163,7 @@ class TaskResult:
     error: str | None
     reconciliation: dict[str, Any] | None = None
     outputs_root: str | None = None
+    return_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +208,7 @@ class RunExecutionResult:
     manager_started_payload: dict[str, Any] | None = None
     availability_warning: str | None = None
     outputs_root: str | None = None
+    return_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

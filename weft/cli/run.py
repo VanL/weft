@@ -59,6 +59,49 @@ def render_run_description(
     typer.echo(f"{ctx.get_help()}{suffix}")
 
 
+def render_failed_result(
+    *,
+    tid: str,
+    value: Any,
+    error: str | None,
+    return_code: int,
+    outputs_root: str | None,
+    json_output: bool,
+    error_prefix: str | None = None,
+    suppress_value: bool = False,
+) -> int:
+    """Deliver failure-bearing stdout once with truthful metadata [MF-2]."""
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "failed",
+                    "result": value,
+                    "error": error,
+                    "return_code": return_code,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
+    if value is not None and not suppress_value:
+        try:
+            render_text_output(
+                value,
+                outputs_root=outputs_root,
+                nl=False,
+                emit_text=lambda text, newline: typer.echo(text, nl=newline),
+            )
+        except BrokenPipeError:
+            raise
+        except OSError as exc:
+            typer.echo(str(exc), err=True)
+    message = error or f"task {tid} failed"
+    typer.echo(f"{error_prefix}: {message}" if error_prefix else message, err=True)
+    return 1
+
+
 def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
     execution: RunExecutionResult,
     *,
@@ -90,6 +133,17 @@ def render_run_result(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-367] exception
     status = execution.status
     result_value = execution.result_value
     error_message = execution.error_message
+    if status == "failed" and execution.return_code is not None:
+        return render_failed_result(
+            tid=execution.tid,
+            value=result_value,
+            error=error_message,
+            return_code=execution.return_code,
+            outputs_root=execution.outputs_root,
+            json_output=json_output,
+            error_prefix=execution.error_prefix,
+            suppress_value=suppress_result_value,
+        )
     if status == "completed":
         if json_output:
             typer.echo(

@@ -293,6 +293,7 @@ def test_realtime_emits_terminal_state_from_acquired_real_task_proof(
             "status": "completed",
             "value": "done",
             "error": None,
+            "outputs_root": str(ctx.outputs_dir.resolve()),
         }
         assert observed[-1].event_type == "end"
         with ctx.queue(f"T{task.tid}.outbox") as outbox:

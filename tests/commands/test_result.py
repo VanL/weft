@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Self, TypedDict
+from typing import Any, NoReturn, Self, TypedDict
 
 import pytest
 from psycopg_pool import PoolTimeout
@@ -25,6 +28,7 @@ from weft._exceptions import (
 from weft.commands import _result_wait as result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
+from weft.commands import tasks as task_cmd
 from weft.commands._streaming import (
     handle_ctrl_stream,
     process_outbox_message,
@@ -1578,3 +1582,295 @@ def test_result_requires_pipeline_lifecycle_before_consuming_output(
     retained_status = status_queue.peek_one()
     assert retained_status is not None
     assert json.loads(retained_status)["type"] == "pipeline_status"
+
+
+@pytest.mark.parametrize("return_code", [0, True, "3", None])
+def test_failed_output_rejects_invalid_return_codes(return_code: Any) -> None:
+    raw = json.dumps(
+        {
+            "type": "failed_output",
+            "return_code": return_code,
+            "error": "failed",
+            "result": "captured",
+        }
+    )
+    with pytest.raises(ValueError, match="failed_output"):
+        process_outbox_message(raw, [], emit_stream=False)
+
+
+def test_failed_output_decodes_failure_separately_from_public_value() -> None:
+    raw = json.dumps(
+        {
+            "type": "failed_output",
+            "return_code": 3,
+            "error": "command failed",
+            "result": "captured\n",
+        }
+    )
+    final, decoded = process_outbox_message(raw, [], emit_stream=False)
+    assert final and decoded is not None
+    assert decoded.value == "captured\n"
+    assert decoded.return_code == 3
+    assert decoded.error == "command failed"
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("event_projection", ["result", "events", "realtime"])
+def test_failed_stdout_settles_failed_before_terminal_publication(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent: bool,
+    event_projection: str,
+) -> None:
+    """A real failed command's row cannot become ordinary completion [MF-2]."""
+    context = build_context(str(workdir))
+    with context.queue(WEFT_GLOBAL_LOG_QUEUE) as queue:
+        tid = str(queue.generate_timestamp())
+    spec = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "held-failure",
+            "spec": {
+                "type": "command",
+                "process_target": sys.executable,
+                "args": ["-c", "import sys; print('held OUT'); sys.exit(7)"],
+                "persistent": persistent,
+                "weft_context": str(context.root),
+            },
+        }
+    )
+    consumer = Consumer(context.broker_target, spec, config=context.config)
+    held = threading.Event()
+    release = threading.Event()
+    original = consumer._finalize_terminal_outcome
+
+    def hold_terminal(**kwargs: Any) -> NoReturn:
+        held.set()
+        assert release.wait(20), "test did not release terminal publication"
+        original(**kwargs)
+
+    monkeypatch.setattr(consumer, "_finalize_terminal_outcome", hold_terminal)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(consumer.run_work_item, {})
+            try:
+                assert held.wait(20), "command did not reach held terminal boundary"
+                evidence = task_evidence.peek_final_outbox_evidence(
+                    context,
+                    tid=tid,
+                    outbox_name=f"T{tid}.outbox",
+                    taskspec_payload=spec.model_dump(mode="json"),
+                )
+                assert evidence is not None
+                assert evidence.status == "failed"
+                assert evidence.return_code == 7
+                snapshot = task_cmd.task_status(tid, context=context)
+                assert snapshot is not None
+                assert snapshot.status == "failed"
+                assert snapshot.return_code == 7
+                if event_projection != "result":
+                    events = (
+                        events_cmd.iter_task_realtime_events(
+                            context, tid, follow=True, timeout=10
+                        )
+                        if event_projection == "realtime"
+                        else events_cmd.follow_task_events(context, tid, timeout=10)
+                    )
+                    with closing_queue_iterator(events) as rows:
+                        final = next(
+                            event for event in rows if event.event_type == "result"
+                        )
+                    assert final.payload["status"] == "failed"
+                    assert final.payload["return_code"] == 7
+                    assert final.payload["value"] == "held OUT\n"
+                    assert final.payload["outputs_root"] == str(
+                        context.outputs_dir.resolve()
+                    )
+                else:
+                    result = await_task_result(context, tid, timeout=10)
+                    assert result.status == "failed"
+                    assert result.return_code == 7
+                    assert result.value == "held OUT\n"
+            finally:
+                release.set()
+            with pytest.raises(RuntimeError, match="Command exited with 7"):
+                future.result(timeout=20)
+    finally:
+        release.set()
+        consumer.cleanup()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_malformed_reserved_output_is_not_background_completion(
+    workdir: Path, persistent: bool
+) -> None:
+    """Bad reserved data fails readers without aborting evidence sweeps [MF-2]."""
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    malformed = {"type": "failed_output", "result": "not a successful value"}
+    with context.queue(f"T{tid}.outbox") as queue:
+        queue.write(json.dumps(malformed))
+    payload = {"spec": {"persistent": persistent}}
+    assert (
+        task_evidence.peek_final_outbox_evidence(
+            context, tid=tid, outbox_name=f"T{tid}.outbox", taskspec_payload=payload
+        )
+        is None
+    )
+    with pytest.raises(CommandExecutionError, match="Malformed failed_output"):
+        result_cmd._read_outbox_task_result(
+            context, name=f"T{tid}.outbox", tid=tid, peek=True
+        )
+
+
+def test_persistent_failure_evidence_preserves_earlier_unread_output(
+    workdir: Path,
+) -> None:
+    """Only the final failure row is retirement evidence for a persistent task."""
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    with context.queue(f"T{tid}.outbox") as queue:
+        queue.write(json.dumps("earlier success"))
+        earlier = queue.peek_one(with_timestamps=True)
+        queue.write(
+            json.dumps(
+                {
+                    "type": "failed_output",
+                    "return_code": 6,
+                    "error": "command failed",
+                    "result": "last stdout",
+                }
+            )
+        )
+        newest = queue.peek_one(with_timestamps=True, order="newest")
+    assert earlier is not None and newest is not None
+    evidence = task_evidence.peek_final_outbox_evidence(
+        context,
+        tid=tid,
+        outbox_name=f"T{tid}.outbox",
+        taskspec_payload={"spec": {"persistent": True}},
+    )
+    assert evidence is not None
+    assert evidence.return_code == 6
+    assert [target.message_id for target in evidence.ack_targets] == [newest[1]]
+    assert earlier[1] not in [target.message_id for target in evidence.ack_targets]
+    result = result_cmd._read_outbox_task_result(
+        context, name=f"T{tid}.outbox", tid=tid, peek=True
+    )
+    assert result is not None
+    assert result.status == "failed"
+    assert result.return_code == 6
+    assert result.value == ["earlier success", "last stdout"]
+
+
+def test_live_failed_command_does_not_duplicate_stdout(workdir: Path) -> None:
+    """Live stdout remains frames, with no captured-output replay [MF-2]."""
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    spec = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "stream-failure",
+            "spec": {
+                "type": "command",
+                "process_target": sys.executable,
+                "args": ["-c", "import sys; print('stream OUT'); sys.exit(8)"],
+                "stream_output": True,
+                "weft_context": str(context.root),
+            },
+        }
+    )
+    consumer = Consumer(context.broker_target, spec, config=context.config)
+    try:
+        with pytest.raises(RuntimeError, match="Command exited with 8"):
+            consumer.run_work_item({})
+        with context.queue(f"T{tid}.outbox") as queue:
+            rows = [json.loads(str(row)) for row in queue.peek_generator()]
+        assert all(row.get("type") != "failed_output" for row in rows)
+        stdout = "".join(
+            row.get("data", "") for row in rows if row.get("stream") == "stdout"
+        )
+        assert stdout == "stream OUT\n"
+        assert spec.state.return_code == 8
+    finally:
+        consumer.cleanup()
+
+
+def test_stdout_publication_failure_preserves_command_terminal(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivery error cannot replace the actual command failure [MF-2]."""
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    spec = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "publish-failure",
+            "spec": {
+                "type": "command",
+                "process_target": sys.executable,
+                "args": ["-c", "import sys; print('OUT'); sys.exit(9)"],
+                "weft_context": str(context.root),
+            },
+        }
+    )
+    consumer = Consumer(context.broker_target, spec, config=context.config)
+
+    def fail_delivery(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected output storage failure")
+
+    monkeypatch.setattr(consumer, "_prepare_output", fail_delivery)
+    try:
+        with pytest.raises(RuntimeError, match="Command exited with 9"):
+            consumer.run_work_item({})
+        terminal = task_evidence.peek_terminal_ctrl_out_evidence(
+            context,
+            tid=tid,
+            ctrl_out_name=f"T{tid}.ctrl_out",
+            taskspec_payload=spec.model_dump(mode="json"),
+        )
+        assert terminal is not None
+        assert terminal.status == "failed"
+        assert terminal.return_code == 9
+        assert terminal.error is not None and "Command exited with 9" in terminal.error
+    finally:
+        consumer.cleanup()
+
+
+def test_failure_wire_size_uses_actual_small_broker_limit(workdir: Path) -> None:
+    """JSON escaping forces a spill even below the raw result threshold [MF-2]."""
+    context = build_context(str(workdir))
+    tid = str(time.time_ns())
+    spec = TaskSpec.model_validate(
+        {
+            "tid": tid,
+            "name": "wire-fit",
+            "spec": {
+                "type": "command",
+                "process_target": sys.executable,
+                "args": [
+                    "-c",
+                    "import sys; sys.stdout.write('\\n'*3000); sys.exit(11)",
+                ],
+                "weft_context": str(context.root),
+            },
+        }
+    )
+    config = {**context.config, "MAX_MESSAGE_SIZE": 4096}
+    consumer = Consumer(context.broker_target, spec, config=config)
+    try:
+        with pytest.raises(RuntimeError, match="Command exited with 11"):
+            consumer.run_work_item({})
+        with context.queue(f"T{tid}.outbox") as queue:
+            rows = list(queue.peek_generator())
+        assert len(rows) == 1
+        wire = str(rows[0])
+        assert len(wire.encode()) <= 4096
+        envelope = json.loads(wire)
+        assert envelope["return_code"] == 11
+        reference = envelope["result"]
+        assert reference["type"] == "large_output"
+        assert reference["size"] == 3000
+        assert Path(reference["path"]).read_bytes() == b"\n" * 3000
+    finally:
+        consumer.cleanup()

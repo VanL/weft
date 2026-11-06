@@ -265,9 +265,12 @@ output.
 
 A waiting `weft run` renders results under the same rules as single-task `weft result` ([CLI-1.2.2]): text mode delivers verified large-output content under the reservation and host rules of Large Output Handling; `--json` returns the reference as written.
 
+For a failed command, text mode delivers raw captured scalar stdout without an extra newline before exiting 1 with the error on stderr, and `--json` returns `{"tid", "status": "failed", "result", "error", "return_code"}`.
+
 _Implementation mapping_: `weft/commands/_output.py::render_text_output`
 serves `weft/cli/run.py::render_run_result` and
-`weft/cli/app.py::_render_task_result`. The command result carries its actual
+`weft/cli/app.py::_render_task_result`; `weft/cli/run.py::render_failed_result`
+owns their shared failed-command presentation. The command result carries its actual
 `outputs_root`, including stored-spec rebinding and `result --stream` events.
 Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
 
@@ -548,6 +551,7 @@ Current behavior:
 - `--error` selects stderr-oriented output where available
 - `--json` includes metadata
 - in text mode a large-output reference that satisfies the reservation rules of Large Output Handling is delivered as its verified content; `--json` and `--all` return it as written ([MF-2.1])
+- a `failed_output` row delivers its raw captured scalar `result` to stdout without an extra newline, prints its error to stderr and exits 1; with `--json` it returns `{"tid", "status": "failed", "result", "error", "return_code"}`. With `--all`, references remain structured; failed items include failure metadata, text mode prints their errors to stderr, and any failed item makes the command exit 1.
 - if a known result row exists only as claimed outbox residue and no terminal
   lifecycle proof is visible, `weft result TID --json` returns promptly with
   `status="failed"`, `result=null`, `error`, and additive `reconciliation`

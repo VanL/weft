@@ -21,6 +21,8 @@ class DecodedOutboxValue:
     value: Any
     emitted: bool = False
     streamed: bool = False
+    return_code: int | None = None
+    error: str | None = None
 
 
 OutboxTextEmitter = Callable[[str, bool, bool], None]
@@ -63,6 +65,20 @@ def process_outbox_message(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-029] excep
         envelope = json.loads(raw)
     except json.JSONDecodeError:
         return True, DecodedOutboxValue(decode_result_payload(raw))
+
+    if isinstance(envelope, dict) and envelope.get("type") == "failed_output":
+        if (
+            set(envelope) != {"type", "return_code", "error", "result"}
+            or type(envelope["return_code"]) is not int
+            or envelope["return_code"] == 0
+            or not isinstance(envelope["error"], str)
+        ):
+            raise ValueError("Malformed failed_output envelope")
+        return True, DecodedOutboxValue(
+            envelope["result"],
+            return_code=envelope["return_code"],
+            error=envelope["error"],
+        )
 
     if isinstance(envelope, dict) and envelope.get("type") == "stream":
         stream_name = str(envelope.get("stream") or "stdout")

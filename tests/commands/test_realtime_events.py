@@ -160,6 +160,7 @@ def test_late_task_terminal_ctrl_out_finishes_realtime_stream(tmp_path: Path) ->
         "status": "completed",
         "value": {"ok": True},
         "error": None,
+        "outputs_root": str(ctx.outputs_dir.resolve()),
     }
     assert events[2].payload == {"status": "completed"}
     assert len(_peek_all(ctx, f"T{tid}.ctrl_out", persistent=False)) == 1
@@ -193,6 +194,7 @@ def test_late_wrapper_lost_ctrl_out_finishes_realtime_stream(tmp_path: Path) -> 
         "status": "failed",
         "value": None,
         "error": WRAPPER_LOST_ERROR,
+        "outputs_root": str(ctx.outputs_dir.resolve()),
     }
     assert len(_peek_all(ctx, f"T{tid}.ctrl_out", persistent=False)) == 1
 
@@ -303,6 +305,7 @@ def test_late_terminal_log_row_finishes_realtime_stream(tmp_path: Path) -> None:
         "status": "completed",
         "value": {"ok": True},
         "error": None,
+        "outputs_root": str(ctx.outputs_dir.resolve()),
     }
     assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 1
 
@@ -321,6 +324,7 @@ def test_late_final_outbox_result_finishes_realtime_stream(tmp_path: Path) -> No
         "status": "completed",
         "value": "done",
         "error": None,
+        "outputs_root": str(ctx.outputs_dir.resolve()),
     }
     assert len(_peek_all(ctx, f"T{tid}.outbox", persistent=True)) == 1
     assert _peek_all(ctx, f"T{tid}.ctrl_out", persistent=False) == []
@@ -437,6 +441,7 @@ def test_staggered_task_terminal_replaces_wrapper_lost_verdict(
         "status": "completed",
         "value": {"ok": True},
         "error": None,
+        "outputs_root": str(ctx.outputs_dir.resolve()),
     }
     assert events[2].payload == {"status": "completed"}
     assert len(_peek_all(ctx, f"T{tid}.ctrl_out", persistent=False)) == 2

@@ -1026,34 +1026,52 @@ def peek_final_outbox_evidence(
     taskspec_payload: dict[str, Any] | None,
     broker: Any | None = None,
     observation_config: TaskObservationConfig | None = None,
+    failure_only: bool = False,
 ) -> TaskEvidenceSnapshot | None:
-    """Peek conservative final one-shot outbox evidence without consuming it."""
+    """Peek ordinary one-shot values or the producer's final failure [MF-2].
 
-    if (observation_config is not None and observation_config.mode != "one_shot") or (
-        observation_config is None
-        and (
-            task_is_persistent_payload(taskspec_payload)
-            or task_is_interactive_payload(taskspec_payload)
+    Persistent/interactive ordinary output is not completion evidence. Only
+    their newest row can be a self-describing failure: the producer publishes
+    no further output after selecting its terminal command failure.
+    """
+
+    ordinary_ineligible = (
+        failure_only
+        or (observation_config is not None and observation_config.mode != "one_shot")
+        or (
+            observation_config is None
+            and (
+                task_is_persistent_payload(taskspec_payload)
+                or task_is_interactive_payload(taskspec_payload)
+            )
         )
-    ):
-        return None
+    )
     stream_buffer: list[str] = []
     values: list[Any] = []
     ack_targets: list[QueueAckTarget] = []
     observed_at: int | None = None
     saw_partial = False
+    failure: tuple[str | None, int] | None = None
     with queue_broker(ctx, outbox_name, broker=broker) as db:
-        iterator = db.peek_generator(outbox_name, with_timestamps=True)
+        if ordinary_ineligible:
+            newest = db.peek_one(outbox_name, with_timestamps=True, order="newest")
+            iterator = iter((newest,)) if newest is not None else iter(())
+        else:
+            iterator = db.peek_generator(outbox_name, with_timestamps=True)
         with closing_queue_iterator(iterator) as rows:
             for item in rows:
                 if not isinstance(item, tuple) or len(item) != 2:
                     continue
                 body, timestamp = item
-                final, decoded = process_outbox_message(
-                    str(body),
-                    stream_buffer,
-                    emit_stream=False,
-                )
+                try:
+                    final, decoded = process_outbox_message(
+                        str(body),
+                        stream_buffer,
+                        emit_stream=False,
+                    )
+                except ValueError:
+                    # Malformed reserved transport is not terminal evidence.
+                    return None
                 if not final:
                     saw_partial = True
                     continue
@@ -1063,19 +1081,23 @@ def peek_final_outbox_evidence(
                     saw_partial = True
                     continue
                 values.append(decoded.value)
+                if decoded.return_code is not None:
+                    failure = (decoded.error, decoded.return_code)
                 timestamp_int = int(timestamp)
                 ack_targets.append(
                     QueueAckTarget(queue=outbox_name, message_id=timestamp_int)
                 )
                 observed_at = timestamp_int
 
-    if saw_partial or len(values) != 1:
+    if failure is None and (ordinary_ineligible or saw_partial or len(values) != 1):
         return None
     value = aggregate_public_outputs(values)
     stdout, stderr = split_stdio(value)
     snapshot = TaskEvidenceSnapshot(
         tid=tid,
-        status="completed",
+        status="failed" if failure is not None else "completed",
+        error=failure[0] if failure is not None else None,
+        return_code=failure[1] if failure is not None else None,
         classification="result_without_terminal",
         source="outbox",
         terminal=True,
@@ -1468,18 +1490,23 @@ def _configured_outbox_evidence(
     config: TaskObservationConfig | None,
     taskspec_payload: dict[str, Any] | None,
     broker: Any | None,
+    failure_only: bool = False,
 ) -> TaskEvidenceSnapshot | None:
-    """Preserve conservative one-shot recovery only with resolved routes [MF-5]."""
-    if config is None or config.mode != "one_shot":
+    """Read explicit failure or conservative one-shot recovery on resolved routes [MF-5]."""
+    if config is None:
         return None
-    return peek_final_outbox_evidence(
+    outbox = peek_final_outbox_evidence(
         ctx,
         tid=tid,
         outbox_name=config.outbox,
         taskspec_payload=taskspec_payload,
         broker=broker,
         observation_config=config,
-    ) or claimed_outbox_result_evidence(
+        failure_only=failure_only,
+    )
+    if outbox is not None or config.mode != "one_shot" or failure_only:
+        return outbox
+    return claimed_outbox_result_evidence(
         ctx,
         tid=tid,
         outbox_name=config.outbox,
@@ -1532,14 +1559,18 @@ def known_tid_evidence(
     if local is not None:
         return local
     runtime = runtime_evidence(tid=tid, mapping_entry=mapping_entry)
+    outbox = _configured_outbox_evidence(
+        ctx,
+        tid=tid,
+        config=config,
+        taskspec_payload=taskspec_payload,
+        broker=broker,
+        failure_only=runtime is not None,
+    )
+    if outbox is not None and outbox.return_code is not None:
+        return outbox
     if runtime is None:
-        runtime = _configured_outbox_evidence(
-            ctx,
-            tid=tid,
-            config=config,
-            taskspec_payload=taskspec_payload,
-            broker=broker,
-        )
+        runtime = outbox
     if ping and config is not None:
         # PING is permitted only after route discovery; accepted payloads retain
         # their original full configuration for the existing keyed probe.
@@ -1581,6 +1612,18 @@ def _nonterminal_mapping_evidence(
         tid=tid,
         prior_live=mapping_entry is not None,
         prior_live_at=payload.get("timestamp"),
+    )
+
+
+def command_failure_return_code(evidence: TaskEvidenceSnapshot | None) -> int | None:
+    """Expose a command exit code without changing function failure shapes [MF-2]."""
+    if evidence is None or evidence.status != "failed":
+        return None
+    spec = (evidence.taskspec_payload or {}).get("spec")
+    return (
+        evidence.return_code
+        if isinstance(spec, dict) and spec.get("type") == "command"
+        else None
     )
 
 

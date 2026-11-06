@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import socket
+import subprocess
 import sys
 from contextlib import redirect_stdout
 from functools import partial
@@ -18,8 +20,10 @@ import typer
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.cli.run import render_run_result
+from weft.commands import tasks as task_commands
 from weft.commands._output import render_text_output as _render_text_output
 from weft.commands.types import RunExecutionResult
+from weft.helpers import closing_queue_iterator
 
 pytestmark = [pytest.mark.shared]
 
@@ -202,3 +206,125 @@ def test_ordinary_result_preserves_cli_ansi_rendering() -> None:
             == 0
         )
     assert captured.getvalue() == "red\n"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_failed_run_delivers_captured_stdout(
+    weft_harness: WeftTestHarness, json_output: bool
+) -> None:
+    args: list[object] = ["run"]
+    if json_output:
+        args.append("--json")
+    args.extend(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('OUT'); print('ERR', file=sys.stderr); sys.exit(3)",
+        ]
+    )
+    rc, out, err = run_cli(*args, cwd=weft_harness.context.root, harness=weft_harness)
+    assert rc == 1
+    if json_output:
+        value = json.loads(out)
+        assert value["status"] == "failed"
+        assert value["result"] == "OUT\n"
+        assert value["return_code"] == 3
+        assert "ERR" in value["error"]
+    else:
+        assert out == "OUT"
+        assert "ERR" in err
+
+
+@pytest.mark.parametrize("case", ["inline", "whitespace", "empty", "large", "escaping"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_failed_command_scalar_fidelity_and_wire_fit(
+    weft_harness: WeftTestHarness, case: str, json_output: bool
+) -> None:
+    cases = {
+        "inline": ("'OUT\\n'", "OUT\n"),
+        "whitespace": ("' \\n'", " \n"),
+        "empty": ("''", ""),
+        "large": ("'x' * (11 * 1024 * 1024)", "x" * (11 * 1024 * 1024)),
+        "escaping": ("'x\\n' * (4 * 1024 * 1024)", "x\n" * (4 * 1024 * 1024)),
+    }
+    expression, expected = cases[case]
+    script = f"import sys; sys.stdout.buffer.write(({expression}).encode()); sys.stderr.write('ERR'); sys.exit(4)"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    command = [sys.executable, "-m", "weft", "run"]
+    if json_output:
+        command.append("--json")
+    command.extend([sys.executable, "-c", script])
+    result = subprocess.run(
+        command,
+        cwd=weft_harness.context.root,
+        env=env,
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 1, result.stderr
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "failed"
+        assert payload["return_code"] == 4
+        assert "ERR" in payload["error"]
+        if case in {"large", "escaping"}:
+            reference = payload["result"]
+            assert reference["type"] == "large_output"
+            assert Path(reference["path"]).read_bytes() == expected.encode()
+        else:
+            assert payload["result"] == (expected if expected else None)
+    else:
+        assert result.stdout == expected
+        assert "ERR" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["single", "peek", "all"])
+def test_background_failed_result_preserves_outcome_and_consumption(
+    weft_harness: WeftTestHarness, mode: str
+) -> None:
+    rc, tid, err = run_cli(
+        "run",
+        "--no-wait",
+        sys.executable,
+        "-c",
+        "import sys; print('background OUT'); sys.exit(5)",
+        cwd=weft_harness.context.root,
+        harness=weft_harness,
+    )
+    assert rc == 0, err
+    # Single mode waits through ordinary startup discovery. Bulk modes inspect
+    # only completed outputs, so wait for real failure evidence, not a sleep.
+    if mode != "single":
+        with closing_queue_iterator(
+            task_commands.watch_task_status(
+                tid, context=weft_harness.context, timeout=20
+            )
+        ) as snapshots:
+            failure = next(
+                snapshot for snapshot in snapshots if snapshot.status == "failed"
+            )
+        assert failure.return_code == 5
+    args: list[object] = ["result", "--json"]
+    if mode == "single":
+        args.extend([tid, "--timeout", 20])
+    else:
+        args.append("--all")
+        if mode == "peek":
+            args.append("--peek")
+    rc, out, err = run_cli(*args, cwd=weft_harness.context.root, harness=weft_harness)
+    assert rc == 1, err
+    payload = json.loads(out)
+    item = (
+        payload
+        if mode == "single"
+        else next(value for value in payload["results"] if value["tid"] == tid)
+    )
+    assert item["status"] == "failed"
+    assert item["result"] == "background OUT\n"
+    assert item["return_code"] == 5
+    with weft_harness.context.queue(f"T{tid}.outbox") as queue:
+        assert (queue.peek_one() is not None) is (mode == "peek")

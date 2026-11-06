@@ -577,6 +577,8 @@ class _CollectedResult:
     values: list[Any] = field(default_factory=list)
     stream_buffer: list[str] = field(default_factory=list)
     final_count: int = 0
+    failure_code: int | None = None
+    failure_error: str | None = None
     first_final_seen: float | None = None
     latest_pending: int | None = None
     pending_changed_at: float | None = None
@@ -727,6 +729,9 @@ class _CollectedResult:
     ) -> bool:
         """Fold only the value decoded after a successful actual claim."""
         self.final_count += 1
+        if output.return_code is not None:
+            self.failure_code = output.return_code
+            self.failure_error = output.error
         self.stream_output = self.stream_output or output.streamed
         append_public_value(self.values, output, show_stderr=show_stderr)
         if self.first_final_seen is None:
@@ -800,6 +805,8 @@ class _CollectedResult:
         expired: bool,
         grace_expired: bool,
     ) -> _ResultSettlement | None:
+        if self.failure_code is not None:
+            return _ResultSettlement("result", "failed", self.failure_error)
         if materialized.config is None:
             return None
         terminal = materialized.terminal_evidence
@@ -1045,6 +1052,11 @@ def _iter_consuming_result(
                         else None
                     ),
                     reconciliation=decision.reconciliation,
+                    outputs_root=str(context.outputs_dir.resolve()),
+                    return_code=collected.failure_code
+                    or task_evidence.command_failure_return_code(
+                        materialized.terminal_evidence
+                    ),
                 )
                 return
             if decision.action == "timeout":

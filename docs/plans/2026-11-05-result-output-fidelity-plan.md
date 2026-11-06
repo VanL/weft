@@ -1,13 +1,14 @@
 # Result Output Fidelity: Spilled Output Survives Its Reference, Failed Commands Keep Their Stdout
 
-Status: promoted
-Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-2.1], Large Output Handling, [MF-5] cleanup owners; docs/specifications/02-TaskSpec.md `cleanup_on_exit`, `output_size_limit_mb`; docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2.2]; docs/specifications/14-Python_API_Surfaces.md [PY-2] (`outputs_root` in Phase 1; failure metadata in Phase 2)
+Status: completed
+Source specs: docs/specifications/12-Pipeline_Composition_and_UX.md [PL-4.1] (Phase 2); docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-2.1], Large Output Handling, [MF-5] cleanup owners; docs/specifications/02-TaskSpec.md `cleanup_on_exit`, `output_size_limit_mb`; docs/specifications/10-CLI_Interface.md [CLI-1.1.1], [CLI-1.2.2]; docs/specifications/14-Python_API_Surfaces.md [PY-2] (`outputs_root` in Phase 1; failure metadata in Phase 2)
 Superseded by: none
 
 Class: 5, risky. It changes the public result contract of `weft run` and
 `weft result`, and the lifecycle of a persisted file (spilled output): who
 deletes it and when. Hardening and Tier-1 cross-family review apply. Promotion
-strategy B. This plan authorizes no implementation.
+strategy B. Implementation was approved by the owner’s implement-per-plan request;
+both phases are complete under the recorded choices and verification below.
 
 ## 1. Goal
 
@@ -316,7 +317,19 @@ Delivery:
   ```
 
   - The `result` field goes through the same size check and spill path as
-    success.
+    success. It is raw captured `RunnerOutcome.stdout`, including trailing
+    newlines and whitespace. Only truly empty stdout omits the row; success
+    `RunnerOutcome.value` stripping is unchanged.
+  - Before writing the failed envelope, measure its actual UTF-8 wire bytes
+    against the resolved broker maximum using
+    `weft/helpers/__init__.py::resolve_broker_max_message_size`. JSON escaping
+    and framing can exceed that maximum even when raw stdout fits the result
+    threshold. If an inline result makes the envelope too large, force that
+    same result through the existing spill helper and rebuild before the one
+    publication attempt. No guessed overhead reserve and no retry after an
+    ambiguous write. If framing/error alone cannot fit, report the existing
+    concrete publication failure; do not invent a large-error protocol or
+    silently shorten diagnostics.
   - Shared outbox decoding recognizes the reserved `failed_output` envelope. The collector treats it as failure evidence: it
     settles `failed` with that error and return code, never `completed`,
     with or without terminal proof.
@@ -324,9 +337,10 @@ Delivery:
     unchanged.
   - Empty stdout writes no row.
 - **Rendering:**
-  - **`weft run` (text):** prints `result`, with the error on stderr; exit
-    1.
-  - **`weft result` (text):** the same.
+  - **`weft run` (text):** delivers raw captured scalar stdout without an
+    extra newline (`nl=False`), with the error on stderr; exit 1.
+  - **`weft result` (text):** the same. A top-level aggregated list keeps
+    §3 B's explicit per-element newline presentation rule.
   - **`--json` on both:** `{"tid", "status": "failed", "result", "error",
     "return_code"}`.
   - **`result --all`:** reports the item as failed, with its `result` as
@@ -345,11 +359,13 @@ Delivery:
   decoded failure metadata instead of constructing `completed`; task-status
   queries and Monitor runtime classification use it even without the waiting
   collector. No renderer independently recognizes wire tags.
-  Exact `type: failed_output` plus the declared fields is a reserved transport
+  Any top-level object with `type: failed_output` is a reserved transport
   envelope, as `stream` already is; document this restriction and validate it
   at the decoder: require a nonzero integer return code, string error and
   present result; reject malformed reserved envelopes as protocol errors,
-  never ordinary successful output. Ordinary values remain ordinary values.
+  never ordinary successful output. Background evidence treats malformed rows as unavailable evidence without aborting observation or retirement. Ordinary values remain ordinary values.
+  For persistent and interactive tasks, inspect only the newest outbox row for explicit failure evidence. Earlier unread successful rows do not become final-result acknowledgment targets.
+  If stdout publication fails, record the delivery error and still publish the command's original failure and return code through its terminal path. Use the runner's actual live-streaming flag rather than only the spec request.
   When one result inspection aggregates prior successful persistent outputs
   and a failed output, preserve public-value order and mark that inspection
   failed with the envelope's error and return code. Do not turn the wrapper
@@ -583,10 +599,10 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 
 ### (Phase 2) [MF-2] — insert after the bullet beginning "error, timeout, or external control applies the configured reserved"
 
-Phase 2 text (`docs/specifications/05-Message_Flow_and_State.md`):
+Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 
 ```text
-- a command that exits non-zero with non-empty captured stdout, and is not live-streaming, writes one `failed_output` row to its outbox before its terminal failure is published: `{"type": "failed_output", "return_code", "error", "result"}`, where `result` passes through the same size check and spill path as a successful result. A result reader settles a `failed_output` row as failed with that error and return code, with or without terminal proof; it never settles it as completed. Empty stdout writes no row. stderr remains diagnostic, and a live-streaming command writes no second copy of its stdout frames. `failed_output` is a reserved, validated transport envelope; shared outbox decoding carries its failure metadata separately from its nested result through waiting collectors, all-results inspection, events, CLI and client adapters. `TaskResult` gains optional `return_code`. Pipeline edges inspect the envelope before any handoff or override-input processing and fail through their existing failure path instead of forwarding it. This rule does not wait for a stage-terminal event.
+- a command that exits non-zero with non-empty captured stdout, and is not live-streaming, writes one `failed_output` row to its outbox before its terminal failure is published: `{"type": "failed_output", "return_code", "error", "result"}`, where `result` passes through the same size check and spill path as a successful result. A result reader settles a `failed_output` row as failed with that error and return code, with or without terminal proof; it never settles it as completed. Only truly empty stdout writes no row; whitespace and trailing newlines are preserved. Measure the actual UTF-8 encoded failure envelope against the resolved broker maximum before publication; when JSON escaping/framing makes an inline result exceed that maximum, force the same result through the spill path and rebuild before its single write attempt. No guessed overhead reserve or post-write retry is introduced. Any top-level object with type `failed_output` is reserved. Malformed reserved rows fail result readers; background evidence treats them as unavailable evidence and does not abort observation or retirement. If stdout publication fails, the Consumer records that delivery error and still publishes the command's original failure and return code through its terminal path. Oversized framing/error alone remains a concrete publication failure without silent diagnostic truncation. stderr remains diagnostic, and a live-streaming command writes no second copy of its stdout frames. `failed_output` is a reserved, validated transport envelope; shared outbox decoding carries its failure metadata separately from its nested result through waiting collectors, all-results inspection, events, CLI and client adapters. `TaskResult` gains optional `return_code`. Pipeline edges inspect the envelope before any handoff or override-input processing and fail through their existing failure path instead of forwarding it. This rule does not wait for a stage-terminal event.
 ```
 
 ### (Phase 1) 02-TaskSpec `cleanup_on_exit` — replace the comment text "Delete task-owned scratch artifacts on completion."
@@ -607,10 +623,10 @@ Replacement (`docs/specifications/10-CLI_Interface.md`):
 
 ### (Phase 2) [CLI-1.2.2] — insert after the Phase 1 bullet above
 
-Phase 2 text (`docs/specifications/10-CLI_Interface.md`):
+Replacement (`docs/specifications/10-CLI_Interface.md`):
 
 ```text
-- a `failed_output` row prints its `result` to stdout and its error to stderr and exits 1; with `--json` it returns `{"tid", "status": "failed", "result", "error", "return_code"}`
+- a `failed_output` row delivers its raw captured scalar `result` to stdout without an extra newline, prints its error to stderr and exits 1; with `--json` it returns `{"tid", "status": "failed", "result", "error", "return_code"}`. With `--all`, references remain structured; failed items include failure metadata, text mode prints their errors to stderr, and any failed item makes the command exit 1.
 ```
 
 ### (Phase 1) [CLI-1.1.1] — insert after the paragraph beginning "Private worker-result protocol failures are rendered in user terms."
@@ -623,10 +639,10 @@ A waiting `weft run` renders results under the same rules as single-task `weft r
 
 ### (Phase 2) [CLI-1.1.1] — append to the Phase 1 paragraph above
 
-Phase 2 text (`docs/specifications/10-CLI_Interface.md`):
+Replacement (`docs/specifications/10-CLI_Interface.md`):
 
 ```text
-For a failed command, text mode prints its captured stdout before exiting 1 with the error on stderr, and `--json` returns `{"tid", "status": "failed", "result", "error", "return_code"}`.
+For a failed command, text mode delivers raw captured scalar stdout without an extra newline before exiting 1 with the error on stderr, and `--json` returns `{"tid", "status": "failed", "result", "error", "return_code"}`.
 ```
 
 Update nearby implementation mappings in 02 (`spec.cleanup_on_exit`), 05
@@ -655,10 +671,26 @@ Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
 In `docs/specifications/14-Python_API_Surfaces.md`, extend the public
 `TaskResult` contract beside its optional `reconciliation` field:
 
-Phase 2 text (`docs/specifications/14-Python_API_Surfaces.md`):
+Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
 
 ```text
-`TaskResult` additionally carries optional `return_code: int | None = None`. A decoded `failed_output` supplies its nonzero command return code, nested public value and error, and reports failed even without a terminal envelope. Existing result fields, reconciliation semantics and ordinary output decoding remain unchanged. Result-event projections preserve the same failure metadata; they do not expose the transport wrapper as the public value.
+- `TaskResult` and `RunExecutionResult` additionally carry optional `return_code: int | None = None`. A decoded `failed_output` supplies its nonzero command return code, nested public value and error, and reports failed even without a terminal envelope. Existing result fields, reconciliation semantics and ordinary output decoding remain unchanged. Result-event projections preserve the same failure metadata; they do not expose the transport wrapper as the public value.
+```
+
+### (Phase 2) Pipeline handoff — [PL-4.1]
+
+Replacement (`docs/specifications/12-Pipeline_Composition_and_UX.md`):
+
+```text
+Before handoff, edges decode reserved transport through the shared outbox decoder.
+A `failed_output` row fails the edge under its existing reserved policy before
+any move or override input. It emits no `queued_for_downstream` checkpoint and
+does not wait for a `stage_terminal` event ([MF-2]). This does not synthesize
+the upstream stage's terminal event.
+If the edge's failure event reaches the coordinator first, the pipeline records
+the edge as the failing child and preserves the command's error and return code
+in its diagnostic. Stages may already be launched; the guarantee is that failure
+output never becomes downstream input.
 ```
 
 ## 8. Tasks
@@ -883,6 +915,14 @@ Start only after the Phase 1 commit exists (`git log`).
          case.
      - (j) A failed command with more than 10 MB of stdout: the row's
        `result` is a reference, delivered and verified.
+     - (j2) Captured stdout below the result-size threshold but containing
+       enough newlines/quotes that its failure envelope exceeds the actual
+       broker maximum: the producer spills before publication, text delivery
+       preserves the raw stdout with exit 1, and JSON returns the reference.
+       This must fail if only inner-result size is checked.
+     - (j3) Raw captured stdout with a trailing newline and whitespace-only
+       stdout are preserved exactly; empty stdout publishes no result row.
+       Run/result JSON carry actual return_code for scalar failure.
    - **Preservation controls:**
      - (k) A live-streaming failed command: after producer closure, the
        stdout frames appear exactly once and no `failed_output` row is
@@ -1706,3 +1746,456 @@ and final plan closure requires its result and Phase 2's own gates. This keeps
 an immutable verification boundary while avoiding idle implementation time.
 The non-green fast observation is disclosed above; full all-tests SQLite
 covered that same contract at normal concurrency and passed.
+
+### Phase 2 start
+
+Phase 1 commit: `bfe496f00e9fd095a3e9c2132c4ec9b7ad7232d9`.
+User's implement-per-plan instruction approves recommended G1/G5. Phase 2
+starts after that local commit, with Phase 1's frozen PostgreSQL verification
+independent of these edits. Necessary plan clarifications: raw captured stdout
+has no new stripping or scalar newline framing; actual failure-envelope wire
+bytes must fit the real broker limit; both public result types carry return_code.
+
+Author Phase 2 proposed-delta fit account (before independent account):
+- Verdict: fits with strain.
+- Grounds: [WT-2a.2], [WT-2a.3], [WT-2a.7], [WT-2a.10], [WT-4] ownership,
+  shared functions, visible failure and explicit layer boundaries.
+- Refusal: no MonitorStore result truth ([ALT-WT-020]), no terminal polling
+  timer or second result lane ([ALT-WT-002], [ALT-WT-010]); no guessed wire
+  reserve or silent stdout-to-diagnostics conversion.
+- Prediction: a failed command's durable output row can never settle completed
+  even while terminal publication is held; pipeline edges reject it before
+  forwarding, and inline/oversized/escaping-heavy stdout remains deliverable.
+- Worst fit: raw outbox values now reserve another transport envelope shape.
+  The schema is explicit and shared by all readers; it is not a second
+  lifecycle store, but it widens the producer/consumer coordinated rollout.
+
+Phase 2 RED proofs: strict failed-output decoder tests failed on all four
+invalid return-code cases (DID NOT RAISE) and on preserving the wrapper instead
+of nested public value. Actual failed `weft run` lost stdout and JSON lacked
+`result`; both text and JSON probes failed before implementation. These seven
+probes passed after the decoder/producer/collector/rendering change. Held-terminal
+real command probes passed in one-shot and persistent modes, through result
+collection and event projection; they inspect task status before consumption.
+No timing budget or worker count changed.
+
+
+### Phase 2 execution: in-flight boundary review
+
+The independent plan review ran while Phase 2 implementation began, after the
+proposed author fit account was saved. This did not meet the requested
+review-before-code sequencing. No Phase 2 producer is in the Phase 1 commit:
+`git show bfe496f0:weft/core/tasks/consumer.py` contains no `failed_output`.
+The review's conditional split-rollout finding is therefore false.
+
+Accepted review changes: any top-level reserved type is validated; malformed
+rows fail readers but supply no background completion evidence; publication
+failure records a delivery diagnostic and preserves the command's own terminal
+failure; the runtime streaming flag controls replay suppression. Persistent
+failure evidence peeks only the newest row. Its acknowledgment target excludes
+earlier unread success rows, so the suggested complete exclusion of persistent
+failure evidence is declined. Edge-first attribution is accepted; no payload
+reaches downstream, even though stages may already have launched. Optional
+return_code/error fields retain the public field model already selected rather
+than adding a second failure tuple abstraction.
+
+The initial new evidence tests had test-authoring errors (positional arguments
+to a keyword-only helper, and expecting ValueError instead of the capability's
+CommandExecutionError wrapper). These were corrected without production changes.
+The streaming probe initially inspected the frame index `chunk` instead of its
+`data`; that assertion was corrected to the actual documented frame format.
+
+
+### Phase 2 independent proposed fit account
+
+# Theory-fit account: the Phase 2 `failed_output` diff
+
+I used only the theory text and the proposed diff. I took it as given that Phase 1 spill lifetime already exists.
+
+## 1. Verdict
+
+**Fits with strain.** The change keeps a failed command's stdout as a typed queue fact, so the failure stays where it happened. It also adds every consumer to one shared decoder at the same time. The strain is that a failure-bearing record now exists outside the single completion fact.
+
+## 2. Theory sections the change rests on
+
+- **[WT-1]** "Failures remain visible where they happened." Failed stdout is kept in the outbox instead of being dropped. Oversized framing becomes "a concrete publication failure without silent diagnostic truncation."
+- **[WT-2a.10] A Unix citizen.** Stdout stays data: whitespace is preserved, text mode adds no extra newline, the error goes to stderr and the outcome goes to the exit code.
+- **[WT-2a.2] Queues are the only durable truth.** The failure output is a row in the task's own outbox, not process memory.
+- **[WT-2a.9] One current contract and [WT-4.4] "Shared function, shared code."** Decoding is shared across collectors, all-results inspection, events, the CLI and the client. Nothing gets a private decoder.
+- **[WT-4.1] "A wake predicate reads facts."** Pipeline edges act on the outbox row itself, "before any handoff," and do "not wait for a stage-terminal event."
+- **[WT-4.2] "Measure; do not bake in inefficiency" and "Classical CS models over … magic budgets."** The check uses the actual UTF-8 encoded envelope size against the resolved broker maximum.
+- **[WT-2a.3] Forward-only lifecycle.** A reader never settles `failed_output` as completed.
+- **[WT-2a.7] Exactly once.** Each outcome gets exactly one write attempt.
+
+## 3. What it refuses, and the entry that refuses it
+
+- **Dual-shape readers.** `failed_output` is one validated envelope that every Weft-owned consumer updates to together. Refused by **[ALT-WT-012]**.
+- **A guessed overhead reserve.** This is the size-budget form of a guessed per-task charge. Refused by **[ALT-WT-001]**'s reasoning and the [WT-4.2] "magic budgets" clause.
+- **A post-write retry loop.** This is a symptom-patching fallback. Refused by the [WT-7] "Blunt local mechanism" falsifier.
+- **A pipeline that forwards a failure envelope as the next stage's input.** That would make a failure look like ordinary data.
+
+**ALT (the alternative this change rejects):** Leave failed stdout out of the outbox and carry it only in the terminal envelope on `ctrl_out`. That keeps one completion record. But the terminal envelope is size-bound, it needs a second spill path, and pipelines would have to wait for the stage-terminal event. The diff's choice is defensible, and it costs the tension in part 5.
+
+## 4. Falsifiable predictions
+
+1. A command that prints `"x\n"` and exits 3 behaves as follows:
+   - Text mode writes exactly `x\n` to stdout, puts the error on stderr and exits 1.
+   - `--json` returns `status:"failed"`, `result:"x\n"` and `return_code:3`.
+   - The Python `TaskResult.return_code` is 3.
+2. A pipeline whose stage 1 fails this way puts zero rows into stage 2's inbox, and stage 2 never launches.
+3. If the result fits inline before JSON escaping but not after, the result spills. The outbox holds exactly one row, and no oversize write is ever attempted.
+4. A command that exits non-zero with empty stdout, or a live-streaming command, writes no `failed_output` row.
+5. No public result surface ever exposes the `{"type":"failed_output"}` wrapper as a value.
+
+Any one of these failing under a black-box probe would show the change does not fit.
+
+## 5. Worst-fitting theory sentence and the tension
+
+**[WT-3], Completion fact:** "One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out`."
+
+The diff lets a result reader settle a task as failed "with or without terminal proof." It does this from a different row, in a different queue, written before the terminal record and not atomically with it.
+
+That makes two failure-bearing facts for one outcome. It brushes against:
+
+- "Address a fact to its observers," which assumes one terminal fact.
+- [WT-2a.13], which says task-owned terminal proof outranks other inference.
+
+The `failed_output` row is task-owned and the command has already exited non-zero, so this is not inference from absence. But the theory has no sentence for an outcome-bearing data row that comes before the completion fact.
+
+There is also a smaller strain on "piped stdin reaches the task as data." A reserved `type` value inside the outbox data channel could collide with a user result of the same shape, unless outbox rows are already framed in a way that rules this out. The diff alone doesn't show that.
+
+**Classification I'd propose:** a document deficiency, because [WT-3] should say whether pre-terminal, task-owned outcome rows are allowed. It is not a change deficiency.
+
+
+Author comparison: retain the reviewer’s `fits with strain` verdict. The data
+row records an actual command outcome; it does not synthesize or replace the
+single terminal publication. The tension with WT-3 is a contested classification,
+not an automatic theory edit. The prediction that the next stage never launches
+is rejected: pipeline stages already bootstrap eagerly. The falsifiable contract
+is zero downstream input. Reserved transport namespace is the explicit G5 owner
+choice, shared with existing stream envelopes. No theory amendment is smuggled
+into this change.
+
+Boundary verification: decoder RED 5 showed invalid return codes accepted and
+wrapper exposed as value; GREEN 5 after shared decoding. Run text/JSON RED 2
+showed missing stdout/result; GREEN 2 after adapters. Held real command probes
+initially showed status still running despite explicit failed-output evidence;
+GREEN 9 after precedence repair, covering task status, result collection and
+result events before terminal publication for one-shot and persistent commands.
+`/tmp/weft-output-phase2-boundaries2.log` passes 14 including malformed background
+evidence, persistent prior-output preservation, live-stream duplicate suppression
+and delivery-failure terminal preservation. Raw subprocess wire/background probes
+pass 13 in `/tmp/weft-output-phase2-wire-and-background.log`.
+
+
+Phase 2 verification harness repair: the existing connection-reuse watch test
+used a 2 s whole-generator deadline while the caller performed several external
+commits between yielded revisions. A controlled module-local clock advancing 3 s
+reproduced the original CommandTimeoutError on the original baseline despite a
+committed next revision. The repair uses no overall deadline for this non-time
+contract and permits at most one wait per requested revision, failing immediately
+on a stale-read loop. Existing deadline tests and runtime code remain unchanged.
+The full PostgreSQL observation module passes 24 in
+`/tmp/weft-output-watch-repair-pg.log`; the causal counterproof is
+`/tmp/weft-output-watch-baseline-counterproof.log`. This is a class 2 test-oracle repair under DOM-15 (no product contract or runtime
+change), recorded here and in the targeted commit. It is not increased timing slack or a claim that all earlier failures were pre-existing.
+
+The realtime event assembler was a second projection boundary: it discarded
+failure metadata after shared decoding. It now preserves failure/error and the
+actual context outputs_root. Existing exact payload expectations are updated
+with the exact resolved root, retaining full-dictionary assertions. No subset
+assertions hide shape changes. The first expanded module run had five failures
+only for this new required context field. The new held probe also checks that
+field for ordinary and realtime result events.
+
+
+### Phase 2 completed implementation author fit account
+
+1. Verdict: fits with strain. Commands preserve raw failed stdout as a typed
+outbox fact and keep the single task-owned terminal publication. Readers use
+one decoder and do not infer success from output presence.
+2. Governing theory: WT-1 visible failures, WT-2a.2 queue truth, WT-2a.3 forward
+lifecycle, WT-2a.10 Unix stdout/error/exit separation, WT-2a.13 task-owned proof,
+WT-4.1 facts before wake predicates, WT-4.2 measured wire size, WT-4.4 shared code.
+3. Refusals: no second successful payload on live streaming; no post-write
+retry after ambiguous publication; no guessed envelope budget; no downstream
+handoff or override of failed transport; no malformed reserved value as ordinary
+success; no full persistent-backlog status scan; no additional receipt queue.
+4. Falsifiable predictions: real nonzero commands preserve raw stdout bytes and
+return failed/code through run/result/all/peek/events/client projections; the
+held pre-terminal command reports failed on both task status and result events;
+the 4 KiB broker escaping probe writes one fitting spill reference with exact
+3,000 newline bytes; persistent evidence acknowledges only its newest failed row;
+readers reject malformed envelopes while background evidence returns unavailable;
+live streaming emits stdout once; output storage faults preserve the original
+command terminal failure. Pipeline probes forbid every downstream payload and
+handoff checkpoint under keep/clear and override, without claiming eager stages
+were never launched.
+5. Worst fit remains WT-3's single completion fact: a task-owned outcome-bearing
+row can be observed before its terminal envelope. The explicit row reports a real
+finished command and prevents existing outbox fallback from inventing completion.
+This is retained as a documented strain, not resolved by quietly revising theory.
+The reserved wire namespace is the owner's G5 choice. Files remain caller-owned
+under Phase 1's accepted lifetime rule. No plan log is part of an independent fit
+input.
+
+
+### Phase 2 independent completed implementation fit account
+
+# Theory-fit account: failed-command stdout (Phase 2) and its shared readers
+
+**1. Verdict: fits with strain.**
+The change keeps a failed command's stdout as a queue row. One shared decoder reads that row, and every Weft-owned reader changes in the same diff. That matches how Weft is built. The strain comes from timing and from duplicated logic. Readers now settle "failed" from an outbox row that is written *before* the terminal broadcast. The status path lets that row override live runtime evidence. And each reader folds the failure metadata with its own code.
+
+**2. Sections the change rests on**
+- **[WT-2a.10] A Unix citizen.** `weft run` now behaves like running the command itself: stdout goes to stdout, the error goes to stderr, and the exit code is non-zero.
+- **[WT-2a.2] Queues are the only durable truth.** The failure is a row in `T{tid}.outbox`, not process memory.
+- **[WT-2a.9] One current contract.** Producer, decoder, collectors, events, CLI, client and pipeline edge all change together.
+- **[WT-2a.11] One operator trust domain.** The envelope gets strict shape validation (`return_code` must be a non-zero int, not a bool), not a trust check.
+- **[WT-4.1] "Address a fact to its observers" and "A wake predicate reads facts."** The pipeline edge decides from the row it has already reserved. It does not wait for an asynchronous `stage_terminal` event.
+- **[WT-4.4] "Measure; do not bake in inefficiency."** The real UTF-8 envelope is measured against the resolved broker maximum before it is written.
+
+**3. What it refuses, and the entry that refuses it**
+- **[ALT-WT-012] (no backward-compatibility code):** no dual decoder or tolerance window. The one reserved shape is enforced everywhere, and a malformed row fails result readers.
+- **[ALT-WT-001] (no guessed budgets):** the spec text says "No guessed overhead reserve or post-write retry". It measures, then spills.
+- **[ALT-WT-009] (no shared-log scans):** waiters read the target's own outbox and `ctrl_out`, never `weft.log.tasks`.
+- **[ALT-WT-002] (no polling fallback):** the edge does not poll or wait for a stage-terminal event. It fails on the fact it already holds.
+
+**4. Falsifiable predictions**
+- **Held terminal publication:** if terminal publication is held, `task_status`, `await_task_result` and both event projections report `failed` with the command's return code from the outbox row alone.
+- **Stdout delivery fails:** the terminal envelope still carries the original return code and error.
+- **Live streaming:** a live-streaming failed command writes zero `failed_output` rows.
+- **Small broker limit:** with `MAX_MESSAGE_SIZE=4096` and 3000 newlines on stdout, exactly one outbox row of ≤4096 bytes is written, and its result is a spilled reference.
+- **Sharpest falsifier ([WT-2a.3], forward-only lifecycle):** for a persistent or interactive task, newest-row evidence assumes the producer writes nothing after a `failed_output` row. If a persistent Consumer survives a failed work item and writes a later row, status flips from `failed` back to non-evidence or running. That would break the forward-only lifecycle and falsify the docstring's premise.
+
+**5. Worst-fitting sentence and the tension**
+The worst fit is the [WT-3] Completion-fact row: *"One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out`."*
+
+The change adds a second record that carries the outcome. It is written earlier, on a different queue, and is not part of that atomic broadcast. Readers settle on it "with or without terminal proof". In `known_tid_evidence`, an outbox failure now beats live `runtime` evidence (`failure_only=runtime is not None`). So status can say `failed` while the process is alive and before the task's own `mark_failed` runs.
+
+This is defensible under [WT-2a.13], because the row is task-owned evidence, not a supervisor's guess. But the theory names one terminal record and now there are two. The theory should either say outbox failure envelopes are terminal-class task facts, or the record should move into the terminal broadcast.
+
+A second, smaller strain is with "Shared function, shared code" ([WT-4.4]). `failure = (decoded.error, decoded.return_code)` is folded separately in `_result_wait`, `events`, `result.py` and `task_evidence`, so the decoder is shared but the settlement rule is copied.
+
+Outside the boundary: the `watch_task_status` timing test edit in `test_control_observation_connections.py` has nothing to do with failed stdout and should be classified separately.
+
+You asked for no tool calls, so I wrote this account directly from the theory and diff. I did not create a plan file or use the plan-mode exit step.
+
+
+Author comparison: retain fits with strain and the previously recorded WT-3
+tension. A command has actually returned nonzero before its output fact is
+published; live wrapper-process evidence cannot turn that finished command into
+success. A failed persistent work item raises out of the worker path, selects
+failed state, and does not resume ordinary work. Held persistent probes release
+terminal publication and assert that failure exception. A later successful row
+would violate the existing forward-only task lifecycle, not be an allowed retry.
+
+The shared decoder owns the reserved namespace, shape validation, value extraction
+and failure metadata. Each reader still owns its own aggregation/projection state;
+the few assignments that fold metadata do not add different interpretations.
+Further extraction is declined as unforced indirection. This disagreement is
+preserved as a contested classification, not a suppressed fit result. The watch
+test change is separately identified as the causal verification-harness repair
+above. It makes no product behavior change.
+
+Final pre-freeze checks: all owned result/realtime/event-connection/output-fidelity
+modules pass 149 (`/tmp/weft-output-phase2-owned-final2.log`). Full repository
+Ruff passes, format checks 643 files, mypy passes 496 source files, and specification
+tests pass 165. `bin/check-doc-paths` and `git diff --check` pass. These are the
+stable `phase2-full-*-stable.log` runs after final source edits. Source and tests
+are frozen before broad acceptance; only this execution record may advance.
+
+
+Phase 2 sensitivity controls ran only in an isolated tree. Disabling the actual
+wire-size fallback made the 4 KiB probe fail: the attempted envelope was 6,095
+bytes, the broker refused it, and the required single outbox row was absent
+(`/tmp/weft-output-phase2-wire-disabled.log`). Restoring the old realtime event
+assembler made both held modes fail with CommandTimeoutError instead of emitting
+a failed result (`/tmp/weft-output-phase2-realtime-disabled.log`). Restored source
+passes all three controls in 2.93 s (`/tmp/weft-output-phase2-mutations-restored.log`).
+No acceptance-tree source or test changed for these experiments. The frozen
+output-only tree's own Ruff, format 641, mypy 496, spec 165 and docpath gates pass.
+
+
+### Phase 2 completed-work review and frozen-suite corrections
+
+Independent completed-work review returned PASS with five nonblocking P2s
+(`/tmp/weft-output-phase2-final-review.out`). Accepted: remove the now-unused
+controlled-clock patch from the final connection-reuse test while preserving its
+causal counterproof; replace the background result test's raw polling loop with
+`watch_task_status`; document bulk failure exit 1 and text diagnostics; add the
+coordinated-rollout warning; map `render_failed_result` in CLI specs and keep the
+Python contract addition in its list. Optional edge prechecks, ensure_ascii
+changes and tuple-helper extraction are declined without a measured need.
+
+The first frozen full SQLite suite failed four tests (6,704 passed, 60 skipped,
+272.32 s). Two exact realtime-event dictionaries omitted the required actual
+outputs_root, so they now assert the exact added context. Two function worker
+handoff failures acquired command-only JSON fields through an over-broad terminal
+return-code fallback. This was a real regression, not an allowed failure-schema
+change. A shared `command_failure_return_code` checks the terminal task's validated
+command type; typed failed_output still supplies its code directly. Both result
+collectors use that boundary, preserving command empty-stdout failure metadata
+without changing function or agent failure shapes. A first focused correction
+run exposed a missing import, fixed before revalidation. The function-based
+wrapper_lost fixture retains its original no-return_code result shape.
+
+The corrected result/realtime/event-connection/output-fidelity/ops/CLI-run modules
+pass (`/tmp/weft-output-phase2-corrected-owned.log`); all three background watcher
+probes pass (`/tmp/weft-output-phase2-background-watch.log`). The expanded module
+run began before the test-only watcher substitution, so broad immutable acceptance
+is rerun after that final test edit. Corrected Ruff, format643 and mypy 496 pass.
+The completed implementation fit account remains fits with strain: the command-
+only metadata correction narrows scope to the approved contract and changes no
+ownership or theory classification. Final scoped code review will include it.
+
+
+Author completed-fit reaffirmation for the refrozen implementation: verdict
+remains fits with strain, with the same governing theory, refusals, falsifiers
+and WT-3 tension as the five-part account above. The shared command-only terminal
+return-code rule restores the approved exclusion of function and agent failure
+schema changes. It does not add outcome authority or a new projection rule.
+Removing an unused test clock leaves the connection-reuse/freshness oracle in
+the wait budget and revision assertions; the counterproof remains recorded.
+The background test now uses the existing queue-driven watcher. No source/test
+edits remain in flight. This author account was saved before the refrozen
+independent completed-fit account is requested.
+
+
+### Refrozen independent completed-fit account
+
+# Theory-fit account: Phase 2 failed-command stdout and its shared readers
+
+## 1. Verdict
+
+**Fits, with strain.**
+
+The change keeps a fact that was being lost: a failed command's stdout. It records that fact as a queue row, `failed_output` in `T{tid}.outbox`. Every reader decodes it through one shared decoder, and producers and readers change together. The strain is in two places:
+
+- The outbox row now acts as a second failure fact, separate from the terminal broadcast.
+- Each reader still collects the failure metadata in its own code.
+
+## 2. Sections the change rests on
+
+- **[WT-2a.2] and "Queues carry facts".** The stdout and the return code live only as a queue row. No reader touches a task's private state ([ALT-WT-020]).
+- **[WT-2a.10] A Unix citizen.** Raw stdout goes to stdout with no extra newline. The error goes to stderr. A non-zero exit carries the outcome.
+- **[WT-2a.9] and "No compatibility code".** The CHANGELOG says to upgrade producers, readers and pipeline edges together, and adds no fallback decoder.
+- **"Shared function, shared code".** `process_outbox_message` is the single decoder. `render_failed_result` serves both `run` and `result`.
+- **"Measure; do not bake in inefficiency".** The encoded size of the envelope is measured against the broker maximum. There is no guessed overhead reserve.
+- **[WT-2a.11] and "No over-armoring".** The envelope gets a strict shape check. Stdout publication is best effort: it logs on failure and never replaces the command's real error.
+- **[WT-2a.6] and the event-driven model.** The pipeline edge decides from the row it has already reserved. It does not wait for a `stage_terminal` event.
+
+## 3. What it refuses, and the entry that refuses it
+
+- **Refused:** dual-shape readers that would treat an old-style row as success during a transition. **Entry: [ALT-WT-012]**, which reopens only when Weft has external users with a compatibility promise. That condition has not fired.
+- **Also refused:** a fixed allowance for JSON framing overhead and a retry after a failed write. This follows the measure-don't-guess reasoning of [ALT-WT-001] and [WT-4.2].
+- **Also refused:** making the pipeline edge wait for a `stage_terminal` event. The edge fails from the reserved row instead.
+
+## 4. Falsifiable predictions
+
+1. **A crash between the two writes.** Suppose the Consumer is killed after the `failed_output` write but before ctrl_out publication. Then `weft status`, `weft result` and `events` all report `failed` with the child's return code. No downstream stage queue receives the row.
+2. **Liveness is unaffected.** `known_tid_evidence` now prefers outbox failure over runtime evidence. Even so, `LivenessMonitor` will not delete `weft.state.tasks.<tid>` while `(pid, create_time)` is alive. `ps` can show a live process that status calls `failed`, and that is allowed, because failure is not proof of death ([WT-2a.13]). If reap or retirement treats the row as proof of exit, the change breaks [WT-2a.13].
+3. **Wire size.** No `failed_output` row ever exceeds the resolved `MAX_MESSAGE_SIZE`.
+4. **Upgrade order.** A reader one release older reports such a task as `completed`. This is the break the CHANGELOG declares.
+
+## 5. The sentence that fits worst, and the tensions
+
+The worst fit is the Completion fact row in [WT-3]: *"One serialized terminal record published atomically to `weft.log.tasks` and `T{tid}.ctrl_out`."* Readers now settle a command as failed from an outbox row "with or without terminal proof". That row is written before the atomic broadcast, and status reads prefer it over runtime evidence. So in practice there are two task-owned terminal facts, with a window in which only one exists.
+
+Both facts come from the same task, so [WT-2a.13]'s "task-owned terminal proof" survives. The theory does not say whether an outbox envelope counts as terminal proof. That gap may be a document deficiency.
+
+Two smaller tensions:
+
+- **Duplicated collection.** The spec says shared interpretation belongs to `process_outbox_message`. But `_CollectedResult`, `_peek_result_value`, `_read_outbox_task_result` and `peek_final_outbox_evidence` each repeat the `if decoded.return_code is not None` step. This strains "Two code paths for one responsibility is a design defect". It may be a change deficiency.
+- **Reserved name inside user values.** Any top-level object whose `type` is `failed_output` is reserved. A Python function that returns such an object therefore has its result unreadable or read as a failure. This follows the existing precedent of `large_output` and `stream`. It still sits uneasily with "It is just a message", since a transport tag now lives in the user's own value space.
+
+
+Author comparison: keep fits with strain. The existing contested classifications
+remain explicit: outcome-bearing data is not a second terminal broadcast, and
+per-reader aggregation state is distinct from the shared transport interpretation.
+Reserved value-space collision remains the approved G5 namespace decision, not
+an undocumented compatibility promise. No theory text changes.
+
+The additional liveness falsifier is accepted: command failure is not proof that
+the wrapper process is dead. This implementation changes result/status evidence,
+not liveness identity checks or retirement ownership. Read-only review of the
+pruning path confirms that an outbox-only result without a terminal log stays
+report-only unless force is explicit. Existing live-process retention protections
+remain in force; this code read is not represented as a new black-box liveness
+proof. A later observation that retirement treats the row as death would be a
+separate concrete violation to fix, not a reason to claim that uncertainty away.
+
+
+Refrozen scoped code review reports no blocker: all five accepted P2 findings
+and the command-only JSON regression are resolved
+(`/tmp/weft-output-phase2-scoped-review.out`). Its remaining observation about
+empty-stdout background failures is an existing-path limitation, not changed
+silently. A real background command exiting 7 with truly empty stdout still
+returns exit 1, no JSON body and the command error on stderr under `result --json`
+(`/tmp/weft-output-empty-background-observation2.log`). No failed_output row exists
+in that case; the normative CLI addition applies to such a row, and ordinary
+empty-stdout behavior remains unchanged. Waiting run, which already has the
+accepted command spec, carries the optional code in its failure JSON. No claim
+is made that every failure kind now uses the new stdout-bearing JSON shape.
+The first diagnostic attempt used the success-only harness completion helper,
+which correctly raised for work_failed; the successful observation used the
+existing status watcher. Neither experiment changed source or tests.
+
+
+Refrozen full SQLite all-tests gate passes: 6,708 passed, 60 skipped in 247.83 s
+(`/tmp/weft-output-phase2-final2-all.log`). All four prior failures are resolved,
+including the unchanged function failure JSON key set. The 649-file source/test
+manifest is unchanged. Exact frozen cheap gates pass: Ruff; format 641; mypy 496;
+specifications 165; doc paths. Fast-default SQLite, full PostgreSQL and the
+additional integration/extension roots still require completion before closure.
+
+
+Refrozen fast-default SQLite gate passes: 6,704 passed, 49 skipped in 235.72 s
+(`/tmp/weft-output-phase2-final2-fast.log`). The earlier interactive poll-count
+failure and STOP case did not recur in either final SQLite gate. This observation
+does not establish their cause or claim they were fixed. The full PostgreSQL
+wrapper is running against the same frozen source; supplementary roots remain
+pending. No acceptance source or test changed between these gates.
+
+
+Refrozen full PostgreSQL tests gate passes: 6,656 passed, 40 skipped in 427.35 s
+(`/tmp/weft-output-phase2-final2-pg.log`), using the normal `bin/pytest-pg --all tests` wrapper and unchanged concurrency. This also closes the earlier Phase 1
+PostgreSQL watch-test acceptance gap with the causal harness repair included.
+There are no PostgreSQL failures in this final full run. Integration and extension
+roots are checked separately because pyproject's default testpaths includes only
+`tests`; plan closure still awaits those results.
+
+
+### Completion record
+
+Supplemental roots pass with unchanged normal concurrency: SQLite 385 passed,
+5 skipped in 9.42 s (`/tmp/weft-output-phase2-final2-extensions-sqlite.log`);
+PostgreSQL 386 passed, 4 skipped in 27.95 s
+(`/tmp/weft-output-phase2-final2-extensions-pg.log`). The four shared skips are
+explicit opt-in real Microsandbox tests; SQLite also skips the PostgreSQL-only
+target test. These are existing test requirements, not a new skip list.
+
+Final full gates are green: SQLite fast 6,704/49 skipped; SQLite all 6,708/60
+skipped; PostgreSQL all 6,656/40 skipped, plus the supplemental roots above.
+Ruff, format 641, mypy 496, spec 165, doc paths and whitespace checks pass. The
+649-file acceptance source/test manifest is unchanged, and all scoped source
+and tests match the main worktree byte for byte. Full PostgreSQL closes the
+Phase 1 local-checkpoint verification-overlap deviation. The original rejected,
+mixed-snapshot and failed runs remain recorded; no timeout, worker count,
+assertion bound or runtime policy was weakened to obtain the final results.
+
+Both phases' spec deltas, nearby implementation mappings, README and Unreleased
+CHANGELOG are promoted. Cross-family completed code review is PASS; its scoped
+follow-up has no blocker. Author and independent completed-fit accounts remain
+explicitly fits with strain, with contested classifications preserved rather
+than a silent theory amendment. The owner-written WT-7 key was already accepted
+in the owning conversation; it was not invented during implementation.
+
+Phase 1 is commit `bfe496f00e9fd095a3e9c2132c4ec9b7ad7232d9`. Phase 2 is the
+targeted commit that carries this completion record, the completed index row,
+and its matching spec/code/test changes. Unrelated manager, custody, governance
+and plan work is excluded. No push, release or deployment is part of this work.
+Rollback remains the coordinated code revert in §10; producer/reader rollout
+must remain coordinated, and spill files remain caller-owned. No new deferred
+implementation item is created. The prior intermittent STOP/poll observations
+did not recur in final gates; their causes are not claimed resolved.

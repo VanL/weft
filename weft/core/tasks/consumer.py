@@ -39,6 +39,7 @@ from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message, serialize_result
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import AgentSessionProtocol, RunnerHandle
+from weft.helpers import resolve_broker_max_message_size
 
 from .base import BaseTask, TaskControlPolicy, TaskWorkerResult
 from .interactive import InteractiveTaskMixin
@@ -304,7 +305,12 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._register_outcome_runtime(outcome)
         metrics_payload = self._extract_metrics(outcome)
         agent_execution = self._build_agent_execution_payload(outcome.value)
-        self._ensure_outcome_ok(outcome, timestamp, metrics_payload)
+        self._ensure_outcome_ok(
+            outcome,
+            timestamp,
+            metrics_payload,
+            live_command_streaming=live_command_streaming,
+        )
         if live_command_streaming:
             result_bytes = self._serialized_result_bytes(outcome.value)
         else:
@@ -897,33 +903,66 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return total_bytes
         return self._emit_single_output(result)
 
-    def _emit_single_output(self, result: Any) -> int:
+    def _prepare_output(
+        self, result: Any, *, spill: bool = True
+    ) -> tuple[str | dict[str, Any], bytes, int]:
+        """Encode, size and optionally spill one output through one path [MF-2]."""
         serialized = serialize_result(result)
         try:
-            encoded_result = serialized.encode("utf-8")
+            encoded = serialized.encode("utf-8")
         except UnicodeEncodeError:
-            encoded_result = serialized.encode("utf-8", errors="replace")
-
+            encoded = serialized.encode("utf-8", errors="replace")
         limit_mb = getattr(
             self.taskspec.spec, "output_size_limit_mb", DEFAULT_OUTPUT_SIZE_LIMIT_MB
         )
         try:
-            limit_bytes = max(int(float(limit_mb) * 1024 * 1024), 1)
+            limit = max(int(float(limit_mb) * 1024 * 1024), 1)
         except (TypeError, ValueError):
-            limit_bytes = DEFAULT_OUTPUT_SIZE_LIMIT_MB * 1024 * 1024
+            limit = DEFAULT_OUTPUT_SIZE_LIMIT_MB * 1024 * 1024
+        value = (
+            self._spill_large_output(encoded)
+            if spill and len(encoded) > limit
+            else serialized
+        )
+        return value, encoded, limit
 
-        outbox_queue = self._queue(self._queue_names["outbox"])
-        if getattr(self.taskspec.spec, "stream_output", False):
-            return self._write_streaming_result(
-                outbox_queue, encoded_result, limit_bytes
-            )
-        if len(encoded_result) > limit_bytes:
-            reference = self._spill_large_output(encoded_result)
-            outbox_queue.write(json.dumps(reference))
-            return len(encoded_result)
+    def _emit_single_output(self, result: Any) -> int:
+        streaming = self.taskspec.spec.stream_output
+        value, encoded, limit = self._prepare_output(result, spill=not streaming)
+        outbox = self._queue(self._queue_names["outbox"])
+        if streaming:
+            return self._write_streaming_result(outbox, encoded, limit)
+        outbox.write(serialize_result(value))
+        return len(encoded)
 
-        outbox_queue.write(serialized)
-        return len(encoded_result)
+    def _emit_failed_command_output(
+        self, outcome: RunnerOutcome, *, live_command_streaming: bool
+    ) -> None:
+        """Preserve stdout with failure evidence before terminal publication [MF-2]."""
+        if (
+            self.taskspec.spec.type != "command"
+            or outcome.returncode in (None, 0)
+            or not outcome.stdout
+            or live_command_streaming
+        ):
+            return
+        try:
+            value, encoded, _limit = self._prepare_output(outcome.stdout)
+            envelope = {
+                "type": "failed_output",
+                "return_code": outcome.returncode,
+                "error": outcome.error or "Target execution failed",
+                "result": value,
+            }
+            wire = json.dumps(envelope)
+            if isinstance(value, str) and len(
+                wire.encode("utf-8")
+            ) > resolve_broker_max_message_size(self._broker_config):
+                envelope["result"] = self._spill_large_output(encoded)
+                wire = json.dumps(envelope)
+            self._queue(self._queue_names["outbox"]).write(wire)
+        except (BrokerError, OSError, ValueError, RuntimeError) as output_error:
+            logger.error("Failed to publish command stdout: %s", output_error)
 
     def _extract_metrics(self, outcome: RunnerOutcome) -> dict[str, Any] | None:
         metrics_payload: dict[str, Any] | None = None
@@ -1020,6 +1059,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         outcome: RunnerOutcome,
         timestamp: int | None,
         metrics_payload: dict[str, Any] | None,
+        *,
+        live_command_streaming: bool = False,
     ) -> None:
         """Raise on non-ok outcomes and transition task state accordingly.
 
@@ -1094,6 +1135,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             )
 
         if outcome.status == "error":
+            self._emit_failed_command_output(
+                outcome, live_command_streaming=live_command_streaming
+            )
             error_exc = RuntimeError(outcome.error or "Target execution failed")
             self.taskspec.mark_failed(
                 error=str(error_exc), return_code=outcome.returncode

@@ -544,6 +544,21 @@ mean the downstream stage has already reserved the payload or started work. For
 stage-output edges, upstream stage completion should come from the separate
 stage terminal owner event, not be inferred from the edge alone.
 
+Before handoff, edges decode reserved transport through the shared outbox decoder.
+A `failed_output` row fails the edge under its existing reserved policy before
+any move or override input. It emits no `queued_for_downstream` checkpoint and
+does not wait for a `stage_terminal` event ([MF-2]). This does not synthesize
+the upstream stage's terminal event.
+If the edge's failure event reaches the coordinator first, the pipeline records
+the edge as the failing child and preserves the command's error and return code
+in its diagnostic. Stages may already be launched; the guarantee is that failure
+output never becomes downstream input.
+
+_Implementation mapping_: `weft/core/tasks/pipeline.py::PipelineEdgeTask._handle_work_message`
+checks `weft/core/outbox.py::process_outbox_message` before `_handoff_payload`;
+`PipelineEdgeTask._fail_edge` retains existing failure disposition.
+Plan: [Result output fidelity](../plans/2026-11-05-result-output-fidelity-plan.md).
+
 This conservative contract keeps recovery and debugging legible.
 
 Example edge check-in payload:

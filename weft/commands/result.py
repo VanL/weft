@@ -151,6 +151,7 @@ def _read_outbox_task_result(
     try:
         stream_buffer: list[str] = []
         values: list[Any] = []
+        failure: tuple[str | None, int] | None = None
         observed_timestamps: list[int] = []
         complete_prefix_length = 0
         iterator = queue.peek_generator(with_timestamps=True)
@@ -164,6 +165,8 @@ def _read_outbox_task_result(
                 )
                 if final and decoded is not None:
                     append_public_value(values, decoded, show_stderr=False)
+                    if decoded.return_code is not None:
+                        failure = (decoded.error, decoded.return_code)
                     complete_prefix_length = len(observed_timestamps)
         value = aggregate_public_outputs(values)
         if value is not None and not peek:
@@ -180,11 +183,12 @@ def _read_outbox_task_result(
     stdout, stderr = task_evidence.split_stdio(value)
     return TaskResult(
         tid=tid,
-        status="completed",
+        status="failed" if failure is not None else "completed",
         value=value,
         stdout=stdout,
         stderr=stderr,
-        error=None,
+        error=failure[0] if failure is not None else None,
+        return_code=failure[1] if failure is not None else None,
         outputs_root=str(context.outputs_dir.resolve()),
     )
 
@@ -232,6 +236,11 @@ def _task_result_event(result: TaskResult) -> TaskEvent:
             "stdout": result.stdout,
             "stderr": result.stderr,
             "error": result.error,
+            **(
+                {"return_code": result.return_code}
+                if result.return_code is not None
+                else {}
+            ),
             **(
                 {"outputs_root": result.outputs_root}
                 if result.outputs_root is not None

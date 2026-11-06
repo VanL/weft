@@ -51,6 +51,7 @@ from weft.helpers import (
 from .run import (
     consume_run_session,
     read_run_stdin,
+    render_failed_result,
     render_run_description,
     render_run_result,
 )
@@ -292,6 +293,15 @@ def _render_task_result(
     value = (
         result.stderr if error_stream and result.stderr is not None else result.value
     )
+    if result.status == "failed" and result.return_code is not None:
+        return render_failed_result(
+            tid=result.tid,
+            value=value,
+            error=result.error,
+            return_code=result.return_code,
+            outputs_root=result.outputs_root,
+            json_output=json_output,
+        )
     if result.status == "completed":
         if json_output:
             typer.echo(
@@ -332,6 +342,47 @@ def _render_task_result(
     message = result.error or f"weft result: task {result.tid} failed"
     typer.echo(message, err=True)
     return 124 if result.status == "timeout" else 1
+
+
+def _render_all_task_results(
+    results: tuple[commands.TaskResult, ...], *, json_output: bool, error_stream: bool
+) -> int:
+    """Render a bulk inspection without dereferencing results [CLI-1.2.2]."""
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "tid": result.tid,
+                            "result": result.value,
+                            **(
+                                {
+                                    "status": "failed",
+                                    "error": result.error,
+                                    "return_code": result.return_code,
+                                }
+                                if result.status == "failed"
+                                else {}
+                            ),
+                        }
+                        for result in results
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+    else:
+        for result in results:
+            value = (
+                result.stderr
+                if error_stream and result.stderr is not None
+                else result.value
+            )
+            typer.echo(f"{result.tid}: {value}")
+            if result.status == "failed":
+                typer.echo(f"{result.tid}: {result.error}", err=True)
+    return 1 if any(result.status == "failed" for result in results) else 0
 
 
 def _manager_json_record(snapshot: commands.ManagerSnapshot) -> dict[str, Any]:
@@ -2327,6 +2378,7 @@ def result_command(
                             error=payload.get("error"),
                             reconciliation=payload.get("reconciliation"),
                             outputs_root=payload.get("outputs_root"),
+                            return_code=payload.get("return_code"),
                         )
                         exit_code = _render_task_result(
                             result,
@@ -2337,30 +2389,13 @@ def result_command(
             raise typer.Exit(code=exit_code)
         if all_results:
             results = cast(tuple[commands.TaskResult, ...], outcome)
-            if json_output:
-                typer.echo(
-                    json.dumps(
-                        {
-                            "results": [
-                                {
-                                    "tid": result.tid,
-                                    "result": result.value,
-                                }
-                                for result in results
-                            ]
-                        },
-                        ensure_ascii=False,
-                    )
+            raise typer.Exit(
+                code=_render_all_task_results(
+                    results,
+                    json_output=json_output,
+                    error_stream=error_stream,
                 )
-            else:
-                for result in results:
-                    value = (
-                        result.stderr
-                        if error_stream and result.stderr is not None
-                        else result.value
-                    )
-                    typer.echo(f"{result.tid}: {value}")
-            return
+            )
         exit_code = _render_task_result(
             cast(commands.TaskResult, outcome),
             json_output=json_output,

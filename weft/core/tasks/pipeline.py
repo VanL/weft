@@ -2,7 +2,7 @@
 
 Spec references:
 - docs/specifications/12-Pipeline_Composition_and_UX.md [PL-3.2], [PL-4.1], [PL-4.2], [PL-5.3]
-- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-4], [MF-6]
+- docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3], [MF-4], [MF-6]
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from weft._constants import (
     WEFT_PIPELINES_STATE_QUEUE,
 )
 from weft.core.control_messages import ControlRequest, encode_control_message
+from weft.core.outbox import process_outbox_message
 from weft.core.pipelines import (
     CompiledPipelineEdge,
     CompiledPipelineStage,
@@ -161,9 +162,16 @@ class PipelineEdgeTask(BaseTask):
             self._requeue_reserved_message(timestamp, context)
             return
 
-        del message
         self._set_activity("working")
         try:
+            # Failure publication may precede the stage-terminal event. Check
+            # the shared transport meaning before either move or override.
+            # Spec: [MF-2], [PL-4.1].
+            _final, decoded = process_outbox_message(message, [], emit_stream=False)
+            if decoded is not None and decoded.return_code is not None:
+                raise RuntimeError(
+                    decoded.error or f"Command exited with {decoded.return_code}"
+                )
             self._handoff_payload(timestamp)
         except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-341] exception
             # An ordinary handoff failure is the edge result; control-flow

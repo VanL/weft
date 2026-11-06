@@ -4,6 +4,16 @@
 
 ### Changed
 
+- Failed non-streaming commands retain captured stdout, including whitespace,
+  and report failure plus the child return code through result, event, run and
+  client surfaces. Text mode adds no newline to scalar failed stdout. A typed
+  `failed_output` outbox envelope prevents success fallback and pipeline handoff;
+  actual encoded wire size also triggers spilling when JSON framing exceeds the
+  broker maximum ([MF-2], [CLI-1.1.1], [CLI-1.2.2], [PY-2]).
+  `result --all` reports failed items on stderr in text mode and exits 1 if any
+  item failed. Upgrade producers, readers and pipeline edges together: old
+  readers treat the new failure envelope as ordinary successful output.
+
 - Spill files survive task exit and result consumption; retaining or removing
   them is the caller's responsibility. Each output has its own exclusive
   numbered file, with ordinary umask-based permissions. Prefer an explicit
