@@ -41,7 +41,7 @@ from weft.core.taskspec import TaskSpec
 from weft.helpers import closing_queue_iterator
 
 from .base import BaseTask, TaskControlPolicy
-from .multiqueue_watcher import QueueMessageContext
+from .multiqueue_watcher import QueueMessageContext, QueueRuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,13 @@ class PipelineEdgeTask(BaseTask):
                 self._handle_reserved_message
             ),
         }
+
+    def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+        """Ignore non-control queues as wait activity while paused."""
+
+        if getattr(self, "_paused", False):
+            return config.name == self._queue_names["ctrl_in"]
+        return super()._queue_counts_as_wait_activity(config)
 
     def _handle_work_message(
         self, message: str, timestamp: int, context: QueueMessageContext

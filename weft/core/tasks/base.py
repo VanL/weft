@@ -1765,6 +1765,8 @@ class BaseTask(MultiQueueWatcher, ABC):
         if command == CONTROL_RESUME:
             if self._paused:
                 self._paused = False
+                self._pending_messages_precheck_confirmed = True
+                self._strategy.notify_activity()
                 self._report_state_change(
                     event="control_resume", message_id=context.timestamp
                 )

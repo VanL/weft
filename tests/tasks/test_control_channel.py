@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -728,6 +731,236 @@ def test_ping_includes_runtime_summary_from_runner_plugin(
     assert ping_response["runtime"]["metadata"]["container_id"] == "abc123"
     assert ping_response["runtime"]["metadata"]["memory_usage_mb"] == 12.5
     assert _read_all(ctrl_out) == []
+
+
+def test_paused_consumer_leaves_inbox_unreserved_and_resumes_on_next_turn(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paused Consumer must not reserve/requeue inbox items and must re-probe on the turn after RESUME [CC-2.1], [CC-2.4], [WT-4.1]."""
+
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(unique_tid, "tests.tasks.sample_targets:echo_payload")
+    task = Consumer(db_path, spec)
+    try:
+        ctrl_in = make_queue(spec.io.control["ctrl_in"])
+        inbox = make_queue(spec.io.inputs["inbox"])
+        reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+        outbox = make_queue(spec.io.outputs["outbox"])
+        reply_to, replies = _requester_queue(make_queue, unique_tid, "paused-probe")
+
+        inbox_q = task._queues[spec.io.inputs["inbox"]].queue
+        reserved_q = task._queues[f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}"].queue
+        orig_inbox_move = inbox_q.move_one
+        orig_reserved_move = reserved_q.move_one
+        inbox_moves = 0
+        reserved_moves = 0
+
+        def count_inbox_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal inbox_moves
+            inbox_moves += 1
+            return orig_inbox_move(*args, **kwargs)
+
+        def count_reserved_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reserved_moves
+            reserved_moves += 1
+            return orig_reserved_move(*args, **kwargs)
+
+        monkeypatch.setattr(inbox_q, "move_one", count_inbox_move)
+        monkeypatch.setattr(reserved_q, "move_one", count_reserved_move)
+
+        ctrl_in.write(encode_control_message("PAUSE", request_id="pause-1"))
+        task.process_once()
+        assert task._paused is True
+
+        ctrl_in.write(
+            encode_control_message(
+                "PING", request_id="ping-paused-0", reply_to=reply_to
+            )
+        )
+        task.wait_for_activity(timeout=0.02)
+        task.process_once()
+
+        pongs = [json.loads(msg) for msg in _read_all(replies)]
+        assert len(pongs) == 1
+        assert pongs[0]["request_id"] == "ping-paused-0"
+        assert pongs[0]["paused"] is True
+
+        inbox.write(json.dumps({"payload": "work"}))
+        original_entry = inbox.peek_one(with_timestamps=True)
+        assert original_entry is not None
+
+        task._pending_messages_precheck_confirmed = True
+        task.process_once()
+
+        ctrl_in.write(
+            encode_control_message(
+                "PING", request_id="ping-paused-1", reply_to=reply_to
+            )
+        )
+        task.wait_for_activity(timeout=0.02)
+        task.process_once()
+
+        pongs = [json.loads(msg) for msg in _read_all(replies)]
+        assert len(pongs) == 1
+        assert pongs[0]["request_id"] == "ping-paused-1"
+        assert pongs[0]["paused"] is True
+        assert inbox_moves == 0
+        assert reserved_moves == 0
+        assert reserved.peek_one() is None
+        assert inbox.peek_one(with_timestamps=True) == original_entry
+
+        ctrl_in.write(encode_control_message("RESUME", request_id="resume-1"))
+        task.wait_for_activity(timeout=0.02)
+        task.process_once()  # RESUME turn
+        assert task._paused is False
+        assert inbox.peek_one(with_timestamps=True) == original_entry
+
+        # Delay the periodic inactive probe so only RESUME's immediate re-probe can activate inbox.
+        task._next_inactive_probe_at = time.monotonic() + 60.0
+        task.process_once()  # Immediate next turn reserves and starts work without advancing the clock
+        assert inbox_moves == 1
+        assert inbox.peek_one() is None
+
+        _drive_task_until(task, lambda: outbox.peek_one() is not None)
+        assert outbox.read_one() == "work"
+    finally:
+        task.cleanup()
+
+
+def test_busy_consumer_leaves_second_item_in_inbox_and_processes_it_on_next_turn_after_completion(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Busy Consumer must leave queued follow-up work in inbox and immediately re-probe after completion [CC-2.1], [WT-4.1]."""
+
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:signal_ready_and_wait_for_release",
+    )
+    spec = spec.model_copy(
+        update={"spec": spec.spec.model_copy(update={"persistent": True})}
+    )
+    task = Consumer(db_path, spec)
+    try:
+        ctrl_in = make_queue(spec.io.control["ctrl_in"])
+        inbox = make_queue(spec.io.inputs["inbox"])
+        reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+        outbox = make_queue(spec.io.outputs["outbox"])
+        reply_to, replies = _requester_queue(make_queue, unique_tid, "busy-probe")
+
+        ready_1 = tmp_path / "ready_1"
+        release_1 = tmp_path / "release_1"
+        ready_2 = tmp_path / "ready_2"
+        release_2 = tmp_path / "release_2"
+
+        inbox.write(
+            json.dumps(
+                {
+                    "kwargs": {
+                        "ready_path": str(ready_1),
+                        "release_path": str(release_1),
+                    }
+                }
+            )
+        )
+        task.process_once()
+        assert task._active_work_in_flight is True
+        drive_until(
+            ready_1.exists,
+            bool,
+            step=lambda: None,
+            wait=lambda timeout: time.sleep(min(timeout, 0.02)),
+            timeout=5.0,
+            wait_slice=0.02,
+        )
+
+        # Simulate an inactive-queue state while item 1 is running so item 2's
+        # immediate start after item 1 completes depends on _handle_active_work_result.
+        task._active_queues = []
+        task._next_inactive_probe_at = time.monotonic() + 60.0
+
+        inbox_q = task._queues[spec.io.inputs["inbox"]].queue
+        reserved_q = task._queues[f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}"].queue
+        orig_inbox_move = inbox_q.move_one
+        orig_reserved_move = reserved_q.move_one
+        inbox_moves = 0
+        reserved_moves = 0
+
+        def count_inbox_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal inbox_moves
+            inbox_moves += 1
+            return orig_inbox_move(*args, **kwargs)
+
+        def count_reserved_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reserved_moves
+            reserved_moves += 1
+            return orig_reserved_move(*args, **kwargs)
+
+        monkeypatch.setattr(inbox_q, "move_one", count_inbox_move)
+        monkeypatch.setattr(reserved_q, "move_one", count_reserved_move)
+
+        inbox.write(
+            json.dumps(
+                {
+                    "kwargs": {
+                        "ready_path": str(ready_2),
+                        "release_path": str(release_2),
+                    }
+                }
+            )
+        )
+        second_entry = inbox.peek_one(with_timestamps=True)
+        assert second_entry is not None
+
+        ctrl_in.write(
+            encode_control_message("PING", request_id="ping-busy-1", reply_to=reply_to)
+        )
+        task.process_once()
+
+        pongs = [json.loads(msg) for msg in _read_all(replies)]
+        assert len(pongs) == 1
+        assert pongs[0]["request_id"] == "ping-busy-1"
+        assert inbox_moves == 0
+        assert reserved_moves == 0
+        assert inbox.peek_one(with_timestamps=True) == second_entry
+
+        # Release item 1 and wait for its worker result to arrive on the local queue.
+        release_1.write_text("go", encoding="utf-8")
+        drive_until(
+            task._has_pending_worker_results,
+            bool,
+            step=lambda: None,
+            wait=task.wait_for_activity,
+            timeout=5.0,
+            wait_slice=0.02,
+        )
+        task.process_once()  # Finalizes item 1 in _handle_active_work_result
+        assert outbox.read_one() == "done"
+        assert task._active_work_in_flight is False
+        assert inbox.peek_one(with_timestamps=True) == second_entry
+
+        # Next reactor turn must immediately probe and reserve item 2 without advancing the clock.
+        task.process_once()
+        assert inbox_moves == 1
+        assert inbox.peek_one() is None
+        assert task._active_work_in_flight is True
+
+        release_2.write_text("go", encoding="utf-8")
+        _drive_task_until(task, lambda: outbox.peek_one() is not None)
+        assert outbox.read_one() == "done"
+        assert reserved.peek_one() is None
+    finally:
+        for release_file in (
+            tmp_path / "release_1",
+            tmp_path / "release_2",
+        ):
+            release_file.write_text("go", encoding="utf-8")
+        task.cleanup()
 
 
 @pytest.fixture

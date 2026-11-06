@@ -4023,3 +4023,58 @@ def test_watcher_ignores_invalid_ambient_broker_config(
     run_single_drain(watcher)
 
     assert seen == ["payload"]
+
+
+def test_update_active_queues_evicts_queue_when_wait_activity_predicate_turns_false(
+    broker_env: BrokerEnv,
+) -> None:
+    """Already-active queues whose wait-activity predicate turns False must be evicted [CC-2.1], [WT-4.1]."""
+
+    db_path, make_queue = broker_env
+    ctrl_queue = make_queue("T900.ctrl_in")
+    work_queue = make_queue("T900.inbox")
+    ctrl_seen: list[str] = []
+    work_seen: list[str] = []
+
+    class GatedWatcher(MultiQueueWatcher):
+        def __init__(self) -> None:
+            self.work_enabled = True
+            super().__init__(
+                queue_configs={
+                    ctrl_queue.name: {
+                        "handler": lambda message, *_args: ctrl_seen.append(message),
+                        "mode": QueueMode.READ,
+                        "priority": QUEUE_PRIORITY_INTERNAL,
+                    },
+                    work_queue.name: {
+                        "handler": lambda message, *_args: work_seen.append(message),
+                        "mode": QueueMode.READ,
+                        "priority": QUEUE_PRIORITY_NORMAL,
+                    },
+                },
+                db=db_path,
+                persistent=True,
+            )
+
+        def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
+            if not self.work_enabled and config.name == work_queue.name:
+                return False
+            return super()._queue_counts_as_wait_activity(config)
+
+    watcher = GatedWatcher()
+    try:
+        ctrl_queue.write("ctrl-1")
+        work_queue.write("work-1")
+        watcher._pending_messages_precheck_confirmed = True
+        watcher._update_active_queues()
+        assert set(watcher._active_queues) == {ctrl_queue.name, work_queue.name}
+
+        watcher.work_enabled = False
+        run_single_drain(watcher)
+
+        assert watcher._active_queues == []
+        assert ctrl_seen == ["ctrl-1"]
+        assert work_seen == []
+        assert work_queue.peek_one() == "work-1"
+    finally:
+        watcher.stop()

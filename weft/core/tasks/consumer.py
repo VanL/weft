@@ -163,9 +163,11 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         }
 
     def _queue_counts_as_wait_activity(self, config: QueueRuntimeConfig) -> bool:
-        """Ignore already-reserved work as fresh wait activity while active."""
+        """Ignore non-control queues as wait activity while active or paused."""
 
-        if getattr(self, "_active_work_in_flight", False):
+        if getattr(self, "_active_work_in_flight", False) or getattr(
+            self, "_paused", False
+        ):
             return config.name == self._queue_names["ctrl_in"]
         return super()._queue_counts_as_wait_activity(config)
 
@@ -582,9 +584,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             if self._direct_work_waiting:
                 self._direct_work_value = committed_value
         finally:
-            self._active_work_in_flight = False
-            self._active_raw_message = None
-            self._active_message_timestamp = None
+            self._finish_active_work_custody()
+
+    def _finish_active_work_custody(self) -> None:
+        self._active_work_in_flight = False
+        self._active_raw_message = None
+        self._active_message_timestamp = None
+        if not self.should_stop and not self._paused:
+            self._pending_messages_precheck_confirmed = True
+            self._strategy.notify_activity()
 
     def _handle_consumer_worker_event(self, event: _ConsumerWorkerEvent) -> None:
         if event.kind == "worker_started":

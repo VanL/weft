@@ -1915,3 +1915,74 @@ def test_command_stdout_survives_zero_copy_pipeline_handoff(
         assert decoded.value == (
             text if downstream_kind == "command" else {"data": text}
         )
+
+
+def test_paused_pipeline_edge_leaves_inbox_unreserved_and_forwards_on_turn_after_resume(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paused PipelineEdgeTask must not reserve/requeue inbox items and must forward on the turn after RESUME [PL-2.3], [WT-4.1]."""
+
+    db_path, make_queue = broker_env
+    tid = str(time.time_ns())
+    edge = PipelineEdgeTask(db_path, _entry_edge_spec(tid))
+    try:
+        ctrl_in = make_queue(edge._queue_names["ctrl_in"])
+        inbox = make_queue(edge._queue_names["inbox"])
+        reserved = make_queue(edge._queue_names["reserved"])
+        target = make_queue("P1775000000000000000.pipeline-to-stage")
+
+        inbox_q = edge._queues[edge._queue_names["inbox"]].queue
+        reserved_q = edge._queues[edge._queue_names["reserved"]].queue
+        orig_inbox_move = inbox_q.move_one
+        orig_reserved_move = reserved_q.move_one
+        inbox_moves = 0
+        reserved_moves = 0
+
+        def count_inbox_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal inbox_moves
+            inbox_moves += 1
+            return orig_inbox_move(*args, **kwargs)
+
+        def count_reserved_move(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reserved_moves
+            reserved_moves += 1
+            return orig_reserved_move(*args, **kwargs)
+
+        monkeypatch.setattr(inbox_q, "move_one", count_inbox_move)
+        monkeypatch.setattr(reserved_q, "move_one", count_reserved_move)
+
+        ctrl_in.write(encode_control_message("PAUSE", request_id="edge-pause"))
+        edge.process_once()
+        assert edge._paused is True
+
+        payload = json.dumps({"payload": "hello"})
+        inbox.write(payload)
+        original_entry = inbox.peek_one(with_timestamps=True)
+        assert original_entry is not None
+
+        edge._pending_messages_precheck_confirmed = True
+        edge.process_once()
+        edge.process_once()
+
+        assert inbox_moves == 0
+        assert reserved_moves == 0
+        assert reserved.peek_one() is None
+        assert inbox.peek_one(with_timestamps=True) == original_entry
+        assert target.peek_one() is None
+
+        ctrl_in.write(encode_control_message("RESUME", request_id="edge-resume"))
+        edge.wait_for_activity(timeout=0.02)
+        edge.process_once()  # RESUME turn
+        assert edge._paused is False
+        assert inbox.peek_one(with_timestamps=True) == original_entry
+
+        edge._next_inactive_probe_at = time.monotonic() + 60.0
+        edge.process_once()  # Immediate next turn forwards without advancing the clock
+        assert inbox_moves == 1
+        assert inbox.peek_one() is None
+        assert reserved.peek_one() is None
+        assert target.read_one() == payload
+        assert edge.taskspec.state.status == "completed"
+    finally:
+        edge.cleanup()

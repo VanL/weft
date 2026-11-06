@@ -1392,7 +1392,8 @@ class MultiQueueWatcher(BaseWatcher):
         still_active: list[str] = [
             name
             for name in self._active_queues
-            if self._queue_has_pending(self._queues[name].queue)
+            if self._queue_counts_as_wait_activity(self._queues[name])
+            and self._queue_has_pending(self._queues[name].queue)
         ]
 
         now = time.monotonic()
