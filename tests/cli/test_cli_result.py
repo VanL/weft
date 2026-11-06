@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -271,7 +272,7 @@ def test_result_stream_attaches_to_running_command_and_emits_live_output(
     assert _wait_for_path(ready_path), (
         "streaming command did not publish readiness marker"
     )
-    assert _wait_for_stream_chunk(weft_harness, tid, "first\n"), (
+    assert _wait_for_stream_chunk(weft_harness, tid, f"first{os.linesep}"), (
         "streaming command readiness marker appeared before the stdout chunk was "
         "broker-visible"
     )
@@ -557,11 +558,11 @@ def test_result_stream_keeps_live_stderr_off_stdout(
 
     try:
         assert _wait_for_path(ready_path)
-        assert _wait_for_stream_chunk(weft_harness, tid, "live stdout\n")
+        assert _wait_for_stream_chunk(weft_harness, tid, f"live stdout{os.linesep}")
         assert _wait_for_stream_chunk(
             weft_harness,
             tid,
-            "live stderr\n",
+            f"live stderr{os.linesep}",
             stream="stderr",
             control=interactive,
         )

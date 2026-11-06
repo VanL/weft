@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sys
 import threading
@@ -273,7 +274,7 @@ def test_interactive_command_streams_output(
     combined_stdout = "".join(
         m.get("data", "") for m in stdout_messages if m.get("stream") == "stdout"
     )
-    assert "echo: hello\n" in combined_stdout
+    assert f"echo: hello{os.linesep}" in combined_stdout
     # Final envelope should be marked final
     assert stdout_messages[-1]["final"] is True
 
@@ -377,7 +378,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
             lambda messages: any(
                 message.get("type") == "stream"
                 and message.get("stream") == stream
-                and message.get("data") == "ready\n"
+                and message.get("data") == f"ready{os.linesep}"
                 for message in messages
             ),
             step=task.process_once,
@@ -390,7 +391,7 @@ def _assert_quiet_interactive_stream_wakes_reactor(
         assert any(
             message.get("type") == "stream"
             and message.get("stream") == stream
-            and message.get("data") == "ready\n"
+            and message.get("data") == f"ready{os.linesep}"
             for message in messages
         )
         assert task._interactive_session.is_alive()
@@ -496,7 +497,8 @@ def test_production_driver_delivers_quiet_output_only_through_notify(
 
     def delivered() -> bool:
         return any(
-            json.loads(raw).get("data") == "ready\n" for raw in outbox.peek_generator()
+            json.loads(raw).get("data") == f"ready{os.linesep}"
+            for raw in outbox.peek_generator()
         )
 
     def observe_output() -> None:
@@ -776,7 +778,7 @@ def test_interactive_shutdown_waits_for_exit_callback(
             lambda: [
                 raw
                 for raw in outbox.peek_generator()
-                if json.loads(raw).get("data") == "ready\n"
+                if json.loads(raw).get("data") == f"ready{os.linesep}"
             ],
             bool,
             step=task.process_once,
@@ -1039,9 +1041,11 @@ def test_interactive_command_control_unwinds_before_terminal(
             assert stderr_finals[0] < terminal_timestamp
             assert stdout_finals[0] < terminal_timestamp
             assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
-            assert any(row.get("data") == "final stderr\n" for row, _ in rows)
             assert any(
-                json.loads(raw).get("data") == "final stdout\n"
+                row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
+            )
+            assert any(
+                json.loads(raw).get("data") == f"final stdout{os.linesep}"
                 for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
             )
         # The status, not a new emission ledger, prevents a repeated command

@@ -1320,7 +1320,7 @@ def test_root_exit_with_inherited_pipe_and_no_deadlines_completes_within_drain_b
         owner, result = _start_owner(run)
         outcome = _owner_outcome(owner, result)
         assert outcome.status == "ok"
-        assert outcome.stdout == "ROOT\n"
+        assert outcome.stdout == f"ROOT{os.linesep}"
         root_exit = float((tmp_path / "root-exit").read_text())
         assert returned_at[0] - root_exit < (
             subprocess_runner.SUBPROCESS_STREAM_DRAIN_TIMEOUT + 0.5
