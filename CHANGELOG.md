@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.122] - 2026-11-06
 
 ### Changed
 
@@ -34,6 +34,9 @@
   ([CLI-1.2.1]), and `weft_django` reuses the request-owned client in task
   detail views and delegates `snapshot()`/`terminal_snapshot()` on bound
   deferred submissions ([DJ-10.1], [DJ-13.2]).
+- PostgreSQL test-container cleanup now removes the image's anonymous data
+  volume with the container, preventing repeated test runs from leaking full
+  temporary database clusters.
 
 ## [0.9.121] - 2026-11-05
 
