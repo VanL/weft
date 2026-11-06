@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.121] - 2026-11-05
 
 ### Changed
 
@@ -36,10 +36,6 @@
   Top-level lists containing a reference-shaped element render element by
   element; ordinary lists keep JSON rendering ([CLI-1.1.1], [CLI-1.2.2]).
 
-## [0.9.121] - 2026-11-05
-
-### Changed
-
 - Ordinary status and Manager list/status expose scoped standing dispatch
   refusals from complete Manager task-state snapshots, with ending evidence,
   lossless causal IDs, owner-indexed lane counts and bounded human samples.
@@ -49,6 +45,12 @@
 - Ambiguous launch custody holds only ancestry-dependent work; unrelated work
   remains eligible, while real checkpoint publication failures still gate
   dispatch ([MA-1.8], [MF-5]).
+- Explicit operator read or delete of an ambiguous reserved launch ends its
+  pending custody and releases the derived ancestry hold. This escape hatch
+  does not infer task death, completion or failure, does not replay the old
+  request, and does not prevent an already-started process from continuing;
+  resubmit with a fresh TID only after judging duplicate effects ([MA-1.8],
+  [MF-5], [OBS.6]).
 - Live wrapper death publishes one supervisor failure with its OS exit code,
   including when resident retirement runs before local cleanup ([MA-1.6a]).
 

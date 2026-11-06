@@ -24,6 +24,7 @@ from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.sample_targets import signal_ready_and_wait_for_release, wait_for_file
 from weft._constants import resolve_runtime_config
+from weft.commands.queue import read_queue
 from weft.core.manager import (
     ManagedChild,
     Manager,
@@ -203,6 +204,102 @@ def test_unknown_launch_custody_is_durable_and_cannot_requeue_or_spin(
     assert not manager._manager_owned_work_pending()
     manager._retire_scheduler_residents()
     assert request.child_spec.tid in manager._scheduler_residents
+
+
+@pytest.mark.parametrize("disposition", ["read", "delete"])
+def test_operator_consumption_releases_ambiguous_launch_and_old_checkpoint(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    disposition: str,
+) -> None:
+    """Operator consumption ends pending custody, not the unknown task's life."""
+    manager = recovery_manager
+    context = weft_harness.context
+    request = _reserve_and_checkpoint(manager, weft_harness)
+    tid = request.child_spec.tid
+    assert tid is not None and request.runtime_identity is not None
+    assert request.reserved_queue is not None and request.source_queue is not None
+    assert request.message_timestamp is not None
+    source = manager._queue(request.source_queue)
+    reserved = manager._queue(request.reserved_queue)
+    body = reserved.peek_one(exact_timestamp=request.message_timestamp)
+    assert isinstance(body, str)
+    payload = json.loads(body)
+    payload["submitted_by"] = submission_lineage(request.runtime_identity)
+    child_id = int(source.write(json.dumps(payload)))
+    manager._refresh_scheduler_evidence()
+    manager._classify_family_requests()
+    assert manager._peek_family_candidate() is None
+    manager._assess_dispatch_refusals()
+    manager._admission_refresh_after = 0
+    manager._refresh_scheduler_evidence()
+    manager._assess_dispatch_refusals()
+    old = read_task_state_snapshot(context, manager.tid)
+    assert old is not None
+    assert any(
+        item["reason"] == "launch_receipt_missing" and item["subjects"] == [tid]
+        for item in old[1]["dispatch_refusals"]["items"]
+    )
+
+    if disposition == "read":
+        entries = read_queue(
+            context, request.reserved_queue, message_id=request.message_timestamp
+        )
+        assert len(entries) == 1 and entries[0].message == body
+    else:
+        assert reserved.delete(message_id=request.message_timestamp)
+    assert reserved.peek_one(exact_timestamp=request.message_timestamp) is None
+    with context.broker() as broker:
+        assert not manager_launch_custody_pending(old[1], broker=broker)
+    manager._admission_refresh_after = 0
+    manager._refresh_scheduler_evidence()
+    manager._assess_dispatch_refusals()
+    assert tid not in manager._scheduler_residents
+    assert tid not in manager._held_launch_feedback
+    ready = manager._peek_family_candidate()
+    assert ready is not None and ready.request_id == child_id
+    snapshot = read_task_state_snapshot(context, manager.tid)
+    assert snapshot is not None
+    assert tid not in snapshot[1]["scheduler_frontiers"]["residents"]
+    assert not any(
+        tid in item.get("subjects", [])
+        for item in snapshot[1]["dispatch_refusals"]["items"]
+    )
+
+    # A successor can still see an older predecessor checkpoint. Restore that
+    # exact obligation with a positively stale owner identity, not a live peer.
+    old[1]["runtime_handle"]["observations"]["host_processes"][0]["create_time"] -= 100
+    manager._unregister_manager(status="stopped")
+    with context.queue(task_state_queue_name(manager.tid), persistent=True) as state:
+        state.write(json.dumps(old[1]))
+    with context.queue("successor.ids", persistent=True) as ids:
+        successor_tid = str(ids.generate_timestamp())
+    successor = Manager(
+        context.broker_target,
+        build_manager_spec(context, successor_tid, idle_timeout_override=0),
+        config=manager._manager_context().config,
+    )
+    try:
+        successor._refresh_scheduler_evidence()
+        assert successor._admission_bootstrapped
+        assert tid not in successor._scheduler_residents
+        assert tid not in successor._held_launch_feedback
+        ready = successor._peek_family_candidate()
+        assert ready is not None and ready.request_id == child_id
+        snapshot = read_task_state_snapshot(context, successor.tid)
+        assert snapshot is not None
+        assert tid not in snapshot[1]["scheduler_frontiers"]["residents"]
+        assert not any(
+            tid in item.get("subjects", [])
+            for item in snapshot[1]["dispatch_refusals"]["items"]
+        )
+        assert source.peek_one(exact_timestamp=request.message_timestamp) is None
+        with context.queue(f"T{tid}.ctrl_out", persistent=True) as terminal:
+            assert terminal.peek_one() is None
+        assert read_task_state_snapshot(context, tid) is None
+    finally:
+        successor.stop(join=False)
+        successor.cleanup()
 
 
 @pytest.mark.parametrize(

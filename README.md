@@ -938,6 +938,56 @@ If a task crashes mid-work, the message remains in reserved for manual recovery 
 - Multi-message tasks should use the inbox/reserved message ID (timestamp).
 - Recommended composite key: `tid:message_id`.
 
+### Recovering an ambiguous Manager launch
+
+A Manager can die after checkpointing a reserved spawn request but before leaving
+process evidence. No naturally occurring incident has been observed as of
+2026-11-05; a deliberate kill probe reproduced the window. The automatic fence
+proposal is [withdrawn](docs/plans/2026-11-05-launch-claim-fence-plan.md): its
+complexity is not justified by the evidence. Use this operator escape hatch.
+
+1. In the original project/context and backend configuration, run
+   `weft status --json` and `weft task status TID --json`. A standing
+   `launch_receipt_missing` refusal names the exact task/message ID and reserved
+   queue. Use that queue, which may belong to an old Manager. Inspect output,
+   process evidence and external effects to decide whether the work may have run.
+2. Save and take the exact request. Set these variables from the refusal and
+   use fresh filenames:
+
+   ```bash
+   TID='replace-with-task-id'
+   RESERVED_QUEUE='replace-with-exact-reserved-queue'
+   weft queue peek "$RESERVED_QUEUE" -m "$TID" > request-before-read.json
+   weft queue read "$RESERVED_QUEUE" -m "$TID" > recovered-request.json
+   ```
+
+   `read` returns the spawn payload and claims it. Ordinary pending custody
+   ends; the Manager clears the no-receipt hold on reconciliation, including
+   after restart. Claimed physical residue does not keep the hold alive.
+   Existing descendants become eligible again, without asserting their parent
+   succeeded. If they must not resume yet, stop the Manager before consuming
+   the request and restart it after reviewing that work.
+3. If you want to discard the saved request, exact deletion is also available:
+
+   ```bash
+   weft queue delete "$RESERVED_QUEUE" -m "$TID"
+   ```
+
+   This physically deletes the row; it is optional after a successful read.
+   Do not delete the whole queue or edit Manager checkpoints. Verify that the
+   refusal disappears with `weft status --json` after reconciliation.
+4. If repetition is appropriate, reconstruct the original CLI invocation or a
+   reviewed task spec from the saved payload and use ordinary `weft run` to get
+   a **new TID**. The spawn envelope is not itself a standalone task spec. Review
+   its input/wiring and submit from a shell outside the original task/pipeline;
+   do not move the old request back to the spawn queue preserving its TID.
+   Record the old/new TIDs and your decision with the saved request.
+
+Consumption is deliberate disposition, not proof of non-execution or process
+termination. The old outcome may remain unknown, and repeating work can repeat
+external effects. Untouched pending requests remain held and are never replayed
+merely because process evidence is missing.
+
 Configurable task policies (`keep`, `clear`) control reserved queue behavior on errors.
 Task-level `requeue` is no longer accepted by spec validation or task construction;
 update stored specs and spawn payloads to use `keep` or `clear`. The Manager

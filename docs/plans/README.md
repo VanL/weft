@@ -3,17 +3,20 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 43 plan files in this directory.
+There are currently 45 plan files in this directory.
 
 ## Curation Policy
 
 - Keep plans that explain shipped behavior, current public surfaces, current extensions, or current release/test tooling.
 - Remove plans that were superseded, exploratory only, audit-only, roadmap-only, process-only, or not implemented as written.
+- Explicitly withdrawn proposals may remain as inactive owner-decision records; they are not implementation authority or backlog.
 - Do not use this directory as a backlog. New unimplemented work should live here only while it is the active implementation slice, then be completed or removed during the next curation pass.
 - Specs stay normative. Plans are historical execution records for how shipped behavior got there.
 
 ## Status Taxonomy
 
+- `withdrawn`: an unimplemented proposal explicitly declined by the owner; retained
+  rationale only, not an active slice, completion claim or implementation authority.
 - `completed`: the planned slice landed and still describes current behavior or tooling.
 - `draft`: the plan is an active implementation slice or meta-plan that has
   not landed yet, or a retained historical draft whose `Superseded by` column
@@ -28,13 +31,15 @@ There are currently 43 plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-11-05-command-stdout-preservation-plan.md`](./2026-11-05-command-stdout-preservation-plan.md) | Command Stdout Preservation | `completed` | none |
+| [`2026-11-05-operator-consumption-of-launch-custody-plan.md`](./2026-11-05-operator-consumption-of-launch-custody-plan.md) | Operator Consumption Ends Pending Launch Custody | `completed` | none |
 | [`2026-11-05-result-output-fidelity-plan.md`](./2026-11-05-result-output-fidelity-plan.md) | Result Output Fidelity: Spilled Output Survives Its Reference, Failed Commands Keep Their Stdout | `completed` | none |
-| [`2026-11-05-linux-libc-pidfd-binding-plan.md`](./2026-11-05-linux-libc-pidfd-binding-plan.md) | Linux pidfd Binding Through libc When Python Omits the Wrapper | `promoted` | none |
+| [`2026-11-05-launch-claim-fence-plan.md`](./2026-11-05-launch-claim-fence-plan.md) | Launch-Claim Fence: Settle Ambiguous Launches With Positive Evidence (withdrawn: insufficient evidence for complexity) | `withdrawn` | none |
 | [`2026-11-05-scoped-ambiguous-launch-dispatch-plan.md`](./2026-11-05-scoped-ambiguous-launch-dispatch-plan.md) | Scoped Dispatch Around Ambiguous Launches | `completed` | none |
 | [`2026-11-05-manager-published-refusals-plan.md`](./2026-11-05-manager-published-refusals-plan.md) | Manager Published Refusals | `completed` | none |
 | [`2026-11-05-wrapper-lost-settlement-idempotence-plan.md`](./2026-11-05-wrapper-lost-settlement-idempotence-plan.md) | Idempotent Wrapper-Lost Settlement | `completed` | none |
 | [`2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md`](./2026-11-05-program-theory-behaviour-and-refusal-revision-plan.md) | Program Theory Revision: Published Refusals, Wake Predicates, Observable Quiet, and Behaviour Probes | `completed` | none |
 | [`2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md`](./2026-11-05-manager-wake-idle-clock-and-settlement-repairs-plan.md) | Manager Wake, Idle Clock, and Launch Settlement Repairs | `completed` | none |
+| [`2026-11-05-linux-libc-pidfd-binding-plan.md`](./2026-11-05-linux-libc-pidfd-binding-plan.md) | Linux pidfd Binding Through libc When Python Omits the Wrapper | `promoted` | none |
 | [`2026-11-04-context-level-service-singletons-plan.md`](./2026-11-04-context-level-service-singletons-plan.md) | Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime | `completed` | none |
 | [`2026-11-02-system-stop-ordering-plan.md`](./2026-11-02-system-stop-ordering-plan.md) | System STOP: Tasks, Then Internal Services, Then the Manager | `completed` | none |
 | [`2026-11-02-test-suite-structure-plan.md`](./2026-11-02-test-suite-structure-plan.md) | Test Suite: Release-Tool Tests and Structural Flakiness (owner decision first) | `draft` | none |

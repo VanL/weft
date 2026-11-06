@@ -14,6 +14,7 @@ ALLOWED_STATUSES = frozenset(
         "completed",
         "draft",
         "promoted",
+        "withdrawn",
     }
 )
 

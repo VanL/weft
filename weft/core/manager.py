@@ -2713,7 +2713,7 @@ class Manager(ServiceTask):
         )
 
     def _ack_launch_custody(self, tid: str, *, broker: Any) -> None:
-        """Exact ACK before dropping its checkpoint reference [MANAGER.11]."""
+        """Confirm pending absence before dropping the custody reference [MANAGER.11]."""
         evidence = self._scheduler_residents.get(tid)
         self._scheduler_undurable.discard(tid)
         self._family_scheduler.release(tid)
@@ -2722,12 +2722,7 @@ class Manager(ServiceTask):
             return
         queue_name, request_id = evidence["reserved_queue"], evidence["request_id"]
         broker.delete_message_ids(queue_name, [request_id])
-        if (
-            broker.peek_one(
-                queue_name, exact_timestamp=request_id, include_claimed=True
-            )
-            is not None
-        ):
+        if broker.peek_one(queue_name, exact_timestamp=request_id) is not None:
             raise RuntimeError("launch acknowledgement not confirmed")
         for key in ("source_queue", "reserved_queue", "request_id"):
             evidence.pop(key, None)
@@ -3010,7 +3005,6 @@ class Manager(ServiceTask):
                 queue_name,
                 with_timestamps=True,
                 after_timestamp=cursor,
-                include_claimed=True,
             )
         ) as rows:
             page = list(
@@ -3204,7 +3198,7 @@ class Manager(ServiceTask):
             return None
 
     def _retire_scheduler_residents(self, tids: Iterable[str] | None = None) -> None:
-        """Retire paths only with positive scoped process exit [MF-5]."""
+        """Release consumed no-receipt custody or positively exited processes [MF-5]."""
         changed = False
         for tid in tuple(self._scheduler_residents if tids is None else tids):
             evidence = self._scheduler_residents.get(tid)
@@ -3214,22 +3208,30 @@ class Manager(ServiceTask):
                 evidence is None
                 or tid in self._active_child_launches
                 or tid in self._child_processes
+                or (
+                    evidence.get("host_processes")
+                    and self._scheduler_evidence_live(tid, evidence)
+                )
+                or (
+                    not evidence.get("host_processes")
+                    and evidence.get("reserved_queue") is None
+                )
             ):
                 continue
-            if not evidence.get("host_processes") or self._scheduler_evidence_live(
-                tid, evidence
-            ):
-                continue
+            processes = evidence.get("host_processes")
             with self._get_connected_queue().get_connection() as broker:
                 if evidence.get("reserved_queue") is not None:
                     request_id = evidence["request_id"]
                     body = broker.peek_one(
                         evidence["reserved_queue"],
                         exact_timestamp=request_id,
-                        include_claimed=True,
                         with_timestamps=False,
                     )
                     if body is not None:
+                        if not processes:
+                            # A pending ambiguous request still owns custody;
+                            # read/delete is the operator's explicit escape hatch.
+                            continue
                         route = self._unhanded_launch_ctrl_out_name(
                             cast(str, body), request_id
                         )
@@ -4775,10 +4777,10 @@ class Manager(ServiceTask):
         return True
 
     def _reserved_queue_has_any_message(self, queue_name: str) -> bool:
-        """Return whether a reserved queue has any row, including claimed rows."""
+        """Return whether a reserved queue has any pending row."""
 
         try:
-            return self._queue(queue_name).peek_one(include_claimed=True) is not None
+            return self._queue(queue_name).peek_one() is not None
         except (BrokerError, OSError, RuntimeError):
             logger.debug(
                 "Failed to inspect reserved queue %s before leadership yield",
@@ -6335,7 +6337,7 @@ class Manager(ServiceTask):
         reserved = self._queue(reserved_queue)
         if message_timestamp is None:
             with closing_queue_iterator(
-                reserved.peek_generator(with_timestamps=True, include_claimed=True)
+                reserved.peek_generator(with_timestamps=True)
             ) as rows:
                 ids = [stamp for _body, stamp in cast(Iterator[tuple[str, int]], rows)]
         else:

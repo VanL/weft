@@ -790,7 +790,7 @@ upstream lifecycle and describes intent, not weft's recorded tokens —
 the next bullet states the statuses this repo actually allows and gates.
 
 - **The status vocabulary is closed, and the index is gated.** This
-  repo's valid statuses are exactly `completed`, `draft`, and `promoted`,
+  repo's valid statuses are exactly `completed`, `draft`, `promoted`, and `withdrawn`,
   declared in the `## Status Taxonomy` section of `docs/plans/README.md`
   and enforced by `tests/specs/test_plan_metadata.py`: every plan carries a
   normalized three-key metadata block (`Status`, `Source specs`,
@@ -818,6 +818,13 @@ the next bullet states the statuses this repo actually allows and gates.
   promoted to `completed` to make a count tidy. (Adopted from
   agent-guidance 2026-07-28; upstream source taut's status-index
   contract, its commit `3706d73`.)
+
+- **Withdrawn proposals are inactive.** `withdrawn` records an explicit owner
+  decision not to implement; it never counts as completed or authorizes edits
+  to runtime behavior. Keep the reason and reopening evidence in the plan,
+  with the index row matching. This status was adopted by owner direction on
+  2026-11-05 for the launch-claim fence. Withdrawal is distinct from an
+  ambiguous status-review quarantine or a shipped/completed slice.
 
 - **Active plans have a mutability boundary**: task instructions and
   checklists stay current and mutable — stale instructions are worse than

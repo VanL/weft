@@ -129,8 +129,9 @@ def iter_task_state_rows(
 
 
 def manager_launch_custody_pending(payload: Mapping[str, Any], *, broker: Any) -> bool:
-    """Retain a Manager checkpoint while exact launch reservations exist [OBS.6].
+    """Retain a Manager checkpoint while pending launch reservations exist [OBS.6].
 
+    Operator consumption ends pending custody, even before physical vacuum.
     Both cleanup owners use this predicate after rereading the newest snapshot.
     Malformed references and broker errors propagate so cleanup fails closed.
     """
@@ -152,7 +153,7 @@ def manager_launch_custody_pending(payload: Mapping[str, Any], *, broker: Any) -
             frontiers.get("reserved_queue", f"T{manager_tid}.{QUEUE_RESERVED_SUFFIX}"),
             manager_tid,
         )
-        if broker.peek_one(queue_name, include_claimed=True) is not None:
+        if broker.peek_one(queue_name) is not None:
             # A real Manager can reserve before its pre-launch checkpoint update.
             # Keep the protocol row and honor its declared queue override.
             return True
@@ -166,12 +167,7 @@ def manager_launch_custody_pending(payload: Mapping[str, Any], *, broker: Any) -
         reserved_queue, exact_id = _launch_reservation_reference(
             reserved_queue, request_id
         )
-        if (
-            broker.peek_one(
-                reserved_queue, exact_timestamp=exact_id, include_claimed=True
-            )
-            is not None
-        ):
+        if broker.peek_one(reserved_queue, exact_timestamp=exact_id) is not None:
             return True
     return False
 
