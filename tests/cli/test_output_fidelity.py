@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 import typer
 
+import weft.commands._output as output_module
 from tests.conftest import run_cli
 from tests.helpers.weft_harness import WeftTestHarness
 from weft.cli.run import render_run_result
@@ -31,6 +33,37 @@ pytestmark = [pytest.mark.shared]
 
 def _echo(text: str, nl: bool) -> None:
     typer.echo(text, nl=nl)
+
+
+def test_windows_closed_stdout_spill_silences_final_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "output.dat"
+    path.write_bytes(b"payload")
+    reference = _reference(path, b"payload")
+    silenced: list[None] = []
+
+    monkeypatch.setattr(output_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        output_module,
+        "_write_stdout_bytes",
+        lambda _data: (_ for _ in ()).throw(OSError(errno.EINVAL, "closed pipe")),
+    )
+    monkeypatch.setattr(
+        output_module,
+        "_silence_closed_stdout",
+        lambda: silenced.append(None),
+    )
+
+    with pytest.raises(OSError, match="incomplete output"):
+        _render_text_output(
+            reference,
+            outputs_root=str(tmp_path),
+            emit_text=_echo,
+        )
+
+    assert silenced == [None]
 
 
 render_text_output = partial(_render_text_output, emit_text=_echo)

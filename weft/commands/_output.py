@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -24,6 +25,21 @@ def _write_stdout_bytes(data: bytes) -> None:
         if written is None or written <= 0:
             raise OSError("stdout did not accept output")
         remaining = remaining[written:]
+
+
+def _silence_closed_stdout() -> None:
+    """Prevent interpreter shutdown from replacing the delivery exit code."""
+
+    with open(os.devnull, "wb") as sink:
+        os.dup2(sink.fileno(), sys.stdout.fileno())
+
+
+def _stdout_is_closed(exc: OSError) -> bool:
+    """Recognize platform spellings of a closed stdout pipe."""
+
+    return isinstance(exc, BrokenPipeError) or (
+        sys.platform == "win32" and exc.errno == errno.EINVAL
+    )
 
 
 def write_command_stdout(text: str) -> None:
@@ -75,12 +91,9 @@ def _stream_spill(value: dict[str, Any], resolved: Path, *, nl: bool) -> None:
         if nl:
             sys.stdout.write("\n")
         sys.stdout.flush()
-    except BrokenPipeError as exc:
-        # Prevent Python's final stdout flush from replacing exit 1 with 120.
-        with open(os.devnull, "wb") as sink:
-            os.dup2(sink.fileno(), sys.stdout.fileno())
-        raise OSError(f"incomplete output at {path}: {exc}") from exc
     except (OSError, ValueError) as exc:
+        if isinstance(exc, OSError) and _stdout_is_closed(exc):
+            _silence_closed_stdout()
         raise OSError(f"incomplete output at {path}: {exc}") from exc
 
 
