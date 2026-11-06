@@ -630,15 +630,14 @@ class HeartbeatTask(ServiceTask):
     def _service_ownership(
         self,
     ) -> tuple[Literal["self", "other", "unknown"], str | None]:
-        if not self._ownership_check_required:
-            current_version = self._endpoint_registry_version()
-            if (
-                current_version is not None
-                and current_version == self._last_endpoint_registry_version
-            ):
-                return self._cached_service_ownership
-
         version_before = self._endpoint_registry_version()
+        if (
+            not self._ownership_check_required
+            and version_before is not None
+            and version_before == self._last_endpoint_registry_version
+        ):
+            return self._cached_service_ownership
+
         with self._get_connected_queue().get_connection() as broker:
             resolved = resolve_endpoint(
                 self._context, INTERNAL_HEARTBEAT_ENDPOINT_NAME, broker=broker
@@ -667,15 +666,13 @@ class HeartbeatTask(ServiceTask):
     def _endpoint_registry_version(self) -> int | None:
         queue = self._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
         try:
-            version: int | None = None
-            iterator = queue.peek_generator(with_timestamps=True)
-            with closing_queue_iterator(iterator) as rows:
-                for item in rows:
-                    _body, timestamp = item
-                    version = timestamp if version is None else max(version, timestamp)
+            rows = queue.peek_many(limit=1, order="newest", with_timestamps=True)
         except (BrokerError, OSError, RuntimeError):
             return None
-        return version
+        if not rows:
+            return None
+        _body, timestamp = rows[0]
+        return int(timestamp)
 
     def _exit_if_superseded(self) -> bool:
         ownership_state, owner_tid = self._service_ownership()

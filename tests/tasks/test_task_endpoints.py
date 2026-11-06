@@ -32,6 +32,7 @@ from weft.context import WeftContext, build_context
 from weft.core.endpoints import (
     build_endpoint_record_payload,
     list_resolved_endpoints,
+    resolve_endpoint,
 )
 from weft.core.task_state import (
     task_state_queue_name,
@@ -829,3 +830,29 @@ def test_bulk_endpoint_listing_keeps_one_history_pass(
         assert len(list_resolved_endpoints(ctx, pattern=pattern)) == 100
         assert history_scans == 1
         assert point_scans == 0
+
+
+def test_endpoint_resolution_rejects_terminal_tid_state_without_runtime_handle_when_log_compacted(
+    tmp_path: Path,
+) -> None:
+    """Retained terminal task-state rows without a runtime handle must not resolve as live when weft.log.tasks is compacted [MF-3.1], [WT-2]."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1770000000000000901"
+    with (
+        ctx.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False) as registry,
+        ctx.queue(task_state_queue_name(tid), persistent=False) as state_queue,
+    ):
+        _endpoint_record(registry, name="mayor", tid=tid)
+        state_queue.write(
+            json.dumps(
+                {
+                    "full": tid,
+                    "short": encode_tid(tid),
+                    "terminal": True,
+                    "runtime_handle": None,
+                    "projection": {"status": "completed"},
+                }
+            )
+        )
+        assert list_resolved_endpoints(ctx) == []
+        assert resolve_endpoint(ctx, "mayor") is None

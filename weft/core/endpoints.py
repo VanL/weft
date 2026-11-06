@@ -290,6 +290,8 @@ def _record_owner_is_live(
     mapping = tid_states.get(record.tid)
     if mapping is None:
         return False
+    if mapping.get("terminal") is True:
+        return False
 
     handle_payload = mapping.get("runtime_handle")
     if handle_payload is None:

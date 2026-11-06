@@ -1986,3 +1986,58 @@ def test_paused_pipeline_edge_leaves_inbox_unreserved_and_forwards_on_turn_after
         assert edge.taskspec.state.status == "completed"
     finally:
         edge.cleanup()
+
+
+def test_pipeline_registry_write_retains_append_id_without_rescanning_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PipelineTask._write_pipeline_registry_record must retain queue.write() message ID directly without rescanning [PL-2.2], [WT-4.1]."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path)
+    root = tmp_path / "project"
+    ctx = build_context(spec_context=root)
+    task = PipelineTask(ctx.broker_target, TaskSpec.model_validate(payload))
+    registry = ctx.queue(WEFT_PIPELINES_STATE_QUEUE, persistent=False)
+    original_queue = task._queue
+    written_ids: list[int] = []
+    scans: list[bool] = []
+
+    class InterleavedPipelineQueue:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(registry, name)
+
+        def write(self, body: str) -> int:
+            own_id = registry.write(body)
+            peer = json.loads(body)
+            peer["name"] = "interleaved-peer"
+            peer_id = registry.write(json.dumps(peer))
+            written_ids.extend((own_id, peer_id))
+            return own_id
+
+        def peek_generator(self, **kwargs: Any) -> Any:
+            scans.append(True)
+            return registry.peek_generator(**kwargs)
+
+    monkeypatch.setattr(
+        task,
+        "_queue",
+        lambda name: (
+            InterleavedPipelineQueue()
+            if name == WEFT_PIPELINES_STATE_QUEUE
+            else original_queue(name)
+        ),
+    )
+    try:
+        task._write_pipeline_registry_record()
+        assert task._registry_message_id == written_ids[0]
+        assert scans == []
+
+        task._delete_pipeline_registry_record()
+        remaining = [
+            int(ts) for _body, ts in registry.peek_generator(with_timestamps=True)
+        ]
+        assert remaining == [written_ids[1]]
+        assert scans == []
+    finally:
+        task.cleanup()
+        registry.close()

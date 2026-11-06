@@ -2153,11 +2153,10 @@ class MaintenanceWorker:
 
         ``stale_open`` candidates are excluded when their TID is
         destruction-protected (``_destruction_protected_runtime_tids``):
-        proven-live owners via host-PID or service-registry evidence, plus
-        owners whose newest tid-mapping row is undecidable (non-host
-        runner handles with no probeable host PIDs), per the
-        undecidable-means-live rule shared with the tid-mapping cleanup
-        policy.
+        live service-registry owners plus owners with a non-terminal
+        ``weft.state.tasks.<tid>`` mapping row (`LivenessMonitor` owns runtime
+        probes and retires stale mapping rows; row presence is `TaskMonitor`'s
+        conservative handoff boundary).
 
         Spec: [MF-5], [OBS.13.7]
         """
@@ -2185,13 +2184,9 @@ class MaintenanceWorker:
             # its own (that is what makes it "stale_open" rather than
             # "suspected_inactive"), so a quiet-but-live task looks
             # identical to an abandoned one from the task-log alone. Gate
-            # disposal on destruction protection: proven-live owners
-            # (host-PID evidence, live service registry rows) plus owners
-            # whose newest tid-mapping row is undecidable
-            # (undecidable-means-live, the same rule that preserves the
-            # row itself). Only a family with no runtime evidence at all,
-            # or whose probeable host processes are all dead, may be
-            # disposed as stale_open.
+            # disposal on destruction protection (`_destruction_protected_runtime_tids`):
+            # live service-registry rows plus non-terminal `weft.state.tasks.<tid>`
+            # mapping rows maintained by LivenessMonitor.
             protected_tids = self._destruction_protected_runtime_tids(
                 {
                     ready.record.tid
@@ -3272,11 +3267,10 @@ class MaintenanceWorker:
         monitor_family_limit_hit = len(pending_records) > len(records)
         remaining_limit = max(0, control_limit - len(records))
         snapshot_needed = bool(records) or remaining_limit > 0
-        # Destruction-protected, not merely active: an undecidable newest
-        # tid-mapping row (e.g. an external/container runner handle with no
-        # probeable host PID) must block reserved-queue deletion the same
-        # way it blocks other destructive cleanup decisions elsewhere in
-        # this module (see `_destruction_protected_runtime_tids`).
+        # Gate reserved-queue deletion on `_destruction_protected_runtime_tids`:
+        # live service-registry owners and non-terminal `weft.state.tasks.<tid>`
+        # mapping rows (LivenessMonitor owns runtime probes and retires stale
+        # mapping rows; row presence is the conservative handoff boundary).
         reserved_queue_names = (
             tuple(
                 sorted(

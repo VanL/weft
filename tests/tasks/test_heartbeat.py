@@ -37,6 +37,7 @@ from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
     SERVICE_IDLE_EXIT_SECONDS,
+    WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_HEARTBEAT_REGISTRATIONS_QUEUE,
     WEFT_QUEUE_NAMESPACE_PREFIX,
@@ -1264,3 +1265,57 @@ def test_heartbeat_build_deletes_residue_and_an_expired_newest_row(
         task.stop(join=False)
         task.cleanup()
         destination.close()
+
+
+def test_heartbeat_endpoint_registry_version_uses_newest_row_without_full_scan(
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_endpoint_registry_version must read newest row via peek_many(limit=1, order='newest') without scanning all rows [MF-3.2]."""
+    context = build_context(spec_context=workdir)
+    tid = str(time.time_ns())
+    task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
+    registry = context.queue(WEFT_ENDPOINTS_REGISTRY_QUEUE, persistent=False)
+    try:
+        first_ts = registry.write(json.dumps({"name": "first", "tid": tid}))
+        newest_ts = registry.write(json.dumps({"name": "second", "tid": tid}))
+        assert newest_ts > first_ts
+
+        registry_queue = task._queue(WEFT_ENDPOINTS_REGISTRY_QUEUE)
+
+        def fail_peek_generator(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(
+                "peek_generator must not be called in _endpoint_registry_version"
+            )
+
+        monkeypatch.setattr(registry_queue, "peek_generator", fail_peek_generator)
+        assert task._endpoint_registry_version() == int(newest_ts)
+
+        version_calls = 0
+        orig_version = task._endpoint_registry_version
+
+        def counted_version() -> int | None:
+            nonlocal version_calls
+            version_calls += 1
+            return orig_version()
+
+        monkeypatch.setattr(task, "_endpoint_registry_version", counted_version)
+        monkeypatch.setattr(
+            "weft.core.tasks.heartbeat.resolve_endpoint",
+            lambda _ctx, _name, **_kwargs: type(
+                "Resolved", (), {"record": type("Rec", (), {"tid": tid})()}
+            )(),
+        )
+        task._ownership_check_required = False
+        task._last_endpoint_registry_version = None
+
+        assert task._service_ownership() == ("self", tid)
+        assert version_calls == 2
+
+        version_calls = 0
+        assert task._service_ownership() == ("self", tid)
+        assert version_calls == 1
+    finally:
+        task.stop(join=False)
+        task.cleanup()
+        registry.close()

@@ -798,8 +798,7 @@ class PipelineTask(BaseTask):
             ],
         }
         queue = self._queue(WEFT_PIPELINES_STATE_QUEUE)
-        queue.write(json.dumps(payload, ensure_ascii=False))
-        self._registry_message_id = self._latest_pipeline_registry_message_id()
+        self._registry_message_id = queue.write(json.dumps(payload, ensure_ascii=False))
 
     def _latest_pipeline_registry_message_id(self) -> int | None:
         latest: int | None = None
