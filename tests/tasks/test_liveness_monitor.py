@@ -1396,10 +1396,11 @@ def test_precheckpoint_reservation_preserves_only_manager_protocol_evidence(
     role: str,
     custom: bool,
 ) -> None:
-    """A reserve-before-checkpoint crash must not erase safe recovery identity.
+    """Pending pre-checkpoint custody preserves only Manager protocol evidence.
 
     The consumer control prevents the broad queue-presence guard from shielding
     ordinary task reservations just because a caller supplied a role-shaped row.
+    A claimed row exercises the operator-consumption release boundary.
     """
     context, monitor, queue, tid, _now = namespace_case
     reserved_name = f"custom.{tid}.reserved" if custom else f"T{tid}.reserved"
@@ -1435,7 +1436,7 @@ def test_precheckpoint_reservation_preserves_only_manager_protocol_evidence(
         queue.write(json.dumps(payload))
         monitor._reconcile_mapping_rows(full=True)
         row = monitor._latest_rows[tid]
-        if role != "manager":
+        if role != "manager" or claimed:
             assert monitor._retire_mapping_row(row) is True
             assert queue.peek() is None
         else:
