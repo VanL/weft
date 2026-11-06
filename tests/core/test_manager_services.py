@@ -13,6 +13,8 @@ from weft.core.manager_services import (
     ServiceCandidateState,
     ServiceLifecycle,
     reduce_managed_service_state,
+    select_canonical_live_candidate,
+    summarize_service_candidates,
 )
 
 pytestmark = [pytest.mark.shared]
@@ -363,3 +365,36 @@ def test_all_managed_service_actions_have_table_coverage() -> None:
         seen_actions.add(decision.action)
 
     assert seen_actions == expected_actions
+
+
+def test_service_candidate_selection_and_summary_order_by_int_tid() -> None:
+    """Service candidate ordering must compare validated TIDs numerically by int(candidate.tid) [REDUCER.1], [WT-2a.1]."""
+    smaller_tid = "999999999999999999"
+    larger_tid = "1844674407370955161"
+    assert larger_tid < smaller_tid  # Lexicographic order disagrees with numeric order
+
+    live_candidates = (
+        _candidate(larger_tid, "live", timestamp=100),
+        _candidate(smaller_tid, "live", timestamp=100),
+    )
+    canonical = select_canonical_live_candidate(live_candidates)
+    assert canonical is not None
+    assert canonical.tid == smaller_tid
+
+    mixed_candidates = (
+        _candidate(larger_tid, "live", timestamp=100),
+        _candidate(smaller_tid, "live", timestamp=100),
+        _candidate(larger_tid, "uncertain", timestamp=90),
+    )
+    summary = summarize_service_candidates(mixed_candidates)
+    assert summary.canonical_live is not None
+    assert summary.canonical_live.tid == smaller_tid
+    assert [c.tid for c in summary.candidates] == [smaller_tid, larger_tid]
+
+    uncertain_summary = summarize_service_candidates(
+        (
+            _candidate(larger_tid, "uncertain", timestamp=100),
+            _candidate(smaller_tid, "uncertain", timestamp=100),
+        )
+    )
+    assert [c.tid for c in uncertain_summary.uncertain] == [smaller_tid, larger_tid]

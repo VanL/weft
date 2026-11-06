@@ -118,18 +118,19 @@ def test_paused_consumer_does_not_spin_with_queued_input(
             assert time.monotonic() < deadline, snapshot
             time.sleep(0.05)
 
-        ctrl_out = ctx.queue(f"T{tid}.ctrl_out", persistent=False)
+        requester_ctrl_in_name = f"T{tid}.probe.ctrl_in"
+        requester_ctrl_in = ctx.queue(requester_ctrl_in_name, persistent=False)
         ctrl_in.write(encode_control_message("PAUSE", request_id="pause-cpu-probe"))
         ctrl_in.write(
             encode_control_message(
                 "STATUS",
-                reply_to=f"T{tid}.ctrl_out",
+                reply_to=requester_ctrl_in_name,
                 request_id="status-cpu-probe",
             )
         )
         pause_deadline = time.monotonic() + 10.0
         while True:
-            reply_raw = ctrl_out.read_one()
+            reply_raw = requester_ctrl_in.read_one()
             if isinstance(reply_raw, str):
                 reply = json.loads(reply_raw)
                 if (

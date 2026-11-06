@@ -180,7 +180,7 @@ def select_canonical_live_candidate(
     live = [candidate for candidate in candidates if candidate.state == "live"]
     if not live:
         return None
-    return min(live, key=lambda candidate: candidate.tid)
+    return min(live, key=_candidate_tid_key)
 
 
 def summarize_service_candidates(
@@ -223,11 +223,11 @@ def summarize_service_candidates(
     uncertain_candidates = tuple(
         sorted(
             (candidate for candidate in reduced if candidate.state == "uncertain"),
-            key=lambda candidate: candidate.tid,
+            key=_candidate_tid_key,
         )
     )
     return ManagedServiceCandidateSummary(
-        candidates=tuple(sorted(reduced, key=lambda candidate: candidate.tid)),
+        candidates=tuple(sorted(reduced, key=_candidate_tid_key)),
         terminal_tids=terminal_tids,
         canonical_live=select_canonical_live_candidate(live_candidates),
         uncertain=uncertain_candidates,
@@ -388,10 +388,14 @@ def _reset_uncertainty(state: ManagedServiceState) -> None:
     state.last_uncertain_reason = None
 
 
-def _candidate_timestamp_key(candidate: ServiceCandidate) -> tuple[int, str]:
+def _candidate_tid_key(candidate: ServiceCandidate) -> int:
+    return int(candidate.tid)
+
+
+def _candidate_timestamp_key(candidate: ServiceCandidate) -> tuple[int, int]:
     return (
         candidate.timestamp if candidate.timestamp is not None else -1,
-        candidate.tid,
+        _candidate_tid_key(candidate),
     )
 
 

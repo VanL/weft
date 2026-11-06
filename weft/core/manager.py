@@ -3376,9 +3376,17 @@ class Manager(ServiceTask):
     def _clear_admission_retry(self) -> None:
         """Make blocked lanes eligible for an immediate fresh observation."""
 
+        was_blocked = bool(
+            self._admission_blocked_lanes
+            or self._startup_blocked
+            or self._admission_retry_after_ns > 0
+        )
         self._admission_blocked_lanes.clear()
         self._startup_blocked = False
         self._admission_retry_after_ns = 0
+        if was_blocked:
+            self._mark_pending_messages_prechecked()
+            self._strategy.notify_activity()
 
     def _schedule_admission_retry_for_source(self, source_queue: str | None) -> None:
         """Backstop a restored launch request with one bounded lane retry."""
@@ -5018,7 +5026,7 @@ class Manager(ServiceTask):
         if exitcode is not None:
             payload["return_code"] = int(exitcode)
         serialized = json.dumps(payload)
-        attempts = max(1, TERMINAL_EVENT_WRITE_RETRIES)
+        attempts = 1 if deadline is None else max(1, TERMINAL_EVENT_WRITE_RETRIES)
         for attempt in range(attempts):
             if deadline is not None and self._remaining_deadline(deadline) <= 0:
                 return False
@@ -7167,6 +7175,18 @@ class Manager(ServiceTask):
         """
         if self._child_terminal_proof_visible(tid, child) is True:
             return True
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                snapshot = read_task_state_snapshot(
+                    self._manager_context(), tid, broker=broker
+                )
+            if snapshot is not None and snapshot[1].get("terminal") is True:
+                return True
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug(
+                "Failed to read service task-state snapshot for terminal proof",
+                exc_info=True,
+            )
         try:
             since_timestamp = int(tid) - 1 if tid.isdigit() else None
             entries = iter_queue_json_entries(

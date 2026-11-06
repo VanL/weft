@@ -124,7 +124,12 @@ from weft.core.taskspec import (
     StateSection,
     TaskSpec,
 )
-from weft.helpers import ContainerRuntimeDetection, decode_tid, process_create_time
+from weft.helpers import (
+    ContainerRuntimeDetection,
+    decode_tid,
+    encode_tid,
+    process_create_time,
+)
 from weft.liveness.models import HostProcessObservation
 
 AUTOSTART_PIPELINE_PROGRESS_TIMEOUT = 60.0
@@ -12193,7 +12198,8 @@ def test_manager_autostart_active_sources_include_tracked_children(
             return None
 
     try:
-        manager._child_processes["tracked-child"] = ManagedChild(
+        tracked_tid = str(int(unique_tid) + 1)
+        manager._child_processes[tracked_tid] = ManagedChild(
             process=cast(BaseProcess, FakeProcess()),
             ctrl_queue=None,
             persistent=False,
@@ -13286,3 +13292,142 @@ def test_manager_leadership_unknown_expiry_controls_ping_without_changing_eviden
                 "reply_to": manager._queue_names["ctrl_in"],
             }
         ]
+
+
+def test_cleanup_children_wrapper_lost_write_failure_schedules_reactor_retry_without_sleeping(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reactor-turn _cleanup_children(deadline=None) must attempt wrapper_lost once without sleeping and arm terminal_retry_after_ns [MA-1], [MA-1.6a], [WT-4.1]."""
+    manager, _make_queue = manager_setup
+    child_tid = "1779000000000000901"
+    child = ManagedChild(
+        process=cast(BaseProcess, FakeLaunchProcess(pid=9901, alive=False)),
+        ctrl_queue=f"T{child_tid}.ctrl_in",
+        ctrl_out_queue=f"T{child_tid}.ctrl_out",
+    )
+    monkeypatch.setattr(
+        manager, "_child_terminal_proof_still_within_grace", lambda *_args: False
+    )
+    manager._child_processes[child_tid] = child
+
+    monkeypatch.setattr(
+        manager,
+        "_terminal_envelope_visible",
+        lambda *_args, **_kwargs: False,
+    )
+    write_attempts: list[tuple[str, str]] = []
+
+    class FailingBroker:
+        def write(self, queue_name: str, body: str) -> int:
+            write_attempts.append((queue_name, body))
+            raise RuntimeError("injected wrapper_lost broker write failure")
+
+    class FailingConnectionContext:
+        def __enter__(self) -> FailingBroker:
+            return FailingBroker()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class FailingConnectedQueue:
+        def get_connection(self) -> FailingConnectionContext:
+            return FailingConnectionContext()
+
+    monkeypatch.setattr(
+        manager,
+        "_get_connected_queue",
+        lambda: FailingConnectedQueue(),
+    )
+
+    sleeps: list[float] = []
+
+    def fail_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        raise AssertionError(f"Reactor turn must not sleep ({seconds}s)")
+
+    monkeypatch.setattr(manager_mod.time, "sleep", fail_sleep)
+
+    assert manager._cleanup_children() is False
+    assert sleeps == []
+    assert len(write_attempts) == 1
+    assert child.terminal_retry_after_ns > 0
+    child_timeouts = manager._manager_child_timeouts(now_ns=time.time_ns())
+    assert len(child_timeouts) == 1 and child_timeouts[0] > 0.0
+    assert manager.next_wait_timeout() is not None
+
+    # Shutdown drain (deadline is not None) retains bounded retries.
+    write_attempts.clear()
+    child.terminal_retry_after_ns = 0
+    monkeypatch.setattr(
+        manager_mod.time, "sleep", lambda seconds: sleeps.append(seconds)
+    )
+    assert manager._cleanup_children(deadline=time.monotonic() + 2.0) is False
+    assert len(write_attempts) == manager_mod.TERMINAL_EVENT_WRITE_RETRIES
+    assert len(sleeps) == manager_mod.TERMINAL_EVENT_WRITE_RETRIES - 1
+
+
+def test_tracked_service_terminal_proof_visible_uses_task_state_snapshot_before_global_log(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_tracked_service_terminal_proof_visible must check weft.state.tasks.<tid> before scanning weft.log.tasks [MA-1.6a], [WT-2]."""
+    manager, make_queue = manager_setup
+    child_tid = "1779000000000000902"
+    child = ManagedChild(
+        process=cast(BaseProcess, FakeLaunchProcess(pid=9902, alive=False)),
+        ctrl_queue=f"T{child_tid}.ctrl_in",
+        ctrl_out_queue=f"T{child_tid}.ctrl_out",
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+    )
+    state_queue = make_queue(task_state_queue_name(child_tid))
+    state_queue.write(
+        json.dumps(
+            {
+                "full": child_tid,
+                "short": encode_tid(child_tid),
+                "terminal": True,
+                "runtime_handle": None,
+                "projection": {"status": "completed"},
+            }
+        )
+    )
+
+    def fail_global_log_scan(queue: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(queue, "name", None) == WEFT_GLOBAL_LOG_QUEUE:
+            raise AssertionError(
+                "WEFT_GLOBAL_LOG_QUEUE must not be scanned when task-state snapshot is terminal"
+            )
+        return manager_mod.iter_queue_json_entries(queue, *args, **kwargs)
+
+    monkeypatch.setattr(manager_mod, "iter_queue_json_entries", fail_global_log_scan)
+    assert manager._tracked_service_terminal_proof_visible(child_tid, child) is True
+
+
+def test_clear_admission_retry_marks_evicted_spawn_lane_for_immediate_reprobe(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """When admission blocks and evicts a spawn lane, _clear_admission_retry must arm an immediate re-probe [MA-1.8], [WT-4.1]."""
+    manager, make_queue = manager_setup
+    inbox_name = manager._queue_names["inbox"]
+    inbox = make_queue(inbox_name)
+    inbox.write(json.dumps(make_child_spec()))
+
+    manager._admission_bootstrapped = True
+    manager._classify_family_requests()
+    manager._mark_pending_messages_prechecked()
+    manager._update_active_queues()
+    assert inbox_name in manager._active_queues
+
+    # Block public admission while family-index retry is in backoff so the wait-activity predicate turns False.
+    manager._admission_blocked_lanes.add("public")
+    manager._family_index_retry_after = time.monotonic() + 60.0
+    manager._next_inactive_probe_at = time.monotonic() + 60.0
+    manager._update_active_queues()
+    assert inbox_name not in manager._active_queues
+
+    # Reopen admission without advancing the periodic inactive-probe clock.
+    manager._family_index_retry_after = 0.0
+    manager._clear_admission_retry()
+    manager._update_active_queues()
+    assert inbox_name in manager._active_queues
