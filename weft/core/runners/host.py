@@ -78,6 +78,7 @@ from weft.core.terminal_handoff_transport import (
     poll_terminal_payload,
     receive_terminal_payload,
     send_terminal_payload,
+    wait_terminal_payload,
 )
 from weft.ext import (
     RunnerCapabilities,
@@ -721,14 +722,35 @@ class HostTaskRunner:
                 )
 
                 if step is None:
+                    producer_sentinel = (
+                        None
+                        if "producer_exited" in progress.consumed_edge_kinds
+                        else getattr(process, "sentinel", None)
+                    )
+                    sampling_deadline = (
+                        next_monitor_at
+                        if (
+                            monitor is not None
+                            and progress.accepted_stop is None
+                            and "limit_reached" not in progress.consumed_edge_kinds
+                            and "producer_exited" not in progress.consumed_edge_kinds
+                        )
+                        else None
+                    )
                     wait_for = self._terminal_handoff_wait_seconds(
-                        now=now,
+                        now=time.monotonic(),
                         start_time=start_time,
-                        next_monitor_at=next_monitor_at if monitor else None,
+                        next_monitor_at=sampling_deadline,
                         drain_deadline=drain_deadline,
+                        cancel_requested=cancel_requested,
+                        has_producer_sentinel=producer_sentinel is not None,
                     )
                     try:
-                        poll_terminal_payload(response_receiver, wait_for)
+                        wait_terminal_payload(
+                            response_receiver,
+                            producer_sentinel=producer_sentinel,
+                            timeout=wait_for,
+                        )
                     except (OSError, ValueError) as exc:
                         pending_transport_failure = str(exc)
                     continue
@@ -875,16 +897,22 @@ class HostTaskRunner:
         start_time: float,
         next_monitor_at: float | None,
         drain_deadline: float | None,
-    ) -> float:
+        cancel_requested: Callable[[], bool] | None = None,
+        has_producer_sentinel: bool = True,
+    ) -> float | None:
         """Return the bounded wait until the next owned observation boundary."""
 
-        deadlines = [now + ACTIVE_CONTROL_POLL_INTERVAL]
+        deadlines: list[float] = []
+        if cancel_requested is not None or not has_producer_sentinel:
+            deadlines.append(now + ACTIVE_CONTROL_POLL_INTERVAL)
         if self._timeout is not None:
             deadlines.append(start_time + self._timeout)
         if next_monitor_at is not None:
             deadlines.append(next_monitor_at)
         if drain_deadline is not None:
             deadlines.append(drain_deadline)
+        if not deadlines:
+            return None
         return max(0.0, min(deadlines) - now)
 
     @staticmethod

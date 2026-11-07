@@ -257,8 +257,13 @@ authority class as a security control. As verified against
   `--sandbox danger-full-access` without separate caller input — the
   container boundary, not the Codex sandbox, is the isolation there. Persistent
   Codex sessions apply cwd and sandbox flags on the first `exec` turn that
-  creates the session; resumed turns use `codex exec resume` and only repeat
-  flags that the resume subcommand accepts.
+  creates the session; resumed turns use `codex exec resume --last` and only
+  repeat flags that the resume subcommand accepts. Because `codex exec` has no
+  creation-time session-ID flag and resolves `auth.json` and `config.toml` from
+  `CODEX_HOME` (`~/.codex`), concurrent host `codex` tasks that require
+  isolated native session history must supply distinct `CODEX_HOME` paths via
+  `spec.env` or use container runtime isolation. (Plan:
+  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`)
 - **`agy`** (`AgyProvider`): appends `--mode plan` when
   `authority_class="bounded"` **or** `workspace_access="read-only"`. It reads
   structured JSON output, captures the exact `conversation_id` from the first

@@ -1328,9 +1328,14 @@ worker entrypoint can publish a terminal outcome.
 
 _Implementation mapping_: `weft/core/terminal_handoff.py` owns the pure reducer,
 same-turn selectors, and edge-consumption driver;
-`weft/core/terminal_handoff_transport.py` owns synchronous private framing;
-`weft/core/runners/host.py` and `weft/core/runners/sessions.py` acquire
-observations, apply effects, and own cleanup.
+`weft/core/terminal_handoff_transport.py` owns synchronous private framing and
+sentinel-multiplexed readiness (`wait_terminal_payload`);
+`weft/core/runners/host.py` (`HostTaskRunner._run_one_shot_terminal_handoff`,
+`HostTaskRunner._terminal_handoff_wait_seconds`) and
+`weft/core/runners/sessions.py` (`AgentSession.execute`,
+`AgentSession._terminal_handoff_wait_seconds`) acquire observations, apply
+effects, and own cleanup. (Plan:
+`docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`)
 
 ## Related Plans
 
