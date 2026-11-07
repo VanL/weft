@@ -2654,6 +2654,19 @@ def test_task_status_reconciles_dead_live_and_absent_handle_superseded_manager_p
         "active_manager_tid": new_mgr_tid,
         "runtime_liveness": "unknown",
     }
+    monkeypatch.setattr(
+        status_cmd.manager_runtime, "detect_container_runtime", lambda: object()
+    )
+    container_absent_pid_snapshot = task_cmd.task_status(dead_mgr_tid, context=ctx)
+    assert container_absent_pid_snapshot is not None
+    assert container_absent_pid_snapshot.status == "running"
+    assert container_absent_pid_snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
     with ctx.queue(f"T{absent_handle_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
         assert ctrl_in.peek_many(limit=10) == []
     with ctx.queue(f"T{new_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:

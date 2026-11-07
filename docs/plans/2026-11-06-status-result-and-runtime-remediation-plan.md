@@ -1,6 +1,6 @@
 # Status, Result Observation, and Runtime Boundary Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: `docs/specifications/01-Core_Components.md` ([CC-2.2.1], [CC-3.5]); `docs/specifications/05-Message_Flow_and_State.md` ([MF-5], [MF-6]); `docs/specifications/07-System_Invariants.md` ([OBS.15], [MANAGER.11]); `docs/specifications/12-Pipeline_Composition_and_UX.md` ([PL-1.5], [PL-4.4]); `docs/specifications/13-Agent_Runtime.md` ([AR-2.1])
 Superseded by: none
 Plan author family: `antigravity` (Google Gemini model family)
@@ -179,13 +179,28 @@ When `self.mode is None`, `terminal is not None`, `terminal.classification == "w
 
 ## 4a. Deviation Log
 
-None at plan creation. Any execution-time deviation from this plan must be recorded here before continuing.
+- **Phase 1–2 Mid-Plan Review Refinements (`3b0f5a18`, `e2a98d9c`)**:
+  - Updated `select_active_manager` in `weft/core/manager_runtime.py` to pass `prune_stale=probe_stale` into `_registry_view` so passive point status (`task_status`) never sends a `PING` to `T{mgr_tid}.ctrl_in` when an active manager registry record has `liveness == "unknown"`.
+  - Updated `_selected_active_manager_tid` in `weft/commands/system.py` to delegate `managers` snapshots to `manager_runtime._select_active_manager_from_snapshot` (stripping `MANAGER_PONG_LIVE_AT_KEY` from copies) so bulk status (`system_status`) and point status (`task_status`) apply identical passive canonical selection rules.
+  - Added an explicit guard in `iter_task_realtime_events` (`weft/commands/events.py`) when `materialized.config is None` after the initial `snapshot` turn (`if materialized.config is None and not follow: return`) so non-following realtime event reads do not settle an unconfigured terminal task on Turn 2 while `follow=True, timeout=None` continues to settle via `collected.settle`.
+- **Phase 4 Mid-Plan Review Refinements (`08314b51`)**:
+  - Updated `HostTaskRunner._run_one_shot_terminal_handoff` (`weft/core/runners/host.py`) to pass `now=time.monotonic()` (fresh post-sample clock reading) into `self._terminal_handoff_wait_seconds(...)`, matching `AgentSession.execute`, and added `test_host_one_shot_terminal_handoff_recomputes_wait_against_fresh_clock_after_monitor_sample`.
+  - Updated `_leaking_function_target` in `tests/core/test_terminal_handoff_transport.py` to check `hasattr(candidate, "send_bytes") and hasattr(candidate, "poll")`, set `multiprocessing.current_process().daemon = False`, and call `_leak_sender_to_grandchild(result_sender, pidfile)` for POSIX and Windows portability, and asserted `outcome.diagnostics["handoff_event"] == "drain_expired"` (matching `runner_diagnostics` top-level `extra` merge).
+- **Phase 5 Full-Suite Test Contract Alignment**:
+  - Updated `test_terminal_projection_without_routes_cannot_collect_result` in `tests/commands/test_task_owned_observation.py` so `timeout=0.0` asserts the revised `[MF-5]` unconfigured terminal settlement (`status == "unknown"`, `classification == "observation_metadata_unavailable"`, `observed_terminal_status == "failed"`) rather than `CommandTimeoutError`.
+  - Updated `test_host_blocking_poll_failure_is_consumed_as_next_turn_transport_failure` and `test_one_shot_stop_after_begin_drain_preserves_first_deadline` in `tests/tasks/test_runner.py` to stub `host_module.wait_terminal_payload` (matching the existing `sessions_module.wait_terminal_payload` tests at lines 4066–4206).
+  - Updated `test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spawn_lane` in `tests/core/test_manager.py` to pass `int` arguments (`1`, `2`) to `make_child_spec` for full-repo `mypy` compliance.
 
 ## 4b. Spec Baseline
 
 Fixed repository and specification baseline for this plan:
 - **Pre-Promotion Spec Baseline Commit**: `709fb78112f797f60c4dea6c709d2c062830211d` (`v0.9.122`)
 - **Promotion Baseline Recording Rule (Strategy B, `writing-plans.md` §4b / §4d)**: After each phase's spec-and-code slice lands in Phases 1–4, record that phase's resulting commit SHA (or `<diff-base-sha> + dirty (<spec-paths>)` before commit) as the **promotion baseline identifier** where the proposed spec delta was applied to `docs/specifications/`, and verify `tests/specs/test_plan_metadata.py` and `bin/check-doc-paths` against that promoted state.
+- **Recorded Phase Promotion Baseline Commits**:
+  - **Phase 1 (`[OBS.15]`, `[MF-5]`)**: `3b0f5a18` (`Reconcile superseded manager snapshots with three-state liveness`)
+  - **Phase 2 (`[MF-5]`)**: `e2a98d9c` (`Settle unconfigured terminal results under explicit timeout`)
+  - **Phase 3 (`[PL-4.4]`, `[MANAGER.11]`)**: `0650cd15` (`Broadcast pipeline pause/resume and apply manager internal reserved policy`)
+  - **Phase 4 (`[CC-3.5]`, `[AR-2.1]`)**: `08314b51` (`Multiplex producer sentinel in one-shot host terminal handoff`)
 - **Touched Specifications at Baseline `709fb78112f797f60c4dea6c709d2c062830211d`**:
   - `docs/specifications/07-System_Invariants.md` (`[OBS.15]` at lines 731–733; `[MANAGER.11]` at lines 222–228)
   - `docs/specifications/05-Message_Flow_and_State.md` (`[MF-5]` at lines 1117–1119, 1215–1220; `[MF-6]` at lines 1345–1385)
@@ -361,8 +376,8 @@ Replacement (`docs/specifications/13-Agent_Runtime.md`):
 
 **Files to Modify**:
 - `weft/commands/_task_snapshot_reducer.py` (`_select_snapshot_policy` at lines 447–457, `reduce_task_state_snapshot` at lines 494–551, and `_draining_manager_reconciliation` next to `_superseded_manager_reconciliation` at lines 675–681)
-- `weft/core/manager_runtime.py` (`select_active_manager` at line 1094: pass `prune_stale=probe_stale` to `_registry_view` so passive `probe_stale=False` callers never trigger `_manager_registry_disposition` or send a control `PING`)
-- `weft/commands/system.py` (`_manager_runtime_liveness` next to `_task_process_alive` at lines 299–307, `_selected_active_manager_tid` using `manager_runtime._select_active_manager_from_snapshot`, `_merge_raw_task_history` at lines 497–537, `_collect_task_snapshot_records` at lines 540–585, `system_status` at lines 1399–1450)
+- `weft/core/manager_runtime.py` (`_manager_registry_disposition` at line 229, `manager_record` at line 1044, `list_manager_records` at line 1054, and `select_active_manager` at line 1094: honor `probe_stale` so passive `probe_stale=False` callers never trigger `_manager_record_has_matched_pong` or send a control `PING`, and accept `Mapping` in `manager_registry_record_liveness`)
+- `weft/commands/system.py` (`_collect_manager_records` at line 214 passing `probe_stale=False`, `_manager_runtime_liveness` delegating to `manager_runtime.manager_registry_record_liveness` at line 306, `_selected_active_manager_tid` using `manager_runtime._select_active_manager_from_snapshot`, `_merge_raw_task_history` at lines 497–537, `_collect_task_snapshot_records` at lines 540–585, `system_status` at lines 1399–1450)
 - `weft/commands/tasks.py` (`_read_point_observation` at lines 472–511 and `_enrich_known_snapshot` at lines 878–916)
 - `docs/specifications/07-System_Invariants.md` (`[OBS.15]`, lines 731–733)
 - `docs/specifications/05-Message_Flow_and_State.md` (`[MF-5]`, lines 1117–1119)
@@ -451,8 +466,7 @@ Replacement (`docs/specifications/13-Agent_Runtime.md`):
      ```python
      status = projection["status"]
      is_manager = (
-         payload.get("role") == "manager"
-         or projection["metadata"].get("role") == "manager"
+         payload.get("role") == "manager" or projection["metadata"].get("role") == "manager"
      )
      if (
          diagnostic is None
@@ -475,36 +489,26 @@ Replacement (`docs/specifications/13-Agent_Runtime.md`):
      ```
    - Use `status` in `TaskSnapshot(status=status, activity=_normalized_text(payload.get("activity")) if status not in TERMINAL_TASK_STATUSES else None, waiting_on=_normalized_text(payload.get("waiting_on")) if status not in TERMINAL_TASK_STATUSES else None, ...)`.
 2. In `weft/commands/system.py`:
-   - Import `inspect_host_process` from `weft.liveness.host` and add helper `_manager_runtime_liveness(mapping_entry: Mapping[str, Any] | None) -> Literal["live", "non_live", "unknown"]` next to `_task_process_alive` (`system.py:299-307`):
+   - Pass `probe_stale=False` from `_collect_manager_records` to `manager_runtime.list_manager_records`, and add helper `_manager_runtime_liveness(mapping_entry: Mapping[str, Any] | None) -> Literal["live", "non_live", "unknown"]` next to `_task_process_alive` (`system.py:299-307`) delegating to `manager_runtime.manager_registry_record_liveness` so snapshot liveness shares the exact container PID-namespace and supervisor-probe policy:
      ```python
      def _manager_runtime_liveness(
          mapping_entry: Mapping[str, Any] | None,
      ) -> Literal["live", "non_live", "unknown"]:
-         handle = _runtime_handle_from_mapping(mapping_entry or {})
-         if handle is None or handle.control.get("authority") != "host-pid":
-             return "unknown"
-         identities = handle.scoped_host_processes()
-         if not identities:
-             return "unknown"
-         observations = [
-             inspect_host_process(pid, create_time)
-             for pid, create_time in identities
-         ]
-         if any(item.evidence == "live" for item in observations):
+         liveness = manager_runtime.manager_registry_record_liveness(mapping_entry)
+         if liveness == "live":
              return "live"
-         if any(item.evidence == "unknown" for item in observations):
-             return "unknown"
-         return "non_live"
+         if liveness == "stale":
+             return "non_live"
+         return "unknown"
      ```
    - Add helper `_is_non_terminal_manager_state_entry(payload: Mapping[str, Any]) -> bool` checking `payload.get("terminal") is not True` and `(payload.get("role") == "manager" or (isinstance(payload.get("projection"), Mapping) and isinstance(payload["projection"].get("metadata"), Mapping) and payload["projection"]["metadata"].get("role") == "manager"))`.
-   - Add helper `_selected_active_manager_tid(ctx: WeftContext, *, managers: Sequence[Mapping[str, Any]] | None = None, broker: Any | None = None) -> str | None` that delegates `managers` snapshots to `manager_runtime._select_active_manager_from_snapshot(ctx, snapshot)` (stripping `MANAGER_PONG_LIVE_AT_KEY` from copies so bulk and point status share the exact passive canonical eligibility rules) and delegates `managers is None` to `manager_runtime.select_active_manager(ctx, broker=broker)` (where `select_active_manager` in `weft/core/manager_runtime.py:1094` passes `prune_stale=probe_stale` so passive `probe_stale=False` callers never send a control `PING`).
+   - Add helper `_selected_active_manager_tid(ctx: WeftContext, *, managers: Sequence[Mapping[str, Any]] | None = None, broker: Any | None = None) -> str | None` that delegates `managers` snapshots to `manager_runtime._select_active_manager_from_snapshot(ctx, snapshot)` and delegates `managers is None` to `manager_runtime.select_active_manager(ctx, broker=broker)` (where `_manager_registry_disposition` and `list_manager_records` in `weft/core/manager_runtime.py` honor `probe_stale=False` so passive bulk and point status callers never send a control `PING`).
    - In `_merge_raw_task_history` (`system.py:497-537`), add `selected_active_manager_tid: str | None = None`, preserve the existing fallback for ordinary tasks (`existing.snapshot.reconciliation is None`) while protecting reconciled Manager projections specifically:
      ```python
      existing = current.get(tid)
      existing_classification = (
          existing.snapshot.reconciliation.get("classification")
-         if existing is not None
-         and isinstance(existing.snapshot.reconciliation, Mapping)
+         if existing is not None and isinstance(existing.snapshot.reconciliation, Mapping)
          else None
      )
      if (
@@ -601,9 +605,9 @@ Commit Phase 1 as an independent commit and record the resulting Phase 1 commit 
        if terminal is not None:
            if self.deadline is not None and terminal.classification == "wrapper_lost":
                grace = self._grace_deadline(materialized)
-               if (
-                   grace is not None and self.deadline < grace
-               ) or not self._expired(grace, now):
+               if (grace is not None and self.deadline < grace) or not self._expired(
+                   grace, now
+               ):
                    return None
            return _ResultSettlement(
                "result",
@@ -711,11 +715,7 @@ Commit Phase 2 as an independent commit (recording the resulting Phase 2 commit 
          was_paused = self._paused
          self._broadcast_control(CONTROL_RESUME)
          handled = super()._handle_control_command(request, context)
-         if (
-             was_paused
-             and not self.should_stop
-             and self.taskspec.state.status == "running"
-         ):
+         if was_paused and not self.should_stop and self.taskspec.state.status == "running":
              restored_activity, restored_waiting_on = (
                  self._pre_pause_activity
                  if self._pre_pause_activity is not None
@@ -723,9 +723,7 @@ Commit Phase 2 as an independent commit (recording the resulting Phase 2 commit 
              )
              self._pre_pause_activity = None
              if restored_activity is not None:
-                 self._set_activity(
-                     restored_activity, waiting_on=restored_waiting_on
-                 )
+                 self._set_activity(restored_activity, waiting_on=restored_waiting_on)
          self._publish_pipeline_snapshot()
          return handled
      ```
@@ -782,7 +780,9 @@ Commit Phase 3 as an independent commit (recording the resulting Phase 3 commit 
    - `test_host_one_shot_terminal_handoff_wakes_on_producer_sentinel_and_expires_drain_when_descendant_holds_pipe`:
      - Monkeypatch `ACTIVE_CONTROL_POLL_INTERVAL` in `weft.core.runners.host` to `5.0` seconds so any reliance on the old `ACTIVE_CONTROL_POLL_INTERVAL` poll floor is immediately distinguishable from sentinel readiness.
      - Run `HostTaskRunner.run_with_hooks` on a real spawned target (`timeout=None`, `limits=None`, `cancel_requested=None`) that spawns a detached child holding an inherited pipe descriptor open for 10 seconds and then exits immediately (`os._exit(7)`) without sending a terminal payload.
-     - Assert that `run_with_hooks` wakes immediately on `process.sentinel` (even though `wait_for is None` on the initial wait), starts the `0.2s` `TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS` drain window, and returns in `< 1.5s` (well under the `5.0s` patched poll interval and `10.0s` child sleep) with `outcome.status == "error"`, `outcome.returncode == 7`, `outcome.error == "Worker result channel failed before a result was received"`, and `outcome.diagnostics["extra"]["handoff_event"] == "drain_expired"` (while cleaning up the helper child in a `finally` block).
+     - Assert that `run_with_hooks` wakes immediately on `process.sentinel` (even though `wait_for is None` on the initial wait), starts the `0.2s` `TERMINAL_HANDOFF_DRAIN_TIMEOUT_SECONDS` drain window, and returns in `< 2.0s` (well under the `5.0s` patched poll interval and grandchild hold window) with `outcome.status == "error"`, `outcome.returncode == 7`, `outcome.error == "Worker result channel failed before a result was received"`, and `outcome.diagnostics["handoff_event"] == "drain_expired"` (while cleaning up the helper child in a `finally` block).
+   - `test_host_one_shot_terminal_handoff_recomputes_wait_against_fresh_clock_after_monitor_sample`:
+     - Verify that when `monitor.check_limits()` advances `time.monotonic()` past `start_time + self._timeout` while setting `next_monitor_at = now + self._monitor_interval`, `_run_one_shot_terminal_handoff` passes a fresh post-sample `time.monotonic()` reading into `_terminal_handoff_wait_seconds` and requests `timeout == 0.0`.
 2. Run pytest on those tests and confirm RED failure.
 
 **Step 4.2 — GREEN Implementation**:
@@ -807,7 +807,7 @@ Commit Phase 3 as an independent commit (recording the resulting Phase 3 commit 
              else None
          )
          wait_for = self._terminal_handoff_wait_seconds(
-             now=now,
+             now=time.monotonic(),
              start_time=start_time,
              next_monitor_at=sampling_deadline,
              drain_deadline=drain_deadline,
@@ -909,7 +909,7 @@ Flip `Status:` to `completed` in this plan and in `docs/plans/README.md`, re-run
 | Phase 1 | `tests/commands/test_task_snapshot_reducer.py`, `tests/commands/test_status.py`, `tests/commands/test_task_commands.py` | `test_reduce_task_snapshot_handles_stale_and_manager_reconciliation`, `test_reduce_task_state_snapshot_reconciles_non_live_live_and_unknown_superseded_managers_and_preserves_terminal_manager`, `test_cmd_status_marks_superseded_manager_record_failed`, `test_system_status_distinguishes_dead_live_absent_handle_and_invalid_projection_fallback`, `test_task_status_reconciles_dead_live_and_absent_handle_superseded_manager_projections` | Confirmed non-live (`manager_liveness="non_live"`) superseded managers reconcile to `status="failed"`, `classification="superseded_manager_record"`; live (`"live"`) and uncertain/absent-handle (`"unknown"`) superseded managers keep `status="running"`, `classification="superseded_manager_draining"` (`runtime_liveness="live" | "unknown"`); terminal manager records preserved; ordinary tasks with invalid projections still fall back to `_merge_raw_task_history` |
 | Phase 2 | `tests/commands/test_result_settlement_policy.py`, `tests/commands/test_retained_result_history.py` | Unconfigured terminal policy cases (including short `deadline < grace_deadline` timeout precedence) + `test_unconfigured_wrapper_lost_settles_after_grace_under_explicit_timeout` | Unconfigured terminal task settles with `status="unknown"`, `classification="observation_metadata_unavailable"` after `0.5s` `wrapper_lost` grace window under `--timeout` (while preserving exit 124 when `deadline < grace_deadline`) |
 | Phase 3 | `tests/tasks/test_pipeline_runtime.py`, `tests/core/test_manager.py` | `test_pipeline_pause_and_resume_broadcasts_to_stages_and_edges_and_restores_activity`, `test_pipeline_repeated_pause_and_resume_repairs_failed_child_control_write_without_clobbering_activity`, `test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spawn_lane` | `PipelineTask` broadcasts `PAUSE`/`RESUME` on every explicit command (repairing partial child write failures on retry), restores pre-pause activity only on the `paused -> running` transition, and updates `P{tid}.status`; `Manager._apply_reserved_policy` with exact `message_timestamp` covers `T{manager}.internal_reserved` |
-| Phase 4 | `tests/core/test_terminal_handoff_transport.py` | `test_host_terminal_handoff_wait_seconds_preserves_timeout_monitor_and_drain_deadlines_without_poll_floor`, `test_host_one_shot_terminal_handoff_wakes_on_producer_sentinel_and_expires_drain_when_descendant_holds_pipe` | `HostTaskRunner._run_one_shot_terminal_handoff` wakes on `process.sentinel` even when a descendant holds the pipe open and expires `drain_deadline` (`Worker result channel failed before a result was received`, `handoff_event == "drain_expired"`), removing the 50ms floor when `cancel_requested is None` while keeping timeout, monitor, drain, and cancellation deadlines |
+| Phase 4 | `tests/core/test_terminal_handoff_transport.py` | `test_host_terminal_handoff_wait_seconds_preserves_timeout_monitor_and_drain_deadlines_without_poll_floor`, `test_host_one_shot_terminal_handoff_wakes_on_producer_sentinel_and_expires_drain_when_descendant_holds_pipe`, `test_host_one_shot_terminal_handoff_recomputes_wait_against_fresh_clock_after_monitor_sample` | `HostTaskRunner._run_one_shot_terminal_handoff` wakes on `process.sentinel` even when a descendant holds the pipe open and expires `drain_deadline` (`Worker result channel failed before a result was received`, `handoff_event == "drain_expired"`), recomputes `wait_for` against a fresh post-sample clock reading, and removes the 50ms floor when `cancel_requested is None` while keeping timeout, monitor, drain, and cancellation deadlines |
 | Phase 5 | Full suite (`tests/specs/test_plan_metadata.py`, `bin/check-doc-paths`, `pytest`, `pytest-pg`) | Repository-wide regression & traceability suite | Zero regressions across all specs, plans, commands, extensions, PostgreSQL backend, and runtime tests |
 
 ## 6a. Theory-Versus-Code Audit Refresh
@@ -929,7 +929,7 @@ All 46 baseline rows from `docs/plans/2026-11-02-program-theory-reconciliation-p
 
 #### Account 1 — Author Account (Five-Part `[WT-7]` Structure)
 
-1. **Verdict**: `fits`.
+1. **Verdict**: `fits with strain`.
 2. **Sections the change rests on**:
    - `[WT-1]` & `[WT-3]` (Pipelines are tasks whose stages and edges are ordinary tasks controlled through normal `ctrl_in` messages; Service registry selects one active Manager in `weft.state.services`; `LivenessMonitor` is the sole deleter of `weft.state.tasks.*`).
    - `[WT-2a.2]`, `[WT-2a.3]`, `[WT-4.1]`, `[WT-4.3]`, & `[ALT-WT-007]` (Queues carry facts; status/result readers reconcile superseded non-terminal Manager projections and unconfigured terminal evidence at read time without mutating queue state, reconciling to `failed` only on positive `non_live` evidence while keeping live and uncertain (`unknown`) superseded Managers `running` with `superseded_manager_draining`).
@@ -944,13 +944,64 @@ All 46 baseline rows from `docs/plans/2026-11-02-program-theory-reconciliation-p
 4. **What it predicts that could prove it wrong (falsifiable predictions)**:
    - **Prediction 1**: After killing Manager `M1` with `SIGKILL` and starting replacement Manager `M2`, both `weft status --all` and `weft task status <M1_tid>` report `M1` as `status="failed"` with `reconciliation.classification == "superseded_manager_record"`, whereas a briefly live losing Manager `M_drain` (`runtime_liveness="live"`) and a handle-less Manager record `M_unknown` (`runtime_liveness="unknown"`) report `status="running"` with `reconciliation.classification == "superseded_manager_draining"`, and `weft.state.tasks.<M1_tid>` retains its original row count (`1`) in the broker.
    - **Prediction 2**: When a task's runner process dies (`wrapper_lost` on `T{tid}.ctrl_out`) before publishing `weft.state.tasks.<tid>`, `weft result <tid> --timeout 5.0` wakes at the `0.5s` `WEFT_COMPLETED_RESULT_GRACE_SECONDS` deadline and returns `status="unknown"`, `reconciliation={"classification": "observation_metadata_unavailable", "observed_terminal_status": "failed"}` in `< 2.0s`, while a call whose `--timeout` expires before the `0.5s` grace window finishes raises `CommandTimeoutError` (exit 124).
-   - **Prediction 3**: When `HostTaskRunner._run_one_shot_terminal_handoff` runs a target with `timeout=None`, `limits=None`, and `cancel_requested=None` (and `ACTIVE_CONTROL_POLL_INTERVAL` patched to `5.0s`) whose worker spawns a child that holds the pipe open and then exits (`os._exit(7)`), `wait_terminal_payload` wakes immediately on `process.sentinel`, starts `drain_deadline` (`0.2s`), and returns protocol failure (`outcome.returncode == 7`, `outcome.error == "Worker result channel failed before a result was received"`, `handoff_event == "drain_expired"`) in `< 1.5s`.
+   - **Prediction 3**: When `HostTaskRunner._run_one_shot_terminal_handoff` runs a target with `timeout=None`, `limits=None`, and `cancel_requested=None` (and `ACTIVE_CONTROL_POLL_INTERVAL` patched to `5.0s`) whose worker spawns a child that holds the pipe open and then exits (`os._exit(7)`), `wait_terminal_payload` wakes immediately on `process.sentinel`, starts `drain_deadline` (`0.2s`), and returns protocol failure (`outcome.returncode == 7`, `outcome.error == "Worker result channel failed before a result was received"`, `handoff_event == "drain_expired"`) in `< 2.0s`.
 5. **The sentence in `docs/program-theory.md` that fits worst**:
    - In `[WT-4.3]` ("Availability and death are different questions", line 470): *"A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death. Task-owned terminal proof wins over a Manager `wrapper_lost` record, and reservation/checkpoint custody survives until task-snapshot handoff or positive settlement."* That passage fits with the most tension because for a superseded Manager whose `host-pid` process is confirmed dead (`manager_liveness == "non_live"`, e.g. `SIGKILL`ed before writing a task-owned terminal projection), `[OBS.15]` reconciles the abandoned Manager projection to terminal `"failed"` (`superseded_manager_record`) at read time by combining two positive facts (`weft.state.services` selected a different active Manager and `inspect_host_process` proved the superseded Manager's scoped `(pid, create_time)` process is absent/stale), whereas missing handles, missing `create_time`, or failed OS probes remain `"unknown"` (`status="running"`, `superseded_manager_draining`).
 
-#### Account 2 — Other-Family Blind Account (`[WT-7]`)
+#### Account 2 — Other-Family Blind Account (`[WT-7]`, `codex` session `01a1b6ed-cad0-7bb3-b7c6-783522c8db2c`)
 
-To be executed in Phase 5 Step 5.1 via `codex exec` receiving only `docs/program-theory.md` and `git diff 709fb78112f797f60c4dea6c709d2c062830211d..HEAD -- weft tests docs/specifications`, and recorded here with divergence classifications before Phase 5 closes.
+Recorded verbatim from `codex exec` receiving only `docs/program-theory.md` and `git diff 709fb78112f797f60c4dea6c709d2c062830211d..08314b511f9c162abef6bf5fead0fb8a2851ab56 -- weft tests docs/specifications`:
+
+> **(1) Verdict: fits with strain.**
+>
+> The change mostly restores Weft’s existing model: Manager selection is separate from process death; missing result metadata produces uncertainty; pipeline controls travel through ordinary queues; reservation cleanup stays with the Manager; and host supervision gains producer-sentinel readiness.
+>
+> The clearest strain is retained fixed polling for cancellation callbacks and missing sentinels. A second strain is the agent runtime’s per-task conversation promise: the Codex specification now makes native-history isolation depend on caller-supplied `CODEX_HOME` paths or containers.
+>
+> **(2) Sections of `docs/program-theory.md` the change rests on.**
+>
+> - **[WT-2a.13], [WT-4.3], and [WT-2] item 3:** independent lifetimes and proof of death justify preserving a superseded Manager’s running projection when runtime evidence is live or unknown. A replacement’s selection alone cannot establish death.
+> - **[WT-2a.2], [WT-3] Evidence, and [WT-4.1]:** status and result readers interpret queue facts and scoped process evidence. Missing observation configuration remains an observation failure rather than becoming a fabricated task outcome.
+> - **[WT-2a.6], [WT-2] item 4, and [WT-4.3]:** multiplexing producer exit with the response channel, recomputing waits after monitoring, and retiring consumed readiness inputs move supervision toward the reactor model.
+> - **[WT-2a.7], [WT-2a.12], and [WT-3] Pipeline:** exact-ID reservation disposition and pipeline PAUSE/RESUME compose existing task and queue operations.
+> - **[WT-3] Agent runtime and session, [WT-4.4] No over-armoring, and [WT-5]:** the Codex documentation places native configuration and runtime isolation at an explicit operator boundary. The tension is whether that precondition adequately supports the theory’s per-task conversation ownership.
+>
+> **(3) What the change refuses, and the entry that refuses it.**
+>
+> It refuses treating supersession as death or permission to stop existing work: [ALT-WT-007], [ALT-WT-015], and [WT-2a.13]. Live and uncertain former Managers remain distinguishable from confirmed dead records.
+>
+> It refuses converting an observer’s deadline or missing metadata into task failure: [WT-2a.13] and [WT-4.3] “Availability and death are different questions.” The caller can time out while the task’s lifecycle remains untouched.
+>
+> It preserves the Manager-only scope of spawn requeue: [ALT-WT-006]. Extending exact-ID disposition across existing spawn sources introduces no new task retry policy or public child lane ([ALT-WT-001]).
+>
+> Pipeline controls follow [WT-2a.12] rather than gaining a privileged control channel. The readiness repair also acts on [ALT-WT-002] and [ALT-WT-021], but incompletely: callback and sentinel-absent branches retain the rejected polling mechanism.
+>
+> **(4) What the change predicts that could prove it wrong.**
+>
+> These predictions are unmeasured in this blind reading.
+>
+> - With a confirmed active replacement, a superseded Manager becomes `failed` only with positive non-live evidence. Live or unknown evidence preserves its lifecycle status with draining reconciliation. Task-owned terminal projections remain intact. Bulk, point, and historical views should agree on these distinctions; passive reads should emit no PING or lifecycle mutation.
+> - An unconfigured result with `wrapper_lost` settles as `unknown` after its completion grace when the caller deadline permits. A deadline preceding grace produces an observation timeout. Equality permits settlement. None of these outcomes should publish synthetic task timeout.
+> - Unconfigured realtime following should wait for discovery or its caller deadline without spinning; a non-following read should return.
+> - A producer exiting while a descendant retains the response pipe should wake supervision through the sentinel and settle within the drain budget. With no cancellation callback and a valid sentinel, quiet supervision should have no fixed wake cap. Periodic wakeups on that path would refute the readiness claim.
+> - Exact-ID CLEAR or REQUEUE should disposition the matching internal or ordinary spawn reservation while preserving unrelated rows.
+> - Repeated pipeline controls should resend child messages and preserve the original pre-pause activity. The injected-write-failure test exposes a limit: the coordinator can publish `paused` while a child missed PAUSE. That snapshot cannot establish that every child has paused.
+> - Concurrent Codex tasks using the documented isolation should retain separate conversations across resumes. A cross-task resume under those conditions would refute the documented isolation prescription. Shared-home interleaving would test how far the theory’s per-task promise depends on that prescription.
+>
+> **(5) The sentence that fits worst, quoted verbatim.**
+>
+> From [WT-4.3]:
+>
+> > Every task waits at one `PollingStrategy` arbiter driven by backend hints/notifications, local `notify_activity()` events, OS sentinel adapters, and explicit deadlines—never defensive polling wait-caps.
+>
+> `_terminal_handoff_wait_seconds` still inserts `ACTIVE_CONTROL_POLL_INTERVAL` whenever a cancellation callback exists or a producer sentinel is unavailable. New tests explicitly preserve the 50 ms cap. Preserving cancellation latency explains the choice, but [ALT-WT-002] requires a notifying adapter. The change reduces this inherited drift while continuing to encode it.
+
+#### Two-Factor Comparison and Divergence Classification (`[WT-7]`)
+
+- **Agreement**: Both Account 1 (`antigravity`) and Account 2 (`codex`, blind) converge on the same verdict (`fits with strain`), the same governing sections (`[WT-2a.2]`, `[WT-2a.6]`, `[WT-2a.7]`, `[WT-2a.12]`, `[WT-2a.13]`, `[WT-3]`, `[WT-4.1]`, `[WT-4.3]`, `[WT-4.4]`), the same refusal entries (`[ALT-WT-002]`, `[ALT-WT-007]`, `[ALT-WT-015]`, `[ALT-WT-021]`), and the same falsifiable predictions across Phases 1–4.
+- **Divergence Classification (`agent reasoning` — complementary strain selection within `[WT-4.3]`, zero `document deficiency` and zero `change deficiency`)**:
+  - Account 1 selected the `[WT-4.3]` sentence on availability vs death (*"A missing snapshot, an expired window, or a failed probe is `unknown`, never proof of death..."*), noting how three-state liveness resolves the tension by reconciling only confirmed `non_live` superseded Managers to `failed` while keeping `unknown` and `live` superseded Managers `running` (`superseded_manager_draining`).
+  - Account 2 confirmed that Phase 1's three-state liveness fully satisfies `[WT-4.3]`'s availability-vs-death rule, and therefore selected the `[WT-4.3]` reactor sentence (*"Every task waits at one `PollingStrategy` arbiter ... never defensive polling wait-caps"*) because `HostTaskRunner._terminal_handoff_wait_seconds` (like `AgentSession._terminal_handoff_wait_seconds`) still retains the `0.05s` `ACTIVE_CONTROL_POLL_INTERVAL` when `cancel_requested is not None` (`Consumer`-driven runs) until `Consumer` cancellation is converted from a boolean callable into a waitable OS event (explicitly recorded in Section 9 Out of Scope). Neither `docs/program-theory.md` nor the change slice requires modification.
 
 ## 7. Verification and Gates
 
@@ -1048,7 +1099,23 @@ Every phase commit (Phases 1–4) must pass:
 - **Findings and Dispositions**:
   - **Finding 1 (P2 — `select_active_manager(ctx, broker=broker)` defaulted `probe_stale=False` but passed `prune_stale=True` to `_registry_view`, causing `_manager_registry_disposition` to send a `PING` to `T{tid}.ctrl_in` when an active manager registry record had `liveness == "unknown"`)**: **Accepted**. Updated `select_active_manager` in `weft/core/manager_runtime.py:1094` to pass `prune_stale=probe_stale` to `_registry_view(...)` (all callers that want active `PING` probing already pass `probe_stale=True`), and added regression assertions in `tests/commands/test_status.py` and `tests/commands/test_task_commands.py` verifying that `T{mgr_tid}.ctrl_in` remains empty after `system_status` and `task_status`.
   - **Finding 2 (P2 — `_selected_active_manager_tid` in `weft/commands/system.py` used `_active_canonical_manager_records(managers)` shortcuts that selected an unproven `liveness == "unknown"` namespace-ambiguous manager in bulk status while `select_active_manager` returned `None` in point status)**: **Accepted**. Updated `_selected_active_manager_tid` in `weft/commands/system.py` to delegate `managers` snapshots to `manager_runtime._select_active_manager_from_snapshot(ctx, snapshot)` (stripping `MANAGER_PONG_LIVE_AT_KEY` from copies so bulk and point status apply identical passive canonical selection rules), and added `test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven` in `tests/commands/test_status.py`.
-  - **Finding 3 (P2 — `iter_task_realtime_events(..., follow=False)` in `weft/commands/events.py` sets `deadline = time.monotonic()` and called `collected.settle(...)` on Turn 2 when `materialized.config is None`, emitting spurious `state`/`result`/`end(status="unknown")` events after `snapshot`)**: **Accepted**. Added an explicit guard in `iter_task_realtime_events` (`weft/commands/events.py:559-570`) when `materialized.config is None` after the initial `snapshot` turn (`if not follow: return`, else check `_deadline_expired(deadline)` and `monitor.wait(_remaining_timeout(deadline))`), restoring `test_realtime_unknown_metadata_requires_explicit_terminal_evidence[control]`.
+  - **Finding 3 (P2 — `iter_task_realtime_events(..., follow=False)` in `weft/commands/events.py` sets `deadline = time.monotonic()` and called `collected.settle(...)` on Turn 2 when `materialized.config is None`, emitting spurious `state`/`result`/`end(status="unknown")` events after `snapshot`)**: **Accepted**. Added `if materialized.config is None and not follow: return` in `iter_task_realtime_events` (`weft/commands/events.py:560-561`) after the initial `snapshot` turn, restoring `test_realtime_unknown_metadata_requires_explicit_terminal_evidence[control]` while preserving `follow=True` settlement in `test_http_views_handle_invalid_and_unknown_tids_cleanly`.
+- **Verdict (`codex` session `01a1b667-09ef-7881-9e06-326633467968`)**: `PASS` at `3b0f5a18` (Phase 1) and `e2a98d9c` (Phase 2).
+
+### Mid-Plan Implementation Review (Phases 3–4, `codex` session `01a1b667-09ef-7881-9e06-326633467968`)
+
+- **Findings and Dispositions**:
+  - **Phase 3 (`0650cd15`)**: Zero defects found.
+  - **Phase 4 Finding 1 (P2 — `HostTaskRunner._run_one_shot_terminal_handoff` passed pre-sample `now` to `_terminal_handoff_wait_seconds` after `monitor.check_limits()`)**: **Accepted**. Updated `weft/core/runners/host.py` to pass `now=time.monotonic()` into `_terminal_handoff_wait_seconds`, matching `AgentSession.execute`, and added `test_host_one_shot_terminal_handoff_recomputes_wait_against_fresh_clock_after_monitor_sample` (patching `host_runner_mod.time` via `SimpleNamespace` so the shared stdlib `time` module is never mutated).
+  - **Phase 4 Finding 2 (P2 — `_leaking_function_target` in `tests/core/test_terminal_handoff_transport.py` used `isinstance(candidate, Connection)` and `subprocess.Popen(..., pass_fds=...)`, which are POSIX-only)**: **Accepted**. Updated `_leaking_function_target` to detect `result_sender` via `hasattr(candidate, "send_bytes") and hasattr(candidate, "poll")`, set `multiprocessing.current_process().daemon = False`, and call `_leak_sender_to_grandchild(result_sender, pidfile)` from `tests.helpers.leaked_sender`.
+- **Verdict (`codex` session `01a1b667-09ef-7881-9e06-326633467968`)**: `PASS` at `0650cd15` (Phase 3) and `08314b51` (Phase 4).
+
+### Post-Implementation Review & Final Closure Verification
+
+- **Findings and Dispositions**:
+  - **Finding 1 (Bulk status still sent a `PING`)**: **Accepted**. Updated `_manager_registry_disposition` (`weft/core/manager_runtime.py:229`) to honor `probe_stale` before calling `_manager_record_has_matched_pong`, added `probe_stale: bool | None = None` to `list_manager_records` (`weft/core/manager_runtime.py:1054`), and updated `_collect_manager_records` (`weft/commands/system.py:214`) to pass `probe_stale=False`. Removed the `ctrl_in` drain from `test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven` (`tests/commands/test_status.py:3256`) and asserted both `ctrl_in.peek_many(limit=10) == []` and zero `send_keyed_ping_probe` calls immediately after `system_status` and after each `task_status` call.
+  - **Finding 2 (`_manager_runtime_liveness` lost the container PID-namespace safeguard)**: **Accepted**. Updated `_manager_runtime_liveness` (`weft/commands/system.py:306`) to delegate directly to `manager_runtime.manager_registry_record_liveness(mapping_entry)` (`weft/core/manager_runtime.py:928`), mapping `"live" -> "live"`, `"stale" -> "non_live"`, and `"unknown" -> "unknown"` so container observers treat an absent host PID (`reason == "process_absent"` when `detect_container_runtime() is not None`) as `"unknown"` rather than `"non_live"` per `[WT-4.3]`. Added `test_superseded_manager_liveness_preserves_container_pid_namespace_safeguard` in `tests/commands/test_status.py` and container-namespace coverage in `tests/commands/test_task_commands.py`.
+- **Verdict (`codex` session `01a1b667-09ef-7881-9e06-326633467968`)**: `PASS` (both post-implementation findings verified resolved; zero defects found).
 
 ## 9. Out of Scope
 

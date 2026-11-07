@@ -3651,26 +3651,6 @@ class _DeferredFirstPollConnection:
         return self._receiver.recv_bytes()
 
 
-class _FailingFirstBlockingPollConnection:
-    """Fail one blocking poll while delegating every other pipe operation."""
-
-    def __init__(self, receiver: Connection) -> None:
-        self._receiver = receiver
-        self.blocking_poll_failed = False
-
-    def poll(self, timeout: float = 0.0) -> bool:
-        if timeout > 0.0 and not self.blocking_poll_failed:
-            self.blocking_poll_failed = True
-            raise OSError("blocking terminal poll failed")
-        return self._receiver.poll(timeout)
-
-    def recv_bytes(self) -> bytes:
-        return self._receiver.recv_bytes()
-
-    def close(self) -> None:
-        self._receiver.close()
-
-
 class _FailingResponseReadConnection:
     """Fail the production response-read poll at the owner boundary."""
 
@@ -3840,9 +3820,27 @@ def test_host_blocking_poll_failure_is_consumed_as_next_turn_transport_failure(
 
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
-    wrapped_receiver = _FailingFirstBlockingPollConnection(receiver)
+    real_wait = host_module.wait_terminal_payload
+    failure = {"raised": False}
+
+    def failing_first_wait(
+        wait_receiver: Connection,
+        *,
+        producer_sentinel: int | None,
+        timeout: float | None,
+    ) -> bool:
+        if not failure["raised"]:
+            failure["raised"] = True
+            raise OSError("blocking terminal poll failed")
+        return real_wait(
+            wait_receiver,
+            producer_sentinel=producer_sentinel,
+            timeout=timeout,
+        )
+
     process = LiveProcess()
     runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(host_module, "wait_terminal_payload", failing_first_wait)
     monkeypatch.setattr(
         runner,
         "_stop_process",
@@ -3851,13 +3849,13 @@ def test_host_blocking_poll_failure_is_consumed_as_next_turn_transport_failure(
     try:
         outcome = runner._run_one_shot_terminal_handoff(
             process,  # type: ignore[arg-type]
-            wrapped_receiver,  # type: ignore[arg-type]
+            receiver,
             worker_pid=None,
             runtime_handle=None,
             cancel_requested=None,
         )
 
-        assert wrapped_receiver.blocking_poll_failed is True
+        assert failure["raised"] is True
         assert outcome.status == "error"
         assert outcome.diagnostics is not None
         assert outcome.diagnostics["handoff_event"] == "transport_failed"
@@ -3897,6 +3895,7 @@ def test_one_shot_stop_after_begin_drain_preserves_first_deadline(
 
     runner = _build_function_host_runner(timeout=5.0)
     monkeypatch.setattr(host_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(host_module, "wait_terminal_payload", _fake_clock_wait(clock))
     monkeypatch.setattr(
         runner,
         "_stop_process",

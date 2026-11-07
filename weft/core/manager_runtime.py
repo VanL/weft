@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -236,14 +237,17 @@ def _manager_registry_disposition(
 ) -> _ManagerRegistryDisposition:
     """Filter one active manager row without taking delete custody ([MA-1])."""
 
-    del probe_stale
     liveness = manager_registry_record_liveness(record)
     if liveness == "live":
         return "keep"
     if liveness == "stale" or _manager_record_unknown_is_expired(record):
         return "omit"
-    if is_canonical_manager_record(record) and _manager_record_has_matched_pong(
-        context, record, probe_cache=probe_cache, broker=broker
+    if (
+        probe_stale
+        and is_canonical_manager_record(record)
+        and _manager_record_has_matched_pong(
+            context, record, probe_cache=probe_cache, broker=broker
+        )
     ):
         return "keep"
     if _host_pid_visibility_is_namespace_ambiguous(record):
@@ -892,11 +896,13 @@ def _record_pid(record: dict[str, Any] | None) -> int | None:
     return live_processes[0][0] if live_processes else None
 
 
-def _manager_handle_from_record(record: dict[str, Any] | None) -> RunnerHandle | None:
-    if not isinstance(record, dict):
+def _manager_handle_from_record(
+    record: Mapping[str, Any] | None,
+) -> RunnerHandle | None:
+    if not isinstance(record, Mapping):
         return None
     payload = record.get("runtime_handle")
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         return None
     try:
         return RunnerHandle.from_dict(payload)
@@ -915,7 +921,7 @@ def _live_host_processes_from_handle(
 
 
 def _host_pid_visibility_is_namespace_ambiguous(
-    record: dict[str, Any] | None,
+    record: Mapping[str, Any] | None,
 ) -> bool:
     handle = _manager_handle_from_record(record)
     return bool(
@@ -926,7 +932,7 @@ def _host_pid_visibility_is_namespace_ambiguous(
 
 
 def manager_registry_record_liveness(
-    record: dict[str, Any] | None,
+    record: Mapping[str, Any] | None,
 ) -> Literal["live", "stale", "unknown"]:
     """Reduce exact runtime evidence without PING or age conversion.
 
@@ -1048,6 +1054,7 @@ def manager_record(
         context,
         target_tid=tid,
         prune_stale=prune_stale,
+        probe_stale=prune_stale,
     ).target_record
 
 
@@ -1057,16 +1064,18 @@ def list_manager_records(
     include_stopped: bool = False,
     canonical_only: bool = False,
     prune_stale: bool = True,
+    probe_stale: bool | None = None,
     broker: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return manager registry records for command-layer consumers."""
 
+    active_probe = prune_stale if probe_stale is None else probe_stale
     records = list(
         _snapshot_registry(
             context,
             prune_stale=prune_stale,
-            probe_stale=prune_stale,
-            probe_cache={},
+            probe_stale=active_probe,
+            probe_cache={} if active_probe else None,
             broker=broker,
         ).values()
     )
@@ -1094,7 +1103,7 @@ def select_active_manager(
 
     return _registry_view(
         context,
-        prune_stale=probe_stale,
+        prune_stale=True,
         probe_stale=probe_stale,
         probe_cache=probe_cache,
         broker=broker,

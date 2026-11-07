@@ -13477,7 +13477,7 @@ def test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spaw
         drain(internal_inbox)
         drain(internal_reserved)
 
-        payload = json.dumps({"taskspec": make_child_spec("internal-requeue")})
+        payload = json.dumps({"taskspec": make_child_spec(1)})
         internal_inbox.write(payload)
         moved = internal_inbox.move_one(
             internal_reserved_name,
@@ -13495,7 +13495,7 @@ def test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spaw
         assert internal_reserved.peek_one() is None
         assert internal_inbox.read_one() == payload
 
-        payload_clear = json.dumps({"taskspec": make_child_spec("internal-clear")})
+        payload_clear = json.dumps({"taskspec": make_child_spec(2)})
         internal_inbox.write(payload_clear)
         moved_clear = internal_inbox.move_one(
             internal_reserved_name,

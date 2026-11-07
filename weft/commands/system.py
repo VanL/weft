@@ -218,6 +218,7 @@ def _collect_manager_records(
         ctx,
         include_stopped=include_stopped,
         canonical_only=False,
+        probe_stale=False,
     )
 
 
@@ -306,20 +307,12 @@ def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
 def _manager_runtime_liveness(
     mapping_entry: Mapping[str, Any] | None,
 ) -> Literal["live", "non_live", "unknown"]:
-    handle = _runtime_handle_from_mapping(mapping_entry or {})
-    if handle is None or handle.control.get("authority") != "host-pid":
-        return "unknown"
-    identities = handle.scoped_host_processes()
-    if not identities:
-        return "unknown"
-    observations = [
-        inspect_host_process(pid, create_time) for pid, create_time in identities
-    ]
-    if any(item.evidence == "live" for item in observations):
+    liveness = manager_runtime.manager_registry_record_liveness(mapping_entry)
+    if liveness == "live":
         return "live"
-    if any(item.evidence == "unknown" for item in observations):
-        return "unknown"
-    return "non_live"
+    if liveness == "stale":
+        return "non_live"
+    return "unknown"
 
 
 def _is_non_terminal_manager_state_entry(payload: Mapping[str, Any]) -> bool:
@@ -343,11 +336,7 @@ def _selected_active_manager_tid(
 ) -> str | None:
     if managers is not None:
         snapshot = {
-            str(item["tid"]): {
-                key: value
-                for key, value in item.items()
-                if key != manager_runtime.MANAGER_PONG_LIVE_AT_KEY
-            }
+            str(item["tid"]): dict(item)
             for item in managers
             if isinstance(item.get("tid"), str) and item["tid"]
         }

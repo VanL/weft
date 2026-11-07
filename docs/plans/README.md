@@ -30,7 +30,7 @@ There are currently 47 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-06-status-result-and-runtime-remediation-plan.md`](./2026-11-06-status-result-and-runtime-remediation-plan.md) | Status, Result Observation, and Runtime Boundary Remediation Plan | `draft` | none |
+| [`2026-11-06-status-result-and-runtime-remediation-plan.md`](./2026-11-06-status-result-and-runtime-remediation-plan.md) | Status, Result Observation, and Runtime Boundary Remediation Plan | `completed` | none |
 | [`2026-11-06-deep-dive-review-remediation-plan.md`](./2026-11-06-deep-dive-review-remediation-plan.md) | Deep-Dive Review Multi-Phase Remediation Plan | `completed` | none |
 | [`2026-11-05-command-stdout-preservation-plan.md`](./2026-11-05-command-stdout-preservation-plan.md) | Command Stdout Preservation | `completed` | none |
 | [`2026-11-05-operator-consumption-of-launch-custody-plan.md`](./2026-11-05-operator-consumption-of-launch-custody-plan.md) | Operator Consumption Ends Pending Launch Custody | `completed` | none |

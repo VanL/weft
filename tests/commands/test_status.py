@@ -3191,6 +3191,7 @@ def test_system_status_distinguishes_dead_live_absent_handle_and_invalid_project
 
 def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Passive status reads never PING an unproven manager and do not treat it as canonical."""
     root = prepare_project_root(tmp_path)
@@ -3198,6 +3199,17 @@ def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_m
     dead_mgr_tid = "1780000000000000311"
     unknown_mgr_tid = "1780000000000000312"
     started = time.time_ns()
+
+    probe_calls: list[str] = []
+    real_probe = status_cmd.manager_runtime.send_keyed_ping_probe
+
+    def _recording_probe(*args: Any, **kwargs: Any) -> Any:
+        probe_calls.append(str(kwargs.get("tid", "")))
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(
+        status_cmd.manager_runtime, "send_keyed_ping_probe", _recording_probe
+    )
 
     dead_handle = _runtime_handle(
         "host",
@@ -3256,10 +3268,18 @@ def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_m
     bulk_snapshot = status_cmd.system_status(ctx, include_terminal=True)
     bulk_by_tid = {task.tid: task for task in bulk_snapshot.tasks}
     with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
-        ctrl_in.read_many(limit=10)
+        assert ctrl_in.peek_many(limit=10) == []
+    assert probe_calls == []
 
     point_dead = task_cmd.task_status(dead_mgr_tid, context=ctx)
+    with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10) == []
+    assert probe_calls == []
+
     point_unknown = task_cmd.task_status(unknown_mgr_tid, context=ctx)
+    with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10) == []
+    assert probe_calls == []
 
     assert point_dead is not None
     assert point_unknown is not None
@@ -3283,5 +3303,149 @@ def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_m
         "public_status": "running",
         "evidence_source": "runtime",
     }
-    with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
-        assert ctrl_in.peek_many(limit=10) == []
+
+
+def test_superseded_manager_liveness_preserves_container_pid_namespace_safeguard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Container observers treat an absent host PID as `unknown`, not `non_live` ([WT-4.3])."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    unobservable_mgr_tid = "1780000000000000321"
+    mismatched_mgr_tid = "1780000000000000322"
+    new_mgr_tid = "1780000000000000323"
+    started = time.time_ns()
+
+    live_pid = os.getpid()
+    live_create_time = psutil.Process(live_pid).create_time()
+    unobservable_handle = _runtime_handle(
+        "host",
+        "999997",
+        host_pids=[999997],
+        observations={
+            "host_processes": [{"pid": 999997, "create_time": 100.0}],
+        },
+    )
+    mismatched_handle = _runtime_handle(
+        "host",
+        str(live_pid),
+        host_pids=[live_pid],
+        observations={
+            "host_processes": [
+                {"pid": live_pid, "create_time": live_create_time + 50.0}
+            ],
+        },
+    )
+    new_handle = _runtime_handle(
+        "host",
+        str(live_pid),
+        host_pids=[live_pid],
+        observations={
+            "host_processes": [{"pid": live_pid, "create_time": live_create_time}],
+        },
+    )
+
+    monkeypatch.setattr(
+        status_cmd.manager_runtime, "detect_container_runtime", lambda: object()
+    )
+
+    assert (
+        status_cmd.manager_runtime.manager_registry_record_liveness(
+            {"runtime_handle": unobservable_handle}
+        )
+        == "unknown"
+    )
+    assert (
+        status_cmd._manager_runtime_liveness({"runtime_handle": unobservable_handle})
+        == "unknown"
+    )
+    assert (
+        status_cmd.manager_runtime.manager_registry_record_liveness(
+            {"runtime_handle": mismatched_handle}
+        )
+        == "stale"
+    )
+    assert (
+        status_cmd._manager_runtime_liveness({"runtime_handle": mismatched_handle})
+        == "non_live"
+    )
+
+    for tid, handle in (
+        (unobservable_mgr_tid, unobservable_handle),
+        (mismatched_mgr_tid, mismatched_handle),
+        (new_mgr_tid, new_handle),
+    ):
+        with ctx.queue(task_state_queue_name(tid), persistent=False) as queue:
+            queue.write(
+                json.dumps(
+                    {
+                        "full": tid,
+                        "short": encode_tid(tid),
+                        "name": f"mgr-{tid[-3:]}",
+                        "runner": "host",
+                        "role": "manager",
+                        "terminal": False,
+                        "activity": "idle",
+                        "waiting_on": WEFT_SPAWN_REQUESTS_QUEUE,
+                        "runtime_handle": handle,
+                        "projection": {
+                            "version": 1,
+                            "status": "running",
+                            "event": "task_started",
+                            "started_at": started,
+                            "metadata": {"role": "manager"},
+                        },
+                    }
+                )
+            )
+
+    with ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    ctx,
+                    tid=new_mgr_tid,
+                    name="new-manager",
+                    runtime_handle=new_handle,
+                )
+            )
+        )
+
+    bulk_snapshot = status_cmd.system_status(ctx, include_terminal=True)
+    bulk_by_tid = {task.tid: task for task in bulk_snapshot.tasks}
+    point_unobservable = task_cmd.task_status(unobservable_mgr_tid, context=ctx)
+    point_mismatched = task_cmd.task_status(mismatched_mgr_tid, context=ctx)
+
+    assert point_unobservable is not None
+    assert point_mismatched is not None
+    assert bulk_by_tid[unobservable_mgr_tid].status == "running"
+    assert bulk_by_tid[unobservable_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+    assert point_unobservable.status == "running"
+    assert point_unobservable.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+    assert bulk_by_tid[mismatched_mgr_tid].status == "failed"
+    assert bulk_by_tid[mismatched_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }
+    assert point_mismatched.status == "failed"
+    assert point_mismatched.reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }

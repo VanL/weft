@@ -557,17 +557,8 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 continue
             if observation_cancelled(cancel_event):
                 return
-            if materialized.config is None:
-                if not follow:
-                    return
-                if _deadline_expired(deadline):
-                    _raise_follow_timeout(
-                        tid=normalized_tid,
-                        operation="realtime events",
-                        timeout=timeout,
-                    )
-                monitor.wait(_remaining_timeout(deadline))
-                continue
+            if materialized.config is None and not follow:
+                return
             with log_queue.get_connection() as broker:
                 (
                     value,

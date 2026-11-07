@@ -13,7 +13,7 @@ import pytest
 
 from simplebroker import Queue
 from tests.helpers.test_backend import prepare_project_root
-from weft._exceptions import CommandExecutionError, CommandTimeoutError
+from weft._exceptions import CommandExecutionError
 from weft.commands import _result_wait as result_wait
 from weft.commands import result as result_cmd
 from weft.commands import tasks as task_cmd
@@ -78,18 +78,11 @@ def test_terminal_projection_without_routes_cannot_collect_result(
                 }
             )
         )
-    if timeout is not None:
-        with pytest.raises(CommandTimeoutError):
-            result_cmd.await_task_result(ctx, tid, timeout=timeout)
-    else:
-        result = result_cmd.await_task_result(ctx, tid)
-        assert result.status == "unknown"
-        assert result.reconciliation is not None
-        assert (
-            result.reconciliation["classification"]
-            == "observation_metadata_unavailable"
-        )
-        assert result.reconciliation["observed_terminal_status"] == "failed"
+    result = result_cmd.await_task_result(ctx, tid, timeout=timeout)
+    assert result.status == "unknown"
+    assert result.reconciliation is not None
+    assert result.reconciliation["classification"] == "observation_metadata_unavailable"
+    assert result.reconciliation["observed_terminal_status"] == "failed"
     status = task_cmd.task_status(tid, context=ctx)
     assert status is not None and status.status == "failed"
 

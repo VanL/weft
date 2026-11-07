@@ -534,8 +534,9 @@ _MANAGER_SNAPSHOT_CASES = (
     ),
     _ManagerSnapshotCase(
         "canonical-pong-rescue-probe-disabled",
-        pong_result=True,
-        expected_in_view=True,
+        pong_result=None,
+        expected_in_view=False,
+        expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
         "canonical-pong-rescue-probe-enabled",
@@ -543,7 +544,11 @@ _MANAGER_SNAPSHOT_CASES = (
         pong_result=True,
         expected_in_view=True,
     ),
-    _ManagerSnapshotCase("canonical-unmatched-pong-omit-only"),
+    _ManagerSnapshotCase(
+        "canonical-unmatched-pong-omit-only",
+        pong_result=None,
+        expected_pong_calls=0,
+    ),
     _ManagerSnapshotCase(
         "canonical-unmatched-pong-prune",
         probe_stale=True,
@@ -563,8 +568,10 @@ _MANAGER_SNAPSHOT_CASES = (
     ),
     _ManagerSnapshotCase(
         "canonical-ambiguous-keep-probe-disabled",
+        pong_result=None,
         namespace_ambiguous=True,
         expected_in_view=True,
+        expected_pong_calls=0,
     ),
     _ManagerSnapshotCase(
         "canonical-ambiguous-keep-probe-enabled",
@@ -835,7 +842,7 @@ def test_snapshot_registry_newer_filtered_row_preserves_older_included_row(
     assert snapshot[tid]["name"] == "older"
     assert snapshot[tid]["timestamp"] == older_id
     assert remaining_ids == ([older_id] if newer_deleted else [older_id, newer_id])
-    assert pong_calls == ["newer"]
+    assert pong_calls == (["newer"] if probe_stale else [])
 
 
 @pytest.mark.parametrize("outcome", ["stopped", "failure"])
@@ -1266,7 +1273,7 @@ def test_snapshot_registry_accepts_only_dispatch_eligible_matched_pong(
         )
         snapshot = core_manager_runtime._snapshot_registry(
             context,
-            probe_stale=False,
+            probe_stale=True,
             probe_cache=probe_cache,
             queue=queue,
         )
