@@ -6398,20 +6398,12 @@ class Manager(ServiceTask):
     ) -> None:
         """Apply manager reserved policy across all attached spawn sources."""
 
-        if message_timestamp is not None:
-            self._apply_spawn_reserved_policy(
-                policy,
-                source_queue=self._queue_names["inbox"],
-                reserved_queue=self._queue_names["reserved"],
-                message_timestamp=message_timestamp,
-            )
-            return
-
         for reserved_queue, source_queue in self._spawn_reserved_queue_pairs():
             self._apply_spawn_reserved_policy(
                 policy,
                 source_queue=source_queue,
                 reserved_queue=reserved_queue,
+                message_timestamp=message_timestamp,
             )
 
     # ------------------------------------------------------------------

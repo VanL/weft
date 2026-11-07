@@ -670,7 +670,7 @@ When recovery is later implemented, it should bias toward under-claiming
 progress. After a crash, it is better for a recovered snapshot to say "last
 checkpoint uncertain" than to overstate what completed.
 
-### Stop and kill [PL-4.4]
+### Stop, kill, pause, and resume [PL-4.4]
 
 Target state:
 
@@ -678,10 +678,19 @@ Target state:
   terminal according to the normal task-control rules
 - killing a pipeline should kill the active stage task and terminate the
   pipeline run
+- pausing a pipeline should broadcast `PAUSE` to stage and edge `ctrl_in`
+  queues on every explicit `PAUSE` request, mark the pipeline paused
+  (`control_pause`), and republish `P{pipeline_tid}.status` with
+  `"activity": "paused"`
+- resuming a paused pipeline should broadcast `RESUME` to stage and edge
+  `ctrl_in` queues on every explicit `RESUME` request, clear the pipeline
+  paused state (`control_resume`), restore the coordinator's pre-pause
+  activity, and republish `P{pipeline_tid}.status`
 - already-completed stages remain completed
 
 Control should stay visible through normal task control queues and task-log
-events.
+events (`weft/core/tasks/pipeline.py::PipelineTask._handle_control_command`;
+plan: `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`).
 
 Baseline fail-fast propagation:
 

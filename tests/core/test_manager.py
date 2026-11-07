@@ -13459,3 +13459,56 @@ def test_clear_admission_retry_marks_evicted_spawn_lane_for_immediate_reprobe(
     manager._clear_admission_retry()
     manager._update_active_queues()
     assert inbox_name in manager._active_queues
+
+
+def test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spawn_lane(
+    broker_env: tuple[Any, Callable[[str], Queue]],
+    unique_tid: str,
+) -> None:
+    """Manager._apply_reserved_policy with an exact message_timestamp must cover weft.spawn.internal / T{manager}.internal_reserved [MANAGER.11]."""
+    db_path, make_queue = broker_env
+    spec = make_manager_spec(unique_tid, role="manager")
+    manager = Manager(db_path, spec)
+    try:
+        internal_reserved_name = manager._queue_names["internal_reserved"]
+        internal_inbox = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+        internal_reserved = make_queue(internal_reserved_name)
+
+        drain(internal_inbox)
+        drain(internal_reserved)
+
+        payload = json.dumps({"taskspec": make_child_spec("internal-requeue")})
+        internal_inbox.write(payload)
+        moved = internal_inbox.move_one(
+            internal_reserved_name,
+            with_timestamps=True,
+        )
+        assert moved is not None
+        _reserved_body, exact_ts = moved
+        assert internal_inbox.peek_one() is None
+        assert internal_reserved.peek_one() == payload
+
+        manager._apply_reserved_policy(
+            ReservedPolicy.REQUEUE,
+            message_timestamp=int(exact_ts),
+        )
+        assert internal_reserved.peek_one() is None
+        assert internal_inbox.read_one() == payload
+
+        payload_clear = json.dumps({"taskspec": make_child_spec("internal-clear")})
+        internal_inbox.write(payload_clear)
+        moved_clear = internal_inbox.move_one(
+            internal_reserved_name,
+            with_timestamps=True,
+        )
+        assert moved_clear is not None
+        _clear_body, clear_ts = moved_clear
+
+        manager._apply_reserved_policy(
+            ReservedPolicy.CLEAR,
+            message_timestamp=int(clear_ts),
+        )
+        assert internal_reserved.peek_one() is None
+        assert internal_inbox.peek_one() is None
+    finally:
+        manager.cleanup()

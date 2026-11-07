@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict
 from simplebroker.ext import BrokerError
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PAUSE,
+    CONTROL_RESUME,
     CONTROL_STATUS,
     CONTROL_STOP,
     FAILURE_LIKE_TASK_STATUSES,
@@ -334,6 +336,7 @@ class PipelineTask(BaseTask):
         runtime_payload = taskspec.metadata.get(PIPELINE_RUNTIME_METADATA_KEY)
         self._runtime = PipelineRuntimeEnvelope.model_validate(runtime_payload or {})
         self._bootstrapped = False
+        self._pre_pause_activity: tuple[str | None, str | None] | None = None
         self._registry_message_id: int | None = None
         self._status_snapshot = self._build_initial_snapshot()
         super().__init__(db, taskspec, stop_event=stop_event, config=config)
@@ -505,6 +508,7 @@ class PipelineTask(BaseTask):
             raise
 
         self._bootstrapped = True
+        self._pre_pause_activity = None
         self._set_activity("waiting")
         self._publish_pipeline_snapshot()
 
@@ -942,4 +946,33 @@ class PipelineTask(BaseTask):
             self._publish_pipeline_snapshot()
             self._delete_pipeline_registry_record()
             return True
+        if command == CONTROL_PAUSE:
+            if not self._paused and self._activity != "paused":
+                self._pre_pause_activity = (self._activity, self._waiting_on)
+            self._broadcast_control(CONTROL_PAUSE)
+            handled = super()._handle_control_command(request, context)
+            self._set_activity("paused", waiting_on=None)
+            self._publish_pipeline_snapshot()
+            return handled
+        if command == CONTROL_RESUME:
+            was_paused = self._paused
+            self._broadcast_control(CONTROL_RESUME)
+            handled = super()._handle_control_command(request, context)
+            if (
+                was_paused
+                and not self.should_stop
+                and self.taskspec.state.status == "running"
+            ):
+                restored_activity, restored_waiting_on = (
+                    self._pre_pause_activity
+                    if self._pre_pause_activity is not None
+                    else ("waiting" if self._bootstrapped else "bootstrapping", None)
+                )
+                self._pre_pause_activity = None
+                if restored_activity is not None:
+                    self._set_activity(
+                        restored_activity, waiting_on=restored_waiting_on
+                    )
+            self._publish_pipeline_snapshot()
+            return handled
         return super()._handle_control_command(request, context)

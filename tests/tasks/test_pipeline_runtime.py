@@ -25,7 +25,9 @@ from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     CONTROL_KILL,
+    CONTROL_PAUSE,
     CONTROL_PING,
+    CONTROL_RESUME,
     CONTROL_STATUS,
     CONTROL_STOP,
     PIPELINE_EDGE_RUNTIME_METADATA_KEY,
@@ -2041,3 +2043,146 @@ def test_pipeline_registry_write_retains_append_id_without_rescanning_queue(
     finally:
         task.cleanup()
         registry.close()
+
+
+def test_pipeline_pause_and_resume_broadcasts_to_stages_and_edges_and_restores_activity(
+    tmp_path: Path,
+) -> None:
+    """PipelineTask broadcasts PAUSE/RESUME to stage and edge ctrl_in queues and restores pre-pause activity [PL-4.4]."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=2)
+    db_path = tmp_path / "pipeline-pause-resume.sqlite3"
+    task = PipelineTask(db_path, TaskSpec.model_validate(payload))
+    try:
+        task.process_once()
+        assert task._bootstrapped is True
+        assert task._activity == "waiting"
+
+        task._set_activity("running", waiting_on="P.custom.wait")
+        ctrl_in = task._queue(task._queue_names["ctrl_in"])
+        status_queue = task._queue(task._runtime.queues.status)
+        child_ctrl_queues = [stage.ctrl_in_queue for stage in task._runtime.stages] + [
+            edge.taskspec["io"]["control"]["ctrl_in"] for edge in task._runtime.edges
+        ]
+
+        ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pipe-pause-1"))
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+
+        assert task._paused is True
+        assert task._activity == "paused"
+        assert task._waiting_on is None
+        for queue_name in child_ctrl_queues:
+            messages = _drain_json(task._queue(queue_name))
+            assert [msg["command"] for msg in messages] == [CONTROL_PAUSE]
+        snapshots = _drain_json(status_queue)
+        assert snapshots[-1]["activity"] == "paused"
+
+        ctrl_in.write(
+            encode_control_message(CONTROL_RESUME, request_id="pipe-resume-1")
+        )
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+
+        assert task._paused is False
+        assert task._activity == "running"
+        assert task._waiting_on == "P.custom.wait"
+        for queue_name in child_ctrl_queues:
+            messages = _drain_json(task._queue(queue_name))
+            assert [msg["command"] for msg in messages] == [CONTROL_RESUME]
+        snapshots = _drain_json(status_queue)
+        assert snapshots[-1]["activity"] == "running"
+    finally:
+        task.cleanup()
+
+
+def test_pipeline_repeated_pause_and_resume_repairs_failed_child_control_write_without_clobbering_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeating PAUSE or RESUME re-broadcasts to repair partial child write failures without clobbering restored activity [PL-4.4]."""
+    payload = _compiled_pipeline_taskspec_payload(tmp_path, stage_count=2)
+    db_path = tmp_path / "pipeline-pause-retry.sqlite3"
+    task = PipelineTask(db_path, TaskSpec.model_validate(payload))
+    try:
+        task.process_once()
+        task._set_activity("bootstrapping", waiting_on="P.bootstrap.wait")
+        ctrl_in = task._queue(task._queue_names["ctrl_in"])
+        child_ctrl_queues = [stage.ctrl_in_queue for stage in task._runtime.stages] + [
+            edge.taskspec["io"]["control"]["ctrl_in"] for edge in task._runtime.edges
+        ]
+        target_child_queue = child_ctrl_queues[0]
+
+        with task._get_connected_queue().get_connection() as broker:
+            broker_type = type(broker)
+            original_write = broker_type.write
+
+        failed_pause_once = False
+        failed_resume_once = False
+
+        def write_with_single_child_failure(
+            db: Any, queue_name: str, message: str, *args: Any, **kwargs: Any
+        ) -> Any:
+            nonlocal failed_pause_once, failed_resume_once
+            if (
+                queue_name == target_child_queue
+                and not failed_pause_once
+                and f'"command": "{CONTROL_PAUSE}"' in message
+            ):
+                failed_pause_once = True
+                raise RuntimeError("transient pause write failure")
+            if (
+                queue_name == target_child_queue
+                and not failed_resume_once
+                and f'"command": "{CONTROL_RESUME}"' in message
+            ):
+                failed_resume_once = True
+                raise RuntimeError("transient resume write failure")
+            return original_write(db, queue_name, message, *args, **kwargs)
+
+        monkeypatch.setattr(broker_type, "write", write_with_single_child_failure)
+
+        ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause-1"))
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+        assert task._paused is True
+        assert _drain_json(task._queue(target_child_queue)) == []
+        for queue_name in child_ctrl_queues[1:]:
+            assert [msg["command"] for msg in _drain_json(task._queue(queue_name))] == [
+                CONTROL_PAUSE
+            ]
+
+        ctrl_in.write(encode_control_message(CONTROL_PAUSE, request_id="pause-2"))
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+        assert task._paused is True
+        assert [
+            msg["command"] for msg in _drain_json(task._queue(target_child_queue))
+        ] == [CONTROL_PAUSE]
+        for queue_name in child_ctrl_queues[1:]:
+            assert [msg["command"] for msg in _drain_json(task._queue(queue_name))] == [
+                CONTROL_PAUSE
+            ]
+
+        ctrl_in.write(encode_control_message(CONTROL_RESUME, request_id="resume-1"))
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+        assert task._paused is False
+        assert task._activity == "bootstrapping"
+        assert task._waiting_on == "P.bootstrap.wait"
+        assert _drain_json(task._queue(target_child_queue)) == []
+        for queue_name in child_ctrl_queues[1:]:
+            assert [msg["command"] for msg in _drain_json(task._queue(queue_name))] == [
+                CONTROL_RESUME
+            ]
+
+        ctrl_in.write(encode_control_message(CONTROL_RESUME, request_id="resume-2"))
+        task._mark_pending_messages_prechecked()
+        task.process_once()
+        assert task._paused is False
+        assert task._activity == "bootstrapping"
+        assert task._waiting_on == "P.bootstrap.wait"
+        assert [
+            msg["command"] for msg in _drain_json(task._queue(target_child_queue))
+        ] == [CONTROL_RESUME]
+    finally:
+        task.cleanup()
