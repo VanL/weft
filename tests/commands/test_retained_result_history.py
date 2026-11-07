@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
 
 from tests.helpers.reactor_driver import drive_until
-from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft._constants import (
+    TERMINAL_ENVELOPE_TYPE,
+    WEFT_GLOBAL_LOG_QUEUE,
+    WRAPPER_LOST_ERROR,
+)
 from weft._exceptions import CommandExecutionError, CommandTimeoutError
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
@@ -218,3 +223,36 @@ def test_claimed_residue_does_not_override_task_owned_terminal_projection(
     assert snapshot is not None and snapshot.status == "completed"
     terminal = task_cmd.task_terminal_snapshot(spec.tid, context=context)
     assert terminal.status == "completed"
+
+
+def test_unconfigured_wrapper_lost_settles_after_grace_under_explicit_timeout(
+    workdir: Path,
+) -> None:
+    """An unconfigured task with wrapper_lost settles after grace instead of waiting out the full timeout."""
+    context = build_context(spec_context=workdir)
+    tid = "1780000000000000501"
+    with context.queue(f"T{tid}.ctrl_out", persistent=True) as ctrl_out:
+        ctrl_out.write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "tid": tid,
+                    "status": "failed",
+                    "event": "work_failed",
+                    "source": "manager",
+                    "error": WRAPPER_LOST_ERROR,
+                }
+            )
+        )
+
+    started = time.monotonic()
+    result = result_cmd.await_task_result(context, tid, timeout=5.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert result.status == "unknown"
+    assert result.error == "observation metadata unavailable"
+    assert result.reconciliation == {
+        "classification": "observation_metadata_unavailable",
+        "observed_terminal_status": "failed",
+    }

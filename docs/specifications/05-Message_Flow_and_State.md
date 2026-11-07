@@ -1222,10 +1222,16 @@ if state later disappears.
 
 Without timeout, unresolved result acquisition returns unknown with
 `observation_metadata_unavailable` reconciliation (CLI exit 1). With finite
-timeout, discovery waits until the original caller deadline and raises the
-existing observation-timeout error (CLI exit 124), without publishing synthetic
-task timeout. Unresolved task
-control routes produce a typed error before any write (CLI exit 1).
+timeout, if terminal evidence is visible (`terminal_projection` without usable
+observation configuration, or `wrapper_lost` whose completion-grace window
+completes at or before the caller deadline), unresolved result acquisition
+settles with unknown and `observation_metadata_unavailable` reconciliation
+(including `observed_terminal_status`, CLI exit 1); if no terminal evidence is
+visible, or if the caller deadline expires before a `wrapper_lost`
+completion-grace window completes, discovery raises the existing
+observation-timeout error at the caller deadline (CLI exit 124), without
+publishing synthetic task timeout. Unresolved task control routes produce a
+typed error before any write (CLI exit 1).
 
 The observation owner registers interest in its exact result and completion
 queues before checking current durable contents, including queues that have

@@ -764,18 +764,29 @@ class _CollectedResult:
             )
         if self.mode is not None:
             return None
+        if terminal is not None:
+            if self.deadline is not None and terminal.classification == "wrapper_lost":
+                grace = self._grace_deadline(materialized)
+                if (grace is not None and self.deadline < grace) or not self._expired(
+                    grace, now
+                ):
+                    return None
+            return _ResultSettlement(
+                "result",
+                "unknown",
+                "observation metadata unavailable",
+                reconciliation={
+                    "classification": "observation_metadata_unavailable",
+                    "observed_terminal_status": terminal.status,
+                },
+            )
         if self.deadline is not None:
             return None
-        reconciliation: dict[str, Any] = {
-            "classification": "observation_metadata_unavailable"
-        }
-        if terminal is not None:
-            reconciliation["observed_terminal_status"] = terminal.status
         return _ResultSettlement(
             "result",
             "unknown",
             "observation metadata unavailable",
-            reconciliation=reconciliation,
+            reconciliation={"classification": "observation_metadata_unavailable"},
         )
 
     def _ordinary_count_eligible(self, count: int) -> bool:
@@ -902,7 +913,12 @@ def _wait_unconfigured_result(
         raise CommandTimeoutError(
             f"Timed out after {timeout} seconds waiting for task {tid}"
         )
-    monitor.wait(None if deadline is None else max(0.0, deadline - time.monotonic()))
+    wait = (
+        None
+        if decision.wait_until is None
+        else max(0.0, decision.wait_until - time.monotonic())
+    )
+    monitor.wait(wait)
 
 
 def _result_window(
@@ -1004,15 +1020,15 @@ def _iter_consuming_result(
                 # suffix and local evidence on resume before deciding a verdict.
                 continue
             if materialized.config is None:
-                yield from _wait_unconfigured_result(
+                for result in _wait_unconfigured_result(
                     tid,
                     materialized,
                     collected,
                     monitor,
                     deadline=deadline,
                     timeout=timeout,
-                )
-                if deadline is None:
+                ):
+                    yield result
                     return
                 continue
             with connection_owner.get_connection() as broker:

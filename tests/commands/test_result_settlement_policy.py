@@ -682,3 +682,69 @@ def test_replacement_pending_window_keeps_actual_delivered_final_clock() -> None
         "failed",
         WRAPPER_LOST_ERROR,
     )
+
+
+def test_unconfigured_terminal_evidence_settlement_and_grace_precedence() -> None:
+    """Unresolved config waits for wrapper_lost grace, preserves short caller timeout, and settles terminal evidence."""
+    collected_wait, mat_wait = _collection_facts(
+        {
+            "mode": None,
+            "terminal": _WRAPPER_LOST,
+            "observed_at": 10.0,
+            "deadline": 20.0,
+        }
+    )
+    decision_wait = collected_wait.settle(mat_wait, now=10.0)
+    assert decision_wait.action == "wait"
+    assert decision_wait.wait_until == 10.5
+
+    for eval_now in (10.1, 10.5):
+        collected_short, mat_short = _collection_facts(
+            {
+                "mode": None,
+                "terminal": _WRAPPER_LOST,
+                "observed_at": 10.0,
+                "deadline": 10.1,
+            }
+        )
+        decision_short = collected_short.settle(mat_short, now=eval_now)
+        assert decision_short.action == "timeout"
+
+    for caller_deadline in (10.5, 20.0):
+        collected_settled, mat_settled = _collection_facts(
+            {
+                "mode": None,
+                "terminal": _WRAPPER_LOST,
+                "observed_at": 10.0,
+                "deadline": caller_deadline,
+            }
+        )
+        decision_settled = collected_settled.settle(mat_settled, now=10.5)
+        assert decision_settled.action == "result"
+        assert decision_settled.status == "unknown"
+        assert decision_settled.error == "observation metadata unavailable"
+        assert decision_settled.reconciliation == {
+            "classification": "observation_metadata_unavailable",
+            "observed_terminal_status": "failed",
+        }
+
+    collected_proj, mat_proj = _collection_facts(
+        {
+            "mode": None,
+            "terminal": _terminal(
+                "failed",
+                source="state",
+                classification="terminal_projection",
+            ),
+            "observed_at": 10.0,
+            "deadline": 20.0,
+        }
+    )
+    decision_proj = collected_proj.settle(mat_proj, now=10.0)
+    assert decision_proj.action == "result"
+    assert decision_proj.status == "unknown"
+    assert decision_proj.error == "observation metadata unavailable"
+    assert decision_proj.reconciliation == {
+        "classification": "observation_metadata_unavailable",
+        "observed_terminal_status": "failed",
+    }
