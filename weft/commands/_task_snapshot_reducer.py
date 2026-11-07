@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 from weft._constants import (
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
@@ -451,10 +451,29 @@ def _select_snapshot_policy(
         and evidence.selected_active_manager_tid is not None
         and record.tid != evidence.selected_active_manager_tid
     ):
-        public_status = "failed"
-        reconciliation = _superseded_manager_reconciliation(
-            active_manager_tid=evidence.selected_active_manager_tid,
-        )
+        if (
+            evidence.runtime_observation is not None
+            and not evidence.runtime_observation.live
+            and evidence.runtime_observation.strength == "strong"
+        ):
+            public_status = "failed"
+            reconciliation = _superseded_manager_reconciliation(
+                active_manager_tid=evidence.selected_active_manager_tid,
+            )
+        else:
+            runtime_liveness: Literal["live", "unknown"] = (
+                "live"
+                if (
+                    evidence.runtime_observation is not None
+                    and evidence.runtime_observation.live
+                )
+                else "unknown"
+            )
+            reconciliation = _draining_manager_reconciliation(
+                active_manager_tid=evidence.selected_active_manager_tid,
+                lifecycle_status=public_status,
+                runtime_liveness=runtime_liveness,
+            )
     return _SelectedSnapshotPolicy(
         public_status=public_status,
         local_evidence=local_evidence,
@@ -496,6 +515,8 @@ def reduce_task_state_snapshot(
     payload: Mapping[str, Any],
     *,
     now_ns: int,
+    selected_active_manager_tid: str | None = None,
+    manager_liveness: Literal["live", "non_live", "unknown"] = "unknown",
 ) -> CollectedTaskSnapshot:
     """Project one newest liveness-valid row without runtime or queue I/O [MF-5]."""
     projection = parse_task_projection(
@@ -511,6 +532,29 @@ def reduce_task_state_snapshot(
             )
         }
         projection = {"status": "unknown", "event": "unknown", "metadata": {}}
+    status = projection["status"]
+    is_manager = (
+        payload.get("role") == "manager"
+        or projection["metadata"].get("role") == "manager"
+    )
+    if (
+        diagnostic is None
+        and status not in TERMINAL_TASK_STATUSES
+        and is_manager
+        and selected_active_manager_tid is not None
+        and tid != selected_active_manager_tid
+    ):
+        if manager_liveness == "non_live":
+            status = "failed"
+            diagnostic = _superseded_manager_reconciliation(
+                active_manager_tid=selected_active_manager_tid
+            )
+        else:
+            diagnostic = _draining_manager_reconciliation(
+                active_manager_tid=selected_active_manager_tid,
+                lifecycle_status=status,
+                runtime_liveness=manager_liveness,
+            )
     started_at = projection.get("started_at")
     completed_at = projection.get("completed_at")
     runtime_handle = payload.get("runtime_handle")
@@ -519,16 +563,16 @@ def reduce_task_state_snapshot(
             tid=tid,
             tid_short=encode_tid(tid),
             name=_normalized_text(payload.get("name")) or tid,
-            status=projection["status"],
+            status=status,
             event=projection["event"],
             activity=(
                 _normalized_text(payload.get("activity"))
-                if projection["status"] not in TERMINAL_TASK_STATUSES
+                if status not in TERMINAL_TASK_STATUSES
                 else None
             ),
             waiting_on=(
                 _normalized_text(payload.get("waiting_on"))
-                if projection["status"] not in TERMINAL_TASK_STATUSES
+                if status not in TERMINAL_TASK_STATUSES
                 else None
             ),
             started_at=started_at,
@@ -678,6 +722,21 @@ def _superseded_manager_reconciliation(*, active_manager_tid: str) -> dict[str, 
         "reason": "different_active_manager_selected",
         "lifecycle_status": "failed",
         "active_manager_tid": active_manager_tid,
+    }
+
+
+def _draining_manager_reconciliation(
+    *,
+    active_manager_tid: str,
+    lifecycle_status: str,
+    runtime_liveness: Literal["live", "unknown"] = "unknown",
+) -> dict[str, Any]:
+    return {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": lifecycle_status,
+        "active_manager_tid": active_manager_tid,
+        "runtime_liveness": runtime_liveness,
     }
 
 

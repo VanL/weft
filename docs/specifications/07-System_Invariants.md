@@ -730,7 +730,15 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   treat that claimed row as a readable final result.
 - **OBS.15**: manager task snapshots must not publish a non-active historical
   manager row as `running` when `weft.state.services` has selected a different
-  active manager.
+  active manager and positive non-live runtime evidence exists; both direct
+  `weft.state.tasks.<tid>` snapshot reduction (`weft status`, `weft status --all`,
+  and `weft task status <tid>`) and historical `weft.log.tasks` folding
+  reconcile a non-terminal superseded manager record with confirmed non-live
+  runtime evidence to `status="failed"` (`classification:
+  "superseded_manager_record"`), while a superseded manager whose runtime is
+  live or unknown (`runtime_liveness: "live" | "unknown"`) reports
+  `status="running"` (`classification: "superseded_manager_draining"`). (Plan:
+  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`)
 - **OBS.16**: explicit runtime-state pruning is limited to supported
   runtime-only `weft.state.*` queues and exact message IDs. It must not prune
   task-local queues, `weft.log.tasks`, spawn requests, or manager control

@@ -1115,8 +1115,16 @@ positive process supervision retain their existing protections.
   still proves a manager task is active. Stale liveness alone is not terminal
   failure proof.
 - manager task snapshots must respect the selected active manager from
-  `weft.state.services`; a historical non-terminal manager task row must not be
-  published as `running` when a different active manager has been selected
+  `weft.state.services`; a non-terminal superseded manager task row with
+  positive non-live runtime evidence must not be published as `running` when a
+  different active manager has been selected, whether reduced directly from
+  `weft.state.tasks.<tid>` (`weft status`, `weft status --all`,
+  `weft task status <tid>`) or through snapshot policy reduction
+  (`status="failed"`, `reconciliation.classification="superseded_manager_record"`),
+  whereas a superseded manager whose runtime is live or unknown preserves
+  `status="running"` with
+  `reconciliation.classification="superseded_manager_draining"`
+  (`runtime_liveness: "live" | "unknown"`)
 - shared waiters use the same terminal-state interpretation for `weft run` and
   `weft result`
 

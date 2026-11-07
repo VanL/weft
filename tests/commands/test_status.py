@@ -1908,7 +1908,13 @@ def test_cmd_status_marks_superseded_manager_record_failed(
     tasks = {task["tid"]: task for task in payload["tasks"]}
     assert tasks[active_tid]["status"] == "running"
     assert tasks[old_tid]["status"] == "running"
-    assert tasks[old_tid]["reconciliation"] is None
+    assert tasks[old_tid]["reconciliation"] == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": active_tid,
+        "runtime_liveness": "unknown",
+    }
 
 
 def test_status_snapshot_preserves_activity_from_latest_log_event(
@@ -2860,3 +2866,422 @@ def test_newest_invalid_projection_does_not_revive_previous_status(
     assert tasks[0].metadata == {}
     assert tasks[0].reconciliation is not None
     assert tasks[0].reconciliation["classification"] == "task_state_projection_invalid"
+
+
+def test_reduce_task_state_snapshot_reconciles_non_live_live_and_unknown_superseded_managers_and_preserves_terminal_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from weft.commands._task_snapshot_reducer import reduce_task_state_snapshot
+
+    old_mgr_tid = "1780000000000000201"
+    new_mgr_tid = "1780000000000000202"
+    now_ns = 5_000_000_000
+    nonterminal_payload = {
+        "full": old_mgr_tid,
+        "short": encode_tid(old_mgr_tid),
+        "name": "manager",
+        "runner": "host",
+        "role": "manager",
+        "terminal": False,
+        "activity": "idle",
+        "waiting_on": "weft.spawn.requests",
+        "timestamp": 2_000_000_000,
+        "projection": {
+            "version": 1,
+            "status": "running",
+            "event": "task_started",
+            "started_at": 1_000_000_000,
+            "metadata": {"role": "manager"},
+        },
+    }
+
+    dead = reduce_task_state_snapshot(
+        old_mgr_tid,
+        nonterminal_payload,
+        now_ns=now_ns,
+        selected_active_manager_tid=new_mgr_tid,
+        manager_liveness="non_live",
+    )
+    assert dead.snapshot.status == "failed"
+    assert dead.snapshot.activity is None
+    assert dead.snapshot.waiting_on is None
+    assert dead.snapshot.reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }
+
+    live = reduce_task_state_snapshot(
+        old_mgr_tid,
+        nonterminal_payload,
+        now_ns=now_ns,
+        selected_active_manager_tid=new_mgr_tid,
+        manager_liveness="live",
+    )
+    assert live.snapshot.status == "running"
+    assert live.snapshot.activity == "idle"
+    assert live.snapshot.waiting_on == "weft.spawn.requests"
+    assert live.snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "live",
+    }
+
+    unknown = reduce_task_state_snapshot(
+        old_mgr_tid,
+        nonterminal_payload,
+        now_ns=now_ns,
+        selected_active_manager_tid=new_mgr_tid,
+        manager_liveness="unknown",
+    )
+    assert unknown.snapshot.status == "running"
+    assert unknown.snapshot.activity == "idle"
+    assert unknown.snapshot.waiting_on == "weft.spawn.requests"
+    assert unknown.snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+
+    terminal_payload = {
+        **nonterminal_payload,
+        "terminal": True,
+        "projection": {
+            "version": 1,
+            "status": "completed",
+            "event": "task_completed",
+            "started_at": 1_000_000_000,
+            "completed_at": 3_000_000_000,
+            "metadata": {"role": "manager"},
+        },
+    }
+    terminal = reduce_task_state_snapshot(
+        old_mgr_tid,
+        terminal_payload,
+        now_ns=now_ns,
+        selected_active_manager_tid=new_mgr_tid,
+        manager_liveness="non_live",
+    )
+    assert terminal.snapshot.status == "completed"
+    assert terminal.snapshot.reconciliation is None
+
+    assert status_cmd._manager_runtime_liveness(None) == "unknown"
+    assert (
+        status_cmd._manager_runtime_liveness(
+            {
+                "runtime_handle": _runtime_handle(
+                    "host",
+                    "999999",
+                    host_pids=[999999],
+                )
+            }
+        )
+        == "unknown"
+    )
+    exact_handle = _runtime_handle(
+        "host",
+        "999999",
+        host_pids=[999999],
+        observations={
+            "host_processes": [{"pid": 999999, "create_time": 100.0}],
+        },
+    )
+    assert (
+        status_cmd._manager_runtime_liveness({"runtime_handle": exact_handle})
+        == "non_live"
+    )
+    live_handle = _runtime_handle(
+        "host",
+        str(os.getpid()),
+        host_pids=[os.getpid()],
+        observations={
+            "host_processes": [
+                {
+                    "pid": os.getpid(),
+                    "create_time": psutil.Process().create_time(),
+                }
+            ],
+        },
+    )
+    assert (
+        status_cmd._manager_runtime_liveness({"runtime_handle": live_handle}) == "live"
+    )
+
+    def _raise_access_denied(pid: int) -> Never:
+        raise psutil.AccessDenied(pid=pid)
+
+    monkeypatch.setattr(psutil, "Process", _raise_access_denied)
+    assert (
+        status_cmd._manager_runtime_liveness({"runtime_handle": exact_handle})
+        == "unknown"
+    )
+
+
+def test_system_status_distinguishes_dead_live_absent_handle_and_invalid_projection_fallback(
+    tmp_path: Path,
+) -> None:
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    dead_mgr_tid = "1780000000000000211"
+    draining_mgr_tid = "1780000000000000212"
+    absent_handle_mgr_tid = "1780000000000000213"
+    missing_identity_mgr_tid = "1780000000000000214"
+    invalid_task_tid = "1780000000000000215"
+    new_mgr_tid = "1780000000000000216"
+    started = time.time_ns()
+
+    def _seed_manager_projection(
+        tid: str,
+        *,
+        runtime_handle: dict[str, Any] | None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "full": tid,
+            "short": encode_tid(tid),
+            "name": f"mgr-{tid[-3:]}",
+            "runner": "host",
+            "role": "manager",
+            "terminal": False,
+            "activity": "idle",
+            "waiting_on": WEFT_SPAWN_REQUESTS_QUEUE,
+            "projection": {
+                "version": 1,
+                "status": "running",
+                "event": "task_started",
+                "started_at": started,
+                "metadata": {"role": "manager"},
+            },
+        }
+        if runtime_handle is not None:
+            payload["runtime_handle"] = runtime_handle
+        with ctx.queue(task_state_queue_name(tid), persistent=False) as queue:
+            queue.write(json.dumps(payload))
+
+    _seed_manager_projection(
+        dead_mgr_tid,
+        runtime_handle=_runtime_handle(
+            "host",
+            "999999",
+            host_pids=[999999],
+            observations={
+                "host_processes": [{"pid": 999999, "create_time": 100.0}],
+            },
+        ),
+    )
+    live_handle = _runtime_handle(
+        "host",
+        str(os.getpid()),
+        host_pids=[os.getpid()],
+        observations={
+            "host_processes": [
+                {
+                    "pid": os.getpid(),
+                    "create_time": psutil.Process().create_time(),
+                }
+            ],
+        },
+    )
+    _seed_manager_projection(draining_mgr_tid, runtime_handle=live_handle)
+    _seed_manager_projection(absent_handle_mgr_tid, runtime_handle=None)
+    _seed_manager_projection(
+        missing_identity_mgr_tid,
+        runtime_handle=_runtime_handle("host", "999999", host_pids=[999999]),
+    )
+    _seed_manager_projection(new_mgr_tid, runtime_handle=live_handle)
+
+    _write_task_log_entry(
+        ctx=ctx,
+        tid=invalid_task_tid,
+        event="task_started",
+        status="running",
+        started_at=started,
+        completed_at=None,
+        name="recoverable-task",
+    )
+    with ctx.queue(task_state_queue_name(invalid_task_tid), persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                {
+                    "full": invalid_task_tid,
+                    "short": encode_tid(invalid_task_tid),
+                    "projection": "corrupt",
+                }
+            )
+        )
+
+    with ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    ctx,
+                    tid=new_mgr_tid,
+                    name="active-manager",
+                    runtime_handle=live_handle,
+                )
+            )
+        )
+
+    default_snapshot = status_cmd.system_status(ctx, include_terminal=False)
+    default_by_tid = {task.tid: task for task in default_snapshot.tasks}
+    assert dead_mgr_tid not in default_by_tid
+    assert default_by_tid[new_mgr_tid].status == "running"
+    assert default_by_tid[new_mgr_tid].reconciliation is None
+    assert default_by_tid[draining_mgr_tid].status == "running"
+    assert default_by_tid[draining_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "live",
+    }
+    assert default_by_tid[absent_handle_mgr_tid].status == "running"
+    assert default_by_tid[absent_handle_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+    assert default_by_tid[missing_identity_mgr_tid].status == "running"
+    assert default_by_tid[missing_identity_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+
+    all_snapshot = status_cmd.system_status(ctx, include_terminal=True)
+    all_by_tid = {task.tid: task for task in all_snapshot.tasks}
+    assert all_by_tid[dead_mgr_tid].status == "failed"
+    assert all_by_tid[dead_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }
+
+    history_snapshot = status_cmd.system_status(
+        ctx, include_terminal=True, include_log_history=True
+    )
+    history_by_tid = {task.tid: task for task in history_snapshot.tasks}
+    assert history_by_tid[dead_mgr_tid].status == "failed"
+    assert history_by_tid[dead_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }
+    assert history_by_tid[draining_mgr_tid].status == "running"
+    assert history_by_tid[draining_mgr_tid].reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "live",
+    }
+    assert history_by_tid[invalid_task_tid].status == "running"
+    assert history_by_tid[invalid_task_tid].reconciliation is None
+
+
+def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven(
+    tmp_path: Path,
+) -> None:
+    """Passive status reads never PING an unproven manager and do not treat it as canonical."""
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    dead_mgr_tid = "1780000000000000311"
+    unknown_mgr_tid = "1780000000000000312"
+    started = time.time_ns()
+
+    dead_handle = _runtime_handle(
+        "host",
+        "999999",
+        host_pids=[999999],
+        observations={
+            "host_processes": [{"pid": 999999, "create_time": 100.0}],
+        },
+    )
+    unknown_handle = _runtime_handle(
+        "host",
+        "999998",
+        host_pids=[999998],
+    )
+
+    for tid, handle in (
+        (dead_mgr_tid, dead_handle),
+        (unknown_mgr_tid, unknown_handle),
+    ):
+        with ctx.queue(task_state_queue_name(tid), persistent=False) as queue:
+            queue.write(
+                json.dumps(
+                    {
+                        "full": tid,
+                        "short": encode_tid(tid),
+                        "name": f"mgr-{tid[-3:]}",
+                        "runner": "host",
+                        "role": "manager",
+                        "terminal": False,
+                        "activity": "idle",
+                        "waiting_on": WEFT_SPAWN_REQUESTS_QUEUE,
+                        "runtime_handle": handle,
+                        "projection": {
+                            "version": 1,
+                            "status": "running",
+                            "event": "task_started",
+                            "started_at": started,
+                            "metadata": {"role": "manager"},
+                        },
+                    }
+                )
+            )
+
+    with ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as queue:
+        queue.write(
+            json.dumps(
+                _manager_service_payload(
+                    ctx,
+                    tid=unknown_mgr_tid,
+                    name="unknown-manager",
+                    runtime_handle=unknown_handle,
+                )
+            )
+        )
+
+    bulk_snapshot = status_cmd.system_status(ctx, include_terminal=True)
+    bulk_by_tid = {task.tid: task for task in bulk_snapshot.tasks}
+    with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        ctrl_in.read_many(limit=10)
+
+    point_dead = task_cmd.task_status(dead_mgr_tid, context=ctx)
+    point_unknown = task_cmd.task_status(unknown_mgr_tid, context=ctx)
+
+    assert point_dead is not None
+    assert point_unknown is not None
+    assert bulk_by_tid[dead_mgr_tid].status == "running"
+    assert bulk_by_tid[dead_mgr_tid].reconciliation is None
+    assert point_dead.status == "running"
+    assert point_dead.reconciliation == {
+        "classification": "stale_liveness",
+        "reason": "host_process_not_live",
+        "lifecycle_status": "running",
+        "public_status": "running",
+        "evidence_source": "runtime",
+    }
+    assert bulk_by_tid[unknown_mgr_tid].status == "running"
+    assert bulk_by_tid[unknown_mgr_tid].reconciliation is None
+    assert point_unknown.status == "running"
+    assert point_unknown.reconciliation == {
+        "classification": "stale_liveness",
+        "reason": "host_process_not_live",
+        "lifecycle_status": "running",
+        "public_status": "running",
+        "evidence_source": "runtime",
+    }
+    with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10) == []

@@ -482,8 +482,25 @@ def _read_point_observation(
     """Acquire projection, routing and evidence from the same current row [MF-5]."""
     row = read_task_state_snapshot(ctx, tid, broker=broker)
     mapping = {**row[1], "timestamp": row[0]} if row else None
+    selected_active_manager_tid: str | None = None
+    manager_liveness: Literal["live", "non_live", "unknown"] = "unknown"
+    if mapping is not None and system_cmd._is_non_terminal_manager_state_entry(mapping):
+        selected_active_manager_tid = system_cmd._selected_active_manager_tid(
+            ctx, broker=broker
+        )
+        if (
+            selected_active_manager_tid is not None
+            and tid != selected_active_manager_tid
+        ):
+            manager_liveness = system_cmd._manager_runtime_liveness(mapping)
     base = (
-        reduce_task_state_snapshot(tid, mapping, now_ns=time.time_ns())
+        reduce_task_state_snapshot(
+            tid,
+            mapping,
+            now_ns=time.time_ns(),
+            selected_active_manager_tid=selected_active_manager_tid,
+            manager_liveness=manager_liveness,
+        )
         if mapping is not None
         else None
     )
@@ -903,7 +920,15 @@ def _enrich_known_snapshot(
         last_timestamp=snapshot.last_timestamp,
         now_ns=time.time_ns(),
     )
-    if stale is not None:
+    existing_classification = (
+        snapshot.reconciliation.get("classification")
+        if isinstance(snapshot.reconciliation, Mapping)
+        else None
+    )
+    if stale is not None and existing_classification not in {
+        "superseded_manager_record",
+        "superseded_manager_draining",
+    }:
         diagnostic = _stale_liveness_reconciliation(
             reason=stale,
             lifecycle_status=snapshot.status,

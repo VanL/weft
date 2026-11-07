@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -21,7 +22,11 @@ from typer.testing import CliRunner
 from simplebroker import Config, Queue
 from tests.helpers.test_backend import prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._constants import CONTROL_KILL, CONTROL_SURFACE_WAIT_INTERVAL
+from weft._constants import (
+    CONTROL_KILL,
+    CONTROL_SURFACE_WAIT_INTERVAL,
+    WEFT_SERVICES_REGISTRY_QUEUE,
+)
 from weft._exceptions import (
     CommandUsageError,
     ControlRejected,
@@ -30,6 +35,7 @@ from weft._exceptions import (
 from weft.cli.app import app
 from weft.commands import _observation as observation_cmd
 from weft.commands import events as event_cmd
+from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.control_convergence import (
     ControlConvergenceAction,
@@ -50,6 +56,7 @@ from weft.core import task_evidence
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.launcher import launch_task_process
+from weft.core.service_convergence import build_manager_service_payload
 from weft.core.task_evidence import TaskEvidenceSnapshot
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
@@ -2518,3 +2525,136 @@ def test_cmd_task_tid_reverse_returns_encoded_short_tid(
     )
     assert cli_result.exit_code == 0
     assert cli_result.stdout.strip() == expected_short
+
+
+def test_task_status_reconciles_dead_live_and_absent_handle_superseded_manager_projections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`task_status` reconciles non-terminal superseded managers and preserves draining over stale_liveness."""
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    dead_mgr_tid = "1777000000000000901"
+    draining_mgr_tid = "1777000000000000902"
+    absent_handle_mgr_tid = "1777000000000000903"
+    new_mgr_tid = "1777000000000000904"
+
+    live_pid = os.getpid()
+    live_create_time = psutil.Process(live_pid).create_time()
+    started = time.time_ns()
+
+    def _mgr_state_entry(
+        tid: str,
+        *,
+        runtime_handle: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "full": tid,
+            "short": encode_tid(tid),
+            "name": "manager",
+            "runner": "host",
+            "role": "manager",
+            "terminal": False,
+            "activity": "idle",
+            "waiting_on": "weft.spawn.requests",
+            "projection": {
+                "version": 1,
+                "status": "running",
+                "event": "task_started",
+                "started_at": started,
+                "metadata": {"role": "manager"},
+            },
+        }
+        if runtime_handle is not None:
+            entry["runtime_handle"] = runtime_handle
+        return entry
+
+    dead_handle = {
+        "runner": "host",
+        "kind": "process",
+        "id": "999999",
+        "control": {"authority": "host-pid"},
+        "observations": {
+            "host_pids": [999999],
+            "host_processes": [{"pid": 999999, "create_time": 100.0}],
+        },
+        "metadata": {},
+    }
+    live_handle = {
+        "runner": "host",
+        "kind": "process",
+        "id": str(live_pid),
+        "control": {"authority": "host-pid"},
+        "observations": {
+            "host_pids": [live_pid],
+            "host_processes": [{"pid": live_pid, "create_time": live_create_time}],
+        },
+        "metadata": {},
+    }
+    new_handle = dict(live_handle)
+
+    for tid, handle in (
+        (dead_mgr_tid, dead_handle),
+        (draining_mgr_tid, live_handle),
+        (absent_handle_mgr_tid, None),
+        (new_mgr_tid, new_handle),
+    ):
+        ctx.queue(task_state_queue_name(tid), persistent=False).write(
+            json.dumps(_mgr_state_entry(tid, runtime_handle=handle))
+        )
+
+    ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False).write(
+        json.dumps(
+            build_manager_service_payload(
+                context=ctx,
+                tid=new_mgr_tid,
+                name="manager",
+                status="active",
+                queues={
+                    "requests": "weft.spawn.requests",
+                    "outbox": "weft.manager.outbox",
+                    "ctrl_in": f"T{new_mgr_tid}.ctrl_in",
+                    "ctrl_out": f"T{new_mgr_tid}.ctrl_out",
+                },
+                runtime_handle=new_handle,
+            )
+        )
+    )
+
+    dead_snapshot = task_cmd.task_status(dead_mgr_tid, context=ctx)
+    assert dead_snapshot is not None
+    assert dead_snapshot.status == "failed"
+    assert dead_snapshot.activity is None
+    assert dead_snapshot.waiting_on is None
+    assert dead_snapshot.reconciliation == {
+        "classification": "superseded_manager_record",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "failed",
+        "active_manager_tid": new_mgr_tid,
+    }
+
+    draining_snapshot = task_cmd.task_status(draining_mgr_tid, context=ctx)
+    assert draining_snapshot is not None
+    assert draining_snapshot.status == "running"
+    assert draining_snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "live",
+    }
+
+    monkeypatch.setattr(status_cmd, "STATUS_RUNTIMELESS_STALE_AFTER_SECONDS", 0.0)
+    absent_snapshot = task_cmd.task_status(absent_handle_mgr_tid, context=ctx)
+    assert absent_snapshot is not None
+    assert absent_snapshot.status == "running"
+    assert absent_snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": new_mgr_tid,
+        "runtime_liveness": "unknown",
+    }
+    with ctx.queue(f"T{absent_handle_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10) == []
+    with ctx.queue(f"T{new_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10) == []

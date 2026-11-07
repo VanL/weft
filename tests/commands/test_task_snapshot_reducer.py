@@ -436,7 +436,14 @@ def test_reduce_task_snapshot_handles_stale_and_manager_reconciliation() -> None
     manager_taskspec = _taskspec(metadata={"role": "manager"})
     manager = _reduce(
         _record(metadata={"role": "manager"}, taskspec_payload=manager_taskspec),
-        evidence=_evidence(selected_active_manager_tid=OTHER_TID),
+        evidence=_evidence(
+            selected_active_manager_tid=OTHER_TID,
+            runtime_observation=RuntimeObservation(
+                live=False,
+                evidence="host-pid",
+                strength="strong",
+            ),
+        ),
     )
     assert manager.snapshot.status == "failed"
     assert manager.snapshot.reconciliation == {
@@ -445,6 +452,47 @@ def test_reduce_task_snapshot_handles_stale_and_manager_reconciliation() -> None
         "lifecycle_status": "failed",
         "active_manager_tid": OTHER_TID,
     }
+
+    live_manager = _reduce(
+        _record(metadata={"role": "manager"}, taskspec_payload=manager_taskspec),
+        evidence=_evidence(
+            selected_active_manager_tid=OTHER_TID,
+            runtime_observation=RuntimeObservation(
+                live=True,
+                evidence="host-pid",
+                strength="strong",
+            ),
+        ),
+    )
+    assert live_manager.snapshot.status == "running"
+    assert live_manager.snapshot.reconciliation == {
+        "classification": "superseded_manager_draining",
+        "reason": "different_active_manager_selected",
+        "lifecycle_status": "running",
+        "active_manager_tid": OTHER_TID,
+        "runtime_liveness": "live",
+    }
+
+    for unknown_observation in (
+        None,
+        RuntimeObservation(live=False, evidence="host-pid", strength="weak"),
+        RuntimeObservation(live=False, evidence="none", strength="unknown"),
+    ):
+        unknown_manager = _reduce(
+            _record(metadata={"role": "manager"}, taskspec_payload=manager_taskspec),
+            evidence=_evidence(
+                selected_active_manager_tid=OTHER_TID,
+                runtime_observation=unknown_observation,
+            ),
+        )
+        assert unknown_manager.snapshot.status == "running"
+        assert unknown_manager.snapshot.reconciliation == {
+            "classification": "superseded_manager_draining",
+            "reason": "different_active_manager_selected",
+            "lifecycle_status": "running",
+            "active_manager_tid": OTHER_TID,
+            "runtime_liveness": "unknown",
+        }
 
 
 def test_reduce_task_snapshot_duration_and_optional_output_contract() -> None:

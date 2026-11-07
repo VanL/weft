@@ -20,7 +20,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
@@ -303,6 +303,64 @@ def _task_process_alive(mapping_entry: Mapping[str, Any] | None) -> bool:
     return handle_has_live_host_process(handle)
 
 
+def _manager_runtime_liveness(
+    mapping_entry: Mapping[str, Any] | None,
+) -> Literal["live", "non_live", "unknown"]:
+    handle = _runtime_handle_from_mapping(mapping_entry or {})
+    if handle is None or handle.control.get("authority") != "host-pid":
+        return "unknown"
+    identities = handle.scoped_host_processes()
+    if not identities:
+        return "unknown"
+    observations = [
+        inspect_host_process(pid, create_time) for pid, create_time in identities
+    ]
+    if any(item.evidence == "live" for item in observations):
+        return "live"
+    if any(item.evidence == "unknown" for item in observations):
+        return "unknown"
+    return "non_live"
+
+
+def _is_non_terminal_manager_state_entry(payload: Mapping[str, Any]) -> bool:
+    if payload.get("terminal") is True:
+        return False
+    if payload.get("role") == "manager":
+        return True
+    projection = payload.get("projection")
+    if isinstance(projection, Mapping):
+        metadata = projection.get("metadata")
+        if isinstance(metadata, Mapping) and metadata.get("role") == "manager":
+            return True
+    return False
+
+
+def _selected_active_manager_tid(
+    ctx: WeftContext,
+    *,
+    managers: Sequence[Mapping[str, Any]] | None = None,
+    broker: Any | None = None,
+) -> str | None:
+    if managers is not None:
+        snapshot = {
+            str(item["tid"]): {
+                key: value
+                for key, value in item.items()
+                if key != manager_runtime.MANAGER_PONG_LIVE_AT_KEY
+            }
+            for item in managers
+            if isinstance(item.get("tid"), str) and item["tid"]
+        }
+        selected = manager_runtime._select_active_manager_from_snapshot(ctx, snapshot)
+    else:
+        selected = manager_runtime.select_active_manager(ctx, broker=broker)
+    if isinstance(selected, Mapping):
+        tid_val = selected.get("tid")
+        if isinstance(tid_val, str) and tid_val:
+            return tid_val
+    return None
+
+
 def _task_process_id(mapping_entry: Mapping[str, Any] | None) -> int | None:
     handle = _runtime_handle_from_mapping(mapping_entry or {})
     if handle is None or handle.control.get("authority") != "host-pid":
@@ -493,6 +551,7 @@ def _merge_raw_task_history(
     since_timestamp: int | None,
     tid_filters: set[str] | None,
     now_ns: int,
+    selected_active_manager_tid: str | None = None,
 ) -> None:
     """Union explicit retained history, without per-task runtime acquisition [MF-5]."""
     records: dict[str, FoldedTaskRecord] = {}
@@ -511,10 +570,20 @@ def _merge_raw_task_history(
         if record.taskspec_payload is None:
             continue
         existing = current.get(tid)
+        existing_classification = (
+            existing.snapshot.reconciliation.get("classification")
+            if existing is not None
+            and isinstance(existing.snapshot.reconciliation, Mapping)
+            else None
+        )
         if (
             record.status not in TERMINAL_TASK_STATUSES
             and existing is not None
-            and existing.snapshot.reconciliation is None
+            and (
+                existing.snapshot.reconciliation is None
+                or existing_classification
+                in {"superseded_manager_record", "superseded_manager_draining"}
+            )
         ):
             continue
         reduced_snapshot = reduce_task_snapshot(
@@ -529,7 +598,7 @@ def _merge_raw_task_history(
                 runtime_observation=None,
                 claimed_outbox=None,
                 active_service_tid=None,
-                selected_active_manager_tid=None,
+                selected_active_manager_tid=selected_active_manager_tid,
             ),
             now_ns=now_ns,
         )
@@ -546,6 +615,7 @@ def _collect_task_snapshot_records(
     since_timestamp: int | None = None,
     now_ns: int | None = None,
     tid_state_entries: Mapping[str, Mapping[str, Any]] | None = None,
+    selected_active_manager_tid: str | None = None,
     broker: Any | None = None,
 ) -> list[CollectedTaskSnapshot]:
     """Acquire current inventory, optionally unioning explicit raw history [MF-5]."""
@@ -559,6 +629,7 @@ def _collect_task_snapshot_records(
                 since_timestamp=since_timestamp,
                 now_ns=now_ns,
                 tid_state_entries=tid_state_entries,
+                selected_active_manager_tid=selected_active_manager_tid,
                 broker=opened,
             )
     if now_ns is None:
@@ -567,8 +638,30 @@ def _collect_task_snapshot_records(
         tid_state_entries = _latest_tid_state_entries(
             ctx, tids=tid_filters, broker=broker
         )
+    if selected_active_manager_tid is None and (
+        include_log_history
+        or any(
+            _is_non_terminal_manager_state_entry(payload)
+            for payload in tid_state_entries.values()
+        )
+    ):
+        selected_active_manager_tid = _selected_active_manager_tid(ctx, broker=broker)
     current = {
-        tid: reduce_task_state_snapshot(tid, payload, now_ns=now_ns)
+        tid: reduce_task_state_snapshot(
+            tid,
+            payload,
+            now_ns=now_ns,
+            selected_active_manager_tid=selected_active_manager_tid,
+            manager_liveness=(
+                _manager_runtime_liveness(payload)
+                if (
+                    selected_active_manager_tid is not None
+                    and tid != selected_active_manager_tid
+                    and _is_non_terminal_manager_state_entry(payload)
+                )
+                else "unknown"
+            ),
+        )
         for tid, payload in tid_state_entries.items()
         if tid_filters is None or tid in tid_filters
     }
@@ -579,6 +672,7 @@ def _collect_task_snapshot_records(
             since_timestamp=since_timestamp,
             tid_filters=tid_filters,
             now_ns=now_ns,
+            selected_active_manager_tid=selected_active_manager_tid,
         )
     return order_task_snapshots(
         current.values(), include_terminal=include_terminal or include_log_history
@@ -1422,6 +1516,10 @@ def system_status(
         include_stopped=include_stopped_managers,
     )
     tid_state_entries = _latest_tid_state_entries(context)
+    selected_active_manager_tid = _selected_active_manager_tid(
+        context,
+        managers=managers,
+    )
     task_records = _collect_task_snapshot_records(
         context,
         include_terminal=True,
@@ -1429,6 +1527,7 @@ def system_status(
         tid_filters=None,
         now_ns=now_ns,
         tid_state_entries=tid_state_entries,
+        selected_active_manager_tid=selected_active_manager_tid,
     )
     services = _collect_internal_service_snapshots(
         context,

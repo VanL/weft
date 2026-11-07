@@ -1094,6 +1094,7 @@ def select_active_manager(
 
     return _registry_view(
         context,
+        prune_stale=probe_stale,
         probe_stale=probe_stale,
         probe_cache=probe_cache,
         broker=broker,
