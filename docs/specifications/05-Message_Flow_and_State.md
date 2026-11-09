@@ -544,7 +544,7 @@ Current rules:
 - the heartbeat service is driven by the shared task reactor loop. It handles
   at most one bounded control/inbox-rejection/table-build/due-emission turn in
   `process_once()`, exposes the next registration due time and the earliest
-  lease expiry through `next_wait_timeout()` (with an empty table the only deadline is the idle clock), and leaves all destination queue writes on the
+  lease expiry through `next_wait_timeout()` (with an empty table the only deadlines are the idle clock and the owner-row refresh of [MA-1] item 7), and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
   heartbeat timer is only the timeout supplied to that same wait path. It holds
@@ -561,10 +561,11 @@ Current rules:
   and a cancel committed after it may be followed by at most one emission.
 - the service ends itself after `SERVICE_IDLE_EXIT_SECONDS` with an empty
   table and no live non-superseded manager. With an empty table its only
-  deadline is that idle clock and it otherwise blocks on its watcher (its
-  `ctrl_in` lane and its notification interest in `weft.state.heartbeats`);
-  with rows its deadlines are the next due emission and the earliest lease
-  expiry, and the idle clock is not armed.
+  deadlines are that idle clock and its owner-row refresh ([MA-1] item 7),
+  and it otherwise blocks on its watcher (its `ctrl_in` lane and its
+  notification interest in `weft.state.heartbeats`); with rows its deadlines
+  are the next due emission, the earliest lease expiry and the owner-row
+  refresh, and the idle clock is not armed.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
@@ -814,8 +815,9 @@ Current rules:
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
   for task-local PING/STATUS/STOP/KILL and schedule bookkeeping while the
   worker scans, writes Monitor-store rows, and applies exact deletes.
-  The monitor's only clock is its own cycle deadline, published through
-  `next_wait_timeout()`. The first cycle runs on the first enabled turn and
+  The monitor's only clock of its own is its cycle deadline, published through
+  `next_wait_timeout()`; the shared service idle clock and owner-row refresh
+  ([MA-1] item 7) come from its base classes. The first cycle runs on the first enabled turn and
   anchors a fixed periodic grid: ticks fall at that cycle's start plus
   whole multiples of `WEFT_TASK_MONITOR_INTERVAL_SECONDS`, and the grid is
   never re-anchored. A cycle runs at each grid tick and consumes, at its
@@ -1570,19 +1572,12 @@ Current manager-dispatch rules:
   they must not immediately prune or supersede the target manager. Lack of a
   PONG is evaluated by the ordinary leadership cadence; the probe adds no
   private deadline.
-- service-owner liveness PINGs use the same non-blocking pattern. The manager
-  writes one keyed PING with the same Manager `reply_to`, stores the pending
-  probe, and receives the matching PONG through its ordinary control drain.
-  Pending service probes are uncertain evidence and select the existing active
-  service cadence. Lack of a PONG is evaluated only by that cadence.
-- constructor bootstrap anchors the applicable leadership or service cadence
-  after it creates a probe, so the first reactor turn cannot classify that new
-  probe as no-PONG. A stored PONG makes its owning reducer actionable without
-  moving that cadence. Within the current reconciliation scope, pending service
-  probes keep their service keys in evidence collection. When autostart is
-  included, a stored PONG for a known autostart source bypasses the
-  manifest-scan throttle so the reply is reduced against current source
-  evidence. A successful complete owning-policy scan may retire a probe whose
+- the manager sends no PING to service owners: a service owner's own fresh
+  service-owner row is its live proof ([MA-1] item 7).
+- constructor bootstrap anchors the leadership cadence after it creates a
+  probe, so the first reactor turn cannot classify that new probe as no-PONG.
+  A stored PONG makes its owning reducer actionable without moving that
+  cadence. A successful complete owning-policy scan may retire a probe whose
   source is absent; failed, throttled, and partial scans retain it.
 - STOP/KILL control that arrives after reservation but before launch still wins:
   a draining or stopped manager must not start a new child from the in-flight
@@ -2277,6 +2272,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 - [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md): collation and lifetime reports take terminality and status from the task's typed terminal record, the event-name map is removed, and the version 6 to 7 Monitor migration closes families stranded by the old reducer ([MF-3], [MF-5], [OBS.13.4]).
 
 - [Service and Manager Exit Records Close Their Monitor Families](../plans/2026-11-09-terminal-idle-events-plan.md): the Monitor collates `service_idle_exit`, `heartbeat_service_superseded`, `manager_idle_shutdown` and the Manager drain-completion records as terminal proof ([MF-3], [MF-5], [OBS.13.4]).
+- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) adds the owner-row refresh deadline to the heartbeat and TaskMonitor clocks ([MF-3.2], [MF-5]).
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 

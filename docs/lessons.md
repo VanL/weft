@@ -787,3 +787,23 @@ The owning service alone reads and deletes its queues. See
 [MA-1](specifications/03-Manager_Architecture.md),
 [MF-3.2](specifications/05-Message_Flow_and_State.md), and
 `plans/2026-11-02-task-monitor-heartbeat-clock-plan.md`.
+
+## 2026-11-09: A probe that starts a Manager stops it, and never deletes a live context
+
+On 2026-11-06 an Antigravity reviewer's probe scripts built contexts inside
+`tempfile.TemporaryDirectory()`, started Managers in them, and did not stop
+them. When a probe raised, the `with` block deleted the directory around the
+live Manager. Each Manager kept its unlinked broker database open; its
+internal services, relaunched against the path, saw no Manager and cycled.
+Thirteen such contexts ran for three days. The cycling exposed an idle-clock
+defect that is now fixed ([MA-1.5],
+[plan](plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md)),
+but the leak itself is caller error: the filesystem under a live context is
+the operator's ([CTX.5](specifications/07-System_Invariants.md),
+[WT-2a.11](program-theory.md)), and Weft does not detect or repair a deleted
+context directory. Rule: a probe, script or test that starts a Manager stops
+its context in `finally` with `weft.commands.system.stop_system(context)` (or
+`weft system stop </dev/null`), or runs under `WeftTestHarness`, whose cleanup
+stops the Manager and the internal services; it removes the context directory
+only after that stop returns. See `weft/commands/system.py::stop_system` and
+`tests/helpers/weft_harness.py`.

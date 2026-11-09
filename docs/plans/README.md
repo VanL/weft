@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 64 plan files in this directory.
+There are currently 65 plan files in this directory.
 
 ## Curation Policy
 
@@ -34,6 +34,7 @@ There are currently 64 plan files in this directory.
 | [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain and Cleanup Signals Verify Process Identity | `draft` | none |
 | [`2026-11-09-typed-terminal-record-plan.md`](./2026-11-09-typed-terminal-record-plan.md) | The Monitor Trusts the Typed Terminal Record | `draft` | none |
 | [`2026-11-09-terminal-idle-events-plan.md`](./2026-11-09-terminal-idle-events-plan.md) | Service and Manager Exit Records Close Their Monitor Families | `draft` | none |
+| [`2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md`](./2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) | Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof | `draft` | none |
 | [`2026-11-08-resource-monitor-descendant-scan-plan.md`](./2026-11-08-resource-monitor-descendant-scan-plan.md) | Resource Monitor Descendant Scan and Quiet Unlimited Sampling | `promoted` | none |
 | [`2026-11-08-manager-checkpoint-volume-plan.md`](./2026-11-08-manager-checkpoint-volume-plan.md) | Manager Checkpoint Volume | `promoted` | none |
 | [`2026-11-08-manager-event-driven-reaping-plan.md`](./2026-11-08-manager-event-driven-reaping-plan.md) | Manager Event-Driven Child Reaping | `draft` | none |

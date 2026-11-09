@@ -36,6 +36,7 @@ See also:
 ## Related Plans
 
 - [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) coalesces a Consumer's snapshot edges per owner step and carries live activity on same-step lifecycle rows ([CC-2.2]).
+- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) has every task launched with a managed service key re-stamp its own service-owner row on its own clock through `BaseTask.next_wait_timeout` ([CC-2], [CC-2.2.1]).
 - retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([CC-2.3]).
 - retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
@@ -287,6 +288,11 @@ Current responsibilities:
 - append complete best-effort runtime snapshots to the task's own
   `weft.state.tasks.<tid>` without reading state history, and maintain process titles
 - own reserved-queue policy application
+- for a task a manager launched with a managed service key, re-stamp its own
+  service-owner row in `weft.state.services` on its first turn and then on its
+  own clock, and publish that refresh deadline through `next_wait_timeout()`
+  ([MA-1] item 7); that row is the task's live proof to managers, which send
+  it no `PING`; a task without a service key does no refresh
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
   `stop()`, `cleanup()`, and `next_wait_timeout()` as the shared task-loop
@@ -600,7 +606,8 @@ Current task families:
   `weft.log.tasks` so long-lived manager, heartbeat, and TaskMonitor work
   cannot amplify the lifecycle log that cleanup itself consumes. Because that
   report is suppressed, `ServiceTask.next_wait_timeout()` also suppresses the
-  inherited `BaseTask` poll-report deadline. Each concrete service composes
+  inherited `BaseTask` poll-report deadline; it keeps the `BaseTask`
+  owner-row refresh deadline ([MA-1] item 7). Each concrete service composes
   only the clocks for work it actually performs. It does not
   implement a reactor turn policy and does not know about manager leadership,
   service keys, cleanup selection, heartbeat registration, or queue scheduling
@@ -728,8 +735,8 @@ Current task families:
 - `HeartbeatTask`: manager-supervised internal interval emitter for
   runtime-scoped periodic queue writes, a standing internal service of the
   canonical manager. It exposes only the next registration due time and the
-  earliest lease expiry through `next_wait_timeout()` (no deadline with an
-  empty table; singleton supersession is checked on each turn it runs) and returns from its protected `_process_reactor_turn()`
+  earliest lease expiry through `next_wait_timeout()` (with an empty table
+  only the shared service idle clock and owner-row refresh; singleton supersession is checked on each turn it runs) and returns from its protected `_process_reactor_turn()`
   hook after one bounded reactor turn; it does not run a private inner wait
   loop or task-local queue pending probe. Queue readiness is owned by
   `MultiQueueWatcher`.

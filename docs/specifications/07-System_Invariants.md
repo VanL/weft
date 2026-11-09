@@ -186,7 +186,9 @@ A live task declares every construction-fixed delivery role and
   it peeks, never a delivery role. The heartbeat service is the queue's only
   reader and deleter: it deletes only rows it rejects, rows a newer row of the
   same `heartbeat_id` supersedes, and rows whose lease has expired. The
-  Manager holds no interest in, reads, or deletes that queue.
+  Manager holds no interest in, reads, or deletes that queue. A task
+  launched with a managed service key declares `weft.state.services` as a
+  fixed support route for its owner-row refresh ([MA-1] item 7).
   Registration precedes the initial read; changed publications
   can return control even without delivery readiness. Rejected evidence retains
   interest with a strict publication cursor; gate release, exit/failure and
@@ -1193,23 +1195,20 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
-  degraded wait rather than an unqualified duplicate launch. A recent
-  nonterminal service row without live proof is uncertain, not terminal;
-  stale nonterminal rows may become restart evidence only after the recent
-  evidence window has elapsed. Broker timestamps may order service evidence,
+  degraded wait rather than an unqualified duplicate launch. A nonterminal
+  service-owner row inside the registry retention window is live evidence
+  unless its host-pid runtime handle proves the process dead: its owner
+  re-stamps it on its own clock ([MA-1] item 7), and a row whose owner
+  stopped refreshing ages out and is no evidence. The manager sends no PING
+  to service owners. Broker timestamps may order service evidence,
   but restart backoff is scheduled from the manager's observation clock. A
   stable singleton audit may run on a slower cadence than active convergence,
   but pending spawn work, missing required owners, duplicate scans, uncertain
-  evidence, a pending service PONG probe, or due autostart scans must return the
-  manager to the active convergence cadence. Pending service probes keep their
-  service keys in the current evidence scope. A stored PONG makes reduction
-  actionable without moving the periodic clock; for an included known
-  autostart source it also bypasses the manifest-scan throttle so current source
-  evidence is collected. Constructor-created probes anchor the owning cadence
-  so the first reactor turn cannot classify them as no-PONG. Manager-authored internal runtime envelopes,
+  evidence, or due autostart scans must return the
+  manager to the active convergence cadence. Manager-authored internal runtime envelopes,
   manager-authored autostart metadata, tracked children, runtime handles, and
-  keyed PONG replies may establish singleton service authority; caller-owned
-  TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
+  the owner's own fresh service-owner row may establish singleton service
+  authority; caller-owned TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
   live child PID is valid live-owner evidence for the spawned service child
   before the child publishes its own task lifecycle row. When more than one live
   owner is visible, the canonical live owner is the lowest live TID and
@@ -1533,6 +1532,7 @@ doc:
 - [Startup window narrows with measured headroom](../plans/2026-11-08-startup-window-settlement-plan.md) revises the [MANAGER.18] startup window above H to narrow in proportion to measured headroom.
 - [Measured memory admission and startup-window parity](../plans/2026-11-09-measured-memory-admission-plan.md) adds the host memory gate on every backend and takes the startup window as the smallest window among the gates that exist, so SQLite no longer serializes startup ([MANAGER.18]).
 - [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) makes the typed terminal record the only task-log terminal proof and records the retention gate and v6 to v7 repair in [OBS.13.4].
+- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) makes `weft.state.services` a fixed support route of every task launched with a managed service key ([QUEUE.7]).
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
