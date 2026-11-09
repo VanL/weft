@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 49 plan files in this directory.
+There are currently 51 plan files in this directory.
 
 ## Curation Policy
 
@@ -30,6 +30,7 @@ There are currently 49 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-08-startup-window-settlement-plan.md`](./2026-11-08-startup-window-settlement-plan.md) | Startup Window Narrows With Measured Headroom | `draft` | none |
 | [`2026-11-07-ops-shaped-admission-burst-plan.md`](./2026-11-07-ops-shaped-admission-burst-plan.md) | Measure Admission on an Ops-Shaped Burst | `completed` | none |
 | [`2026-11-07-nested-admission-load-plan.md`](./2026-11-07-nested-admission-load-plan.md) | Stress Admission with Nested Work | `completed` | none |
 | [`2026-11-07-model-found-scheduler-and-registry-repairs-plan.md`](./2026-11-07-model-found-scheduler-and-registry-repairs-plan.md) | Model-Found Scheduler and Registry Repairs | `completed` | none |

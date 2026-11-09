@@ -1217,9 +1217,14 @@ Ordinary launch selection is work-conserving family scheduling over dynamically 
 
 Every ordinary PostgreSQL launch requires a fresh coherent usage observation
 and the existing measured admission decision. Let L=max(0,C-R), H=floor(4L/5),
-and W=6. If H>=W and observed usage U<H, a Manager may have up to W unfinished
-ordinary startups. Otherwise it waits until no ordinary startup is unfinished
-before authorizing one launch. Unknown usage denies dispatch. Window occupancy
+and W=6. If H>=W, a Manager may have up to
+N(U)=min(W, max(1, floor(W(L-U)/(L-H)))) unfinished ordinary startups at
+observed usage U: the whole window W while U<=H, then fewer in proportion to
+measured headroom L-U, down to one startup as U approaches L. Otherwise it
+waits until no ordinary startup is unfinished before authorizing one launch.
+A window wider than one never leaves an unfinished startup less measured
+headroom, (L-U)/N(U), than the (L-H)/W share each of W startups has at H; the
+shape uses no constant beyond H and W. Unknown usage denies dispatch. Window occupancy
 counts selected launch-worker requests and processes awaiting startup feedback
 once per TID, starting before process creation; it does not count queued work
 or running tasks whose startup feedback has settled. SQLite retains serialized
@@ -1474,6 +1479,7 @@ doc:
 
 ## Related Plans
 
+- [Startup window narrows with measured headroom](../plans/2026-11-08-startup-window-settlement-plan.md) revises the [MANAGER.18] startup window above H to narrow in proportion to measured headroom.
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).

@@ -316,13 +316,24 @@ def _read_denial(
     )
 
 
-def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
+def test_startup_pressure_narrows_window_without_hot_loop_and_reopens(
     monkeypatch: pytest.MonkeyPatch,
     isolated_postgres_server: str,
 ) -> None:
-    """Real U crosses H with two unfinished startups, then reopens on fresh U."""
-    public_limit = 72
+    """Real U above H overlaps the narrowed window, holds the next startup, reopens.
+
+    C=200 and a 10% reserve give R=20, L=180 and H=144, so the window is
+    min(6, max(1, floor((180-U)/6))): six startups at U<=144 and exactly three
+    for 157<=U<=162. Two fenced startups launch at low usage; real external
+    sessions then hold U in the three-startup band. A third startup must
+    launch above H, a fourth must wait without a hot loop, and releasing the
+    sessions must reopen the window on a fresh observation.
+    """
+    public_limit = 180
     startup_threshold = math.floor(public_limit * MANAGER_STARTUP_FAST_PATH_FRACTION)
+    assert startup_threshold == 144
+    three_startup_band = range(157, 163)
+    requests = 4
     with WeftTestHarness() as harness:
         with harness.context.queue("startup-pressure-ids", persistent=True) as queue:
             manager_tid = str(queue.generate_timestamp())
@@ -331,7 +342,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
             make_manager_spec(manager_tid, idle_timeout=0.0),
             config=load_config(
                 {
-                    "WEFT_ADMISSION_MAX_CONNECTIONS": 80,
+                    "WEFT_ADMISSION_MAX_CONNECTIONS": 200,
                     "WEFT_ADMISSION_RESERVE_FRACTION": 0.1,
                     "WEFT_TASK_MONITOR_ENABLED": False,
                     "WEFT_LIVENESS_MONITOR_ENABLED": False,
@@ -342,16 +353,16 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
         )
         spawn = multiprocessing.get_context("spawn")
         publication, release = spawn.Event(), spawn.Event()
-        ready = [spawn.Event() for _ in range(3)]
-        started = [spawn.Event() for _ in range(3)]
+        ready = [spawn.Event() for _ in range(requests)]
+        started = [spawn.Event() for _ in range(requests)]
         processes: list[BaseProcess] = []
 
         def launch(
             _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
         ) -> BaseProcess:
             # The standing heartbeat service launches through this hook too
-            # ([MA-1] item 7); only the three user requests, whose child TIDs
-            # are their request IDs, own the test's indexed events.
+            # ([MA-1] item 7); only the user requests, whose child TIDs are
+            # their request IDs, own the test's indexed events.
             tid = str(child_spec.tid)
             if tid in tids:
                 index = tids.index(tid)
@@ -393,7 +404,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                     }
                 }
             )
-            request_ids = [int(source.write(body)) for _ in range(3)]
+            request_ids = [int(source.write(body)) for _ in range(requests)]
             tids = [str(request_id) for request_id in request_ids]
             for tid in tids:
                 harness.register_tid(tid)
@@ -409,11 +420,14 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 timeout=30.0,
             )
             assert not ready[0].is_set()
+            read_usage = manager._read_postgres_connection_usage
+            # Aim at the middle of the band so a pool connection opening or
+            # closing in the Manager leaves the window at three.
+            sessions = 159 - int(read_usage()["total"])
             with _pressure(harness, None) as pressure:
-                pressure.send(startup_threshold)
-                assert pressure.poll(30.0) and pressure.recv() == startup_threshold
+                pressure.send(sessions)
+                assert pressure.poll(30.0) and pressure.recv() == sessions
                 observations: list[int] = []
-                read_usage = manager._read_postgres_connection_usage
 
                 def observe_usage() -> Any:
                     usage = read_usage()
@@ -424,6 +438,15 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 monkeypatch.setattr(
                     manager, "_read_postgres_connection_usage", observe_usage
                 )
+                # Two fenced startups remain unfinished. Above H the window
+                # must still admit a third launch, then hold the fourth.
+                drive_until(
+                    lambda: receipts(3),
+                    bool,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=30.0,
+                )
                 drive_until(
                     lambda: manager._startup_blocked,
                     bool,
@@ -431,10 +454,14 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                     wait=manager.wait_for_activity,
                     timeout=30.0,
                 )
-                assert startup_threshold <= observations[-1] < public_limit
+                assert observations
+                assert all(used in three_startup_band for used in observations), (
+                    observations
+                )
+                assert set(manager._startup_feedback) == set(tids[:3])
                 assert not manager._admission_blocked_lanes
-                assert source.peek_one(exact_timestamp=request_ids[2]) is not None
-                assert reserved.peek_one(exact_timestamp=request_ids[2]) is None
+                assert source.peek_one(exact_timestamp=request_ids[3]) is not None
+                assert reserved.peek_one(exact_timestamp=request_ids[3]) is None
                 manager._admission_retry_after_ns = time.time_ns() + 120_000_000_000
                 observed = len(observations)
                 for _ in range(5):
@@ -443,7 +470,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 assert len(observations) == observed
                 assert not manager._queue_has_pending(source)
                 assert not manager._has_pending_messages()
-                assert not started[2].is_set()
+                assert not started[3].is_set()
 
                 reply_name = f"T{int(manager.tid) + 1}.ctrl_in"
                 manager._queue(manager._queue_names["ctrl_in"]).write(
@@ -460,7 +487,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 assert pressure.poll(30.0) and pressure.recv() == "released"
                 manager._admission_retry_after_ns = time.time_ns() - 1
                 drive_until(
-                    lambda: receipts(3),
+                    lambda: receipts(requests),
                     bool,
                     step=manager.process_once,
                     wait=manager.wait_for_activity,
@@ -468,7 +495,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 )
                 assert observations[-1] < startup_threshold
                 assert not ready[0].is_set()
-                assert source.peek_one(exact_timestamp=request_ids[2]) is None
+                assert source.peek_one(exact_timestamp=request_ids[3]) is None
                 publication.set()
                 release.set()
                 outboxes = [manager._queue(f"T{tid}.outbox") for tid in tids]
@@ -481,11 +508,7 @@ def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
                 )
                 assert [
                     json.loads(queue.read_one() or "null") for queue in outboxes
-                ] == [
-                    {"data": "payload"},
-                    {"data": "payload"},
-                    {"data": "payload"},
-                ]
+                ] == [{"data": "payload"}] * requests
         finally:
             publication.set()
             release.set()

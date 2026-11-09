@@ -28,20 +28,31 @@ AdmissionLane = Literal["public", "internal"]
 def _startup_window_allows_launch(
     *, unfinished: int, backend: str, capacity: Mapping[str, Any] | None
 ) -> bool:
-    """Bound startup overlap after normal admission allows a launch [MA-1.8]."""
+    """Bound startup overlap after normal admission allows a launch [MA-1.8].
+
+    With usable limit L, threshold H and window W, a PostgreSQL Manager may
+    have min(W, max(1, floor(W(L-U)/(L-H)))) unfinished startups at measured
+    usage U: all W at or below H, then fewer in proportion to headroom L-U.
+    A window wider than one never leaves an unfinished startup less measured
+    headroom than the (L-H)/W share each of W startups has at H.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
+    """
 
     if unfinished == 0:
         return True
     if backend != "postgres" or capacity is None:
         return False
-    threshold = math.floor(
-        capacity["public_limit"] * MANAGER_STARTUP_FAST_PATH_FRACTION
+    limit: int = capacity["public_limit"]
+    used: int = capacity["used"]
+    threshold = math.floor(limit * MANAGER_STARTUP_FAST_PATH_FRACTION)
+    if threshold < MANAGER_STARTUP_FAST_PATH_WINDOW:
+        return False
+    window = min(
+        MANAGER_STARTUP_FAST_PATH_WINDOW,
+        MANAGER_STARTUP_FAST_PATH_WINDOW * (limit - used) // (limit - threshold),
     )
-    return (
-        threshold >= MANAGER_STARTUP_FAST_PATH_WINDOW
-        and capacity["used"] < threshold
-        and unfinished < MANAGER_STARTUP_FAST_PATH_WINDOW
-    )
+    return unfinished < max(1, window)
 
 
 def _admission_capacity(

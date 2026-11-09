@@ -20,13 +20,29 @@ from weft.core.admission import (
 @pytest.mark.parametrize(
     ("unfinished", "backend", "capacity", "allowed"),
     [
+        # L=270: H=216 and the window is min(6, max(1, floor((270-U)/9))).
         (5, "postgres", {"public_limit": 270, "used": 215}, True),
-        (5, "postgres", {"public_limit": 270, "used": 216}, False),
         (6, "postgres", {"public_limit": 270, "used": 215}, False),
+        (5, "postgres", {"public_limit": 270, "used": 216}, True),
+        (6, "postgres", {"public_limit": 270, "used": 216}, False),
+        (4, "postgres", {"public_limit": 270, "used": 217}, True),
+        (5, "postgres", {"public_limit": 270, "used": 217}, False),
+        (2, "postgres", {"public_limit": 270, "used": 243}, True),
+        (3, "postgres", {"public_limit": 270, "used": 243}, False),
+        (1, "postgres", {"public_limit": 270, "used": 252}, True),
+        (2, "postgres", {"public_limit": 270, "used": 252}, False),
+        (1, "postgres", {"public_limit": 270, "used": 253}, False),
+        (1, "postgres", {"public_limit": 270, "used": 269}, False),
+        (1, "postgres", {"public_limit": 270, "used": 300}, False),
+        (0, "postgres", {"public_limit": 270, "used": 269}, True),
+        # H=floor(4L/5) must reach W=6 before any overlap.
         (1, "postgres", {"public_limit": 7, "used": 0}, False),
         (1, "postgres", {"public_limit": 8, "used": 0}, True),
-        (1, "postgres", {"public_limit": 11, "used": 7}, True),
-        (1, "postgres", {"public_limit": 11, "used": 8}, False),
+        # L=11: H=8, the window is min(6, max(1, floor(2(11-U)))).
+        (1, "postgres", {"public_limit": 11, "used": 8}, True),
+        (5, "postgres", {"public_limit": 11, "used": 8}, True),
+        (1, "postgres", {"public_limit": 11, "used": 10}, True),
+        (2, "postgres", {"public_limit": 11, "used": 10}, False),
         (1, "sqlite", {"public_limit": 270, "used": 0}, False),
         (1, "sqlite", None, False),
         (1, "postgres", None, False),
@@ -35,14 +51,15 @@ from weft.core.admission import (
         (0, "postgres", None, True),
     ],
 )
-def test_startup_overlap_requires_low_postgres_usage_and_room(
+def test_startup_overlap_narrows_with_measured_postgres_headroom(
     unfinished: int,
     backend: str,
     capacity: dict[str, Any] | None,
     allowed: bool,
 ) -> None:
-    # Literal boundaries protect the 80%-capacity and six-startup contracts,
-    # independently of the implementation's constants or threshold calculation.
+    # Literal boundaries protect the 80%-capacity threshold, the six-startup
+    # window and its proportional narrowing above the threshold, independently
+    # of the implementation's constants or threshold calculation.
     assert (
         _startup_window_allows_launch(
             unfinished=unfinished, backend=backend, capacity=capacity
