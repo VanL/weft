@@ -33,6 +33,7 @@ import weft.core.tasks.service as service_task_mod
 from simplebroker import Queue
 from simplebroker.ext import BrokerConnection, BrokerError
 from tests.helpers.typing import BrokerEnv, TaskFactory
+from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_heartbeat import make_heartbeat_taskspec
 from weft._constants import (
     CONTROL_PING,
@@ -73,6 +74,8 @@ from weft.commands._spawn_submission import reconcile_submitted_spawn
 from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.heartbeat import upsert_heartbeat
+from weft.core.manager import Manager
+from weft.core.manager_runtime import build_manager_spec
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.policies.dead_task import DeadTaskLogCoalesceGroup
 from weft.core.monitor.runtime import (
@@ -14488,5 +14491,202 @@ def test_task_monitor_stale_service_family_awaiting_cleanup_is_work(
     try:
         exited = _drive_monitor_across_idle_window(task, service_clock)
         assert exited is (owner_state == "active")
+    finally:
+        task.stop()
+
+
+def _idle_exit_heartbeat(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """Run a real heartbeat service to its ``service_idle_exit``; return its TID."""
+
+    tid = str(time.time_ns())
+    heartbeat = HeartbeatTask(
+        weft_harness.context.broker_target,
+        make_heartbeat_taskspec(tid, weft_harness.root),
+    )
+    try:
+        heartbeat.process_once()
+        service_clock["ns"] += int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+        heartbeat.process_once()
+        assert heartbeat.should_stop
+    finally:
+        heartbeat.stop(join=False)
+        heartbeat.cleanup()
+    return tid
+
+
+def _superseded_heartbeat(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """Supersede a real heartbeat by the canonical one; return the loser's TID.
+
+    The canonical heartbeat then idle-exits too, so its own family is terminal
+    and nothing else stays retained.
+    """
+
+    owner_tid = str(time.time_ns())
+    loser_tid = str(int(owner_tid) + 1)
+    owner = HeartbeatTask(
+        weft_harness.context.broker_target,
+        make_heartbeat_taskspec(owner_tid, weft_harness.root),
+    )
+    loser = HeartbeatTask(
+        weft_harness.context.broker_target,
+        make_heartbeat_taskspec(loser_tid, weft_harness.root),
+    )
+    try:
+        owner.process_once()
+        loser.process_once()
+        assert loser.should_stop
+        service_clock["ns"] += int(SERVICE_IDLE_EXIT_SECONDS * 1_000_000_000)
+        owner.process_once()
+        assert owner.should_stop
+    finally:
+        for heartbeat in (loser, owner):
+            heartbeat.stop(join=False)
+            heartbeat.cleanup()
+    return loser_tid
+
+
+def _scoped_manager(weft_harness: WeftTestHarness, tid: str) -> Manager:
+    """Return a real Manager on a private inbox, so it launches no services."""
+
+    payload = build_manager_spec(
+        weft_harness.context, tid, idle_timeout_override=60.0
+    ).model_dump(mode="json")
+    payload["io"]["inputs"]["inbox"] = f"manager.{tid}.inbox"
+    return Manager(weft_harness.context.broker_target, TaskSpec.model_validate(payload))
+
+
+def _idle_shutdown_manager(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """Run a real Manager to its ``manager_idle_shutdown``; return its TID."""
+
+    del service_clock
+    tid = str(time.time_ns())
+    manager = _scoped_manager(weft_harness, tid)
+    try:
+        manager.process_once()
+        # The idle window has elapsed: no Manager-owned input since long ago.
+        manager._last_activity_ns = 1
+        manager.process_once()
+        assert manager.should_stop
+    finally:
+        manager.cleanup()
+    return tid
+
+
+def _stop_drained_manager(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """STOP a real childless Manager through its ``manager_stop_drained``."""
+
+    del service_clock
+    tid = str(time.time_ns())
+    manager = _scoped_manager(weft_harness, tid)
+    ctrl_in = weft_harness.context.queue(f"T{tid}.ctrl_in", persistent=False)
+    try:
+        manager.process_once()
+        ctrl_in.write(encode_control_message(CONTROL_STOP))
+        for _ in range(20):
+            manager.process_once()
+            if manager.should_stop:
+                break
+        assert manager.should_stop
+    finally:
+        ctrl_in.close()
+        manager.cleanup()
+    return tid
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "terminal_status", "run_producer"),
+    [
+        ("service_idle_exit", "completed", _idle_exit_heartbeat),
+        ("heartbeat_service_superseded", "completed", _superseded_heartbeat),
+        ("manager_idle_shutdown", "completed", _idle_shutdown_manager),
+        ("manager_stop_drained", "cancelled", _stop_drained_manager),
+    ],
+)
+def test_task_monitor_retires_service_and_manager_exit_families(
+    broker_env: BrokerEnv,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_event: str,
+    terminal_status: str,
+    run_producer: Callable[[WeftTestHarness, dict[str, int]], str],
+) -> None:
+    """A service or Manager exit record is terminal proof that retires its family.
+
+    Each exit publishes the typed terminal record ([MF-3]): a terminal status
+    with ``type="terminal"``. The Monitor must collate that record as the
+    family's terminal proof, run summary, disposition and control cleanup,
+    and retire the family ([OBS.13.4]), so nothing retained keeps the Monitor
+    alive (owner ruling 10.3). Mutation caught: an exit event missing from
+    the Monitor's terminal-event map strands the family (and, for the STOP
+    drain, leaves the Manager's earlier drain-start row as its terminal proof).
+    """
+
+    db_path, make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    tid = run_producer(weft_harness, service_clock)
+    terminal_records = [
+        payload
+        for payload in (
+            json.loads(body)
+            for body in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator()
+        )
+        if payload.get("tid") == tid and payload.get("event") == terminal_event
+    ]
+    assert len(terminal_records) == 1
+    assert terminal_records[0]["type"] == TERMINAL_ENVELOPE_TYPE
+    assert terminal_records[0]["status"] == terminal_status
+
+    task = TaskMonitor(
+        db_path,
+        _marked_task_monitor_spec("1778089999999999711"),
+        # A cancelled family also needs reserved-cleanup proof; let it run now.
+        config=_idle_monitor_config(
+            WEFT_TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS="0",
+        ),
+    )
+    try:
+        # Ingest, summary and disposition, then the cleanup slices.
+        for _ in range(3):
+            _drive_one_monitor_cycle(task)
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            record = store.get_task(tid)
+            assert record is not None
+            assert (
+                record.terminal_seen,
+                record.terminal_event,
+                record.terminal_status,
+            ) == (True, terminal_event, terminal_status)
+            assert record.summary_emitted_at_ns is not None
+            assert record.disposition_at_ns is not None
+            assert record.task_control_deleted_at_ns is not None
+
+            # Past the retention window the family retires and nothing it
+            # left keeps the Monitor alive.
+            retention_ns = int(
+                worker._monitor_config.task_log_retention_period_seconds * 1_000_000_000
+            )
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns() + retention_ns + 1_000_000_000,
+                task_log_owner="collated_store",
+            )
+            assert store.get_task(tid) is None
+            assert worker._retained_work_pending() is False
     finally:
         task.stop()

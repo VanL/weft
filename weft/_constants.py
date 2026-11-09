@@ -1739,8 +1739,24 @@ TERMINAL_TASK_EVENTS: Final[Mapping[str, str]] = {
     "work_timeout": "timeout",
     "work_limit_violation": "failed",
     "work_completed": "completed",
+    # Service and Manager lifetimes end through their own terminal records.
+    "service_idle_exit": "completed",
+    "heartbeat_service_superseded": "completed",
+    "manager_idle_shutdown": "completed",
+    "manager_stop_drained": "cancelled",
+    "manager_leadership_drained": "cancelled",
+    "manager_superseded_drained": "cancelled",
 }
-"""Task-log events that prove terminal lifecycle status when completion is set."""
+"""Task-log events that prove terminal lifecycle status when completion is set.
+
+The Monitor collates a family as terminal from this map ([OBS.13.4]), so every
+event a task or service publishes as its terminal record ([MF-3]) needs an
+entry here. Known exception: the Manager also publishes
+``manager_leadership_yielded`` and ``manager_superseded`` on a nonterminal
+drain start, so an entry would close a family that is still draining; their
+childless terminal form is unlisted pending an owner decision
+(``docs/plans/2026-11-09-terminal-idle-events-plan.md``).
+"""
 
 TASK_LOG_START_EVENTS: Final[frozenset[str]] = frozenset(
     {

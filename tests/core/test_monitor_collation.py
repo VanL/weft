@@ -120,6 +120,55 @@ def test_monitor_collation_does_not_treat_activity_status_as_terminal() -> None:
     assert update.reserved_probe_needed is False
 
 
+@pytest.mark.parametrize(
+    ("event", "status", "terminal"),
+    [
+        ("manager_leadership_drained", "cancelled", True),
+        ("manager_superseded_drained", "cancelled", True),
+        ("manager_leadership_yielded", "running", False),
+        ("manager_superseded", "running", False),
+    ],
+)
+def test_monitor_collation_closes_a_draining_manager_only_at_drain_completion(
+    event: str,
+    status: str,
+    terminal: bool,
+) -> None:
+    """A Manager drain closes its family on the drained record, not the start.
+
+    These rows have the shape ``BaseTask._report_state_change`` publishes for
+    a Manager that yields or is superseded while user work still runs: a
+    nonterminal drain-start row (``draining``), then the typed terminal record
+    when the drain completes ([MF-3], [MA-3]). The drained record is terminal
+    proof ([OBS.13.4]); the drain-start row must not close the family while
+    the Manager still serves its children. Mutations caught: a drained event
+    missing from the terminal-event map, or a drain-start name added to it.
+    """
+
+    tid = "1779000000000000004"
+    payload: dict[str, Any] = {
+        "event": event,
+        "tid": tid,
+        "status": status,
+        "taskspec": {
+            "tid": tid,
+            "name": "manager",
+            "state": {"status": status},
+            "metadata": {"role": "manager"},
+        },
+    }
+    if terminal:
+        payload.update(type="terminal", source="task")
+    else:
+        payload["draining"] = True
+
+    update = update_from_task_log_row(_row(1779000000000006000, payload))
+
+    assert update is not None
+    assert update.terminal_seen is terminal
+    assert update.terminal_status == (status if terminal else None)
+
+
 def test_monitor_collation_ignores_malformed_rows() -> None:
     row = DecodedQueueWindowRow(
         raw=QueueWindowRow(
