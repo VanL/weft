@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from weft._constants import (
+    ADMISSION_LANES,
     ADMISSION_MEMORY_RESERVE_FRACTION,
     ADMISSION_SERVICE_RESERVE_SLOTS,
     MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS,
@@ -24,8 +25,6 @@ from weft._constants import (
 )
 
 AdmissionLane = Literal["public", "internal"]
-
-_BOTH_LANES: frozenset[AdmissionLane] = frozenset(("public", "internal"))
 
 
 @dataclass(frozen=True)
@@ -263,12 +262,12 @@ class AdmissionController:
         backend_blocked = (
             frozenset[AdmissionLane]()
             if not backend_gate
-            else _BOTH_LANES
+            else ADMISSION_LANES
             if capacity is None
             else frozenset(_admission_blocked_lanes_for_capacity(capacity))
         )
         blocked = backend_blocked | (
-            _BOTH_LANES
+            ADMISSION_LANES
             if memory_capacity is None
             else frozenset(_admission_blocked_lanes_for_capacity(memory_capacity))
         )

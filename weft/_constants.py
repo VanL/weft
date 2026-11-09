@@ -31,7 +31,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from functools import partial
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from simplebroker import (
     DEFAULT_CONFIG,
@@ -836,6 +836,11 @@ Fixed, not `WEFT_ADMISSION_RESERVE_FRACTION`: that setting is the backend
 gate's operating reserve, which operators raise to leave connections to other
 clients of a shared database server, and says nothing about this host's memory.
 """
+
+ADMISSION_LANES: Final[frozenset[Literal["public", "internal"]]] = frozenset(
+    ("public", "internal")
+)
+"""Both admission lanes; a gate with no usable capacity refuses both [MA-1.8]."""
 
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
@@ -1864,6 +1869,14 @@ MIN_FDS_LIMIT: Final[int] = 1
 MIN_CONNECTIONS_LIMIT: Final[int] = 0
 """Minimum allowed network connections limit."""
 
+RESOURCE_LIMIT_FIELDS: Final[tuple[str, ...]] = (
+    "memory_mb",
+    "cpu_percent",
+    "max_fds",
+    "max_connections",
+)
+"""``LimitsSection`` fields; setting any of them makes sampling enforcement [RM-5.1]."""
+
 
 # Manager behaviour
 # ------------------
@@ -1988,6 +2001,15 @@ keeps writing to a pipe after the root's terminal decision. Delivery of the
 frozen captured backlog is separate and may take longer according to sink
 throughput (Spec: [RM-5.2]).
 """
+
+DARWIN_PROC_PPID_ONLY: Final[int] = 6
+"""libproc ``proc_listpids`` type selecting processes by parent PID [RM-5.1]."""
+
+DARWIN_CHILD_PID_CAPACITY: Final[int] = 64
+"""Initial libproc child-PID buffer; a full buffer is grown and the call repeated."""
+
+WINDOWS_ERROR_INVALID_PARAMETER: Final[int] = 87
+"""``OpenProcess`` reports a PID with no process as an invalid parameter [RM-5.2]."""
 
 SUBPROCESS_STREAM_TURN_READ_BYTES: Final[int] = 64 * 1024
 """Per-stream fairness budget for one subprocess supervision turn.

@@ -28,19 +28,13 @@ import threading
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import Final
 
 import psutil
 
+from weft._constants import DARWIN_CHILD_PID_CAPACITY, DARWIN_PROC_PPID_ONLY
 from weft.core.deferred import get_ctypes
 
 logger = logging.getLogger(__name__)
-
-_PROC_PPID_ONLY: Final[int] = 6
-"""libproc ``proc_listpids`` type selecting processes by parent PID."""
-
-_DARWIN_CHILD_PID_CAPACITY: Final[int] = 64
-"""Initial child-PID buffer; a full buffer is grown and the call repeated."""
 
 ChildPidReader = Callable[[int], list[int]]
 
@@ -115,10 +109,12 @@ def _darwin_child_pid_reader() -> ChildPidReader | None:
     pid_size = ctypes.sizeof(ctypes.c_int)
 
     def read_child_pids(pid: int) -> list[int]:
-        capacity = _DARWIN_CHILD_PID_CAPACITY
+        capacity = DARWIN_CHILD_PID_CAPACITY
         while True:
             buffer = (ctypes.c_int * capacity)()
-            filled = int(list_pids(_PROC_PPID_ONLY, pid, buffer, ctypes.sizeof(buffer)))
+            filled = int(
+                list_pids(DARWIN_PROC_PPID_ONLY, pid, buffer, ctypes.sizeof(buffer))
+            )
             if filled < 0:
                 code = ctypes.get_errno()
                 raise OSError(code, os.strerror(code))

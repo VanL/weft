@@ -14,11 +14,11 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from importlib import import_module
-from typing import Any, Final
+from typing import Any
 
 import psutil
 
-from weft._constants import DEFAULT_POLLING_INTERVAL
+from weft._constants import DEFAULT_POLLING_INTERVAL, RESOURCE_LIMIT_FIELDS
 from weft.core.process_tree import descendant_processes
 from weft.ext import ResourceMetrics
 
@@ -26,19 +26,11 @@ logger = logging.getLogger(__name__)
 
 PsutilProcess = Any
 
-_LIMIT_FIELDS: Final[tuple[str, ...]] = (
-    "memory_mb",
-    "cpu_percent",
-    "max_fds",
-    "max_connections",
-)
-"""``LimitsSection`` fields; setting any of them makes sampling enforcement."""
-
 
 def limits_configured(limits: Any | None) -> bool:
     """Return whether ``limits`` sets any resource limit (Spec: [RM-5.1])."""
     return limits is not None and any(
-        getattr(limits, name, None) is not None for name in _LIMIT_FIELDS
+        getattr(limits, name, None) is not None for name in RESOURCE_LIMIT_FIELDS
     )
 
 

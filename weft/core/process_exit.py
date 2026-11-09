@@ -29,15 +29,13 @@ import os
 import select
 import sys
 from collections.abc import Callable
-from typing import Final, Protocol, cast
+from typing import Protocol, cast
 
+from weft._constants import WINDOWS_ERROR_INVALID_PARAMETER
 from weft.core.deferred import get_ctypes
 
 if sys.platform == "win32":
     import _winapi
-
-_WINDOWS_ERROR_INVALID_PARAMETER: Final[int] = 87
-"""``OpenProcess`` reports a PID with no process as an invalid parameter."""
 
 
 class ProcessExitSource(Protocol):
@@ -147,7 +145,7 @@ def open_process_exit_source(pid: int) -> ProcessExitSource | None:
         try:
             handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, pid)
         except OSError as exc:
-            if exc.winerror == _WINDOWS_ERROR_INVALID_PARAMETER:
+            if exc.winerror == WINDOWS_ERROR_INVALID_PARAMETER:
                 return None
             raise
         return _HandleExitSource(handle)
