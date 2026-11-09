@@ -1289,8 +1289,10 @@ Bulk status/list/stats default to current nonterminal projections. Explicit
 `--log` / `include_log_history=True` unions retained raw history with current
 projections: terminal task-log proof wins, otherwise valid current projection
 wins. It implies historical inclusion; `--log --watch` is a usage error.
-Bulk acquisition performs no per-task control/output reads, active PING, implicit
-global-history replay, or Monitor reads. It reports the last successful task
+Bulk acquisition performs no per-task control/output reads, active task PING,
+implicit global-history replay, or Monitor reads. The only write a status
+command makes is the bounded keyed PING round to Manager rows whose liveness
+is still unknown ([CLI-1.2.1]); it leaves no residue. It reports the last successful task
 publication and can lag a durable completion or supervisor `wrapper_lost` after
 abrupt child death or failed final publication. Known-TID reads acquiring local
 completion still surface terminal evidence immediately. Event following remains

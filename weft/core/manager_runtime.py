@@ -55,8 +55,11 @@ from weft.context import WeftContext
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import (
     ControlProbeResult,
+    KeyedPingTarget,
+    MatchedPong,
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
+    send_keyed_ping_round,
 )
 from weft.core.launcher import start_resource_tracker_detached
 from weft.core.queue_window import iter_broker_queue_json_entries
@@ -747,7 +750,8 @@ def _manager_record_diagnostic(
     context: WeftContext,
     record: dict[str, Any],
     *,
-    probe_cache: dict[str, int | None],
+    liveness: Literal["live", "stale", "unknown"],
+    pong: MatchedPong | None,
 ) -> _ManagerDiagnostic:
     """Classify one manager row for explicit diagnostics."""
 
@@ -771,6 +775,24 @@ def _manager_record_diagnostic(
             dispatch_eligible=False,
             canonical_candidate=False,
         )
+    if pong is not None:
+        tid = str(record.get("tid"))
+        ctrl_in_name = _manager_ctrl_queue_name(tid, record)
+        return _ManagerDiagnostic(
+            record=record,
+            liveness="live",
+            proof_source="pong",
+            proof_detail=ctrl_in_name,
+            dispatch_eligible=pong_proves_dispatch_eligible(
+                pong.payload,
+                record=record,
+                ctrl_in_name=ctrl_in_name,
+                ctrl_out_name=_manager_ctrl_out_queue_name(tid, record),
+                outbox_name=WEFT_MANAGER_OUTBOX_QUEUE,
+                root_context=str(context.root),
+            ),
+            canonical_candidate=True,
+        )
 
     handle = _manager_handle_from_record(record)
     if handle is None:
@@ -784,23 +806,9 @@ def _manager_record_diagnostic(
         )
 
     authority = handle.control.get("authority")
-    liveness = manager_registry_record_liveness(record)
     expired_unknown = liveness == "unknown" and _manager_record_unknown_is_expired(
         record
     )
-    if (
-        liveness == "unknown"
-        and not expired_unknown
-        and _manager_record_has_matched_pong(context, record, probe_cache=probe_cache)
-    ):
-        return _ManagerDiagnostic(
-            record=record,
-            liveness="live",
-            proof_source="pong",
-            proof_detail=_manager_ctrl_queue_name(str(record.get("tid")), record),
-            dispatch_eligible=True,
-            canonical_candidate=True,
-        )
     source = (
         str(authority)
         if authority in {"host-pid", "external-supervisor"}
@@ -829,13 +837,38 @@ def manager_diagnostic_records(
     *,
     include_stopped: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return explicit diagnostic rows for known manager registry owners."""
+    """Return explicit diagnostic rows for known manager registry owners.
 
-    snapshot = _snapshot_registry(context, prune_stale=False)
-    probe_cache: dict[str, int | None] = {}
+    Probing follows the status-command rule: one keyed PING round for active
+    canonical rows whose runtime liveness is still unknown and unexpired
+    ([CLI-1.3], [CLI-1.2.1]).
+    """
+
+    records = list(_snapshot_registry(context, prune_stale=False).values())
+    liveness = {
+        str(record.get("tid")): manager_registry_record_liveness(record)
+        for record in records
+        if record.get("status") in {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}
+        and is_canonical_manager_record(record)
+    }
+    pongs = _ping_unknown_manager_records(
+        context,
+        [
+            record
+            for record in records
+            if record.get("status") == SERVICE_STATUS_ACTIVE
+            and liveness.get(str(record.get("tid"))) == "unknown"
+            and not _manager_record_unknown_is_expired(record)
+        ],
+    )
     diagnostics = [
-        _manager_record_diagnostic(context, record, probe_cache=probe_cache)
-        for record in snapshot.values()
+        _manager_record_diagnostic(
+            context,
+            record,
+            liveness=liveness.get(str(record.get("tid")), "unknown"),
+            pong=pongs.get(str(record.get("tid"))),
+        )
+        for record in records
     ]
     if not include_stopped:
         diagnostics = [
@@ -874,6 +907,44 @@ def manager_diagnostic_records(
         rows.append(record)
     rows.sort(key=lambda rec: int(rec.get("timestamp", 0)), reverse=True)
     return rows
+
+
+def _manager_probe_timeout() -> float:
+    """Bounded keyed-PING wait for Manager proof; one bound for every caller."""
+
+    return max(
+        0.0,
+        min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS),
+    )
+
+
+def _ping_unknown_manager_records(
+    context: WeftContext,
+    records: list[dict[str, Any]],
+) -> dict[str, MatchedPong]:
+    """Send one parallel keyed PING round to Manager rows still ``unknown``.
+
+    Each unanswered PING is retracted by exact ID, so a silent or dead Manager
+    keeps no residue; a failed write leaves its row unknown ([CLI-1.2.1]).
+    """
+
+    results = send_keyed_ping_round(
+        context,
+        [
+            KeyedPingTarget(
+                tid=str(record["tid"]),
+                ctrl_in_name=_manager_ctrl_queue_name(str(record["tid"]), record),
+            )
+            for record in records
+        ],
+        timeout=_manager_probe_timeout(),
+        retract_unanswered=True,
+    )
+    return {
+        tid: result.matched
+        for tid, result in results.items()
+        if result.matched is not None
+    }
 
 
 def _registry_view(
@@ -1020,10 +1091,7 @@ def _manager_record_has_matched_pong(
         tid=tid,
         ctrl_in_name=ctrl_in_name,
         broker=broker,
-        timeout=max(
-            0.0,
-            min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS),
-        ),
+        timeout=_manager_probe_timeout(),
     )
     if result.matched is None or not pong_proves_dispatch_eligible(
         result.matched.payload,
@@ -1078,12 +1146,17 @@ def list_manager_records(
     canonical_only: bool = False,
     prune_stale: bool = True,
     observe: bool = False,
+    tid: str | None = None,
     broker: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return manager registry records for command-layer consumers.
 
-    ``observe`` is the passive project-status read: no PING, and unexpired
-    unknown active rows are kept with their ``liveness`` ([CLI-1.2.1], [MA-1]).
+    ``observe`` is the status-command read shared by ``weft status``,
+    ``weft manager list`` and ``weft manager status``: the passive reduction
+    keeps live and unexpired unknown active rows with their ``liveness``, then
+    one keyed PING round marks each answering unknown row ``live`` with
+    ``proof_source: "pong"``; an unanswered row stays ``unknown``
+    ([CLI-1.2.1], [MA-1]). ``tid`` restricts the rows before that round.
     Other readers keep an unknown row only on a matched PONG or PID-namespace
     ambiguity.
     """
@@ -1099,6 +1172,8 @@ def list_manager_records(
             broker=broker,
         ).values()
     )
+    if tid is not None:
+        records = [record for record in records if record.get("tid") == tid]
     if canonical_only:
         records = [record for record in records if is_canonical_manager_record(record)]
     if not include_stopped:
@@ -1108,6 +1183,15 @@ def list_manager_records(
             if record.get("status")
             not in {SERVICE_STATUS_STOPPED, SERVICE_STATUS_SUPERSEDED}
         ]
+    if observe:
+        pongs = _ping_unknown_manager_records(
+            context,
+            [record for record in records if record.get("liveness") == "unknown"],
+        )
+        for record in records:
+            if str(record.get("tid")) in pongs:
+                record["liveness"] = "live"
+                record["proof_source"] = "pong"
     records.sort(key=lambda rec: int(rec.get("timestamp", 0)), reverse=True)
     return records
 

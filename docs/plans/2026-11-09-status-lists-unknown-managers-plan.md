@@ -18,6 +18,11 @@ drops an active, unexpired row whose liveness is `unknown`. Status must keep
 such a row, label it `liveness: "unknown"`, and still write nothing. Active
 manager selection and leadership do not change.
 
+Revision 2 (owner, 2026-11-09) widens and changes this: `weft manager list`
+and `weft manager status` use the same rows as status, and all three send one
+bounded PING round to rows still `unknown`, leaving no residue. See
+"Revision 2" below; it supersedes "still write nothing".
+
 ## Source documents
 
 - `docs/program-theory.md` [WT-2a.2] (queues are the only durable truth; a
@@ -159,11 +164,19 @@ in code (`_select_active_manager_from_snapshot` requires `live` or
 | `weft status` lists an active, unexpired Manager row whose liveness is `unknown` in the reading process (omitted since `b6d850c1`; before it, listed only after a matched PONG that status itself wrote a PING for) | C | [WT-2a.13]; [WT-4] 4.3; [MA-1] "missing probes are unknown evidence" |
 | A Manager that died without proof (no provider loaded, container gone) stays listed as `active` with `liveness: "unknown"` until the 300 s unknown window expires (before `b6d850c1`: omitted after a failed PING) | C | [WT-2a.13]: a failed or missing probe is unknown, not death; the row is labelled, never shown as live; `weft manager list` and `--diagnostic` still probe |
 | Status JSON and plain text carry `liveness` (`live` or `unknown`) on `active` Manager rows (JSON had `null`; plain text had no line) | C | Additive observation; [CLI-1.2.1] |
-| Python `SystemStatusSnapshot.managers[i].liveness` is filled for `active` rows, so it no longer equals the `client.managers.status(tid)` snapshot field-for-field (that one keeps `liveness: None`) | C | Additive on status; manager status unchanged; [PY-2] |
+| Python `ManagerSnapshot.liveness` is filled for `active` rows by status, `client.managers.list()` and `client.managers.status(tid)` alike (rev. 2; slice 1 filled it on status only) | C | Additive; owner, 2026-11-09: manager list/status "consistent with weft status"; [PY-2] |
 | Status service rows report `desired: true` while an unknown, unexpired Manager row is listed | C | `desired` follows the listed active Managers; [WT-2a.13] |
 | A newly retained unknown Manager's `internal_reserved` evidence now feeds status service rows (`weft/commands/system.py` ~1126): with no competing evidence, a service can change from `unknown`/`none` to `reserved`/`internal-spawn-reserved`, with queue and Manager provenance | C | [WT-4.1] "Queues carry facts; processes carry hints": the reserved row is a queue fact; read-only |
-| Status stays write-free (no PING) | N | [WT-2a.2]; [CLI-1.2.1] |
-| Selection, leadership, startup and `weft manager list/status` are unchanged | N | [MA-1] "not leadership authority" |
+| (rev. 2) `weft status`, `weft manager list`, `weft manager status` and their client equivalents send one parallel keyed-PING round to the listed `active` rows still `unknown` after the passive reduction; added latency is at most one Manager probe bound (`min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS)` = 0.5 s) and only when such a row exists. Status is no longer write-free (slice 1 / `b6d850c1`: no PING): per call it mints one requester TID and writes one PING per unknown row | A | Owner, 2026-11-09: "I don't mind having a tiny bit more latency on it if the latency only affects the status commands and weft manager list". A probe adds positive evidence only and is never proof of death ([WT-2a.13]); a PING requester holds a TID and owns its reply `ctrl_in` ([WT-2a.12]) |
+| (rev. 2) An answering unknown row reports `liveness: "live"`, `proof_source: "pong"` | C | Additive positive evidence |
+| (rev. 2) An unanswered PING is deleted by exact ID and the requester queue is retired, so the round leaves no residue (single `send_keyed_ping_probe` callers keep their existing late-PONG/dead-requester sweep contract, [MF-3]) | N | Zero residue; the dead-TID sweep excludes Manager queues, so a PING left in a dead Manager's `ctrl_in` would otherwise persist |
+| (rev. 2) `weft manager list` / `manager status` keep an unexpired unknown row whose PING went unanswered, labelled `unknown` (they omitted it before) | C | [WT-2a.13]: a failed probe is unknown, not death |
+| (rev. 2) A failed PING write leaves the row `unknown`; the command does not fail (manager list omitted the row before) | C | [WT-2a.13]; owner, 2026-11-09 |
+| (rev. 2) Plain `manager list` gains a `LIVE` column; plain `manager status` gains a `Liveness:` line; their JSON gains `liveness` / `proof_source` | C | Additive; same facts as status |
+| (rev. 2) `--diagnostic` probes by the same rule, in one parallel round (it probed one row at a time); a matched PONG from a Manager that is not dispatch-eligible now reports `live`/`pong` with `dispatch_eligible: false` (it reported `unknown`) | C | One probe rule (owner, 2026-11-09); liveness and dispatch eligibility are different questions ([WT-4] 4.3); canonical marking still requires dispatch eligibility |
+| (rev. 2) `send_keyed_ping_probe` delegates to the new multi-target `send_keyed_ping_round`; single-target behavior is unchanged | N | [WT-4] 4.4 "Shared function, shared code" |
+| Selection, leadership, startup, stop, harness internals and `weft run` Manager reuse are unchanged; a PONG proved by a status command does not make a row selectable | N | [MA-1] "not leadership authority" |
+| Status service rows are not pinged: they use the service-owner reduction, whose self-refreshed owner row is the only service liveness proof | N | Owner, 2026-11-09 service-refresh decision (other track) |
 
 No `D` rows.
 
@@ -185,7 +198,7 @@ No `D` rows.
 
 ### [CLI-1.2.1] — insert after the bullet "shows manager registry information and task snapshots"
 
-Replacement (`docs/specifications/10-CLI_Interface.md`):
+Slice 1 text, superseded by revision 2 (`docs/specifications/10-CLI_Interface.md`):
 ```text
 - lists each Manager's latest registry row. An `active` row is listed when its
   runtime liveness is `live`, or `unknown` and younger than
@@ -204,7 +217,7 @@ Inserted after "`weft/commands/system.py` owns status collection and the
 explicit task/manager/service JSON projections and `cmd_status()`;", with a
 plan link appended to the paragraph:
 
-Replacement (`docs/specifications/10-CLI_Interface.md`):
+Slice 1 text, superseded by revision 2 (`docs/specifications/10-CLI_Interface.md`):
 ```text
 `weft/commands/system.py::_collect_manager_records` reads Manager rows through
 `weft/core/manager_runtime.py::list_manager_records(observe=True)`;
@@ -216,7 +229,7 @@ The following clause ("both the definite-stale and expired-unknown pruning
 predicates override keep-newest for every manager status.") is kept unchanged
 as its own sentence, now capitalized.
 
-Replacement (`docs/specifications/03-Manager_Architecture.md`):
+Slice 1 text, superseded by revision 2 (`docs/specifications/03-Manager_Architecture.md`):
 ```text
 Younger unknown rows keep the bounded keyed-PING rescue described above,
 except in the passive project-status observation ([CLI-1.2.1]): it sends no
@@ -228,11 +241,180 @@ authority; active-manager selection still requires live or matched-PONG proof.
 
 ### [PY-2] — `ManagerSnapshot` bullet, clause "diagnostic mode populates them."
 
-Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
+Slice 1 text, superseded by revision 2 (`docs/specifications/14-Python_API_Surfaces.md`):
 ```text
   `canonical: bool | None = None`; diagnostic mode populates them. Project
   status populates only `liveness` (`live` or `unknown`) on `active` rows
   ([CLI-1.2.1]).
+```
+
+## Revision 2 (owner decisions, 2026-11-09)
+
+Two owner decisions after slice 1 (`dded29e2`, reviewed in `0de2fd60`):
+
+1. "weft manager list and weft manager status should be consistent with weft
+   status." This answers both slice-1 owner questions.
+2. "Status is sort of a special-purpose command, so I don't mind having a tiny
+   bit more latency on it if the latency only affects the status commands and
+   weft manager list." This supersedes slice 1's "status sends no PING".
+
+Rule, identical for `weft status`, `weft manager list`, `weft manager status
+TID`, `client.managers.list()` and `client.managers.status(tid)`:
+
+1. Passive reduction first (slice 1's observe disposition): live rows kept,
+   definitively stale and expired-unknown rows omitted, active unexpired
+   unknown rows kept.
+2. Then one probe round for the listed rows still `unknown`, and only those:
+   one requester TID and reply queue, one keyed PING per row written at once,
+   one wait bounded by the existing Manager probe bound. A matched PONG makes
+   the row `live` with `proof_source: "pong"`. No PONG or a failed write keeps
+   it `unknown` and listed; the command does not fail. Unanswered PINGs are
+   deleted by exact ID; the reply queue is retired.
+3. Live and stale rows are never pinged. Selection, leadership, startup, stop,
+   harness internals and `weft run` reuse are unchanged; a status-command PONG
+   does not stamp `_pong_live_at`, so it never makes a row selectable.
+4. `--diagnostic` keeps its extra fields and uses the same round.
+
+Services: status service rows use the service-owner reduction, not this
+Manager reduction, and the owner made the self-refreshed owner row their only
+liveness proof on the service-refresh track, so no service row is pinged.
+
+Implementation:
+
+- `weft/core/control_probe.py`: `KeyedPingTarget`, `send_keyed_ping_round`
+  (multi-target round; `retract_unanswered`), helpers `_write_round_requests`,
+  `_await_round_pongs`, `_read_matching_pongs`, `_retract_probe_requests`;
+  `_write_probe_request` returns the PING row ID; `send_keyed_ping_probe` is
+  the one-target case of the round (no retraction, unchanged contract).
+- `weft/core/manager_runtime.py`: `_manager_probe_timeout` (the existing bound,
+  now shared), `_ping_unknown_manager_records` (round with retraction);
+  `list_manager_records(observe=True, tid=...)` runs the round after the
+  passive reduction and filters; `manager_diagnostic_records` computes each
+  row's liveness once and runs the same round; `_manager_record_diagnostic`
+  takes that liveness and the round's PONG.
+- `weft/commands/manager.py`: `cmd_manager_list` (non-diagnostic),
+  `list_managers`, `manager_status` and `cmd_manager_status` read through
+  `list_manager_records(observe=True)` (status by TID via
+  `_observed_manager_record`). Stop paths keep `manager_record`.
+- `weft/cli/app.py`: `LIVE` column in plain `manager list`, `Liveness:` line in
+  plain `manager status`.
+
+Tests (RED on `0de2fd60`, then GREEN):
+
+- `tests/commands/test_manager_commands.py::test_status_commands_ping_only_unknown_managers_and_leave_no_residue`:
+  live, answering-unknown, silent-unknown, stale and expired rows; for status,
+  manager list and client list the answering row is `live`/`pong`, the silent
+  row `unknown`, only those two are pinged, the silent `ctrl_in` keeps no row
+  (pending or claimed) and no requester queue remains; the same per TID for
+  `cmd_manager_status` / `manager_status`; `--diagnostic` uses the same round;
+  plain-text `LIVE` / `Liveness:` rendering. RED: status reported the answering
+  row `unknown`.
+- `test_status_manager_list_and_manager_status_agree_field_for_field`: the
+  three commands (and both client calls) return equal `ManagerSnapshot`s;
+  stale and expired rows are absent everywhere. RED: manager list returned
+  fewer rows than status.
+- `test_status_commands_keep_unknown_manager_when_ping_write_fails`: the first
+  row's PING write raises `BrokerError`; that row stays `unknown`, the next row
+  is still pinged and proved, no command fails. RED: manager list omitted the
+  refused row.
+- Updated: `tests/commands/test_status.py::test_system_status_lists_silent_unknown_manager_after_one_ping_round`
+  (slice-1 test; now asserts one PING to the unknown row only and zero residue
+  instead of no write) and
+  `test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven`
+  (bulk status pings the unknown Manager once with no residue; point task
+  status stays passive).
+- Reverted: slice 1's `liveness` exception in
+  `tests/core/test_client.py::test_system_and_manager_namespaces_expose_shared_runtime_state`;
+  the field-for-field comparison holds again.
+
+Revision 2 spec delta (strategy B, atomic with the code):
+
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+no per-task control/outbox peeks or active task PING (Manager rows follow the
+bounded PING round below) and may lag local completion or
+```
+
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+- lists each Manager's latest registry row. An `active` row is listed when its
+  runtime liveness is `live`, or `unknown` and younger than
+  `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS`, and carries `liveness`
+  (`live` or `unknown`) in JSON and plain text; a definitively stale row and
+  an older unknown row are omitted. A row is `unknown` when this process
+  cannot prove the Manager's runtime, for example an external-supervisor row
+  whose liveness provider is not loaded here. After that passive reduction,
+  status sends one round of keyed PINGs, in parallel, to the listed `active`
+  rows that are still `unknown`, and waits once for the Manager probe bound
+  (`min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS)`).
+  A matched PONG makes the row `live` with `proof_source: "pong"`. No PONG,
+  or a PING write that fails, leaves the row `unknown` and listed; it is never
+  `stale` and the command does not fail. Live and stale rows are never pinged.
+  Each unanswered PING is deleted by exact ID and the requester's reply queue
+  is retired, so the round leaves no residue; status writes nothing else.
+  `weft manager list` and `weft manager status TID` read the same rows by the
+  same rule, so for one registry state the three commands report the same
+  Manager rows field for field. Status never selects an unknown or
+  PONG-proved row as the active Manager ([MA-1]). Other Manager rows carry
+  no `liveness`
+```
+
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+`weft manager list` and `weft manager status TID` (and
+`client.managers.list()` / `client.managers.status(tid)`) report Manager rows
+exactly as project status does ([CLI-1.2.1]): the same passive reduction, the
+same single PING round for rows still `unknown`, the same `liveness` and
+`proof_source` fields. Plain `manager list` shows a `LIVE` column and plain
+`manager status` a `Liveness:` line when the row has one.
+`weft manager list --diagnostic` keeps the default manager-list semantics behind
+an explicit operator flag: it reads the latest known manager service-owner rows
+without stale pruning, classifies each row as live/stale/unknown/non-live,
+reports the proof source (`host-pid`, `external-supervisor`, `pong`, or registry
+metadata), and marks the selected canonical live owner. Its probing is the
+status-command rule: one PING round for active canonical rows still `unknown`
+and unexpired; a matched PONG reports `live` with source `pong`, and
+`dispatch_eligible` additionally requires the PONG to prove dispatch
+eligibility. It is a diagnostic view of `weft.state.services`, not a fallback
+process table.
+```
+
+Replacement (`docs/specifications/03-Manager_Architecture.md`):
+```text
+Younger unknown rows keep the bounded keyed-PING rescue described above.
+The status commands (`weft status`, `weft manager list`, `weft manager
+status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
+unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
+omitting it, because a missing probe or a missing PONG is unknown evidence,
+not proof of death; their unanswered PINGs are retracted by exact ID. That
+observation is not leadership authority; active-manager selection still
+requires live or matched-PONG proof.
+```
+
+Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
+```text
+  `canonical: bool | None = None`; diagnostic mode populates them. Project
+  status, `client.managers.list()` and `client.managers.status(tid)` populate
+  `liveness` (`live` or `unknown`) on `active` rows and `proof_source: "pong"`
+  when a PONG proved the row; for one registry state their snapshots are
+  equal ([CLI-1.2.1]).
+```
+
+Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
+```text
+Bulk acquisition performs no per-task control/output reads, active task PING,
+implicit global-history replay, or Monitor reads. The only write a status
+command makes is the bounded keyed PING round to Manager rows whose liveness
+is still unknown ([CLI-1.2.1]); it leaves no residue.
+```
+
+Replacement (`docs/specifications/07-System_Invariants.md`):
+```text
+  This reconciliation writes nothing; the only write a status command makes
+  is the bounded keyed PING round to Manager rows still `unknown`, which
+  leaves no residue and selects no Manager ([CLI-1.2.1]). (Plans:
+  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`,
+  `docs/plans/2026-11-09-status-lists-unknown-managers-plan.md`)
 ```
 
 ## Tasks
@@ -312,12 +494,8 @@ worktree and owns the cross-family review; it is recorded below.
 
 ## Owner questions
 
-- Should `weft manager list` (default mode) also keep a younger unknown row
-  after a failed PONG, labelled `unknown`, instead of omitting it? [WT-2a.13]
-  says a failed probe is unknown; [MA-1] currently specifies the rescue.
-- Should `weft manager list` / `manager status` also fill `liveness` (live,
-  or live by matched PONG) so they match project status field-for-field? Today
-  only `--diagnostic` and project status fill it.
+Both slice-1 questions were answered on 2026-11-09 ("weft manager list and
+weft manager status should be consistent with weft status"); see Revision 2.
 
 ## Review and execution record
 
@@ -370,3 +548,41 @@ combinations: non-observer behavior matched baseline; observer behavior
 matched retention, labeling and no-PING expectations. Broker-backed tests and
 the mutation suite were not rerun by the reviewer (read-only). Review loop
 closed.
+
+### Revision 2 execution (2026-11-09, on `0de2fd60`)
+
+- RED on `0de2fd60` (source files swapped back to HEAD, tests kept): the
+  answering row read `('unknown', None)` instead of `('live', 'pong')` in
+  status; manager list returned fewer rows than status; manager list omitted
+  the row whose PING write failed. All three GREEN after the change.
+- Mutation sensitivity, 9/9 killed: no PING round in observe mode; PING every
+  listed row (live too); unanswered PING not retracted; unanswered unknown row
+  dropped as dead; PONG without `proof_source`; manager status on the old
+  probing path; a failed write aborting the round (killed only after the
+  write-failure test gained a second, answering row); `--diagnostic` without
+  the round; plain `manager status` without the `Liveness:` line.
+- End-to-end CLI probe on a temp context with one `liveness_provider: "docker"`
+  row and no Docker plugin loaded: `weft status --json`, `weft manager list
+  --json` and `weft manager status TID --json` each report
+  `('active', 'unknown')` in 1.15-1.18 s wall time per CLI process (Python
+  start-up plus the 0.5 s probe bound); plain text shows the `LIVE` column and
+  `Liveness: unknown`; afterwards the row's `ctrl_in` holds no pending or
+  claimed row and no `.ctrl_in` queue remains.
+- SQLite (`-n 4`): `tests/commands/test_status.py`,
+  `tests/commands/test_manager_commands.py`, `tests/core/test_control_probe.py`,
+  `tests/core/test_client.py` and 17 more status/manager/run/CLI files
+  (including `tests/cli/test_cli_run.py`, `tests/commands/test_run.py`,
+  `tests/test_harness_registration.py`): 1,017 outcomes, 1 failure,
+  `tests/cli/test_cli_status_rendering.py::test_task_list_and_task_status_json_use_status_task_json_payload_for_wall_clock_timestamps`,
+  which passes alone and with its own file under `-n 4`. Cause, pre-existing
+  and unrelated: the test monkeypatches `weft.commands.tasks.cmd_task_status`,
+  but the CLI calls the `weft.commands` facade, whose `__getattr__` caches the
+  real function the first time any earlier test in the same xdist worker runs
+  `weft task status` in-process. Long-session with `-m ""` on SQLite: passed.
+- PostgreSQL (`./bin/pytest-pg`): the status, manager, control-probe, client,
+  system-contract, CLI status/rendering/manager/system/run and
+  `tests/commands/test_run.py` files plus `tests/cli/test_cli_long_session.py`:
+  547 passed in 380.33 s.
+- Gates: `ruff check .`, `ruff format --check` on touched Python files, repo
+  mypy command (499 files), `bin/check-doc-paths`, `bin/check-dom15-fixtures`,
+  `tests/specs`: clean.

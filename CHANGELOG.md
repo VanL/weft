@@ -4,12 +4,22 @@
 
 ### Fixed
 
-- `weft status` lists an active Manager whose runtime it cannot prove from the
-  status process, such as an externally supervised (containerized) Manager
-  whose liveness provider is not loaded there, instead of hiding it. The row
-  carries `liveness: "unknown"` (live rows carry `"live"`) in JSON and plain
-  text until the 300 s unknown window expires. Status still sends no PING and
-  never selects an unknown Manager as the active one ([CLI-1.2.1], [MA-1]).
+- `weft status`, `weft manager list` and `weft manager status` (and
+  `client.managers.list()` / `client.managers.status(tid)`) now report the
+  same Manager rows. An active Manager whose runtime the command cannot prove
+  from its own process, such as an externally supervised (containerized)
+  Manager whose liveness provider is not loaded there, is no longer hidden:
+  the command sends one round of keyed PINGs, in parallel, to such rows only
+  (at most 0.5 s more, and only when one exists). A row that answers shows
+  `liveness: "live"` with `proof_source: "pong"`; a row that does not stays
+  listed as `liveness: "unknown"` until the 300 s unknown window expires, and
+  its unanswered PING is deleted. Live and stale rows are never pinged, a
+  failed PING write leaves the row unknown without failing the command, and
+  none of these commands selects an unknown Manager as the active one.
+  `weft status` therefore sends PINGs again (it sent none since the
+  status/result remediation); it writes nothing else. Plain `manager list`
+  gains a `LIVE` column and plain `manager status` a `Liveness:` line
+  ([CLI-1.2.1], [CLI-1.3], [MA-1], [PY-2]).
 
 ## [0.9.122] - 2026-11-06
 

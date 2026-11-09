@@ -35,12 +35,14 @@ from weft._exceptions import (
 from weft.cli.app import (
     _manager_json_record,
     _status_json_payload,
+    manager_list_command,
     manager_status_command,
 )
 from weft.commands import manager as manager_cmd
 from weft.commands import system as status_cmd
 from weft.commands.types import ManagerSnapshot
 from weft.context import WeftContext, build_context
+from weft.core import control_probe as control_probe_mod
 from weft.core import manager_runtime as core_manager_runtime
 from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
@@ -1941,6 +1943,294 @@ def test_list_command_omits_stale_external_supervisor_manager(
     records = manager_cmd.cmd_manager_list(context=context_root)
 
     assert tid not in {record.tid for record in records}
+
+
+_UNREGISTERED_LIVENESS_PROVIDER = "weft-status-commands-test-unregistered"
+"""A provider no process registers, so its rows reduce to ``unknown``."""
+
+
+def _unprobed_supervisor_handle() -> dict[str, object]:
+    return {
+        "runner": "manager-supervisor",
+        "kind": "supervised-process",
+        "id": "container:status-commands",
+        "control": {"authority": "external-supervisor"},
+        "observations": {"liveness_provider": _UNREGISTERED_LIVENESS_PROVIDER},
+        "metadata": {},
+    }
+
+
+def _answer_status_pings(
+    monkeypatch: pytest.MonkeyPatch,
+    context: WeftContext,
+    *,
+    answering: set[str],
+) -> list[str]:
+    """Record every PING target and answer for ``answering`` TIDs.
+
+    The answering Manager consumes its PING and writes a matched PONG to the
+    requester's ``reply_to`` queue, through real queues.
+    """
+
+    pinged: list[str] = []
+    original_write = control_probe_mod._write_probe_request
+
+    def write_and_answer(
+        reply_queue: Any,
+        *,
+        broker: Any | None,
+        ctrl_in_name: str,
+        message: str,
+    ) -> int:
+        message_id = original_write(
+            reply_queue, broker=broker, ctrl_in_name=ctrl_in_name, message=message
+        )
+        tid = ctrl_in_name.removeprefix("T").removesuffix(".ctrl_in")
+        pinged.append(tid)
+        if tid in answering:
+            with context.queue(ctrl_in_name, persistent=False) as ctrl_in:
+                raw = ctrl_in.read_one()
+            assert raw is not None
+            request = json.loads(str(raw))
+            with context.queue(request["reply_to"], persistent=False) as reply:
+                reply.write(
+                    json.dumps(
+                        {
+                            "command": "PING",
+                            "status": "ok",
+                            "message": "PONG",
+                            "tid": tid,
+                            "request_id": request["request_id"],
+                            "task_status": "running",
+                        }
+                    )
+                )
+        return message_id
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", write_and_answer)
+    return pinged
+
+
+def _write_status_command_rows(context: WeftContext) -> dict[str, str]:
+    """Register live, answering, silent, stale and expired-unknown Managers."""
+
+    tids = {
+        "live": "1780000000000000701",
+        "answering": "1780000000000000702",
+        "silent": "1780000000000000703",
+        "stale": "1780000000000000704",
+        "expired": "1780000000000000705",
+    }
+    stale_handle: dict[str, object] = {
+        "runner": "host",
+        "kind": "process",
+        "id": str(os.getpid()),
+        "control": {"authority": "host-pid"},
+        "observations": {
+            "host_processes": [
+                {
+                    "pid": os.getpid(),
+                    "create_time": float(process_create_time(os.getpid()) or 0.0)
+                    + 50.0,
+                }
+            ]
+        },
+        "metadata": {},
+    }
+    handles = {
+        "live": _host_runtime_handle(os.getpid()),
+        "answering": _unprobed_supervisor_handle(),
+        "silent": _unprobed_supervisor_handle(),
+        "stale": stale_handle,
+    }
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as registry:
+        for role, handle in handles.items():
+            registry.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context, tids[role], name=role, runtime_handle=handle
+                    )
+                )
+            )
+        expired_at = time.time_ns() - int(
+            (core_manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS + 60)
+            * 1_000_000_000
+        )
+        registry.insert_messages(
+            [
+                (
+                    json.dumps(
+                        _manager_service_payload(
+                            context,
+                            tids["expired"],
+                            name="expired",
+                            runtime_handle=_unprobed_supervisor_handle(),
+                        )
+                    ),
+                    expired_at,
+                )
+            ]
+        )
+    return tids
+
+
+def _ctrl_in_queue_names(context: WeftContext) -> set[str]:
+    with context.broker() as broker:
+        return {name for name in broker.list_queues() if name.endswith(".ctrl_in")}
+
+
+def test_status_commands_ping_only_unknown_managers_and_leave_no_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each status command sends one PING round to unknown rows only [CLI-1.2.1].
+
+    An answering row becomes live by PONG; a silent row stays unknown and listed
+    with its PING retracted; live and stale rows are never pinged ([WT-2a.13]).
+    """
+
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tids = _write_status_command_rows(context)
+    pinged = _answer_status_pings(monkeypatch, context, answering={tids["answering"]})
+    expected = {
+        tids["live"]: ("live", None),
+        tids["answering"]: ("live", "pong"),
+        tids["silent"]: ("unknown", None),
+    }
+    target_ctrl_in = {f"T{tid}.ctrl_in" for tid in tids.values()}
+
+    surfaces = {
+        "status": lambda: list(status_cmd.system_status(context).managers),
+        "manager list": lambda: list(
+            manager_cmd.cmd_manager_list(context=context_root)
+        ),
+        "client list": lambda: manager_cmd.list_managers(context),
+    }
+    for name, read in surfaces.items():
+        pinged.clear()
+        rows = read()
+        assert {row.tid: (row.liveness, row.proof_source) for row in rows} == (
+            expected
+        ), name
+        assert sorted(pinged) == sorted([tids["answering"], tids["silent"]]), name
+        with context.queue(f"T{tids['silent']}.ctrl_in", persistent=False) as ctrl_in:
+            assert ctrl_in.peek_many(limit=10, include_claimed=True) == [], name
+        assert _ctrl_in_queue_names(context) <= target_ctrl_in, name
+
+    # --diagnostic keeps its extra fields and uses the same probe rule.
+    pinged.clear()
+    diagnostic = {
+        row.tid: row
+        for row in manager_cmd.cmd_manager_list(diagnostic=True, context=context_root)
+    }
+    assert sorted(pinged) == sorted([tids["answering"], tids["silent"]])
+    assert (
+        diagnostic[tids["answering"]].liveness,
+        diagnostic[tids["answering"]].proof_source,
+    ) == ("live", "pong")
+    assert diagnostic[tids["silent"]].liveness == "unknown"
+    assert diagnostic[tids["live"]].proof_source == "host-pid"
+    with context.queue(f"T{tids['silent']}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+
+    for role in ("live", "answering", "silent"):
+        pinged.clear()
+        shown = manager_cmd.cmd_manager_status(tids[role], context=context_root)
+        client_shown = manager_cmd.manager_status(context, tids[role])
+        assert client_shown is not None
+        assert (shown.liveness, shown.proof_source) == expected[tids[role]]
+        assert (client_shown.liveness, client_shown.proof_source) == expected[
+            tids[role]
+        ]
+        assert pinged == ([] if role == "live" else [tids[role]] * 2)
+
+    capsys.readouterr()
+    manager_status_command(tids["silent"], context=context_root)
+    assert "Liveness: unknown" in capsys.readouterr().out.splitlines()
+    manager_list_command(context=context_root)
+    listed_lines = capsys.readouterr().out.splitlines()
+    assert listed_lines[0].split() == ["TID", "STATUS", "LIVE", "NAME"]
+    assert f"{tids['answering']}  active    live      answering" in listed_lines
+    assert f"{tids['silent']}  active    unknown   silent" in listed_lines
+
+
+def test_status_manager_list_and_manager_status_agree_field_for_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three status commands report the same Manager rows [CLI-1.2.1]."""
+
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    tids = _write_status_command_rows(context)
+    _answer_status_pings(monkeypatch, context, answering={tids["answering"]})
+
+    project = {row.tid: row for row in status_cmd.system_status(context).managers}
+    listed = {
+        row.tid: row for row in manager_cmd.cmd_manager_list(context=context_root)
+    }
+    client_listed = {row.tid: row for row in manager_cmd.list_managers(context)}
+
+    assert set(project) == {tids["live"], tids["answering"], tids["silent"]}
+    assert project == listed == client_listed
+    for tid, row in project.items():
+        assert manager_cmd.cmd_manager_status(tid, context=context_root) == row
+        assert manager_cmd.manager_status(context, tid) == row
+    for role in ("stale", "expired"):
+        with pytest.raises(ManagerNotRunning):
+            manager_cmd.cmd_manager_status(tids[role], context=context_root)
+        assert manager_cmd.manager_status(context, tids[role]) is None
+
+
+def test_status_commands_keep_unknown_manager_when_ping_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed PING write leaves its row unknown and fails nothing [CLI-1.2.1].
+
+    The refused write comes first; the next row is still pinged and proved.
+    """
+
+    context_root = prepare_project_root(tmp_path / "ctx")
+    context = build_context(context_root)
+    refused = "1780000000000000711"
+    answering = "1780000000000000712"
+    with context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as registry:
+        for tid in (refused, answering):
+            registry.write(
+                json.dumps(
+                    _manager_service_payload(
+                        context, tid, runtime_handle=_unprobed_supervisor_handle()
+                    )
+                )
+            )
+    _answer_status_pings(monkeypatch, context, answering={answering})
+    answer_write = control_probe_mod._write_probe_request
+
+    def refuse_one_write(*args: Any, **kwargs: Any) -> int:
+        if kwargs["ctrl_in_name"] == f"T{refused}.ctrl_in":
+            raise BrokerError("attempt to write a readonly database")
+        return answer_write(*args, **kwargs)
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", refuse_one_write)
+    expected = {refused: "unknown", answering: "live"}
+
+    assert {
+        row.tid: row.liveness for row in status_cmd.system_status(context).managers
+    } == expected
+    assert {
+        row.tid: row.liveness
+        for row in manager_cmd.cmd_manager_list(context=context_root)
+    } == expected
+    for tid, liveness in expected.items():
+        shown = manager_cmd.manager_status(context, tid)
+        assert shown is not None and shown.liveness == liveness
+        assert (
+            manager_cmd.cmd_manager_status(tid, context=context_root).liveness
+            == liveness
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX only")

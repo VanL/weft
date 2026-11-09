@@ -33,7 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
-- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md): passive project status keeps a younger unknown `active` Manager row, labelled `unknown`, without PING or leadership authority ([MA-1], [CLI-1.2.1]).
+- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md): the status commands keep a younger unknown `active` Manager row, prove it by one bounded PING round when it answers, and otherwise label it `unknown`, without leadership authority ([MA-1], [CLI-1.2.1]).
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
@@ -737,12 +737,14 @@ containerized reader, or a recorded identity without a creation time,
 is `unknown`; a handle is live if any of its recorded processes is live.
 Readers and manager leadership checks omit unknown rows older than
 `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS` without keyed PING.
-Younger unknown rows keep the bounded keyed-PING rescue described above,
-except in the passive project-status observation ([CLI-1.2.1]): it sends no
-PING, keeps a younger unknown `active` row and labels it
-`liveness: "unknown"`, because a missing or process-local-only probe is
-unknown evidence, not proof of death. That observation is not leadership
-authority; active-manager selection still requires live or matched-PONG proof.
+Younger unknown rows keep the bounded keyed-PING rescue described above.
+The status commands (`weft status`, `weft manager list`, `weft manager
+status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
+unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
+omitting it, because a missing probe or a missing PONG is unknown evidence,
+not proof of death; their unanswered PINGs are retracted by exact ID. That
+observation is not leadership authority; active-manager selection still
+requires live or matched-PONG proof.
 Both the definite-stale and expired-unknown pruning predicates override
 keep-newest for every manager status.
 

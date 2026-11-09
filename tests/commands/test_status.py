@@ -47,6 +47,7 @@ from weft.commands.types import (
     TaskSnapshot,
 )
 from weft.context import WeftContext, build_context
+from weft.core import control_probe as control_probe_mod
 from weft.core import manager_runtime
 from weft.core import task_evidence as core_task_evidence
 from weft.core.runners import host as host_runner
@@ -444,15 +445,30 @@ def test_system_status_manager_snapshot_includes_internal_spawn_queues(
     assert manager.internal_reserved == internal_reserved
 
 
-def test_system_status_lists_unknown_manager_without_ping(
+def _record_ping_targets(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the ``ctrl_in`` of every keyed PING written, without changing it."""
+
+    targets: list[str] = []
+    real_write = control_probe_mod._write_probe_request
+
+    def _recording_write(*args: Any, **kwargs: Any) -> Any:
+        targets.append(str(kwargs["ctrl_in_name"]))
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", _recording_write)
+    return targets
+
+
+def test_system_status_lists_silent_unknown_manager_after_one_ping_round(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Status keeps an unproven active Manager as `unknown` and writes nothing.
+    """Status keeps an unproven active Manager as `unknown` and leaves no residue.
 
     A missing liveness probe is unknown evidence, not proof of death
-    ([WT-2a.13]); a bulk status read sends no PING ([CLI-1.2.1], [MA-1]).
-    Definitively stale and expired-unknown rows stay omitted.
+    ([WT-2a.13]); status PINGs only the unknown row, once, and retracts the
+    unanswered PING ([CLI-1.2.1], [MA-1]). Definitively stale and
+    expired-unknown rows stay omitted and are never pinged.
     """
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
@@ -461,14 +477,7 @@ def test_system_status_lists_unknown_manager_without_ping(
     stale_tid = "1780000000000000403"
     expired_tid = "1780000000000000404"
 
-    probe_calls: list[str] = []
-    real_probe = manager_runtime.send_keyed_ping_probe
-
-    def _recording_probe(*args: Any, **kwargs: Any) -> Any:
-        probe_calls.append(str(kwargs.get("tid", "")))
-        return real_probe(*args, **kwargs)
-
-    monkeypatch.setattr(manager_runtime, "send_keyed_ping_probe", _recording_probe)
+    ping_targets = _record_ping_targets(monkeypatch)
 
     unprobed_supervisor = _runtime_handle(
         "manager-supervisor",
@@ -524,7 +533,6 @@ def test_system_status_lists_unknown_manager_without_ping(
                 )
             ]
         )
-    last_timestamp_before = collect_broker_status(ctx).last_timestamp
 
     snapshot = status_cmd.system_status(ctx)
 
@@ -532,11 +540,14 @@ def test_system_status_lists_unknown_manager_without_ping(
         live_tid: "live",
         unknown_tid: "unknown",
     }
-    assert probe_calls == []
+    assert ping_targets == [f"T{unknown_tid}.ctrl_in"]
     for tid in (live_tid, unknown_tid, stale_tid, expired_tid):
         with ctx.queue(f"T{tid}.ctrl_in", persistent=False) as ctrl_in:
-            assert ctrl_in.peek_many(limit=10) == []
-    assert collect_broker_status(ctx).last_timestamp == last_timestamp_before
+            assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+    with ctx.broker() as broker:
+        assert [
+            name for name in broker.list_queues() if name.endswith(".ctrl_in")
+        ] == []
 
 
 def test_status_services_include_independent_liveness_monitor_inventory(
@@ -3288,23 +3299,18 @@ def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_m
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Passive status reads never PING an unproven manager and do not treat it as canonical."""
+    """Status PINGs an unproven manager once; point task status stays passive.
+
+    Neither read treats the unproven manager as canonical, and the unanswered
+    status PING leaves no row in its ``ctrl_in`` ([CLI-1.2.1], [MA-1]).
+    """
     root = prepare_project_root(tmp_path)
     ctx = build_context(spec_context=root)
     dead_mgr_tid = "1780000000000000311"
     unknown_mgr_tid = "1780000000000000312"
     started = time.time_ns()
 
-    probe_calls: list[str] = []
-    real_probe = status_cmd.manager_runtime.send_keyed_ping_probe
-
-    def _recording_probe(*args: Any, **kwargs: Any) -> Any:
-        probe_calls.append(str(kwargs.get("tid", "")))
-        return real_probe(*args, **kwargs)
-
-    monkeypatch.setattr(
-        status_cmd.manager_runtime, "send_keyed_ping_probe", _recording_probe
-    )
+    ping_targets = _record_ping_targets(monkeypatch)
 
     dead_handle = _runtime_handle(
         "host",
@@ -3363,18 +3369,21 @@ def test_system_status_and_task_status_stay_passive_and_agree_when_only_active_m
     bulk_snapshot = status_cmd.system_status(ctx, include_terminal=True)
     bulk_by_tid = {task.tid: task for task in bulk_snapshot.tasks}
     with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
-        assert ctrl_in.peek_many(limit=10) == []
-    assert probe_calls == []
+        assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+    assert ping_targets == [f"T{unknown_mgr_tid}.ctrl_in"]
+    assert [(manager.tid, manager.liveness) for manager in bulk_snapshot.managers] == [
+        (unknown_mgr_tid, "unknown")
+    ]
 
     point_dead = task_cmd.task_status(dead_mgr_tid, context=ctx)
     with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
         assert ctrl_in.peek_many(limit=10) == []
-    assert probe_calls == []
+    assert ping_targets == [f"T{unknown_mgr_tid}.ctrl_in"]
 
     point_unknown = task_cmd.task_status(unknown_mgr_tid, context=ctx)
     with ctx.queue(f"T{unknown_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
         assert ctrl_in.peek_many(limit=10) == []
-    assert probe_calls == []
+    assert ping_targets == [f"T{unknown_mgr_tid}.ctrl_in"]
 
     assert point_dead is not None
     assert point_unknown is not None
