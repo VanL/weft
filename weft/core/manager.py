@@ -1034,7 +1034,9 @@ class Manager(ServiceTask):
                 {
                     "tid": tid,
                     "pid": child.process.pid,
-                    "alive": child.process.is_alive(),
+                    # No probe until the exit sentinel fires [MA-1.6a].
+                    "alive": child.sentinel_observed_ns <= 0
+                    or child.process.is_alive(),
                     "persistent": child.persistent,
                     "internal_role": child.internal_role,
                     "service_key": child.service_key,
@@ -2820,7 +2822,11 @@ class Manager(ServiceTask):
         if tid not in self._scheduler_residents:
             return
         try:
-            latest = read_task_state_snapshot(self._manager_context(), tid)
+            # Read through the Manager's own connection; a reap opens no broker.
+            with self._get_connected_queue().get_connection() as broker:
+                latest = read_task_state_snapshot(
+                    self._manager_context(), tid, broker=broker
+                )
             if latest is not None:
                 self._adopt_scheduler_evidence(tid, latest[1])
         except (BrokerError, OSError, RuntimeError, ValueError, TypeError):
@@ -4866,12 +4872,23 @@ class Manager(ServiceTask):
     def _child_has_exited(self, child: ManagedChild) -> bool:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-008] exception
         """Return True when the child process is no longer live.
 
-        The multiprocessing Process view can lag behind the OS process table on
-        some platforms. When that happens, relying on ``is_alive()`` alone keeps
-        exited children in ``_child_processes`` indefinitely and blocks manager
-        shutdown. Treat a missing OS PID as authoritative and reap best-effort.
+        The child's sentinel is the only exit evidence: it becomes ready when
+        the child exits, and ``_drain_child_sentinel_events`` records that.
+        Until then the child is live and costs no OS probe.
+
+        After the sentinel fires, the multiprocessing Process view can still
+        lag behind the OS process table: another waiter (``psutil.wait_procs``
+        in ``terminate_process_tree``) may consume the exit status, and
+        ``exitcode`` then stays ``None``. Relying on ``is_alive()`` alone would
+        keep that child in ``_child_processes`` indefinitely and block manager
+        shutdown, so a missing OS PID is authoritative and the child is reaped
+        best-effort, rechecked on the published PID-liveness deadline.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
         """
 
+        if child.sentinel_observed_ns <= 0:
+            return False
         exitcode = child.process.exitcode
         if exitcode is not None:
             return True

@@ -20,6 +20,7 @@ import weft.core.manager as manager_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_manager_family_maintenance import _publish_waiting_task
+from tests.helpers.manager_dispatch import observe_child_exit
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.sample_targets import signal_ready_and_wait_for_release, wait_for_file
@@ -791,6 +792,7 @@ def test_live_manager_wrapper_kill_commits_one_failure_with_exit_code(
         assert exitcode is not None and exitcode != 0
         if os.name != "nt":
             assert exitcode == -9
+        observe_child_exit(manager, tid)
         if retire_first:
             manager._retire_scheduler_residents()
         assert manager._cleanup_children()

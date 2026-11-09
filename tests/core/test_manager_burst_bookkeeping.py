@@ -15,6 +15,7 @@ import pytest
 import weft.core.manager as manager_mod
 from simplebroker import Queue
 from tests.core.test_manager import make_manager_spec, write_autostart_fixture
+from tests.helpers.manager_dispatch import observe_child_exit
 from tests.helpers.typing import BrokerEnv
 from weft._constants import (
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
@@ -139,6 +140,7 @@ def test_exited_child_keeps_reservation_until_failsafe_commits(
         return real_write(db, queue, body, **kwargs)
 
     monkeypatch.setattr(broker_type, "write", write)
+    observe_child_exit(manager, tid)
     try:
         assert manager._cleanup_children() is False
         child = manager._child_processes[tid]

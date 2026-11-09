@@ -1385,15 +1385,16 @@ def _staged_dispatch_maintenance(
             process.join(timeout=10.0)
             assert not process.is_alive()
             assert process.exitcode is not None and process.exitcode != 0
+            # Cleanup acts on the exit the reactor drained from the sentinel.
+            assert manager._child_sentinel_adapter.wait(10.0)
+            assert manager._drain_child_sentinel_events() == 1
+            assert not manager._child_sentinel_adapter.wait(0)
             outage = True
             assert manager._cleanup_children() is False
             assert write_failures > 0
             assert child.terminal_retry_after_ns > clock.time_ns()
             assert reserved.peek_one(exact_timestamp=old_id) is not None
             assert ctrl_out.peek_one() is None
-            assert manager._child_sentinel_adapter.wait(10.0)
-            assert manager._drain_child_sentinel_events() == 1
-            assert not manager._child_sentinel_adapter.wait(0)
         yield child, make_ready, assert_pending
     finally:
         outage = False

@@ -39,6 +39,7 @@ import weft.core.tasks.base as base_task_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.broker_reads import count_queue_calls
+from tests.helpers.manager_dispatch import observe_child_exit
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.typing import BrokerEnv, record_and_return
@@ -943,10 +944,14 @@ def manager_setup(
 
 
 def wait_for_children(manager: Manager, timeout: float = 5.0) -> None:
+    """Reap exited user work as a turn does: drain exit sentinels, then clean up."""
     deadline = time.monotonic() + timeout
     while manager._user_work_children() and time.monotonic() < deadline:
+        manager._drain_child_sentinel_events()
         manager._cleanup_children()
-        time.sleep(0.05)
+        manager._child_sentinel_adapter.wait(
+            min(0.05, max(0.0, deadline - time.monotonic()))
+        )
 
 
 def test_manager_idle_probe_uses_newest_pending_timestamp(
@@ -3012,6 +3017,7 @@ def test_pg_admission_real_child_reap_refreshes_progress_once(
         manager._child_processes["1777000000000000099"] = ManagedChild(
             process=process, ctrl_queue=None, persistent=False
         )
+        observe_child_exit(manager, "1777000000000000099")
         assert manager._cleanup_children() is True
         process_primary_candidate(manager)
         events = [
@@ -3358,6 +3364,7 @@ def test_terminal_service_child_retries_reserved_spawn_ack(
         service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
         reserved_queue=manager._queue_names["internal_reserved"],
         message_timestamp=message_id,
+        sentinel_observed_ns=time.time_ns(),
     )
     manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT).active_tid = child_tid
     monkeypatch.setattr(
@@ -3462,6 +3469,7 @@ def test_manager_restarts_dead_task_monitor_after_backoff(
         ctrl_queue=None,
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+        sentinel_observed_ns=time.time_ns(),
     )
     monkeypatch.setattr(
         manager,
@@ -3514,6 +3522,7 @@ def test_manager_restarts_dead_liveness_monitor_after_backoff(
         ctrl_queue=None,
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
+        sentinel_observed_ns=time.time_ns(),
     )
     monkeypatch.setattr(
         manager,
@@ -6485,6 +6494,7 @@ def test_process_once_reconciles_internal_services_before_user_spawn_work(
             ctrl_out_queue=f"T{old_tid}.ctrl_out",
             persistent=True,
             internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
+            sentinel_observed_ns=time.time_ns(),
         )
         make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
             json.dumps(
@@ -11167,6 +11177,8 @@ def test_manager_superseded_drain_waits_on_user_work_not_services(
 
         user._alive = False
         user.exitcode = 0
+        # A turn drains the user child's exit sentinel before the drain step.
+        manager._child_processes["user-work"].sentinel_observed_ns = time.time_ns()
         manager._continue_shutdown_drain()
 
         assert manager.should_stop is True
@@ -11286,6 +11298,153 @@ def test_manager_active_heartbeat_race_preserves_superseded_record(  # noqa: C90
     assert manager.taskspec.state.status == "cancelled"
 
 
+def _launch_waiting_child(
+    manager: Manager, make_queue: Callable[[str], Queue], tmp_path: Path
+) -> tuple[str, Path]:
+    """Launch one real child through the Manager's spawn inbox and await its entry.
+
+    Return the child TID and the release path that lets the child finish.
+    """
+
+    ready = tmp_path / "waiting-child.ready"
+    release = tmp_path / "waiting-child.release"
+    inbox = make_queue(manager._queue_names["inbox"])
+    message_id = inbox.write(
+        json.dumps(
+            {
+                "spec": {
+                    "type": "function",
+                    "function_target": (
+                        "tests.tasks.sample_targets:signal_ready_and_wait_for_release"
+                    ),
+                },
+                "inbox_message": {
+                    "kwargs": {
+                        "ready_path": str(ready),
+                        "release_path": str(release),
+                    }
+                },
+            }
+        )
+    )
+    tid = str(message_id)
+    drive_until(
+        lambda: ready.exists() and tid in manager._child_processes,
+        bool,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=30.0,
+    )
+    return tid, release
+
+
+def test_manager_turns_do_not_probe_a_live_child(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A running child costs the Manager reactor no OS probe per turn.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]. Child exit
+    reaches the reactor as the child's sentinel event, so turns taken while the
+    child runs neither ``waitpid`` it nor probe its host PID. The stdlib's own
+    ``Process.start`` bookkeeping on launch-worker threads is not a reactor
+    probe and is not counted.
+    """
+
+    manager, make_queue = manager_setup
+    tid, release = _launch_waiting_child(manager, make_queue, tmp_path)
+    child = manager._child_processes[tid]
+    child_pid = child.process.pid
+    assert isinstance(child_pid, int)
+    reactor_thread = threading.get_ident()
+    probes: list[str] = []
+    real_waitpid = os.waitpid
+    real_pid_is_live = manager_mod.pid_is_live
+
+    def counting_waitpid(pid: int, options: int) -> tuple[int, int]:
+        if pid == child_pid and threading.get_ident() == reactor_thread:
+            probes.append("waitpid")
+        return real_waitpid(pid, options)
+
+    def counting_pid_is_live(pid: int | None) -> bool:
+        if pid == child_pid:
+            probes.append("pid_is_live")
+        return real_pid_is_live(pid)
+
+    try:
+        monkeypatch.setattr(os, "waitpid", counting_waitpid)
+        monkeypatch.setattr(manager_mod, "pid_is_live", counting_pid_is_live)
+        # Span several host-PID recheck intervals so a throttled probe would fire.
+        observe_until = time.monotonic() + 3 * MANAGER_PID_LIVENESS_RECHECK_INTERVAL
+        turns = 0
+        while time.monotonic() < observe_until:
+            manager.process_once()
+            turns += 1
+            manager.wait_for_activity(MANAGER_PID_LIVENESS_RECHECK_INTERVAL / 5)
+        observed = list(probes)
+        monkeypatch.undo()
+
+        assert turns >= 5
+        assert observed == []
+        assert manager._child_processes.get(tid) is child
+        assert child.process.is_alive()
+    finally:
+        monkeypatch.undo()
+        release.touch()
+        drive_until(
+            lambda: tid in manager._child_processes,
+            lambda present: not present,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+
+
+def test_manager_reaps_exited_child_on_its_sentinel_turn(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The turn that drains a child's exit sentinel reaps that child.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8].
+    With task-owned terminal proof published, exit needs no timer: the
+    sentinel wakes the reactor and the next turn retires the child. Refreshing
+    the reaped resident's admission evidence reads through the Manager's own
+    broker connection, so that turn opens no broker.
+    """
+
+    manager, make_queue = manager_setup
+    tid, release = _launch_waiting_child(manager, make_queue, tmp_path)
+    adapter = manager._child_sentinel_adapter
+    while adapter.wait(0):
+        manager.process_once()
+    assert tid in manager._child_processes
+    assert tid in manager._scheduler_residents
+
+    release.touch()
+    assert adapter.wait(30.0)
+    opened: list[str] = []
+    real_broker = WeftContext.broker
+
+    def counting_broker(context: WeftContext) -> Any:
+        opened.append("broker")
+        return real_broker(context)
+
+    monkeypatch.setattr(WeftContext, "broker", counting_broker)
+    manager.process_once()
+    monkeypatch.undo()
+
+    assert tid not in manager._child_processes
+    assert tid not in manager._scheduler_residents
+    assert opened == []
+    terminal = json.loads(str(make_queue(f"T{tid}.ctrl_out").peek_one()))
+    assert terminal["type"] == TERMINAL_ENVELOPE_TYPE
+    assert terminal["source"] == "task"
+    assert terminal["status"] == "completed"
+
+
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
@@ -11306,10 +11465,12 @@ def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
             self.join_calls.append(0.0 if timeout is None else float(timeout))
 
     fake_process = FakeProcess()
+    # The exit sentinel fired, but the Process view still reports a live child.
     manager._child_processes["child"] = ManagedChild(
         process=cast(BaseProcess, fake_process),
         ctrl_queue=None,
         persistent=False,
+        sentinel_observed_ns=time.time_ns(),
     )
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: False)
@@ -11345,6 +11506,7 @@ def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
         process=cast(BaseProcess, ExitedProcess()),
         ctrl_queue=None,
         persistent=False,
+        sentinel_observed_ns=time.time_ns(),
     )
     manager._child_processes["child"] = child
     managed_pid_live = [True]
@@ -11395,6 +11557,7 @@ def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(
         ctrl_queue=None,
         ctrl_out_queue=ctrl_out,
         launched_ns=now_ns - 1,
+        sentinel_observed_ns=now_ns,
     )
     manager._child_processes[tid] = child
     monkeypatch.setattr(manager_mod.time, "time_ns", lambda: now_ns)
@@ -11498,6 +11661,7 @@ def test_cleanup_children_retires_due_retry_before_clean_exit_proof_grace(
         process.join(timeout=15.0)
         assert not process.is_alive()
         assert process.exitcode == 0
+        observe_child_exit(manager, tid)
 
         assert manager._cleanup_children() is False
         assert proof_reads_failed > 0 and failsafe_writes_failed > 0
@@ -11626,11 +11790,11 @@ def test_child_has_exited_trusts_live_host_pid_before_process_view(
             del timeout
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid == 424243)
-
-    assert (
-        manager._child_has_exited(ManagedChild(cast(BaseProcess, FakeProcess()), None))
-        is False
+    child = ManagedChild(
+        cast(BaseProcess, FakeProcess()), None, sentinel_observed_ns=time.time_ns()
     )
+
+    assert manager._child_has_exited(child) is False
 
 
 def test_child_has_exited_allows_startup_liveness_visibility_grace(
@@ -11651,8 +11815,12 @@ def test_child_has_exited_allows_startup_liveness_visibility_grace(
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: False)
 
+    now_ns = time.time_ns()
     child = ManagedChild(
-        cast(BaseProcess, FakeProcess()), None, launched_ns=time.time_ns()
+        cast(BaseProcess, FakeProcess()),
+        None,
+        launched_ns=now_ns,
+        sentinel_observed_ns=now_ns,
     )
 
     assert manager._child_has_exited(child) is False
@@ -12392,6 +12560,7 @@ def test_manager_autostart_ensure_restarts_after_child_exit_without_scan_wait(
             autostart_source=str(manifest_path.resolve()),
         )
         manager._autostart_last_scan_ns = 123_456_789
+        observe_child_exit(manager, "child")
 
         manager._cleanup_children()
 
@@ -12480,6 +12649,7 @@ def test_manager_autostart_stale_active_log_without_liveness_is_not_active(
             autostart_source=source,
             service_key=source,
         )
+        observe_child_exit(manager, child_tid)
         log_queue.write(
             json.dumps(
                 {
@@ -13355,6 +13525,7 @@ def test_cleanup_children_wrapper_lost_write_failure_schedules_reactor_retry_wit
         process=cast(BaseProcess, FakeLaunchProcess(pid=9901, alive=False)),
         ctrl_queue=f"T{child_tid}.ctrl_in",
         ctrl_out_queue=f"T{child_tid}.ctrl_out",
+        sentinel_observed_ns=time.time_ns(),
     )
     monkeypatch.setattr(
         manager, "_child_terminal_proof_still_within_grace", lambda *_args: False
