@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 59 plan files in this directory.
+There are currently 62 plan files in this directory.
 
 ## Curation Policy
 
@@ -41,6 +41,7 @@ There are currently 59 plan files in this directory.
 | [`2026-11-08-startup-window-settlement-plan.md`](./2026-11-08-startup-window-settlement-plan.md) | Startup Window Narrows With Measured Headroom | `draft` | none |
 | [`2026-11-08-manager-dispatch-path-plan.md`](./2026-11-08-manager-dispatch-path-plan.md) | Manager Dispatch and Launch-Result Round Trips | `draft` | none |
 | [`2026-11-08-drain-survivor-exit-sentinel-plan.md`](./2026-11-08-drain-survivor-exit-sentinel-plan.md) | Stopping-Drain Survivor Exit Sentinel | `draft` | none |
+| [`2026-11-08-bootstrap-resident-without-identity-plan.md`](./2026-11-08-bootstrap-resident-without-identity-plan.md) | Bootstrap Skips a Resident Without Identity; Reconciliation Retries Only Transient Failures | `draft` | none |
 | [`2026-11-07-ops-shaped-admission-burst-plan.md`](./2026-11-07-ops-shaped-admission-burst-plan.md) | Measure Admission on an Ops-Shaped Burst | `completed` | none |
 | [`2026-11-07-nested-admission-load-plan.md`](./2026-11-07-nested-admission-load-plan.md) | Stress Admission with Nested Work | `completed` | none |
 | [`2026-11-07-model-found-scheduler-and-registry-repairs-plan.md`](./2026-11-07-model-found-scheduler-and-registry-repairs-plan.md) | Model-Found Scheduler and Registry Repairs | `completed` | none |

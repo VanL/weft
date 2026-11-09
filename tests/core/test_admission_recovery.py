@@ -648,31 +648,66 @@ def test_unhanded_launch_unresolved_route_keeps_custody_and_settles_sibling(
     )
 
 
-@pytest.mark.parametrize("bad_snapshot", [False, True])
+def _dead_predecessor_checkpoint(
+    first: Manager, harness: WeftTestHarness
+) -> tuple[_ManagerChildLaunchRequest, dict[str, Any]]:
+    """Checkpoint one spawned launch; return it and a copy whose owner is dead."""
+    request = _reserve_and_checkpoint(first, harness)
+    first._checkpoint_spawned_admission(
+        _ManagerChildLaunchResult(request, multiprocessing.current_process())
+    )
+    snapshot = read_task_state_snapshot(harness.context, first.tid)
+    assert snapshot is not None
+    payload = snapshot[1]
+    # A changed create time makes the predecessor's own process evidence stale.
+    payload["runtime_handle"]["observations"]["host_processes"][0]["create_time"] -= 100
+    return request, payload
+
+
+def _successor_of(
+    first: Manager, harness: WeftTestHarness, payload: dict[str, Any]
+) -> Manager:
+    """Stop the predecessor, publish its edited checkpoint, build a successor."""
+    first._unregister_manager(status="stopped")
+    with harness.context.queue(
+        task_state_queue_name(first.tid), persistent=True
+    ) as state:
+        state.write(json.dumps(payload))
+    with harness.context.queue("successor.ids", persistent=True) as ids:
+        successor_tid = str(ids.generate_timestamp())
+    return Manager(
+        harness.context.broker_target,
+        build_manager_spec(harness.context, successor_tid, idle_timeout_override=0),
+        config=first._manager_context().config,
+    )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["checkpoint_owner", "snapshot_owner", "checkpoint_identity_missing"],
+)
 def test_successor_skips_mismatched_identity_and_preserves_reservation(
     recovery_manager: Manager,
     weft_harness: WeftTestHarness,
     caplog: pytest.LogCaptureFixture,
-    bad_snapshot: bool,
+    corruption: str,
 ) -> None:
-    """Persisted foreign evidence cannot block refresh or replay another launch [MA-1.8]."""
+    """Persisted foreign evidence cannot block refresh or replay another launch [MA-1.8].
+
+    A checkpoint resident that records no runtime identity takes the same
+    path as one that names another identity (2026-11-08 bootstrap plan).
+    """
     first = recovery_manager
-    request = _reserve_and_checkpoint(first, weft_harness)
-    first._checkpoint_spawned_admission(
-        _ManagerChildLaunchResult(request, multiprocessing.current_process())
-    )
+    request, payload = _dead_predecessor_checkpoint(first, weft_harness)
     tid = request.child_spec.tid
     assert (
         tid is not None
         and request.reserved_queue is not None
         and request.source_queue is not None
     )
-    snapshot = read_task_state_snapshot(weft_harness.context, first.tid)
-    assert snapshot is not None
-    payload = snapshot[1]
-    payload["runtime_handle"]["observations"]["host_processes"][0]["create_time"] -= 100
-    evidence = payload["scheduler_frontiers"]["residents"][tid]
-    if bad_snapshot:
+    residents = payload["scheduler_frontiers"]["residents"]
+    evidence = residents[tid]
+    if corruption == "snapshot_owner":
         child = {
             **evidence,
             "full": tid,
@@ -683,22 +718,25 @@ def test_successor_skips_mismatched_identity_and_preserves_reservation(
             task_state_queue_name(tid), persistent=True
         ) as state:
             state.write(json.dumps(child))
-    else:
+    elif corruption == "checkpoint_owner":
         evidence["connection_owner"] = "mismatched-owner"
-    first._unregister_manager(status="stopped")
-    with weft_harness.context.queue(
-        task_state_queue_name(first.tid), persistent=True
-    ) as state:
-        state.write(json.dumps(payload))
-    with weft_harness.context.queue("successor.ids", persistent=True) as ids:
-        successor_tid = str(ids.generate_timestamp())
-    successor = Manager(
-        weft_harness.context.broker_target,
-        build_manager_spec(
-            weft_harness.context, successor_tid, idle_timeout_override=0
-        ),
-        config=first._manager_context().config,
-    )
+    else:
+        # The shape a hand-written probe left in a real context: lineage and
+        # exact custody, but no context, hostname, launch time or receipt.
+        residents[tid] = {
+            key: evidence[key]
+            for key in (
+                "root_tid",
+                "submitter_tid",
+                "ancestry_tids",
+                "scheduling_class",
+                "connection_owner",
+                "source_queue",
+                "reserved_queue",
+                "request_id",
+            )
+        } | {"host_processes": []}
+    successor = _successor_of(first, weft_harness, payload)
     try:
         unrelated = submit_spawn_request(
             weft_harness.context.broker_target,
@@ -721,6 +759,7 @@ def test_successor_skips_mismatched_identity_and_preserves_reservation(
                 step=successor.process_once,
                 wait=successor.wait_for_activity,
                 timeout=15,
+                diagnostics=lambda: {"bootstrapped": successor._admission_bootstrapped},
             )
             assert source.peek_one(exact_timestamp=request.message_timestamp) is None
         assert successor._admission_bootstrapped
@@ -730,16 +769,13 @@ def test_successor_skips_mismatched_identity_and_preserves_reservation(
             successor._admission_refresh_after = 0
             successor.process_once()
             assert successor._admission_bootstrapped
-        assert (
-            len(
-                [
-                    r
-                    for r in caplog.records
-                    if "Manager bootstrap ignored" in r.getMessage()
-                ]
-            )
-            == 1
-        )
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if "Manager bootstrap ignored" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert tid in warnings[0]
         with weft_harness.context.queue(
             request.reserved_queue, persistent=True
         ) as reserved:
@@ -749,6 +785,50 @@ def test_successor_skips_mismatched_identity_and_preserves_reservation(
                 )
                 is not None
             )
+    finally:
+        successor.stop(join=False)
+        successor.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("updates", "dropped", "error"),
+    [
+        pytest.param(
+            {"scheduling_class": "bogus"}, (), ValueError, id="identity_value"
+        ),
+        pytest.param({"host_processes": "bogus"}, (), TypeError, id="process_list"),
+        pytest.param(
+            {"host_processes": []}, ("request_id",), KeyError, id="custody_reference"
+        ),
+    ],
+)
+def test_successor_stops_on_malformed_retained_resident(
+    recovery_manager: Manager,
+    weft_harness: WeftTestHarness,
+    updates: dict[str, Any],
+    dropped: tuple[str, ...],
+    error: type[Exception],
+) -> None:
+    """A malformed retained row is a defect, not a retried read [MA-1.8].
+
+    Only a row without identity fields takes the skip path. Any other
+    malformed field escapes reconciliation instead of a silent retry.
+    """
+    first = recovery_manager
+    request, payload = _dead_predecessor_checkpoint(first, weft_harness)
+    tid = request.child_spec.tid
+    assert tid is not None
+    evidence = payload["scheduler_frontiers"]["residents"][tid]
+    evidence.update(updates)
+    for key in dropped:
+        del evidence[key]
+    successor = _successor_of(first, weft_harness, payload)
+    try:
+        # The reconciliation owner no longer swallows it; no caller in the
+        # reactor turn catches it either, so the Manager stops with it.
+        with pytest.raises(error):
+            successor._refresh_scheduler_evidence()
+        assert not successor._admission_bootstrapped
     finally:
         successor.stop(join=False)
         successor.cleanup()
