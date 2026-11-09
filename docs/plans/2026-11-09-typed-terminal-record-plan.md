@@ -199,3 +199,21 @@ Execution evidence (2026-11-09):
   byte-exact.
 - SQLite (`-n 4`) and PostgreSQL (`./bin/pytest-pg`) gates, ruff, mypy and doc
   gates: recorded in the handoff report for each commit.
+
+### Round 2 verification (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to F1-F3 over `7dd52a38..19af1d39`. Verdict: FAIL on one incomplete part
+of F1 only; the production fix, F2 and F3 passed (duplicate classifier deleted,
+readers on `terminal_record_status`, no incompatible Weft terminal record found).
+Remaining item: `tests/test_harness_pg_connections.py` still wrote terminal rows
+without `type="terminal"` before `wait_for_terminal_state`, so both its
+wait variants waited until timeout (pre-existing at `7dd52a38`).
+
+Fixed by the coordinator: the fixture now carries `type="terminal"` and
+`source="task"`. Evidence (`./bin/pytest-pg tests/test_harness_pg_connections.py`,
+`--timeout 30`): with the old fixture, 2 failed with `TimeoutError: Timed out
+waiting for task ... terminal state 'completed'` (the two
+`wait_for_terminal_state` cases), 4 passed; with the fix, 6 passed in 2.7 s.
+The file was restored byte-identical (`cmp`). This PG-only fixture is the likely
+source of the author's earlier unbounded-run hang. Review loop closed.
