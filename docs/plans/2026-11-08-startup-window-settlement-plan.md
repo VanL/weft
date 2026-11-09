@@ -39,8 +39,11 @@ proportion to measured headroom above H:
 It equals W at U<=H, as today, and falls to one only as U approaches L. It
 adds no constant: H and W keep their owner-set values, and the slope is
 fixed by them. A window wider than one never gives an unfinished startup
-less than (L-H)/W connections of measured headroom, the share each of the
-current rule's W startups has at its threshold.
+less than (L-H)/W connections of measured headroom. That floor is 1/W of a
+connection below the current rule's tightest overlap point, (L-H+1)/W at
+U=H-1, and it is not an absolute overshoot guarantee; the measured safety
+evidence is the coordinator's pressured-leg benchmark (see the difference
+register).
 
 ## Owner decisions
 
@@ -73,8 +76,13 @@ A startup already settles on the first fact that can wake the Manager.
   later in the same constructor. Only in-process work separates them: opening
   queue handles, building the observation config, and setting the process
   title.
-- The Manager watches `weft.state.tasks.<tid>` from launch selection
-  (notification-only interest, [MA-1.8]). The row wakes it;
+- On this branch the Manager watches `weft.state.tasks.<tid>` once the
+  launch-worker receipt is handled (notification-only interest, [MA-1.8]):
+  `Manager._activity_wait_queues` skips TIDs in `_active_child_launches`.
+  The receipt turn's exact read (`_reconcile_launch_now`) covers a snapshot
+  written before interest begins. Registering interest at launch selection
+  is Track D's change (`perf/manager-wait-set`, `eccbaf9c`), not this
+  branch's. Either way, a new row wakes the Manager;
   `_has_pending_observation` marks the publication, and the next turn calls
   `_reconcile_launch_now` -> `_advance_launch_custody`
   (`weft/core/manager.py:2732`), which settles on snapshot handoff or, on
@@ -108,10 +116,18 @@ estimate:
 
 - For N(U)>=2, N(U) <= W(L-U)/(L-H), so (L-U)/N(U) >= (L-H)/W. Including the
   reserve, (L-U+R)/N(U) >= (L-H+R)/W because N(U) <= W. The current rule's
-  tightest point is W startups at U=H-1, which gives (L-H+1)/W. The floor
-  therefore moves by 1/W of a connection (at U=H only), and nowhere else does
-  an unfinished startup stand on less measured headroom, to L or to C, than
-  the current rule already accepts.
+  tightest overlap point is W startups at U=H-1, which gives (L-H+1)/W. The
+  new floor is 1/W of a connection lower, and the new rule reaches it
+  wherever W(L-U)/(L-H) is a whole number, not only at H. For L=270:
+  (L-U)/N is 54/6 = 9 at U=216 and 45/5 = 9 at U=225, against 55/6 (about
+  9.17) at U=215 under the current rule.
+- The per-startup floor is relative headroom, not an absolute overshoot
+  bound. If every startup eventually held c connections, the largest
+  population one unobserved window could reach is max(U + N(U)c). For L=270
+  and c=11 that is 216 + 6*11 = 282 under this rule, against
+  215 + 6*11 = 281 under the current rule. This plan makes no absolute
+  overshoot claim; the safety evidence is the coordinator's measured oracle
+  (zero native slot rejections on the pressured stress leg).
 - Where N(U)=1 the rule is today's serialized rule.
 - U still decides admission: every launch needs a fresh coherent observation
   and U<L. N(U) never enters U or available capacity, charges nothing to
@@ -236,8 +252,9 @@ Comprehension check (answer before editing):
 - Every ordinary PostgreSQL launch keeps a fresh coherent usage observation
   and the measured gate U<L. Unknown usage denies dispatch.
 - Zero unfinished startups always permits a launch at the window layer.
-- N(U) <= W everywhere; at most W notification interests (Track D's
-  sentence "There are at most W outstanding interests" stays true).
+- N(U) <= W everywhere; at most W notification interests (the [MA-1.8]
+  sentence "There are at most W outstanding interests", present at the
+  baseline and kept by Track D, stays true).
 - No new constant, environment setting, per-task charge, lane or family cap.
   The constants keep their values.
 - SQLite behaviour, H<W behaviour (tiny ceilings), unknown-usage behaviour,
@@ -254,8 +271,8 @@ Comprehension check (answer before editing):
 
 | Change | Class | Theory basis |
 |--------|-------|--------------|
-| PostgreSQL, H<=U<L: up to N(U) unfinished startups instead of one (e.g. 4 at U=226-234 for L=270) | A (owner-decided rule change; owner decision 1) | [WT-4.2] classical model (window flow control against measured free capacity); [WT-4.2] measured C-R-U admission is unchanged; per-startup headroom never below the current rule's share at H; not [ALT-WT-001] (no charge in U, transient, no forecast) |
-| More launches can be unobserved at once in that band, so short-lived overshoot past L into the reserve can be larger than today in that band, never larger than today's worst case at U=H-1 | A | [WT-7] "Measured admission is a soft guard"; safety oracle: zero native slot rejections on the pressured stress leg (coordinator benchmark) |
+| PostgreSQL, H<=U<L: up to N(U) unfinished startups instead of one (e.g. 4 at U=226-234 for L=270) | A (owner-decided rule change; owner decision 1) | [WT-4.2] classical model (window flow control against measured free capacity); [WT-4.2] measured C-R-U admission is unchanged; per-startup measured headroom never below (L-H)/W, which is 1/W of a connection under the current rule's tightest overlap point; not [ALT-WT-001] (no charge in U, transient, no forecast) |
+| More launches can be unobserved at once in that band, so short-lived overshoot past L into the reserve can be larger than today in that band. No absolute overshoot bound is claimed: with startups each eventually holding 11 connections, one window's worst population is 282 here against 281 today (L=270) | A | [WT-7] "Measured admission is a soft guard"; safety oracle: zero native slot rejections on the pressured stress leg (coordinator benchmark) |
 | `startup_feedback_pending` refusals above H start at occupancy N(U) instead of 1; same reason, scope and ending condition | C (fewer refusals, no lost information) | [WT-2a.15] unchanged |
 | Below H, H<W, unknown usage, SQLite, settlement, custody, checkpoints | N | none needed |
 | Constant docstring for `MANAGER_STARTUP_FAST_PATH_FRACTION` | N | none needed |
@@ -451,9 +468,9 @@ the same evidence. No one-way door.
 
 - Checked against [ALT-WT-001]: no term enters U or available capacity;
   nothing is charged while queued; the window ends per TID at settlement.
-  The slope (L-H)/W has units of connections per startup and is stated as
-  the existing rule's share, not a per-task estimate. The owner must still
-  accept that reading (decision 1).
+  The slope (L-H)/W has units of connections per startup and is derived
+  from the owner's H and W, not from a per-task estimate. The owner must
+  still accept that reading (decision 1).
 - Checked hot loops: a refusal still sets `_startup_blocked` and the recheck
   deadline, and the system test asserts no new usage observation over five
   turns while blocked.
@@ -468,7 +485,14 @@ the same evidence. No one-way door.
 
 ## Review and execution record
 
-(Coordinator: cross-family review and benchmark results go here.)
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at caca2961 against 08c2f87b.
+Verdict: no blocker.
+
+| ID | Severity | Finding | Disposition |
+|----|----------|---------|-------------|
+| F1 | P3 | The plan's safety comparison overstated equivalence with the current rule. The per-startup headroom reduction also occurs above H (at U=225, (L-U)/N = 45/5 = 9, below the current overlap minimum 55/6, about 9.17), and "never larger than today's worst case" is false: with startups each opening 11 connections, one unobserved window's worst population is 282 against 281. | Accepted, fixed: the Goal paragraph, the Direction 2 headroom bullet and difference-register rows 1 and 2 now state the (L-H)/W floor as 1/W of a connection below the current tightest overlap point, reached at several usage levels above H, and drop the absolute overshoot guarantee; a new bullet gives the 282-versus-281 example and names the coordinator's pressured-leg oracle (zero native slot rejections) as the safety evidence. The [MA-1.8]/[MANAGER.18] sentence was checked against the counterexample and left unchanged: it asserts only (L-U)/N(U) >= (L-H)/W under the new rule, which holds (9 >= 9 at U=225), and makes no comparison with the old rule or absolute claim. No policy change. |
+| F2 | P3 | The plan said this branch watches startup snapshots from launch selection; on this branch `_activity_wait_queues` still skips `_active_child_launches`, so interest begins after the receipt. Selection-time registration belongs to Track D. | Accepted, fixed: Direction 1 now describes receipt-time interest on this branch, notes that the receipt turn's exact read covers an earlier snapshot, and attributes selection-time registration to Track D (`perf/manager-wait-set`, `eccbaf9c`); the invariants bullet attributes the "at most W outstanding interests" sentence to the baseline spec, kept by Track D. |
 
 Implementation evidence from the authoring agent:
 
