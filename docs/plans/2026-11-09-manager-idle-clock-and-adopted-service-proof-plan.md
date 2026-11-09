@@ -1062,3 +1062,16 @@ the existing sweep retires a dead owner's pending probe; an in-memory run of
 the repository methods kept the probe on `9f7e0207` and removed it on
 `1fc4cabc`. Register row 4 matches the live reconciliation paths. Full pytest
 was not rerun by the reviewer. Review loop closed.
+
+### Refresh revision: final verification (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to F1-F3 and the terminal guard over `9a408b78..ad70190b`. Verdict:
+PASS, no new defect. F1: clean-break upgrade instructions and the [WT-4.4] D
+row are present, with no compatibility mechanism. F2 (owner decision): the
+service-owner PING fallback and probe state are removed; production
+registration supplies the spawned task's host-process handle for every runner;
+remaining PINGs serve Manager leadership/recovery or task control. F3: the
+[QUEUE.7] guard, D row and managed/ordinary regression cases are present. The
+terminal case exercises the status guard independently. Broker-backed tests
+were not rerun by the reviewer (read-only sandbox). Review loop closed.
