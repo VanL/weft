@@ -10,11 +10,14 @@
   time while its services keep running ([MA-1] item 5, [MA-1.5]).
 - Every task a Manager launched with a managed service key (built-in internal
   services and autostart services) re-stamps its own service-owner row in
-  `weft.state.services` every `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS` (100 s,
-  a third of the 300 s registry retention window), so a Manager that adopted
-  them, or a successor after a launcher crash, sees them live and launches no
-  duplicate. The Manager no longer re-proves aged service rows by `PING`
-  ([MA-1] item 7, [MA-1.6a]).
+  `weft.state.services` on its first turn and then every
+  `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS` (100 s, a third of the 300 s
+  registry retention window), so a Manager that adopted them, or a successor
+  after a launcher crash, sees them live and launches no duplicate. That
+  fresh row is the owner's live proof (a host-pid runtime handle on the row
+  still decides liveness); the Manager no longer sends service owners a
+  `PING`, and a row whose owner stopped refreshing ages out
+  ([MA-1] item 7, [MA-1.6a], [MANAGER.15]).
 - Such a task declares `weft.state.services` as a fixed support route, so it
   can no longer use that queue as its outbox or another queue role;
   construction rejects that topology ([QUEUE.7]).

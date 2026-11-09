@@ -288,9 +288,10 @@ Current responsibilities:
   `weft.state.tasks.<tid>` without reading state history, and maintain process titles
 - own reserved-queue policy application
 - for a task a manager launched with a managed service key, re-stamp its own
-  service-owner row in `weft.state.services` on its own clock and publish
-  that refresh deadline through `next_wait_timeout()` ([MA-1] item 7); a task
-  without a service key does no refresh
+  service-owner row in `weft.state.services` on its first turn and then on its
+  own clock, and publish that refresh deadline through `next_wait_timeout()`
+  ([MA-1] item 7); that row is the task's live proof to managers, which send
+  it no `PING`; a task without a service key does no refresh
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
   `stop()`, `cleanup()`, and `next_wait_timeout()` as the shared task-loop

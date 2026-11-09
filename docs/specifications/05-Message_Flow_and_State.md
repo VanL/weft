@@ -1568,19 +1568,12 @@ Current manager-dispatch rules:
   they must not immediately prune or supersede the target manager. Lack of a
   PONG is evaluated by the ordinary leadership cadence; the probe adds no
   private deadline.
-- service-owner liveness PINGs use the same non-blocking pattern. The manager
-  writes one keyed PING with the same Manager `reply_to`, stores the pending
-  probe, and receives the matching PONG through its ordinary control drain.
-  Pending service probes are uncertain evidence and select the existing active
-  service cadence. Lack of a PONG is evaluated only by that cadence.
-- constructor bootstrap anchors the applicable leadership or service cadence
-  after it creates a probe, so the first reactor turn cannot classify that new
-  probe as no-PONG. A stored PONG makes its owning reducer actionable without
-  moving that cadence. Within the current reconciliation scope, pending service
-  probes keep their service keys in evidence collection. When autostart is
-  included, a stored PONG for a known autostart source bypasses the
-  manifest-scan throttle so the reply is reduced against current source
-  evidence. A successful complete owning-policy scan may retire a probe whose
+- the manager sends no PING to service owners: a service owner's own fresh
+  service-owner row is its live proof ([MA-1] item 7).
+- constructor bootstrap anchors the leadership cadence after it creates a
+  probe, so the first reactor turn cannot classify that new probe as no-PONG.
+  A stored PONG makes its owning reducer actionable without moving that
+  cadence. A successful complete owning-policy scan may retire a probe whose
   source is absent; failed, throttled, and partial scans retain it.
 - STOP/KILL control that arrives after reservation but before launch still wins:
   a draining or stopped manager must not start a new child from the in-flight

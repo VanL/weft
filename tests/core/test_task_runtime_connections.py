@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
@@ -795,10 +795,8 @@ def test_keyed_probe_never_closes_borrowed_broker(
                     connection.execute("SELECT 1")
 
 
-@pytest.mark.parametrize("kind", ["manager", "service"])
 def test_manager_probe_advancement_and_state_helpers_reuse_connection(
     counted_connections: tuple[WeftContext, list[Any]],
-    kind: Literal["manager", "service"],
 ) -> None:
     ctx, connections = counted_connections
     manager = Manager(
@@ -821,38 +819,12 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
             assert handle.id == "runtime-1"
         record = {"tid": tid, "ctrl_in": "target.in", "ctrl_out": "target.out"}
         now_ns = time.time_ns()
-        if kind == "manager":
+        proof = manager._manager_pong_dispatch_proof(record, now_ns=now_ns)
+        assert proof.reason == "ping_pending"
+        request_id = manager._leader_probe_pending[tid].request_id
+        for _ in range(3):
             proof = manager._manager_pong_dispatch_proof(record, now_ns=now_ns)
             assert proof.reason == "ping_pending"
-            pending = manager._leader_probe_pending[tid]
-            request_id = pending.request_id
-            for _ in range(3):
-                proof = manager._manager_pong_dispatch_proof(record, now_ns=now_ns)
-                assert proof.reason == "ping_pending"
-        else:
-            candidate = manager._service_pong_candidate(
-                service_key="test-service",
-                tid=tid,
-                timestamp=None,
-                metadata={},
-                ctrl_in_name="target.in",
-                source="control-pong",
-            )
-            assert candidate is not None and candidate.reason == "ping_pending"
-            service_pending = next(
-                probe
-                for probe in manager._service_probe_pending.values()
-                if probe.service_key == "test-service"
-            )
-            request_id = service_pending.request_id
-            for _ in range(3):
-                candidate = manager._advance_service_pong_probe(
-                    service_pending,
-                    timestamp=None,
-                    metadata={},
-                    resolve_unanswered=False,
-                )
-                assert candidate is not None and candidate.reason == "ping_pending"
         with manager._get_connected_queue().get_connection() as broker:
             broker.write(
                 manager._queue_names["ctrl_in"],
@@ -867,24 +839,13 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
                     }
                 ),
             )
-        if kind == "manager":
-            manager._drain_control_queue_first()
-            proof = manager._manager_pong_dispatch_proof(
-                record,
-                now_ns=now_ns,
-                consume_stored=True,
-            )
-            assert proof.liveness == "live"
-        else:
-            manager._drain_control_queue_first()
-            service_pending = manager._service_probe_pending[service_pending.key]
-            candidate = manager._advance_service_pong_probe(
-                service_pending,
-                timestamp=None,
-                metadata={},
-                resolve_unanswered=False,
-            )
-            assert candidate is not None and candidate.state == "live"
+        manager._drain_control_queue_first()
+        proof = manager._manager_pong_dispatch_proof(
+            record,
+            now_ns=now_ns,
+            consume_stored=True,
+        )
+        assert proof.liveness == "live"
         manager._cleanup_stale_internal_reserved_queues(force=True)
         assert len(connections) == initial_connections
         assert set(manager._queue_cache) == cached_names

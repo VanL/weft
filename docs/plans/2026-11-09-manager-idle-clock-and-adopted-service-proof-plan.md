@@ -183,6 +183,10 @@ The Manager already refreshes its own row this way
 - `docs/specifications/07-System_Invariants.md` (review F3: [QUEUE.7] names
   the `services_registry` support route; plan backlink)
 - `CHANGELOG.md`, `README.md` (review F1: the change and the upgrade step)
+- `weft/_constants.py`, `tests/core/test_task_runtime_connections.py`, and
+  `docs/specifications/05-Message_Flow_and_State.md` [MF-3] and
+  `07-System_Invariants.md` [MANAGER.15] (review F2: the service PING
+  fallback and its probe state removed)
 - `docs/ruff-suppression-registry.md` (C2: one `C901` suppression fewer)
 - `docs/specifications/03-Manager_Architecture.md` (delta below)
 - `docs/plans/README.md` (index row, file count)
@@ -254,14 +258,15 @@ The Manager already refreshes its own row this way
 | 2 | A Manager may idle-exit while a built-in service is missing, in restart backoff, being relaunched, or unproved. The service request already written stays in `weft.spawn.internal`; a launch in flight is committed and detached by the existing cleanup ([IMPL.10]); the next Manager's ensure finds or relaunches the service. Before: the Manager waited for convergence to settle. | A (owner, C1) | as row 1; [MA-1] item 7 (services are context-level singletons, not Manager custody) |
 | 2a | A due autostart scan (every second while the autostart directory exists) no longer holds an idle Manager at the verdict. The scan itself still runs in that turn's convergence pass; a manifest it finds still holds the Manager as an `ensure` obligation or a pending public spawn. | N (a check, not work; a manifest dropped in the last second before an idle exit waits for the next Manager, like any submission racing an exit) | [MA-1] item 7 "checking for work is not work"; [WT-4.3] "A quiet task costs nothing an operator can see" |
 | 3 | A pipeline-owned internal spawn request no longer resets the clock through the newest-row broker probe; it still does when pending (owned work), when reserved, and when its child launches, commits or exits. | N | covered by the remaining sites; same outcome |
-| 4 | Revised C2: every task a Manager launched with a managed service key (heartbeat, TaskMonitor, LivenessMonitor, autostart services) re-writes its latest live owner row unchanged every 100 s (a third of the 300 s retention) and deletes the rows that one replaces; an adopter keeps live proof from the registry past 300 s, with no PING. Before: proof lost after 300 s; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cost: one registry write and one delete per managed task per 100 s, one more wake per 100 s for each managed task, and the wakes those writes give tasks with a registry interest. | A (owner, decision B) | [WT-2a.13] (death needs proof; a live owner keeps proving itself), [WT-4.2] "One owner for each resource" (the owner keeps its own row), [ALT-WT-023] |
+| 4 | Revised C2: every task a Manager launched with a managed service key (heartbeat, TaskMonitor, LivenessMonitor, autostart services) re-writes its latest live owner row unchanged on its first turn and then every 100 s (a third of the 300 s retention) and deletes the rows that one replaces; an adopter keeps live proof from the registry past 300 s, with no PING. Before: proof lost after 300 s; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cost: one registry write and one delete per managed task at start and per 100 s, one more wake per 100 s for each managed task, and the wakes those writes give tasks with a registry interest. | A (owner, decision B) | [WT-2a.13] (death needs proof; a live owner keeps proving itself), [WT-4.2] "One owner for each resource" (the owner keeps its own row), [ALT-WT-023] |
 | 5 | After a launcher crash, a successor that starts more than 300 s after an `ensure` autostart service launched sees it live from its refreshed row and launches no duplicate. Before (base): no live candidate, `start_now`, two copies, and duplicate convergence could not see the original. | C (no loss; a duplicate is avoided) | [MA-1] item 7 singleton rule; owner decision B |
 | 6 | A live owner's latest row is never older than about 100 s, so neither the 300 s retention nor TaskMonitor's runtime prune (expired rows, after 3,600 s) can remove it; superseded own rows are deleted by the refresh itself. Closes owner question 1. | C | consume-to-disappear ([WT-2]) |
 | 7 | A stopping, terminal, dead or wedged owner stops refreshing; its row ages out as before, with no PING. | N | [WT-2a.13] |
-| 8 | The first C2 (aged-row PING, `aged_live`, review F1's probe-key rule) is removed; no Manager writes PINGs to service owners for proof any more. | N (replaced by row 4) | [WT-4.4] "As few concepts as possible" |
+| 8 | The first C2 (aged-row PING, `aged_live`, review F1's probe-key rule) is removed, and (owner decision on review F2) so is the older service-candidate PING fallback with its pending-probe state: the probe cadence selection (`pong_probe_pending`), the stored-PONG bypass of the manifest-scan throttle, the constructor's cadence anchor for service probes, and the probe retirement sweeps. No Manager writes a PING to a service owner. The Manager's leadership PING to other Manager rows is unchanged. | N (replaced by row 4) | [WT-4.4] "As few concepts as possible"; owner: "One mechanism" |
 | 9 | An ordinary task without a managed service key publishes no refresh deadline and writes no registry row. | N | [WT-4.3] "A quiet task costs nothing an operator can see" |
 | 10 | Mixed versions only (review F1): services and autostart tasks still running from pre-refresh code never re-stamp their rows; 300 s after their last row a new Manager sees no live owner (a fresh successor starts a duplicate; an existing adopter waits). Removed by the documented upgrade step, `weft system stop` before or while upgrading (§4b). | D (during mixed-version operation only) | [WT-4.4] "No compatibility code: contract changes update all producers and consumers in one coordinated release"; owner rule: no backward-compatibility shims, break cleanly, note it in the CHANGELOG |
 | 11 | A task launched with a managed service key declares `weft.state.services` as a support route, so it can no longer name that queue as its outbox or another queue role; the topology check rejects it at construction. Ordinary tasks keep the baseline topology (review F3). | D (an unreasonable configuration, rejected loudly) | [WT-4.2] "One owner for each resource" (the registry route belongs to the task's owner-row duty); [WT-4.3] closed reactor inputs; [QUEUE.7] collision guard |
+| 12 | Review F2: a fresh owner row with no host-checkable runtime handle is live from the row itself (its task re-stamps it on its first turn and every 100 s). Before: the Manager sent a keyed PING; a matching PONG made it live; unanswered, the row was uncertain for 5 s after the owner's TID was minted and terminal after that, so a dead handle-less owner was replaced within a couple of passes. Now it is replaced only once its row ages out (up to 300 s). No production writer emits such a row: every managed-service row is written by the launching Manager with the host-pid handle of the task's own host process, whatever its runner, so a dead owner is still found at once by its handle (`registered host pid is not live`). | D (unreachable in production) | [WT-2a.13] (a live owner keeps proving itself; the fresh self-written row is that proof); [WT-4.4] "As few concepts as possible"; owner decision 2026-11-09 ("the self-refreshed row is the proof ... One mechanism") |
 
 ### 4b. Rollout, rollback, one-way doors
 
@@ -382,6 +387,33 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
   deadline …; the shared service idle clock and owner-row refresh ([MA-1]
   item 7) come from its base classes."
 
+### Review F2 (owner decision 2026-11-09) — the self-refreshed row is the proof
+
+- 03 [MA-1] item 7: the ownership-proof list ends with "or the owner's own
+  service-owner row inside the retention window" instead of "a matched
+  keyed `PING`/`PONG`"; the refresh runs "on its first turn, and then on its
+  own clock"; add: "That self-refreshed row is the owner's live proof: a row
+  with a host-pid runtime handle is still decided by that handle (a dead
+  process is terminal), and a row with no host-checkable handle is live while
+  it is inside the window. The manager sends service owners no `PING`; one
+  proof mechanism." Delete the "Service-candidate PING fallback ..."
+  paragraph; in the cadence paragraph, replace the unanswered-service-probe
+  clause with "The manager sends no PING to service owners (item 7)."
+- 03 `_Implementation mapping_` [MA-1.6a]: drop
+  `Manager._service_candidate_from_task_log`, `Manager._service_pong_candidate`,
+  `Manager._advance_service_pong_probe` and the stale
+  `Manager._retire_expired_unvisited_probes`; name
+  `Manager._service_candidate_from_service_owner_record`.
+- 05 [MF-3]: the service-owner PING bullet becomes "the manager sends no PING
+  to service owners"; the bootstrap-anchor bullet keeps only the leadership
+  probe.
+- 07 [MANAGER.15]: a nonterminal row inside the retention window is live
+  unless its host-pid handle proves the process dead; the 5 s recent-evidence
+  grace, the pending service probe cadence, the stored-PONG bypass and the
+  keyed-PONG authority are removed.
+- 01 [CC-2]: the BaseTask refresh bullet adds the first-turn refresh and
+  that the row is the task's live proof.
+
 ### `## Related Plans` — insert as the first bullet
 
 ```text
@@ -411,6 +443,7 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
 | [MA-1] item 7, [MA-1.6a] | Slice 2 re-proves an aged owner row by a keyed `PING` (`aged_live`, `_service_candidate_from_aged_owner_record`, review F1's probe-key rule). | Every task launched with a managed service key re-stamps its own owner row every `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS`; the PING path, `aged_live` and their tests are removed. | Owner decision B, 2026-11-09 ("the existing service should refresh the row"). One mechanism; it also covers adopted autostart services after a launcher crash, which the PING path covered and internal-only refresh would not. | Revised slice 2 delta (03 item 7 and [MA-1.6a]; 01 [CC-2]; 05 [MF-3.2], [MF-5]); applied in the revision commit. |
+| [MA-1] item 7, [MA-1.6a], [MANAGER.15] | The revised C2 removed only the aged-row PING; the service-candidate PING fallback for fresh rows without host proof stayed (review F2). | That fallback and all its probe state are removed; a fresh row is the owner's proof; the refresh also runs on the task's first turn. | Owner decision 2026-11-09 on review F2: "the self-refreshed row is the proof, and the old fallback ping is removed. One mechanism." | Review F2 delta (03 item 7, [MA-1.6a]; 05 [MF-3]; 07 [MANAGER.15]; 01 [CC-2]); applied in the F2 commit. |
 | [MA-1] item 5, [MA-1.5] | The idle verdict counts "unsettled autostart convergence", including a due autostart scan. | It ignores `autostart_scan_due`. | A real handoff probe (Manager 2 adopting live services, after slice 2) stayed alive past 720 s: an instrumented rerun showed every idle-clock reset at the convergence-active check with reasons `["autostart_scan_due"]` and 1.000 to 1.001 s since the last scan. The one-second scan fell due between the turn's convergence pass and its verdict; aged-row PING traffic gave the Manager the unaligned wakes that hit that window. A due scan is a check for work, not work (the rule this plan states). | Slice 1 delta, last sentence of the item 5 insertion; applied in the slice 1 commit. |
 
 ## 5. Tasks
@@ -595,9 +628,11 @@ existing process seams.
   `active_tid` is the original, and its only candidate is `live`.
 - **C2 revised** (`tests/tasks/test_service_task.py`)
   `test_managed_service_task_restamps_its_owner_row_on_its_own_clock`
-  (nothing before the interval; the deadline is published; one re-stamped
-  row, same payload, newer stamp, the replaced row gone; nothing on the next
-  turn), `test_ending_service_task_stops_refreshing_its_owner_row`
+  (review F2: the refresh is due before the first turn and that turn
+  re-stamps the launcher's row; then the deadline is published, nothing on
+  the next turn, and on the interval one re-stamped row, same payload, newer
+  stamp, the replaced row gone),
+  `test_ending_service_task_stops_refreshing_its_owner_row`
   (parametrized: a stopping task, and a terminal task that is not stopping,
   so each guard is exercised on its own; named
   `test_stopping_service_task_stops_refreshing_its_owner_row` before review
@@ -607,6 +642,13 @@ existing process seams.
   construction (`ValueError` naming `services_registry`) when it carries a
   managed service key, and built as before when it does not (register
   row 11).
+- **Review F2** `test_owner_row_without_host_proof_is_live_only_while_its_task_refreshes_it`
+  (`tests/core/test_manager.py`), parametrized: a launcher row with no
+  runtime handle, aged past the retention window; when the service task has
+  re-stamped it, a successor Manager sees one `live` candidate and adopts
+  the owner; when it never did, there is no candidate and the owner is not
+  adopted. Either way no PING reaches the owner's `ctrl_in` (register
+  row 12).
 - **First C2 (superseded, tests removed)** `test_adopted_service_keeps_live_proof_past_registry_retention`:
   write a predecessor's heartbeat owner row (host-pid handle of a live
   process), construct a canonical Manager (it adopts the owner), then, with
@@ -856,7 +898,7 @@ and F2; F3 and one test-coverage note.
 | ID | Severity | Location | Finding | Disposition |
 |----|----------|----------|---------|-------------|
 | F1 | P2 | §4b; `service_convergence.py` retention; the removed aged-row PING path | Services already running baseline code never refresh; 300 s after their last row a new Manager discards it: a fresh successor gets `start_now` (a duplicate) and an existing adopter `wait_uncertain`. The rollout section and register omitted the loss. | Accepted, fixed as a documented clean break with an operator-controlled transition (owner's standing rule: no compatibility code, break cleanly, note it in the CHANGELOG). Upgrade step `weft system stop` per context in §4b, the CHANGELOG, the README and spec 03 [MA-1] item 7; register row 10 (`D` during mixed-version operation only, [WT-4.4]). No second proof mechanism. No separate mixed-version test (§4b says why). |
-| F2 | P3 | Register row 8; the service-candidate PING fallback in `manager.py` | A fresh owner row with no host-checkable proof still reaches `_service_pong_candidate`, so the Manager still writes service-owner proof PINGs; row 8's claim was false. | Decided by the owner on 2026-11-09: the self-refreshed row is the proof and the fallback PING is removed. Handled in the commit after this one. |
+| F2 | P3 | Register row 8; the service-candidate PING fallback in `manager.py` | A fresh owner row with no host-checkable proof still reaches `_service_pong_candidate`, so the Manager still writes service-owner proof PINGs; row 8's claim was false. | Accepted, fixed per owner (decision 2026-11-09: "the self-refreshed row is the proof, and the old fallback ping is removed. One mechanism."). Fixed in the commit after the F1/F3 commit; record below; register rows 8 and 12. |
 | F3 | P3 | `BaseTask._reactor_support_routes`; §4a | The `services_registry` support route rejects a managed Consumer whose outbox is `weft.state.services`, which baseline built; unlisted. | Accepted: the collision guard stays ([QUEUE.7] requires every fixed support route to be declared); register row 11 (`D`, [WT-4.2], [WT-4.3]); regression test `test_managed_task_cannot_use_the_service_registry_as_a_queue_role` (managed rejected, ordinary built). Spec 07 [QUEUE.7] names the route. |
 | note | — | `tests/tasks/test_service_task.py` | The stopping test did not exercise the terminal-status guard on its own. | Accepted: the test is parametrized with a terminal, not-stopping case. Mutations: removing the terminal-status guard fails only the terminal case; dropping the `services_registry` route fails the managed F3 case; each restored byte-for-byte. |
 
@@ -865,6 +907,110 @@ on SQLite `-n 4`: 1,157 passed, 5 skipped; the eight owning files on
 PostgreSQL (`./bin/pytest-pg`): 985 passed, 15 skipped; ruff, ruff format,
 repo mypy (499 files), `bin/ruff_suppression_index.py --check`,
 `bin/check-doc-paths`: clean.
+
+Review F2 fix, 2026-11-09 (owner decision: "the self-refreshed row is the
+proof, and the old fallback ping is removed. One mechanism."):
+
+- Which runtimes reached the fallback, checked before removing anything:
+  `_service_candidate_from_service_owner_record` reached
+  `_service_pong_candidate` only for a row with no parsable runtime handle,
+  or with a handle that is neither a live host process nor `host-pid`
+  authority. Every managed-service owner row is written by
+  `Manager._register_managed_service_owner` (or its terminal twin) after the
+  launch worker started the task's host process (`launch_task_process`, a
+  spawn `Process`), with `Manager._child_runtime_handle(process)`: a
+  `host-pid` handle with `(pid, create_time)`. That holds for every runner:
+  Docker, macOS sandbox and microsandbox work runs inside that host wrapper,
+  which is a Weft task process and refreshes its own row (the refresh runs on
+  the reactor while work runs on the task worker; on `9a408b78` the autostart
+  crash probe's `/bin/sleep 900` task re-stamped at about 100, 200 and 300 s).
+  The handle is empty only if `process.pid` is not a positive integer, which
+  cannot follow a successful `start()`, and the refresh copies the launcher's
+  row, handle included. So no production runtime reached the fallback; only
+  handle-less test rows did. The task-log path
+  `_service_candidate_from_task_log` (a `control-pong` service PING) had no
+  caller. No runtime that cannot self-refresh was found.
+- Launcher-written and self-written rows are not distinguished: the reducer
+  does not need it (a host-pid handle decides liveness whoever wrote the
+  row), and since the refresh copies the launcher's payload no existing
+  field tells them apart without a new concept.
+- Startup refresh: `_service_owner_refreshed_ns` starts at `None`, so the
+  refresh is due on the task's first turn, then every interval. A first turn
+  that runs before the launcher's write finds no row and writes nothing; the
+  launcher's row is then the young one until the next interval.
+- Removed code: `_ServicePendingPongProbe`, `Manager._service_probe_pending`,
+  `_service_probe_key`, `_service_pong_candidate`,
+  `_advance_service_pong_probe`,
+  `_preserve_pending_service_probes_after_failed_scan`,
+  `_pending_service_probes_for_scope`, `_pending_service_probe_active_reasons`
+  (the `pong_probe_pending` reason), the stored-reply and autostart-bypass
+  branches of `_run_managed_service_convergence` and
+  `_reconcile_managed_services`, the probe sweeps of
+  `_observed_service_candidates_by_key`, the service half of
+  `_handle_control_reply`, the constructor's cadence anchor for service
+  probes, `resolve_unanswered` on the service paths, and
+  `MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS`; also the dead task-log
+  path `_service_candidate_from_task_log` with its only helpers
+  `_service_candidate_taskspec_dump`, `_service_candidate_control_queues`,
+  `_service_candidate_pid` and `_service_candidate_metadata`.
+- Kept PINGs, neither of which proves service ownership: the Manager's
+  leadership PING to other Manager rows (`_manager_pong_dispatch_proof`,
+  `_advance_manager_pong_probe`, `_leader_probe_pending`,
+  `_ManagerPendingPongProbe`, `resolve_unanswered` on the leadership paths),
+  and the task control PING/PONG (the task ping command,
+  `send_keyed_ping_probe`, the `control-pong` evidence in
+  `weft/core/task_evidence.py`).
+- Removed tests, each exercising only the removed probe state:
+  `test_pending_service_pong_selects_active_cadence_and_stored_reply_bypasses_gate`,
+  `test_stored_autostart_pong_bypasses_only_included_manifest_scan`,
+  `test_complete_autostart_scan_retires_absent_unanswered_probe` (its
+  source-removal assertion stays covered by
+  `test_manager_autostart_prunes_deleted_manifest_state`),
+  `test_managed_service_pong_probe_is_nonblocking` (replaced by the new
+  test below), `test_pending_service_probe_keeps_live_tracked_key_in_evidence_scope`,
+  `test_managed_service_no_pong_resolves_only_on_later_ordinary_pass`,
+  `test_complete_service_scan_retires_absent_probe_but_failed_scan_retains_it`,
+  `test_failed_service_registry_scan_does_not_spawn_over_pending_probe`,
+  `test_manager_control_reply_drops_ambiguous_pong` (a PONG can no longer
+  match two probes: leadership probes are keyed by TID), and
+  `test_service_candidate_pid_prefers_positive_non_boolean_child_pid` (the
+  only caller of a dead helper); the helpers `_service_probe_for` and
+  `_write_service_pong`; the `service` case of
+  `test_manager_probe_advancement_and_state_helpers_reuse_connection`.
+- Adapted: `test_failed_autostart_scan_retains_source` (keeps its source
+  assertion), `test_manager_malformed_pong_is_consumed_without_resolving_probe`
+  (now on a leadership probe; consumption is the shared control drain's
+  contract), `test_manager_pending_leadership_probe_adds_no_private_wait_timeout`,
+  `test_manager_constructor_anchors_cadence_for_bootstrap_leadership_probe`,
+  `test_task_monitor_live_owner_row_blocks_duplicate_restart` (renamed: its
+  proof was always the host handle, never a PONG), and one candidate's
+  source label in `test_task_monitor_duplicate_tracked_child_force_kills_owned_process`.
+- RED on `8916f838`:
+  `test_owner_row_without_host_proof_is_live_only_while_its_task_refreshes_it[True]`
+  failed (the refreshed handle-less row read `uncertain`, a PING pending);
+  its `[False]` case (a launcher row never refreshed, aged) passed there, as
+  before. `test_managed_service_task_restamps_its_owner_row_on_its_own_clock`
+  failed with `next_wait_timeout()` 99.99 s instead of 0 (no startup
+  refresh).
+- Sensitivity: with only `weft/core/manager.py` back at `8916f838`, `[True]`
+  failed the same way; with only the startup initializer reverted, the
+  refresh test failed the same way; a mutation letting the reducer keep
+  expired rows failed `[False]` (the aged row became a candidate). Each
+  restored byte-for-byte (`cmp`, `git diff`).
+- Suppressions: no `C901` directive became unused (the `C901` offenders in
+  `manager.py` match its directives one to one), so the registry and the
+  ratchet are unchanged.
+- Gates: the eight owning files plus `tests/core/test_task_runtime_connections.py`,
+  `tests/core/test_service_helper_connections.py`,
+  `tests/core/test_control_probe.py` and `tests/specs` on SQLite `-n 4`:
+  1,254 passed, 5 skipped, 4 failed under a machine load average of about
+  94 from other agents' runs (`test_manager_autostart_ensure_restarts`,
+  `test_manager_sigterm_drains_nonpersistent_children`, both cases of
+  `test_persistent_consumer_resurrects_after_ambiguous_family_cleanup`: two
+  waits that timed out with live children); rerun alone, all four passed.
+  The same eleven files on PostgreSQL (`./bin/pytest-pg`): 1,085 passed,
+  16 skipped. Ruff, ruff format, repo mypy (499 files), `git diff --check`,
+  `bin/ruff_suppression_index.py --check`, `bin/check-doc-paths`: clean.
 
 ## 9. Out of Scope
 

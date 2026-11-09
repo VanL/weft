@@ -1363,9 +1363,6 @@ MANAGER_SERVE_LOG_COMPONENTS: Final[frozenset[str]] = frozenset(
 )
 """Allowed foreground manager operational-log component labels."""
 
-MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS: Final[float] = 5.0
-"""Window where nonterminal service rows without live proof remain uncertain."""
-
 MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS: Final[float] = 1.0
 """Maximum delay between active singleton convergence turns."""
 

@@ -1166,23 +1166,20 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   live, terminal, and uncertain evidence through one deterministic transition
   table before Manager applies side effects. Terminal proof for a TID wins over
   live evidence for the same TID, and uncertain evidence must become visible
-  degraded wait rather than an unqualified duplicate launch. A recent
-  nonterminal service row without live proof is uncertain, not terminal;
-  stale nonterminal rows may become restart evidence only after the recent
-  evidence window has elapsed. Broker timestamps may order service evidence,
+  degraded wait rather than an unqualified duplicate launch. A nonterminal
+  service-owner row inside the registry retention window is live evidence
+  unless its host-pid runtime handle proves the process dead: its owner
+  re-stamps it on its own clock ([MA-1] item 7), and a row whose owner
+  stopped refreshing ages out and is no evidence. The manager sends no PING
+  to service owners. Broker timestamps may order service evidence,
   but restart backoff is scheduled from the manager's observation clock. A
   stable singleton audit may run on a slower cadence than active convergence,
   but pending spawn work, missing required owners, duplicate scans, uncertain
-  evidence, a pending service PONG probe, or due autostart scans must return the
-  manager to the active convergence cadence. Pending service probes keep their
-  service keys in the current evidence scope. A stored PONG makes reduction
-  actionable without moving the periodic clock; for an included known
-  autostart source it also bypasses the manifest-scan throttle so current source
-  evidence is collected. Constructor-created probes anchor the owning cadence
-  so the first reactor turn cannot classify them as no-PONG. Manager-authored internal runtime envelopes,
+  evidence, or due autostart scans must return the
+  manager to the active convergence cadence. Manager-authored internal runtime envelopes,
   manager-authored autostart metadata, tracked children, runtime handles, and
-  keyed PONG replies may establish singleton service authority; caller-owned
-  TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
+  the owner's own fresh service-owner row may establish singleton service
+  authority; caller-owned TaskSpec metadata alone must not. A manager-authored `task_spawned` row with a
   live child PID is valid live-owner evidence for the spawned service child
   before the child publishes its own task lifecycle row. When more than one live
   owner is visible, the canonical live owner is the lowest live TID and

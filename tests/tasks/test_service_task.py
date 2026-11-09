@@ -1260,11 +1260,14 @@ def test_managed_service_task_restamps_its_owner_row_on_its_own_clock(
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
     Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2
-    (owner decision B). Every third of the registry retention window the task
-    re-writes the row its launcher wrote, unchanged but freshly stamped, and
-    deletes the rows it replaces; before the interval it writes nothing, and
-    its next wait carries the refresh deadline. Named mutations: no refresh;
-    a refresh that leaves the replaced row behind; a refresh every turn.
+    (owner decision B) and the owner's review-F2 decision (the self-refreshed
+    row is the proof). On its first turn, and then every third of the
+    registry retention window, the task re-writes the row its launcher
+    wrote, unchanged but freshly stamped, and deletes the rows it replaces;
+    between refreshes it writes nothing, and its next wait carries the
+    refresh deadline. Named mutations: no refresh at startup; no refresh on
+    the interval; a refresh that leaves the replaced row behind; a refresh
+    every turn.
     """
 
     db_path, make_queue = broker_env
@@ -1274,10 +1277,17 @@ def test_managed_service_task_restamps_its_owner_row_on_its_own_clock(
         make_service_taskspec(unique_tid, metadata=_managed_service_metadata()),
     )
     try:
+        assert task.next_wait_timeout() == 0.0
         task.process_once()
-        assert _registry_rows(make_queue) == [(payload, original_row)]
+
+        ((first_payload, first_row),) = _registry_rows(make_queue)
+        assert first_payload == payload
+        assert first_row > original_row
         wait = task.next_wait_timeout()
-        assert wait is not None and 0 < wait <= _REFRESH_INTERVAL_NS / 1e9
+        assert wait is not None and wait > _REFRESH_INTERVAL_NS / 1e9 - 5
+
+        task.process_once()
+        assert _registry_rows(make_queue) == [(payload, first_row)]
 
         task._service_owner_refreshed_ns = (
             time.monotonic_ns() - _REFRESH_INTERVAL_NS - 1
@@ -1286,12 +1296,7 @@ def test_managed_service_task_restamps_its_owner_row_on_its_own_clock(
 
         ((refreshed_payload, refreshed_row),) = _registry_rows(make_queue)
         assert refreshed_payload == payload
-        assert refreshed_row > original_row
-        wait = task.next_wait_timeout()
-        assert wait is not None and wait > _REFRESH_INTERVAL_NS / 1e9 - 5
-
-        task.process_once()
-        assert _registry_rows(make_queue) == [(payload, refreshed_row)]
+        assert refreshed_row > first_row
     finally:
         task.stop()
 

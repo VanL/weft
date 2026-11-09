@@ -351,9 +351,10 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._caller_pid = os.getppid()
         self._managed_pids: dict[int, float | None] = {}
         self._runtime_handle: RunnerHandle | None = None
-        # Managed-service owner-row refresh clock [MA-1] item 7.
+        # Managed-service owner-row refresh clock [MA-1] item 7; ``None`` until
+        # the first refresh, which is due on the task's first turn.
         self._service_owner_key = managed_service_owner_key(taskspec)
-        self._service_owner_refreshed_ns = time.monotonic_ns()
+        self._service_owner_refreshed_ns: int | None = None
         self._kill_requested = False
         self._external_stop_handled = False
 
@@ -1423,9 +1424,10 @@ class BaseTask(MultiQueueWatcher, ABC):
     def _service_owner_refresh_timeout(self) -> float | None:
         """Return seconds until this task's owner row is due for a refresh.
 
-        ``None`` for a task without a managed service key, and for a stopping
-        or terminal task: a task that stops refreshing ages out of the
-        registry retention window as before.
+        ``0.0`` before the first refresh, so the task re-stamps its row on its
+        first turn. ``None`` for a task without a managed service key, and for
+        a stopping or terminal task: a task that stops refreshing ages out of
+        the registry retention window as before.
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
         """
@@ -1436,20 +1438,25 @@ class BaseTask(MultiQueueWatcher, ABC):
             or self.taskspec.state.status in TERMINAL_TASK_STATUSES
         ):
             return None
+        if self._service_owner_refreshed_ns is None:
+            return 0.0
         interval_ns = int(SERVICE_OWNER_REFRESH_INTERVAL_SECONDS * 1_000_000_000)
         elapsed_ns = time.monotonic_ns() - self._service_owner_refreshed_ns
         return max(0.0, (interval_ns - elapsed_ns) / 1_000_000_000)
 
     def _refresh_service_owner_row(self) -> None:
-        """Re-stamp this task's own live owner row once its interval is due.
+        """Re-stamp this task's own live owner row on its first turn and each interval.
 
         The row a launching Manager wrote is re-written unchanged, so its
         runtime handle and provenance stay the launcher's, and the rows it
         replaces are deleted: the registry keeps one young row per live owner,
         which neither ages out of the retention window nor reaches the runtime
-        prune. A missing or non-live row is left alone. A refresh is not work
-        for the task's idle exit, and the registry is not Manager idle
-        activity. A failed read or write is retried at the next interval.
+        prune, and that self-written row is the owner's live proof. A missing
+        or non-live row is left alone (a first turn that runs before the
+        launcher's write finds nothing; the launcher's row is then the young
+        one until the next interval). A refresh is not work for the task's
+        idle exit, and the registry is not Manager idle activity. A failed
+        read or write is retried at the next interval.
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
         """

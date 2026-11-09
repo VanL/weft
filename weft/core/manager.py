@@ -72,7 +72,6 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
-    MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS,
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_ADMISSION_RECHECK_SECONDS,
     MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
@@ -389,20 +388,6 @@ class _ManagerDrainStopTarget:
     escalate: bool
     queue: Queue | None = None
     publication_id: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _ServicePendingPongProbe:
-    """Non-blocking service-owner PING awaiting a matching PONG."""
-
-    key: str
-    service_key: str
-    tid: str
-    row_timestamp: int | None
-    source: Literal["control-pong", "service-registry-pong"]
-    request_id: str
-    created_turn: int
-    pong: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -807,7 +792,6 @@ class Manager(ServiceTask):
             str, tuple[int, int | None, ManagerLeadershipProof]
         ] = {}
         self._leader_probe_pending: dict[str, _ManagerPendingPongProbe] = {}
-        self._service_probe_pending: dict[str, _ServicePendingPongProbe] = {}
         self._manager_superseded_observed_ts_by_tid: dict[str, int] = {}
         self._leader_probe_used_this_turn = False
         self._leader_actionable_work_cache: tuple[int, bool] | None = None
@@ -833,10 +817,7 @@ class Manager(ServiceTask):
             self._last_leader_check_ns = time.time_ns()
         self._activate_service_task(set_spawning_title=True)
         self._emit_manager_loop_summary(force=True)
-        service_probes_before = set(self._service_probe_pending)
         self._reconcile_managed_services(force=True)
-        if set(self._service_probe_pending) - service_probes_before:
-            self._last_managed_service_convergence_ns = time.time_ns()
         self._managed_service_duplicate_scan_pending.clear()
         self._managed_internal_spawn_enqueued = False
         self._register_atexit_callback()
@@ -1589,50 +1570,26 @@ class Manager(ServiceTask):
     def _handle_control_reply(
         self, message: str, timestamp: int, context: QueueMessageContext
     ) -> None:
-        """Store one exactly matched PONG for the owning policy reducer.
+        """Store one exactly matched leadership PONG for the owning reducer.
 
         Reply dispatch remains an in-memory operation. The shared control
-        handler owns acknowledgement of the source row.
+        handler owns acknowledgement of the source row. The Manager sends no
+        PING to service owners; their own fresh registry rows are their proof
+        ([MA-1] item 7).
 
-        Spec: [MA-1.4], [MA-1.6a], [MF-6], [MANAGER.8], [MANAGER.15]
+        Spec: [MA-1.4], [MF-6], [MANAGER.8], [MANAGER.15]
         """
 
         del timestamp, context
-        matches: list[tuple[str, str, dict[str, Any]]] = []
-        for key, leader_probe in self._leader_probe_pending.items():
+        for key, leader_probe in tuple(self._leader_probe_pending.items()):
             payload = coerce_pong_response(
                 message,
                 tid=leader_probe.tid,
                 request_id=leader_probe.request_id,
             )
             if payload is not None:
-                matches.append(("leader", key, payload))
-        for key, service_probe in self._service_probe_pending.items():
-            payload = coerce_pong_response(
-                message,
-                tid=service_probe.tid,
-                request_id=service_probe.request_id,
-            )
-            if payload is not None:
-                matches.append(("service", key, payload))
-        if len(matches) != 1:
-            return
-
-        kind, key, payload = matches[0]
-        if kind == "leader":
-            stored_leader_probe = self._leader_probe_pending.get(key)
-            if stored_leader_probe is not None:
-                self._leader_probe_pending[key] = replace(
-                    stored_leader_probe,
-                    pong=payload,
-                )
-            return
-        stored_service_probe = self._service_probe_pending.get(key)
-        if stored_service_probe is not None:
-            self._service_probe_pending[key] = replace(
-                stored_service_probe,
-                pong=payload,
-            )
+                self._leader_probe_pending[key] = replace(leader_probe, pong=payload)
+                return
 
     def _launch_child_task(
         self,
@@ -7382,199 +7339,6 @@ class Manager(ServiceTask):
         except ValueError:
             return None
 
-    @staticmethod
-    def _service_probe_key(
-        *,
-        source: str,
-        service_key: str,
-        tid: str,
-        timestamp: int | None,
-    ) -> str:
-        return f"{source}\x1f{service_key}\x1f{tid}\x1f{timestamp or 0}"
-
-    def _service_pong_candidate(
-        self,
-        *,
-        service_key: str,
-        tid: str,
-        timestamp: int | None,
-        metadata: dict[str, Any],
-        ctrl_in_name: str,
-        source: Literal["control-pong", "service-registry-pong"],
-        resolve_unanswered: bool = False,
-    ) -> ServiceCandidate | None:
-        """Advance or start one non-blocking service-owner PING probe.
-
-        A pending probe is unknown service evidence. The caller falls through
-        to normal recent/stale classification only on the next eligible
-        ordinary active-service evaluation.
-        """
-
-        key = self._service_probe_key(
-            source=source,
-            service_key=service_key,
-            tid=tid,
-            timestamp=timestamp,
-        )
-        pending = self._service_probe_pending.get(key)
-        if pending is not None:
-            return self._advance_service_pong_probe(
-                pending,
-                timestamp=timestamp,
-                metadata=metadata,
-                resolve_unanswered=resolve_unanswered,
-            )
-
-        request_id = uuid.uuid4().hex
-        ping_message = encode_control_message(
-            CONTROL_PING,
-            request_id=request_id,
-            reply_to=self._queue_names["ctrl_in"],
-        )
-        try:
-            with self._get_connected_queue().get_connection() as broker:
-                broker.write(ctrl_in_name, ping_message)
-        except (BrokerError, OSError, RuntimeError) as exc:
-            return ServiceCandidate(
-                key=service_key,
-                tid=tid,
-                state="uncertain",
-                source=source,
-                timestamp=timestamp,
-                reason=str(exc),
-                metadata=metadata,
-            )
-        self._service_probe_pending[key] = _ServicePendingPongProbe(
-            key=key,
-            service_key=service_key,
-            tid=tid,
-            row_timestamp=timestamp,
-            source=source,
-            request_id=request_id,
-            created_turn=self._loop_iteration,
-        )
-        return ServiceCandidate(
-            key=service_key,
-            tid=tid,
-            state="uncertain",
-            source=source,
-            timestamp=timestamp,
-            reason="ping_pending",
-            metadata=metadata,
-        )
-
-    def _advance_service_pong_probe(
-        self,
-        probe: _ServicePendingPongProbe,
-        *,
-        timestamp: int | None,
-        metadata: dict[str, Any],
-        resolve_unanswered: bool,
-    ) -> ServiceCandidate | None:
-        """Advance one event-fed service PING on its owning policy cadence."""
-
-        if probe.pong is not None:
-            self._service_probe_pending.pop(probe.key, None)
-            return ServiceCandidate(
-                key=probe.service_key,
-                tid=probe.tid,
-                state="live",
-                source=probe.source,
-                timestamp=timestamp,
-                metadata=metadata,
-            )
-
-        if resolve_unanswered and probe.created_turn < self._loop_iteration:
-            self._service_probe_pending.pop(probe.key, None)
-            return None
-
-        return ServiceCandidate(
-            key=probe.service_key,
-            tid=probe.tid,
-            state="uncertain",
-            source=probe.source,
-            timestamp=timestamp,
-            reason="ping_pending",
-            metadata=metadata,
-        )
-
-    def _service_candidate_from_task_log(
-        self,
-        *,
-        service_key: str,
-        tid: str,
-        payload: Mapping[str, Any],
-        timestamp: int,
-        runtime_handle: RunnerHandle | None = None,
-        resolve_unanswered: bool = False,
-    ) -> ServiceCandidate:
-        candidate_metadata = self._service_candidate_metadata(payload)
-        ctrl_queues = self._service_candidate_control_queues(payload)
-
-        status = payload.get("status")
-        if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
-            return ServiceCandidate(
-                key=service_key,
-                tid=tid,
-                state="terminal",
-                source="task-log",
-                timestamp=timestamp,
-                reason=status,
-                metadata=candidate_metadata,
-            )
-
-        if runtime_handle is not None and handle_has_live_host_process(runtime_handle):
-            force_kill_pids = self._runtime_handle_force_kill_pids(runtime_handle)
-            return ServiceCandidate(
-                key=service_key,
-                tid=tid,
-                state="live",
-                source="tid-mapping",
-                timestamp=timestamp,
-                metadata=self._service_candidate_metadata(
-                    payload,
-                    force_kill_pids=force_kill_pids,
-                ),
-            )
-
-        if ctrl_queues is not None:
-            ctrl_in_name, _ctrl_out_name = ctrl_queues
-            probe_candidate = self._service_pong_candidate(
-                service_key=service_key,
-                tid=tid,
-                timestamp=timestamp,
-                metadata=candidate_metadata,
-                ctrl_in_name=ctrl_in_name,
-                source="control-pong",
-                resolve_unanswered=resolve_unanswered,
-            )
-            if probe_candidate is not None:
-                return probe_candidate
-
-        recent_grace_ns = int(
-            MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
-        )
-        if not tid.isdigit() or time.time_ns() - int(tid) <= recent_grace_ns:
-            return ServiceCandidate(
-                key=service_key,
-                tid=tid,
-                state="uncertain",
-                source="task-log",
-                timestamp=timestamp,
-                reason="recent non-terminal state without live runtime proof or PONG",
-                metadata=candidate_metadata,
-            )
-
-        return ServiceCandidate(
-            key=service_key,
-            tid=tid,
-            state="terminal",
-            source="task-log",
-            timestamp=timestamp,
-            reason="stale non-terminal state without live runtime proof or PONG",
-            metadata=candidate_metadata,
-        )
-
     def _service_owner_record_evidence(
         self,
         record: ServiceOwnerRecord,
@@ -7606,10 +7370,18 @@ class Manager(ServiceTask):
     def _service_candidate_from_service_owner_record(
         self,
         record: ServiceOwnerRecord,
-        *,
-        resolve_unanswered: bool = False,
     ) -> ServiceCandidate:
-        """Project one service-owner row into managed-service evidence."""
+        """Project one service-owner row into managed-service evidence.
+
+        The reducer passes only rows inside the registry retention window. A
+        host-pid handle decides liveness when the row has one; otherwise the
+        row itself is the proof: its task re-stamps it on its first turn and
+        every ``SERVICE_OWNER_REFRESH_INTERVAL_SECONDS``, so a row inside the
+        window is live, and one whose task stopped refreshing ages out. The
+        Manager sends the owner no PING.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+        """
 
         metadata, runtime_handle = self._service_owner_record_evidence(record)
 
@@ -7645,43 +7417,12 @@ class Manager(ServiceTask):
                     metadata=metadata,
                 )
 
-        if "ctrl_in" in metadata and "ctrl_out" in metadata:
-            probe_candidate = self._service_pong_candidate(
-                service_key=record.service_key,
-                tid=record.owner_tid,
-                timestamp=record.timestamp,
-                metadata=metadata,
-                ctrl_in_name=metadata["ctrl_in"],
-                source="service-registry-pong",
-                resolve_unanswered=resolve_unanswered,
-            )
-            if probe_candidate is not None:
-                return probe_candidate
-
-        recent_grace_ns = int(
-            MANAGED_SERVICE_RECENT_EVIDENCE_GRACE_SECONDS * 1_000_000_000
-        )
-        if (
-            record.owner_tid.isdigit()
-            and time.time_ns() - int(record.owner_tid) <= recent_grace_ns
-        ):
-            return ServiceCandidate(
-                key=record.service_key,
-                tid=record.owner_tid,
-                state="uncertain",
-                source="service-registry",
-                timestamp=record.timestamp,
-                reason="recent active owner without live runtime proof or PONG",
-                metadata=metadata,
-            )
-
         return ServiceCandidate(
             key=record.service_key,
             tid=record.owner_tid,
-            state="terminal",
+            state="live",
             source="service-registry",
             timestamp=record.timestamp,
-            reason="stale active owner without live runtime proof or PONG",
             metadata=metadata,
         )
 
@@ -7900,40 +7641,6 @@ class Manager(ServiceTask):
         return False
 
     @staticmethod
-    def _service_candidate_taskspec_dump(
-        payload: Mapping[str, Any],
-    ) -> Mapping[str, Any] | None:
-        if payload.get("event") == "task_spawned":
-            taskspec_dump = payload.get("child_taskspec")
-        else:
-            taskspec_dump = payload.get("taskspec")
-        if not isinstance(taskspec_dump, Mapping):
-            return None
-        return taskspec_dump
-
-    @classmethod
-    def _service_candidate_control_queues(
-        cls,
-        payload: Mapping[str, Any],
-    ) -> tuple[str, str] | None:
-        taskspec_dump = cls._service_candidate_taskspec_dump(payload)
-        if taskspec_dump is None:
-            return None
-        io_section = taskspec_dump.get("io")
-        if not isinstance(io_section, Mapping):
-            return None
-        control = io_section.get("control")
-        if not isinstance(control, Mapping):
-            return None
-        ctrl_in_name = control.get("ctrl_in")
-        ctrl_out_name = control.get("ctrl_out")
-        if not isinstance(ctrl_in_name, str) or not ctrl_in_name:
-            return None
-        if not isinstance(ctrl_out_name, str) or not ctrl_out_name:
-            return None
-        return ctrl_in_name, ctrl_out_name
-
-    @staticmethod
     def _runtime_handle_force_kill_pids(handle: RunnerHandle) -> tuple[int, ...]:
         if handle.control.get("authority") != "host-pid":
             return ()
@@ -7941,72 +7648,8 @@ class Manager(ServiceTask):
             pid for pid, _create_time in live_host_processes_from_handle(handle)
         )
 
-    @classmethod
-    def _service_candidate_pid(cls, payload: Mapping[str, Any]) -> int | None:
-        child_pid = payload.get("child_pid")
-        if (
-            isinstance(child_pid, int)
-            and not isinstance(child_pid, bool)
-            and child_pid > 0
-        ):
-            return child_pid
-
-        taskspec_dump = cls._service_candidate_taskspec_dump(payload)
-        if taskspec_dump is None:
-            return None
-        state = taskspec_dump.get("state")
-        if not isinstance(state, Mapping):
-            return None
-        pid = state.get("pid")
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-            return pid
-        return None
-
-    @classmethod
-    def _service_candidate_metadata(
-        cls,
-        payload: Mapping[str, Any],
-        *,
-        force_kill_pids: Sequence[int] = (),
-    ) -> dict[str, Any]:
-        candidate_metadata: dict[str, Any] = {}
-        ctrl_queues = cls._service_candidate_control_queues(payload)
-        if ctrl_queues is not None:
-            ctrl_in_name, ctrl_out_name = ctrl_queues
-            candidate_metadata["ctrl_in"] = ctrl_in_name
-            candidate_metadata["ctrl_out"] = ctrl_out_name
-        pid = cls._service_candidate_pid(payload)
-        if pid is not None:
-            candidate_metadata["pid"] = pid
-        kill_pids = [
-            pid
-            for pid in force_kill_pids
-            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-        ]
-        if kill_pids:
-            candidate_metadata["force_kill_pids"] = kill_pids
-        return candidate_metadata
-
     def _manager_context(self) -> WeftContext:
         return self._task_context()
-
-    def _preserve_pending_service_probes_after_failed_scan(
-        self,
-        candidates_by_key: dict[str, list[ServiceCandidate]],
-    ) -> None:
-        """Keep pending probes as evidence when a registry scan proves nothing."""
-
-        for probe in tuple(self._service_probe_pending.values()):
-            if probe.service_key not in candidates_by_key:
-                continue
-            candidate = self._advance_service_pong_probe(
-                probe,
-                timestamp=probe.row_timestamp,
-                metadata={},
-                resolve_unanswered=False,
-            )
-            if candidate is not None:
-                candidates_by_key[probe.service_key].append(candidate)
 
     def _observed_service_candidates_by_key(
         self,
@@ -8014,7 +7657,6 @@ class Manager(ServiceTask):
         *,
         tracked_by_key: Mapping[str, ServiceCandidate | None] | None = None,
         scan_terminal_proof: bool = False,
-        resolve_unanswered: bool = False,
     ) -> dict[str, list[ServiceCandidate]]:
         candidates_by_key: dict[str, list[ServiceCandidate]] = {
             key: [] for key in desired_keys
@@ -8036,14 +7678,12 @@ class Manager(ServiceTask):
             registry_entries = tuple(iter_queue_json_entries(queue, strict=True))
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to scan service-owner registry", exc_info=True)
-            self._preserve_pending_service_probes_after_failed_scan(candidates_by_key)
             return candidates_by_key
         read = collect_service_owner_records(
             registry_entries,
             service_type=SERVICE_TYPE_MANAGED,
         )
         now_ns = time.time_ns()
-        observed_probe_sources: set[str] = set()
         for service_key in desired_keys:
             decision = reduce_service_ownership(
                 service_key,
@@ -8054,14 +7694,6 @@ class Manager(ServiceTask):
                 read_failed=read.read_failed,
             )
             for record in decision.records:
-                observed_probe_sources.add(
-                    self._service_probe_key(
-                        source="service-registry-pong",
-                        service_key=record.service_key,
-                        tid=record.owner_tid,
-                        timestamp=record.timestamp,
-                    )
-                )
                 state = self._service_state(record.service_key)
                 tid = record.owner_tid
                 if tid in state.locally_terminal_tids:
@@ -8077,18 +7709,8 @@ class Manager(ServiceTask):
                     )
                     continue
                 candidates_by_key.setdefault(record.service_key, []).append(
-                    self._service_candidate_from_service_owner_record(
-                        record,
-                        resolve_unanswered=resolve_unanswered,
-                    )
+                    self._service_candidate_from_service_owner_record(record)
                 )
-        for key, probe in tuple(self._service_probe_pending.items()):
-            if (
-                probe.source == "service-registry-pong"
-                and probe.service_key in desired_keys
-                and key not in observed_probe_sources
-            ):
-                self._service_probe_pending.pop(key, None)
         return candidates_by_key
 
     def _observed_service_candidates(self, service_key: str) -> list[ServiceCandidate]:
@@ -8216,7 +7838,6 @@ class Manager(ServiceTask):
         include_internal: bool = True,
         include_autostart: bool = True,
         scan_terminal_proof: bool = False,
-        resolve_unanswered: bool = False,
     ) -> None:
         """Reconcile all Manager-owned singleton services through one path."""
 
@@ -8226,11 +7847,6 @@ class Manager(ServiceTask):
         services: list[ManagedServiceSpec] = []
         internal_services: list[ManagedServiceSpec] = []
         autostart_services: list[ManagedServiceSpec] = []
-        known_autostart_sources = set(self._autostart_sources)
-        stored_autostart_reply = include_autostart and any(
-            probe.pong is not None and probe.service_key in known_autostart_sources
-            for probe in self._service_probe_pending.values()
-        )
         if include_internal:
             desired = self._desired_internal_service_keys()
             # Ordered: the construction order reaches broker writes and request
@@ -8247,18 +7863,7 @@ class Manager(ServiceTask):
                 build() for key, build in builders if key in desired
             )
         if include_autostart:
-            autostart_services.extend(
-                self._desired_autostart_services(
-                    force=force or stored_autostart_reply,
-                )
-            )
-            if self._autostart_last_scan_complete:
-                for key, probe in tuple(self._service_probe_pending.items()):
-                    if (
-                        probe.service_key in known_autostart_sources
-                        and probe.service_key not in self._autostart_sources
-                    ):
-                        self._service_probe_pending.pop(key, None)
+            autostart_services.extend(self._desired_autostart_services(force=force))
         services.extend(internal_services)
         services.extend(autostart_services)
         if not services:
@@ -8313,11 +7918,6 @@ class Manager(ServiceTask):
             if service.lifecycle == "once" and state.launched_once:
                 continue
             keys_needing_evidence.add(service.key)
-        keys_needing_evidence.update(
-            probe.service_key
-            for probe in self._service_probe_pending.values()
-            if probe.service_key in desired_keys
-        )
 
         self._emit_serve_log(
             "managed_service_reconcile",
@@ -8335,7 +7935,6 @@ class Manager(ServiceTask):
                 keys_needing_evidence,
                 tracked_by_key=tracked_by_key,
                 scan_terminal_proof=scan_terminal_proof,
-                resolve_unanswered=resolve_unanswered,
             )
             if keys_needing_evidence
             else {}
@@ -8854,40 +8453,6 @@ class Manager(ServiceTask):
             keys.add(INTERNAL_SERVICE_KEY_LIVENESS_MONITOR)
         return frozenset(keys)
 
-    def _pending_service_probes_for_scope(
-        self,
-        *,
-        include_autostart: bool,
-        include_internal: bool = True,
-    ) -> tuple[_ServicePendingPongProbe, ...]:
-        """Return pending probes owned by the current convergence scope."""
-
-        internal_keys = (
-            self._desired_internal_service_keys() if include_internal else frozenset()
-        )
-        return tuple(
-            probe
-            for probe in self._service_probe_pending.values()
-            if probe.service_key in internal_keys
-            or include_autostart
-            and probe.service_key in self._autostart_sources
-        )
-
-    def _pending_service_probe_active_reasons(
-        self,
-        *,
-        include_autostart: bool,
-        include_internal: bool = True,
-    ) -> tuple[str, ...]:
-        """Return the convergence reason contributed by pending PONG probes."""
-
-        if self._pending_service_probes_for_scope(
-            include_autostart=include_autostart,
-            include_internal=include_internal,
-        ):
-            return ("pong_probe_pending",)
-        return ()
-
     def _managed_service_convergence_active_reasons(
         self,
         *,
@@ -8906,12 +8471,7 @@ class Manager(ServiceTask):
         excluded: frozenset[str] = (
             frozenset() if include_internal else INTERNAL_SERVICE_KEYS
         )
-        reasons = list(
-            self._pending_service_probe_active_reasons(
-                include_autostart=include_autostart,
-                include_internal=include_internal,
-            )
-        )
+        reasons: list[str] = []
         if include_internal and self._managed_internal_spawn_enqueued:
             reasons.append("internal_spawn_enqueued")
         if include_internal and include_broker and internal_spawn_pending is None:
@@ -9055,12 +8615,6 @@ class Manager(ServiceTask):
         )
         interval_ns = int(interval_seconds * 1_000_000_000)
         autostart_scan_due = "autostart_scan_due" in local_active_reasons
-        stored_reply_due = any(
-            probe.pong is not None
-            for probe in self._pending_service_probes_for_scope(
-                include_autostart=include_autostart
-            )
-        )
         ordinary_due = (
             self._last_managed_service_convergence_ns <= 0
             or now_ns - self._last_managed_service_convergence_ns >= interval_ns
@@ -9069,7 +8623,6 @@ class Manager(ServiceTask):
             not force
             and not self._managed_internal_spawn_enqueued
             and not autostart_scan_due
-            and not stored_reply_due
             and not ordinary_due
         ):
             fields = {
@@ -9117,10 +8670,7 @@ class Manager(ServiceTask):
 
             state_before = self._managed_service_state_snapshot()
             enqueued_before = self._managed_internal_spawn_enqueued
-            self._reconcile_managed_services(
-                include_autostart=include_autostart,
-                resolve_unanswered=ordinary_due,
-            )
+            self._reconcile_managed_services(include_autostart=include_autostart)
             service_request_enqueued = (
                 self._managed_internal_spawn_enqueued and not enqueued_before
             )
