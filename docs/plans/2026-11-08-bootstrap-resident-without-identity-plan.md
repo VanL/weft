@@ -398,3 +398,15 @@ and its test (`test_failed_bootstrap_checkpoint_keeps_restored_work_undispatched
 stays green. Independent cross-family review: to be recorded here by the
 coordinator (this agent was told not to call external reviewers), which is a
 deviation from Class 4/5 review-before-implementation.
+
+### Cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-08,
+scoped-change review of plan and implementation at `671f3246` against
+`08c2f87b`. Verdict: no blocker, no in-scope findings. The reviewer confirmed
+the causal premise on base, that missing identity now enters the existing
+mismatch path (which protects reservation custody before orphan recovery), and
+that keeping `RuntimeError` preserves retries for failed bootstrap publication
+and unconfirmed acknowledgement. Owner questions left open: whether other
+malformed retained rows should also be skipped per [WT-2a.15], and the
+no-`root_tid` row that stays ignored.
