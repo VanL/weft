@@ -517,3 +517,12 @@ tests/tasks/test_agent_execution.py tests/core/test_subprocess_runner.py`:
 554 passed, 10 skipped; PostgreSQL (`./bin/pytest-pg`, same targets): 554
 passed, 21 skipped; `ruff check .`, `ruff format --check` on touched files,
 the repo mypy command (502 source files), and `bin/check-doc-paths`: clean.
+
+### Cross-family review, round 2
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+round-2 verification scoped to F1 and F2 over `bb475514..8dd29fe0`.
+Verdict: PASS, no new defect in the fix delta. The reviewer confirmed the
+fresh root timestamp with a live two-level tree probe (baseline returned no
+descendants, the fix returned both) and reproduced the F2 `AttributeError`
+against the baseline methods before passing the candidate.
