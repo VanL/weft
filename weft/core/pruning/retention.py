@@ -79,7 +79,7 @@ from weft.core.task_evidence import (
     peek_terminal_ctrl_out_evidence,
     queue_names_for_tid,
     status_from_log_payload,
-    terminal_status_from_event,
+    terminal_record_status,
 )
 
 RetentionFamily = Literal["task-local", "task-log", "retention"]
@@ -449,7 +449,7 @@ def _read_task_log_rows(
                     message_id=int(message_id),
                     tid=tid,
                     status=status,
-                    terminal=terminal_status_from_event(payload) is not None,
+                    terminal=terminal_record_status(payload) is not None,
                     taskspec_payload=taskspec if isinstance(taskspec, dict) else None,
                 )
             )

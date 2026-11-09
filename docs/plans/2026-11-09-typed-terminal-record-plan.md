@@ -36,15 +36,19 @@ Implement the owner's 2026-11-09 decisions on that plan's open questions:
 |--------|-------------------------------|----------|
 | `weft/core/monitor/collation.py::update_from_task_log_payload` | event name decided terminality and status | replaced by `task_evidence.terminal_record_status` |
 | `weft/core/monitor/lifetime_report.py` (copy of the same helper) | same | replaced by the same shared function; the copy is deleted |
-| `weft/core/task_evidence.py::terminal_status_from_event` | fallback for a row whose status is nonterminal but whose event is mapped and `completed_at` is set | fallback deleted: no current producer writes that shape (`mark_*` sets status and `completed_at` together) |
+| `weft/core/task_evidence.py::terminal_status_from_event` | its own status-first classifier, plus a map fallback for a nonterminal status with `completed_at` | deleted (review F1): a second classifier for one responsibility. Its readers (`log_terminal_evidence`, `monitor/runtime.py::reduce_task_log_messages`, `pruning/retention.py::_read_task_log_rows`, `commands/events.py::iter_task_events`) and the `tests/helpers/task_observation.py` fixture helper call `terminal_record_status` |
 | `weft/core/monitor/runtime.py::_lifecycle_conflict_reason` | `nonterminal_status_with_terminal_event` | branch deleted: its only reachable input was a Manager's legitimate `running` drain-start `control_stop` row, a false conflict |
 | `weft/commands/_task_snapshot_reducer.py::_reconcile_lifecycle_status` | `contradictory_terminal_event_status` / `stale_status_payload` for old records | deleted with the `status_reason` field; it was added (2026-05-06) for "old records" only, which the no-compatibility rule excludes |
 | `tests/helpers/weft_harness.py::_terminal_status_from_task_log` | event-first wait | uses `terminal_record_status` |
 
 ## Change
 
-- `weft/core/task_evidence.py`: new `terminal_record_status(payload)`;
-  `coerce_terminal_envelope` uses it; the map fallback is removed.
+- `weft/core/task_evidence.py`: new `terminal_record_status(payload)`, the
+  one task-log terminal classifier; `coerce_terminal_envelope` and
+  `log_terminal_evidence` use it; `terminal_status_from_event` is deleted.
+- `weft/core/monitor/runtime.py` (row `terminal`), `weft/core/pruning/retention.py`
+  (row `terminal`), `weft/commands/events.py` (`--follow` stop): use
+  `terminal_record_status`.
 - `weft/core/monitor/collation.py`, `weft/core/monitor/lifetime_report.py`:
   terminality comes from `terminal_record_status`; both `_terminal_status`
   copies are deleted.
@@ -52,7 +56,7 @@ Implement the owner's 2026-11-09 decisions on that plan's open questions:
   `weft/commands/tasks.py`: the map-dependent branches are deleted.
 - `weft/_constants.py`: `TERMINAL_TASK_EVENTS` deleted;
   `WEFT_MONITOR_SCHEMA_VERSION` 6 to 7.
-- `weft/core/monitor/store.py::MonitorStoreAccess.migrate_v6_to_v7` and
+- `weft/core/monitor/store.py::_MonitorTableAccess.migrate_v6_to_v7` and
   `weft/core/monitor/sql.py` (`select_v6_unprocessed_open_collations`,
   `mark_v6_stranded_collation_terminal`): the repair, run by
   `MonitorStore.ensure_schema` for a v6 store and after the v5 to v6 edge.
@@ -99,6 +103,7 @@ stronger discriminator rule).
 | The TaskMonitor runtime candidate class `runtime_conflict` / `nonterminal_status_with_terminal_event` is gone (it fired only on a draining Manager's legitimate row) | C | removes a false diagnostic |
 | Status surfaces no longer reconstruct a terminal status from the event name for a row whose status is nonterminal but has `completed_at` (`stale_status_payload`); such rows show their own status | D for pre-contract or foreign rows only; N for every row the current producers write | [WT-2a.9] / [ALT-WT-012] no compatibility code; [WT-4.4] no over-armoring: the shape is unreachable from current producers |
 | Readers of a row that carries a terminal status but no `type` (not produced by Weft) no longer treat it as terminal in the Monitor and the test harness | D for foreign rows; N for Weft rows | [MF-3] defines the terminal record; same basis |
+| Terminal task-log evidence (`log_terminal_evidence`), the TaskMonitor runtime reducer's row `terminal`, retention pruning's row `terminal`, and `weft events --follow` take terminality only from the typed record: an untyped row with a terminal status (or a terminal status only under `taskspec.state`) is no longer terminal there; `--follow` keeps waiting on it | D for foreign or pre-contract rows; N for every row Weft writes (`_report_state_change` adds `type` exactly when the status is terminal) | [WT-4.4] shared function, shared code; [WT-2a.9]; no compatibility code |
 | Monitor schema 7; a v6 store is repaired once at startup (1,116 families on a copy of the leaked t582_a context) | C | [WT-2a.9] "a bounded forward migration for durable old data" |
 | A v6-only Monitor refuses a v7 store as newer | A (owner-decided migration) | rollback step documented below |
 | Terminal families keep waiting for the task-log retention period before retirement, as the code already did; specs now say so | N (code unchanged) | owner ruling 10.3 |
@@ -122,6 +127,8 @@ stronger discriminator rule).
 | `...::test_task_monitor_keeps_a_stopping_manager_open_until_its_drained_record` | the family stays open during a STOP drain and closes on `manager_stop_drained` | terminal with summary during the drain |
 | `...::test_task_monitor_retires_a_family_stranded_by_the_v6_reducer` | a v6-stranded family is repaired, summarized, disposed, cleaned and retired | `(False, None, None)`; also fails with the migration made a no-op |
 | `tests/core/test_monitor_store.py::test_monitor_store_v6_migration_closes_families_stranded_on_their_terminal_record` | repair marks only stranded families; idempotent | fails pre-fix and with the migration a no-op; fails with the "never summarized" guard removed |
+| `tests/commands/test_task_evidence.py::test_task_log_readers_take_terminality_only_from_the_typed_record` (review F1; one case per reader: `log_terminal_evidence`, monitor runtime, retention, `events --follow`) | a typed record is terminal; an untyped `work_completed`/`completed` row is not | all four fail at the untyped row (`assert True is False`) with the status-first classifier, on 7dd52a38 and with the reader change reverted |
+| `tests/core/monitor/test_lifetime_report.py::test_raw_row_lifetime_report_promotes_available_taskspec` (review F2) | raw-row lifetime reports take terminality and status from the record: childless supersession `cancelled`, `work_limit_violation` `killed`, a running drain-start row open | with the 83271b49 decoder the three new cases fail: supersession `terminal_seen` False, limit `'failed'`, drain start terminal |
 
 Synthetic task-log payloads that stand for terminal records in the monitor,
 collation, lifetime-report, store and maintenance tests now carry
@@ -149,10 +156,6 @@ STOP-draining Managers show no terminal collation until their drained record.
 
 ## Out of scope
 
-- `terminal_status_from_event` (status-first) still serves status, events and
-  retention readers. It agrees with the typed rule for every record Weft
-  writes; converging those readers on `terminal_record_status` is a possible
-  follow-up, not required by the owner decision.
 - C1, C2 and B from the parent plan.
 
 ## Deviation Log
@@ -170,7 +173,14 @@ STOP-draining Managers show no terminal collation until their drained record.
 
 Self fresh-eyes review: done after drafting; reader table re-derived from
 `grep TERMINAL_TASK_EVENTS`, cited paths and section codes resolved.
-Cross-family review: to be filled by the coordinator.
+Cross-family review (Tier 1, Codex read-only) of 7dd52a38, findings and
+dispositions:
+
+| ID | Finding | Disposition |
+|----|---------|-------------|
+| F1 (blocker) | `terminal_status_from_event` still classified terminal proof independently for events, retention, foreground monitoring and `log_terminal_evidence` | Accepted, fixed: the function is deleted; `log_terminal_evidence`, `monitor/runtime.py::reduce_task_log_messages`, `pruning/retention.py::_read_task_log_rows`, `commands/events.py::iter_task_events` and the `tests/helpers/task_observation.py` fixture helper call `terminal_record_status`; the plan's follow-up carve-out is removed and a register row added; RED test `test_task_log_readers_take_terminality_only_from_the_typed_record` added first; reader fixtures that stand for terminal records now carry the discriminator |
+| F2 | the raw-row lifetime-report test only covered `work_completed`/`completed`, which the old decoder also passed | Accepted, fixed: the test is parametrized with literal expectations for childless supersession (`cancelled`), `work_limit_violation` (`killed`) and a running `control_stop` drain-start row (open) |
+| F3 (nit) | `MonitorStoreAccess.migrate_v6_to_v7` does not resolve | Accepted, fixed: plan and `_constants.py` cite `_MonitorTableAccess.migrate_v6_to_v7` |
 
 Execution evidence (2026-11-09):
 
@@ -180,5 +190,12 @@ Execution evidence (2026-11-09):
   version 7 and the 1,116 terminal with `terminal_event=service_idle_exit`,
   `terminal_status=completed`, `terminal_message_id=last_message_id`; the 2
   running families unchanged; a second startup changed nothing.
+- F1 sensitivity: with only the four reader files reverted to their
+  7dd52a38 form (the status-first classifier), every case of
+  `test_task_log_readers_take_terminality_only_from_the_typed_record` fails at
+  the untyped row (`assert True is False`); restored byte-exact.
+- F2 control: with the 83271b49 collation, lifetime-report and constants
+  files, the supersession, limit and drain-start cases fail; restored
+  byte-exact.
 - SQLite (`-n 4`) and PostgreSQL (`./bin/pytest-pg`) gates, ruff, mypy and doc
-  gates: recorded in the handoff report for this commit.
+  gates: recorded in the handoff report for each commit.

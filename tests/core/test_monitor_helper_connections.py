@@ -255,7 +255,16 @@ def test_retention_prune_borrows_through_task_local_evidence_and_apply(
     ctx = weft_harness.context
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as owner:
         for _ in range(3):
-            owner.write(json.dumps({"tid": _TID, "status": "completed"}))
+            owner.write(
+                json.dumps(
+                    {
+                        "tid": _TID,
+                        "status": "completed",
+                        "type": "terminal",
+                        "source": "task",
+                    }
+                )
+            )
         with ctx.queue(f"T{_TID}.ctrl_in", persistent=True) as ctrl:
             ctrl.write("STOP")
         with owner.get_connection() as broker:
@@ -290,7 +299,16 @@ def test_borrowed_scan_closes_real_generator_on_early_exit(
     ctx = weft_harness.context
     with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=True) as owner:
         for _ in range(3):
-            owner.write(json.dumps({"tid": _TID, "status": "completed"}))
+            owner.write(
+                json.dumps(
+                    {
+                        "tid": _TID,
+                        "status": "completed",
+                        "type": "terminal",
+                        "source": "task",
+                    }
+                )
+            )
         with owner.get_connection() as broker:
             original_peek = broker.peek_generator
             closed: list[str] = []

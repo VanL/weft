@@ -660,7 +660,7 @@ def reduce_task_log_messages(
             if limit is not None and result.events_scanned >= limit:
                 break
             continue
-        terminal = task_evidence.terminal_status_from_event(payload) is not None
+        terminal = task_evidence.terminal_record_status(payload) is not None
         result.rows.append(
             TaskLogRow(
                 payload=payload,

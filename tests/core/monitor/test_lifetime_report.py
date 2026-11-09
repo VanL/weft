@@ -451,29 +451,51 @@ def test_lifetime_salvage_row_set_participates_in_report_identity() -> None:
     assert first["report_id"] != changed["report_id"]
 
 
-def test_raw_row_lifetime_report_promotes_available_taskspec() -> None:
+@pytest.mark.parametrize(
+    ("event", "status", "typed", "expected_terminal_status"),
+    [
+        ("work_completed", "completed", True, "completed"),
+        # A Manager superseded with no user work: its final record.
+        ("manager_superseded", "cancelled", True, "cancelled"),
+        # A limit violation records the status the task published.
+        ("work_limit_violation", "killed", True, "killed"),
+        # A STOP-draining Manager's drain-start row is not terminal.
+        ("control_stop", "running", False, None),
+    ],
+)
+def test_raw_row_lifetime_report_promotes_available_taskspec(
+    event: str,
+    status: str,
+    typed: bool,
+    expected_terminal_status: str | None,
+) -> None:
+    """Raw-row lifetime reports take terminality from the typed record ([MF-3])."""
+
+    payload: dict[str, Any] = {
+        "tid": "1779000000000000400",
+        "event": event,
+        "status": status,
+        "taskspec": {
+            "tid": "1779000000000000400",
+            "name": "sample",
+            "spec": {"runner": {"name": "host"}},
+            "state": {
+                "status": status,
+                "started_at": 1779000000000000400,
+                "completed_at": (
+                    1779000000000000401 if expected_terminal_status else None
+                ),
+            },
+        },
+    }
+    if typed:
+        payload.update(type="terminal", source="task")
+    else:
+        payload["draining"] = True
     row = QueueWindowRow(
         queue="weft.log.tasks",
         message_id=1779000000000000401,
-        body=json.dumps(
-            {
-                "tid": "1779000000000000400",
-                "event": "work_completed",
-                "type": "terminal",
-                "source": "task",
-                "status": "completed",
-                "taskspec": {
-                    "tid": "1779000000000000400",
-                    "name": "sample",
-                    "spec": {"runner": {"name": "host"}},
-                    "state": {
-                        "status": "completed",
-                        "started_at": 1779000000000000400,
-                        "completed_at": 1779000000000000401,
-                    },
-                },
-            }
-        ),
+        body=json.dumps(payload),
     )
 
     report = build_raw_row_lifetime_report(
@@ -491,7 +513,8 @@ def test_raw_row_lifetime_report_promotes_available_taskspec() -> None:
     )
     assert report["subject"]["tid"] == "1779000000000000400"
     assert report["taskspec"]["tid"] == "1779000000000000400"
-    assert report["lifetime"]["status"] == "completed"
-    assert report["lifetime"]["terminal_status"] == "completed"
+    assert report["lifetime"]["status"] == status
+    assert report["lifetime"]["terminal_seen"] is (expected_terminal_status is not None)
+    assert report["lifetime"]["terminal_status"] == expected_terminal_status
     assert report["monitor"]["queue"] == "weft.log.tasks"
     assert report["monitor"]["message_id"] == 1779000000000000401

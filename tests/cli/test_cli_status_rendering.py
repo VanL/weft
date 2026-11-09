@@ -251,6 +251,8 @@ def test_watch_task_events_json_formats_broker_message_id(
                         "tid": tid,
                         "status": "completed",
                         "event": "work_completed",
+                        "type": "terminal",
+                        "source": "task",
                         "taskspec": {"name": "status-task"},
                     },
                     message_id,

@@ -1034,7 +1034,7 @@ WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 7
 """Schema version for Monitor-owned durable collation tables.
 
 v7 repairs v6 families left open by the event-name terminal reducer
-(``MonitorStoreAccess.migrate_v6_to_v7``).
+(``_MonitorTableAccess.migrate_v6_to_v7`` in ``weft/core/monitor/store.py``).
 """
 
 WEFT_MONITOR_META_TABLE: Final[str] = "weft_monitor_meta"

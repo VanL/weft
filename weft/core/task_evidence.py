@@ -561,25 +561,6 @@ def terminal_record_status(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def terminal_status_from_event(payload: dict[str, Any]) -> str | None:
-    """Return the public terminal status represented by a task-log event."""
-
-    if payload.get("event") == "task_activity":
-        return None
-    status = payload.get("status")
-    if not isinstance(status, str):
-        taskspec = payload.get("taskspec")
-        if isinstance(taskspec, dict):
-            state = taskspec.get("state")
-            if isinstance(state, dict):
-                state_status = state.get("status")
-                if isinstance(state_status, str):
-                    status = state_status
-    if status in TERMINAL_TASK_STATUSES:
-        return status
-    return None
-
-
 def terminal_error_message(payload: dict[str, Any], status: str) -> str | None:
     """Return the best available public error string for a terminal event."""
 
@@ -1232,9 +1213,12 @@ def log_terminal_evidence(
     tid: str,
     timestamp: int | None = None,
 ) -> TaskEvidenceSnapshot | None:
-    """Return terminal task-log evidence from one payload when present."""
+    """Return terminal task-log evidence from one payload when present.
 
-    status = terminal_status_from_event(payload)
+    Spec: [MF-3]
+    """
+
+    status = terminal_record_status(payload)
     if status is None:
         return None
     taskspec = payload.get("taskspec")
