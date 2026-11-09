@@ -68,6 +68,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     INTERNAL_SERVICE_KEY_LIVENESS_MONITOR,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
+    INTERNAL_SERVICE_KEYS,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
     MANAGED_SERVICE_CONVERGENCE_INTERVAL_SECONDS,
@@ -1221,23 +1222,43 @@ class Manager(ServiceTask):
         return tid
 
     def _idle_activity_queue_names(self) -> tuple[str, ...]:
-        """Return manager-owned queues whose pending work should reset idle time."""
+        """Return the public spawn queues whose newest row resets idle time.
 
-        queue_names = list(self._spawn_inbox_queue_names())
-        queue_names.extend(
-            reserved_queue
-            for reserved_queue, _source in self._spawn_reserved_queue_pairs()
-        )
-        return tuple(dict.fromkeys(queue_names))
+        Internal-lane rows are not activity by themselves: a built-in service
+        request is supervision, and other internal work counts when it is
+        pending, reserved or launched.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
+
+        return (self._queue_names["inbox"], self._queue_names["reserved"])
 
     def _manager_owned_work_pending(self) -> bool:
-        """Launch worker activity is owned work; retained custody is maintenance."""
-        if self._has_active_child_launches():
+        """Launch worker activity is owned work; retained custody is maintenance.
+
+        A built-in service launch or request is supervision, not owned work.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
+        if any(
+            not self._child_is_supervision_only(request)
+            for request in self._active_child_launches.values()
+        ):
             return True
+        internal_inbox = self._queue_names.get("internal_inbox")
         for queue_name in self._spawn_inbox_queue_names():
             try:
-                if self._queue_has_pending(self._queue(queue_name)):
+                queue = self._queue(queue_name)
+                if not self._queue_has_pending(queue):
+                    continue
+                if queue_name != internal_inbox:
                     return True
+                with closing_queue_iterator(queue.peek_generator()) as rows:
+                    if any(
+                        not self._is_service_supervision_row(queue_name, str(body))
+                        for body in rows
+                    ):
+                        return True
             except (BrokerError, OSError, RuntimeError):
                 logger.debug("Unable to inspect manager-owned work", exc_info=True)
         return False
@@ -2004,7 +2025,7 @@ class Manager(ServiceTask):
                 state.pending_request_id = None
             state.locally_terminal_tids.discard(child_spec.tid)
             self._managed_service_duplicate_scan_pending.add(request.service_key)
-        self._last_activity_ns = time.time_ns()
+        self._note_idle_activity(supervision=self._child_is_supervision_only(request))
 
         child_dump = redact_taskspec_dump(
             child_spec.model_dump(mode="json"), self._taskspec_redaction_paths
@@ -2479,14 +2500,52 @@ class Manager(ServiceTask):
     # Manager bookkeeping
     # ------------------------------------------------------------------
     @staticmethod
-    def _child_is_supervision_only(child: ManagedChild) -> bool:
-        """Return whether a child is internal supervision rather than user work."""
+    def _child_is_supervision_only(
+        child: ManagedChild | _ManagerChildLaunchRequest,
+    ) -> bool:
+        """Return whether a child or launch is internal supervision, not user work.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
 
         return child.internal_role in {
             INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
             INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
             INTERNAL_RUNTIME_TASK_CLASS_LIVENESS_MONITOR,
         }
+
+    def _is_service_supervision_row(self, queue_name: str, body: str) -> bool:
+        """Return whether a spawn row is a built-in internal service request.
+
+        Only the internal spawn lane carries such rows; public rows are never
+        parsed. A service request is supervision, not work: it neither resets
+        the idle clock nor holds an idle Manager.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
+
+        if queue_name != self._queue_names.get("internal_inbox"):
+            return False
+        try:
+            payload = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(payload, Mapping)
+            and self._spawn_request_service_key(
+                payload, desired_keys=set(INTERNAL_SERVICE_KEYS)
+            )
+            is not None
+        )
+
+    def _note_idle_activity(self, *, supervision: bool) -> None:
+        """Reset the idle clock for work; leave it for service supervision.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
+
+        if not supervision:
+            self._last_activity_ns = time.time_ns()
 
     def _user_work_children(self) -> dict[str, ManagedChild]:
         """Return children that should block idle shutdown and leadership yield."""
@@ -5108,6 +5167,11 @@ class Manager(ServiceTask):
                     )
                     continue
                 child_exited = True
+                # Work completion is activity: the idle countdown begins only
+                # after in-flight work has finished.
+                self._note_idle_activity(
+                    supervision=self._child_is_supervision_only(child)
+                )
                 try:
                     # Dead children must never stall the manager control loop.
                     # Treat dead-child cleanup as a local reap only; descendant
@@ -5174,9 +5238,6 @@ class Manager(ServiceTask):
             self._autostart_last_scan_ns = 0
         if child_exited:
             self._admission_controller.note_child_reap(now=time.monotonic())
-            # Child completion is activity. The manager should only begin its idle
-            # countdown after in-flight work has actually finished.
-            self._last_activity_ns = time.time_ns()
             self._invalidate_leadership_work_cache()
             self._clear_admission_retry()
         return child_exited
@@ -6423,12 +6484,14 @@ class Manager(ServiceTask):
         work. Registry leadership remains advisory and is not a pre-launch
         fence for work this manager has already reserved.
 
-        Spec: [MA-1.1], [MA-2], [MA-3], [MF-6]
+        Spec: [MA-1.1], [MA-1.5], [MA-2], [MA-3], [MF-6]
         """
-        self._last_activity_ns = time.time_ns()
+        source_queue = context.queue_name
+        self._note_idle_activity(
+            supervision=self._is_service_supervision_row(source_queue, message)
+        )
         if not self._dispatch_cleanup_scope:
             self._cleanup_children()
-        source_queue = context.queue_name
         reserved_queue = context.reserved_queue_name or self._queue_names["reserved"]
         self._emit_serve_log(
             "spawn_reserved",
@@ -8786,10 +8849,13 @@ class Manager(ServiceTask):
         self,
         *,
         include_autostart: bool,
+        include_internal: bool = True,
     ) -> tuple[_ServicePendingPongProbe, ...]:
         """Return pending probes owned by the current convergence scope."""
 
-        internal_keys = self._desired_internal_service_keys()
+        internal_keys = (
+            self._desired_internal_service_keys() if include_internal else frozenset()
+        )
         return tuple(
             probe
             for probe in self._service_probe_pending.values()
@@ -8802,10 +8868,14 @@ class Manager(ServiceTask):
         self,
         *,
         include_autostart: bool,
+        include_internal: bool = True,
     ) -> tuple[str, ...]:
         """Return the convergence reason contributed by pending PONG probes."""
 
-        if self._pending_service_probes_for_scope(include_autostart=include_autostart):
+        if self._pending_service_probes_for_scope(
+            include_autostart=include_autostart,
+            include_internal=include_internal,
+        ):
             return ("pong_probe_pending",)
         return ()
 
@@ -8813,26 +8883,41 @@ class Manager(ServiceTask):
         self,
         *,
         include_autostart: bool,
+        include_internal: bool = True,
         internal_spawn_pending: bool | None = None,
         include_broker: bool = True,
     ) -> tuple[str, ...]:
-        """Return why manager-owned service convergence is active."""
+        """Return why manager-owned service convergence is active.
 
+        ``include_internal=False`` leaves out the built-in internal services
+        and their internal spawn lane: they are supervision, not work, so the
+        idle verdict asks only about autostart work [MA-1.5].
+        """
+
+        excluded: frozenset[str] = (
+            frozenset() if include_internal else INTERNAL_SERVICE_KEYS
+        )
         reasons = list(
             self._pending_service_probe_active_reasons(
-                include_autostart=include_autostart
+                include_autostart=include_autostart,
+                include_internal=include_internal,
             )
         )
-        if self._managed_internal_spawn_enqueued:
+        if include_internal and self._managed_internal_spawn_enqueued:
             reasons.append("internal_spawn_enqueued")
-        if include_broker and internal_spawn_pending is None:
+        if include_internal and include_broker and internal_spawn_pending is None:
             internal_spawn_pending = self._internal_spawn_pending()
-        if include_broker and internal_spawn_pending:
+        if include_internal and include_broker and internal_spawn_pending:
             reasons.append("internal_spawn_pending")
-        if self._managed_service_duplicate_scan_pending:
+        if self._managed_service_duplicate_scan_pending - excluded:
             reasons.append("duplicate_scan_pending")
         desired_keys = self._desired_internal_service_keys()
-        for service_key, state in self._managed_service_state.items():
+        states = (
+            (service_key, state)
+            for service_key, state in self._managed_service_state.items()
+            if service_key not in excluded
+        )
+        for service_key, state in states:
             service_unsettled = state.spawn_pending or state.active_tid is None
             if state.spawn_pending:
                 reasons.append("spawn_pending")
@@ -8854,11 +8939,22 @@ class Manager(ServiceTask):
         return tuple(dict.fromkeys(reasons))
 
     def _managed_service_convergence_active(self, *, include_autostart: bool) -> bool:
-        """Return whether manager-owned convergence has non-stable work to advance."""
+        """Return whether convergence of work, not supervision, is unsettled.
 
-        return bool(
-            self._managed_service_convergence_active_reasons(
+        The idle verdict's question: only autostart services count, because
+        built-in internal services never hold an idle Manager. A due autostart
+        scan is a check for work, not work: the turn's convergence pass runs a
+        due scan before this verdict, and a manifest it finds holds the Manager
+        as an ``ensure`` obligation or a pending spawn.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        """
+
+        return any(
+            reason != "autostart_scan_due"
+            for reason in self._managed_service_convergence_active_reasons(
                 include_autostart=include_autostart,
+                include_internal=False,
             )
         )
 
@@ -9056,8 +9152,6 @@ class Manager(ServiceTask):
                 progress_reasons=list(progress_reasons),
                 child_count=len(self._child_processes),
             )
-            if drained:
-                self._last_activity_ns = time.time_ns()
 
             if self.should_stop or self._draining:
                 return
@@ -9499,10 +9593,9 @@ class Manager(ServiceTask):
             self._last_activity_ns = time.time_ns()
             return
         if self._managed_service_convergence_active(include_autostart=True):
-            # Supervision-only service children do not block idle by themselves,
-            # but a missing or uncertain manager-owned service is active
-            # convergence work until it is either replaced or explicitly
-            # suppressed by policy.
+            # Unsettled autostart convergence is work. A missing, relaunching
+            # or unproved internal service is supervision and never holds an
+            # idle Manager [MA-1.5].
             self._last_activity_ns = time.time_ns()
             return
         if self._autostart_ensure_obligation_pending():

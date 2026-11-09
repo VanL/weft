@@ -6853,11 +6853,20 @@ def test_manager_idle_exit_detaches_launched_service(
         _kill_detached_service(service)
 
 
-def test_manager_idle_shutdown_waits_for_missing_internal_service(
+def test_manager_idle_shutdown_does_not_wait_for_missing_internal_service(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A missing internal service is supervision and never holds an idle Manager.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+    [MA-1.5]. Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof
+    Task 1 (C1, owner decision 2026-11-09) inverts the earlier contract, under
+    which a missing internal service was convergence work that held the
+    Manager.
+    """
+
     db_path, _make_queue = broker_env
     spec = make_manager_spec(unique_tid, idle_timeout=0.01)
     manager = Manager(
@@ -6879,7 +6888,175 @@ def test_manager_idle_shutdown_waits_for_missing_internal_service(
 
     try:
         manager.process_once()
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "completed"
+    finally:
+        manager.cleanup()
+
+
+def test_service_cycle_does_not_reset_manager_idle_clock(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycling internal service cannot hold an idle Manager alive.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] items 5 and 7,
+    [MA-1.5]. Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof
+    Task 1 (C1). After the last real work the only events are one heartbeat
+    exit and the Manager's relaunch of it: reap, internal request, drain,
+    launch and commit. None of them moves the idle clock, and the Manager then
+    reaches idle shutdown on that clock. Named mutation: counting any of those
+    supervision events as activity.
+    """
+
+    db_path, _make_queue = broker_env
+    idle_timeout = 60.0
+    half_window_ns = int(idle_timeout / 2 * 1_000_000_000)
+    launches: list[FakeLaunchProcess] = []
+
+    def fake_launch(*_args: object, **_kwargs: object) -> FakeLaunchProcess:
+        process = FakeLaunchProcess(pid=None)
+        launches.append(process)
+        return process
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", fake_launch)
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=idle_timeout),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+
+    def heartbeat_tids() -> list[str]:
+        return [
+            tid
+            for tid, child in manager._child_processes.items()
+            if child.internal_role == INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT
+        ]
+
+    try:
+        drive_manager_until(manager, lambda: len(heartbeat_tids()) == 1)
+        (first_tid,) = heartbeat_tids()
+        idle_since = time.time_ns() - half_window_ns
+        manager._last_activity_ns = idle_since
+
+        launches[0].kill()
+        drive_manager_until(
+            manager,
+            lambda: len(heartbeat_tids()) == 1 and heartbeat_tids() != [first_tid],
+        )
+
+        assert len(launches) == 2
         assert manager.should_stop is False
+        assert manager._last_activity_ns == idle_since, (
+            "service supervision moved the idle clock by "
+            f"{(manager._last_activity_ns - idle_since) / 1e9:.3f}s"
+        )
+
+        manager._last_activity_ns = idle_since - half_window_ns - 1_000_000_000
+        manager.process_once()
+
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "completed"
+    finally:
+        manager.cleanup()
+        manager_mod._discard_live_detached_services()
+
+
+def test_manager_owned_work_excludes_only_service_requests_on_internal_lane(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """A pending service request is supervision; other internal work is owned.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+    [MA-1.5]. Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof
+    Task 1 (C1). A canonical Manager enqueues its heartbeat request at
+    construction, and drains launch one child at a time, so a service request
+    can wait pending at the idle verdict. It must not hold the Manager, while a
+    pipeline-owned internal request still must. Named mutation: counting every
+    pending internal row as owned work, or none.
+    """
+
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=60.0),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    internal_inbox = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    try:
+        assert internal_inbox.has_pending()
+        assert manager._manager_owned_work_pending() is False
+
+        internal_inbox.write(json.dumps({"taskspec": make_child_spec(size=1)}))
+
+        assert manager._manager_owned_work_pending() is True
+    finally:
+        manager.cleanup()
+
+
+def test_due_autostart_scan_alone_does_not_hold_an_idle_manager(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A due autostart scan is a check for work, not work.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+    [MA-1.5]. Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof
+    Task 1 (C1). The one-second scan can fall due between a turn's
+    convergence pass and its idle verdict; the 2026-11-09 handoff probe saw
+    that reset the idle clock every few seconds once PING traffic gave the
+    Manager unaligned wakes. Holding this turn's convergence pass reproduces
+    the ordering. Named mutation: counting ``autostart_scan_due`` at the idle
+    verdict.
+    """
+
+    db_path, _make_queue = broker_env
+    autostart_dir = tmp_path / "autostart"
+    autostart_dir.mkdir()
+    config = dict(
+        load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        )
+    )
+    config["AUTOSTART_TASKS"] = True
+    config["AUTOSTART_DIR"] = str(autostart_dir)
+    manager = Manager(
+        db_path,
+        make_manager_spec(
+            unique_tid,
+            f"manager.{unique_tid}.inbox",
+            f"manager.{unique_tid}.ctrl_in",
+            f"manager.{unique_tid}.ctrl_out",
+            idle_timeout=60.0,
+        ),
+        config=config,
+    )
+    monkeypatch.setattr(
+        manager, "_run_managed_service_convergence", lambda **_kwargs: None
+    )
+    try:
+        manager._autostart_last_scan_ns = (
+            time.time_ns() - manager._autostart_scan_interval_ns - 1
+        )
+        manager._last_activity_ns = time.time_ns() - 61_000_000_000
+        assert "autostart_scan_due" in (
+            manager._managed_service_convergence_active_reasons(
+                include_autostart=True, include_broker=False
+            )
+        )
+
+        manager.process_once()
+
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "completed"
     finally:
         manager.cleanup()
 
