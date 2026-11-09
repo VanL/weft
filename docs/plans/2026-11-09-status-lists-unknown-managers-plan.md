@@ -1050,3 +1050,16 @@ closed.
 - Gates: `ruff check .`, `ruff format --check` on touched Python files, repo
   mypy command (499 files), `bin/check-doc-paths`, `bin/check-dom15-fixtures`,
   `tests/specs`: clean.
+
+### Revision 4 cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to `8a2a96ff..15f23644` (leadership-probe retraction and the revision-3
+doc corrections). Verdict: no blocker, no actionable findings. The reviewer
+verified each retraction site is guarded by `probe.pong is None`, exact-ID
+deletion preserves unrelated peer messages, and ran 15 in-memory cases across
+the three sites and five PONG arrival orderings: leadership results and cached
+proofs matched baseline, PONGs queued during retraction were consumed and
+acknowledged, and injected deletion failures preserved decisions. All 11
+revision-4 spec blocks match the promoted specs. Broker-backed suites were not
+rerun by the reviewer. Review loop closed.
