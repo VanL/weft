@@ -33,7 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
-- [Drain SIGTERM Rung Verifies Child Launch Identity](../plans/2026-11-09-drain-escalation-identity-plan.md) makes the child SIGTERM rung signal a tracked child's PID only while its launch `(pid, create_time)` identity still matches ([MA-3], [LIVENESS.R5]).
+- [Drain SIGTERM Rung and Forced Reap Verify Child Launch Identity](../plans/2026-11-09-drain-escalation-identity-plan.md) makes the child SIGTERM rung and the forced reap signal a tracked child's PID only while its launch `(pid, create_time)` identity still matches ([MA-3], [LIVENESS.R5]).
 
 - [Stopping-Drain Survivor Exit Sentinel](../plans/2026-11-08-drain-survivor-exit-sentinel-plan.md) wakes a stopping drain that holds an exited wrapper on its live managed survivor's kernel exit source instead of a past-due PID-liveness recheck ([MA-1.6a], [MA-3]).
 

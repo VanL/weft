@@ -167,6 +167,7 @@ from weft.helpers import (
 )
 from weft.liveness import analyze_liveness
 from weft.liveness.host import inspect_host_process
+from weft.liveness.models import RuntimeLiveness
 from weft.liveness.policy import mapping_row_is_live
 
 from .admission import (
@@ -5372,19 +5373,28 @@ class Manager(ServiceTask):
                     ):  # pragma: no cover - defensive
                         pass
                 kill_issued = False
-                if child.process.is_alive():
+                # The process view can report a wrapper alive after another
+                # waiter reaped it; signal its PID only while the launch
+                # identity still verifies [MA-3], [LIVENESS.R5].
+                if (
+                    child.process.is_alive()
+                    and self._launched_child_liveness(tid, child) == "live"
+                ):
                     remaining = self._remaining_deadline(deadline)
-                    if child.process.pid is not None and remaining > 0:
+                    if remaining > 0:
                         # Split the remaining budget across the TERM wait and
                         # the SIGKILL reap wait so escalation for
                         # TERM-resistant descendants stays inside one caller
                         # deadline instead of being dropped entirely.
                         terminate_process_tree(
-                            child.process.pid,
+                            cast(int, child.process.pid),
                             timeout=remaining / 2.0,
                             kill_after=True,
                         )
-                    if child.process.is_alive():
+                    if (
+                        child.process.is_alive()
+                        and self._launched_child_liveness(tid, child) == "live"
+                    ):
                         try:
                             child.process.kill()
                             kill_issued = True
@@ -5406,6 +5416,9 @@ class Manager(ServiceTask):
                     still_alive = child.process.is_alive()
                 except (AssertionError, OSError, ValueError):
                     still_alive = True
+                if still_alive and self._launched_child_liveness(tid, child) == "stale":
+                    # The launched process is provably gone; only the view lags.
+                    still_alive = False
                 surviving_managed_pids = sorted(
                     pid for pid in managed_pids.get(tid, set()) if pid_is_live(pid)
                 )
@@ -5503,17 +5516,18 @@ class Manager(ServiceTask):
             for tid, _queue in pending:
                 self._drain_progress[tid] = _StopProgress(attempted_at=stamp)
 
-    def _child_stop_escalation_pids(
+    def _launched_child_liveness(
         self, tid: str, child: ManagedChild
-    ) -> tuple[int, ...]:
-        """Re-verify a tracked child's launch identity before signalling it.
+    ) -> RuntimeLiveness:
+        """Classify a tracked child's PID against the identity it was launched with.
 
-        The rung signals by PID, and an exited, reaped wrapper's PID may
-        already name another process. The child's PID qualifies only while
-        its ``(pid, create_time)`` matches the identity recorded when this
-        Manager launched it (its scheduler evidence); an unknown creation
-        time is not verified identity, and the drain window's forced reap
-        still covers a live child.
+        The Manager signals a child by PID, and once another waiter has reaped
+        the wrapper its PID may name another process while the process view
+        still reports it alive. The verdict is ``inspect_host_process`` on the
+        PID and the creation time recorded when this Manager launched the child
+        (its scheduler evidence): ``live`` only while they still match,
+        ``stale`` once the launched process is provably gone, and ``unknown``
+        without a recorded creation time. Only ``live`` permits a host signal.
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
         docs/specifications/07-System_Invariants.md [LIVENESS.R5]
@@ -5522,16 +5536,24 @@ class Manager(ServiceTask):
         pid = child.process.pid
         evidence = self._scheduler_residents.get(tid)
         if not isinstance(pid, int) or pid <= 0 or evidence is None:
-            return ()
+            return "unknown"
         launched = self._admission_host_processes(evidence).get(pid)
         created = None if launched is None else launched["create_time"]
-        if created is None:
+        return inspect_host_process(
+            pid, None if created is None else float(created)
+        ).evidence
+
+    def _child_stop_escalation_pids(
+        self, tid: str, child: ManagedChild
+    ) -> tuple[int, ...]:
+        """Return the child's PID for the SIGTERM rung only while it verifies.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+        """
+
+        if self._launched_child_liveness(tid, child) != "live":
             return ()
-        return (
-            (pid,)
-            if pid_is_live(pid) and pid_matches_create_time(pid, float(created))
-            else ()
-        )
+        return (cast(int, child.process.pid),)
 
     @staticmethod
     def _drain_target_live_pids(target: _ManagerDrainStopTarget) -> tuple[int, ...]:
