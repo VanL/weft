@@ -345,6 +345,9 @@ def test_undurable_receipt_publishes_before_the_turn_dispatches(
         )
     )
     weft_harness.register_tid(waiting)
+    # Keep periodic reconciliation out of the measured turn, so only the
+    # pre-dispatch barrier can publish the receipt, however long setup took.
+    manager._admission_refresh_after = time.monotonic() + 60.0
     manager.process_once()
     assert tid not in manager._scheduler_undurable
     assert waiting in manager._active_child_launches or (

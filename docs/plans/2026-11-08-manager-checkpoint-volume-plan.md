@@ -139,16 +139,18 @@ loop, with write-ahead barriers only where an external effect follows.
 | Change | Class | Theory basis |
 | --- | --- | --- |
 | Receipt, adoption, handoff ack, startup release, maintenance and retirement publish once at turn end instead of once per site | C | [WT-2a.6] the turn is the reactor's unit of work; [WT-4.1] the turn's one complete snapshot carries the same facts; intra-turn rows were superseded within the turn |
-| A crash after process creation but before the receipt's publication (pre-dispatch or turn end) leaves the launch ambiguous; the window is the rest of that turn instead of one write | C | [WT-2a.13], [WT-4.3]: the specified ambiguous-launch hold applies and the task's own snapshot ends it; never replay |
+| A crash after process creation but before the receipt's publication (pre-dispatch or turn end) leaves the launch ambiguous; the window is the rest of that turn instead of one write | D (accepted tradeoff) | Recovery availability narrows: a crash in the wider window leaves the launch held as ambiguous until its own snapshot arrives, where before a durable receipt ended the hold at once. Accepted under [WT-4.4] ("Measure; do not bake in inefficiency"): one append per custody event was the measured cost (15.7% of Manager wall, meta-row lock contention for every PG writer), and the window grows only by the rest of one turn. Custody is unchanged: [WT-2a.13]/[WT-4.3] keep the ambiguous hold, missing evidence never authorizes replay, and [MA-1.8] still requires a durable receipt or handoff before another ordinary dispatch |
 | A crash before turn end can leave a retired or acknowledged resident in the newest checkpoint | C | Successors end it by confirmed pending absence or scoped death ([MF-5]); the ack still precedes removal |
-| On PostgreSQL, a startup that is ready only by attributed usage in its receipt turn releases at its next observation, because the receipt is not yet durable there | C | Release still requires handoff or durable receipt ([MA-1.8]); the task's first snapshot, which normally releases startup, follows its connection at once |
+| On PostgreSQL, a startup that is ready only by attributed usage in its receipt turn releases at its next observation, because the receipt is not yet durable there | D (accepted tradeoff) | Readiness latency can grow for that startup: release waits for its next observation (its first snapshot, or the 1 s recheck) instead of happening in the receipt turn. Accepted under [WT-4.4]: the path needs the child connected before the Manager drains its launch result, which is rare, and its first snapshot normally follows the connection at once and releases it by handoff. The [MA-1.8] release rule (handoff or durable receipt) is kept, not weakened, to avoid the delay |
 | A failed publication retries on the next turn (one end-of-turn or pre-dispatch attempt per turn) instead of at each later site in the turn | C | [WT-4.4] no over-armoring; bounded retries on existing turns ([MA-1.8] "retries through bounded maintenance") |
 | An undurable receipt left by an earlier failure publishes before the next turn's dispatch, not only at the 1 s refresh | C (improvement) | [MA-1.8] barrier realized at the point it guards |
 | Published residents carry only the 12 custody fields; task-snapshot fields are no longer copied into the Manager checkpoint | C | [WT-4.2] one owner per fact; [ALT-WT-019]; [OBS.6] lists resident content as lineage, class, process evidence and reservation references; every reader uses only those fields |
 | The payload builder no longer deep-copies residents or the dispatch observation | N | Serialized at once on the owning thread |
 | Checkpoint rows per launch drop from at least 4 to about 2 to 3, and bytes per row by about two thirds | N (performance) | [WT-4.4] measure |
 
-No row is class D.
+Two rows are class D: the wider ambiguity window and the delayed PostgreSQL
+startup release. Each is a performance tradeoff accepted under [WT-4.4] with
+custody unchanged; neither changes code beyond the turn commit above.
 
 ## 8. Proposed Spec Delta (promoted)
 
@@ -247,7 +249,8 @@ mocks except an injected broker write failure at the state-queue boundary):
   that every field the Manager records is published.
 - `test_undurable_receipt_publishes_before_the_turn_dispatches`: a receipt
   left undurable by a failed append publishes before dispatch, and the same
-  turn dispatches the waiting request.
+  turn dispatches the waiting request. Periodic reconciliation is pushed out
+  of the measured turn, so only the pre-dispatch barrier can publish it.
 
 Existing owners rerun unchanged: `tests/core/test_admission_recovery.py`
 (including the diagnostic and checkpoint gate tests),
@@ -344,8 +347,16 @@ Proposals for the owner (not implemented):
 
 ## Review and execution record
 
-Author family: Claude (implementation agent, Track B). Cross-family review is
-the coordinator's and is recorded here by the coordinator.
+Author family: Claude (implementation agent, Track B).
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at 1f444e6f against 08c2f87b.
+Verdict: no blocker.
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | P3 | Section 7 labelled the wider crash ambiguity window and the delayed PostgreSQL startup release as C and said "No row is class D", although both narrow recovery availability or readiness latency; the citations explained preserved safety, not why the tradeoff satisfies the owner's rule. | Accepted, fixed: both rows reclassified D with the tradeoff stated under [WT-4.4] and the kept custody rules ([WT-2a.13]/[WT-4.3] ambiguous hold, [MA-1.8] release and dispatch rules); the closing line now names the two D rows. No implementation change. |
+| F2 | P3 | `test_undurable_receipt_publishes_before_the_turn_dispatches` let bootstrap start the one-second maintenance deadline before setup; slow setup let baseline `_refresh_scheduler_evidence` publish the failed receipt before dispatch, so the test's baseline RED depended on setup speed. | Accepted, fixed: the test sets `_admission_refresh_after` one minute ahead immediately before the measured turn, as the reap test does. Re-verified: fails on baseline `manager.py` (08c2f87b) at `assert tid not in manager._scheduler_undurable`; passes on the candidate. |
 
 Execution record: implementation, spec delta and tests land in one commit on
 `perf/manager-checkpoints` from base `08c2f87b`. Verification on the final
