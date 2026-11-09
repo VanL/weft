@@ -11,7 +11,7 @@ import multiprocessing
 import multiprocessing.synchronize
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -22,6 +22,7 @@ import pytest
 
 import weft.core.manager as manager_mod
 import weft.core.tasks.base as base_mod
+import weft.core.tasks.multiqueue_watcher as watcher_mod
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_manager import make_manager_spec
@@ -687,6 +688,151 @@ def test_startup_window_overlaps_but_bounds_unobserved_processes(
         _join_waiting_processes(processes)
 
 
+def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
+    startup_pg_manager: tuple[Manager, WeftTestHarness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One settlement and the launch it admits replace the waiter once [MA-1.8].
+
+    Selecting a launch makes its startup eligible for interest, so the first
+    wait after the turn that settles one startup and selects the next changes
+    the shared activity waiter once; the later launch receipt changes nothing.
+    The admitted launch's receipt is held until that wait has run, so a fast
+    receipt cannot fold the two edges together. The real SimpleBroker factory
+    is counted, not replaced. Periodic maintenance and the absence fallback are
+    held, so only the released publication can settle.
+    """
+    now_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            time_ns=lambda: now_ns,
+            monotonic=time.monotonic,
+            perf_counter=time.perf_counter,
+            sleep=time.sleep,
+        ),
+    )
+    manager, harness = startup_pg_manager
+    window = (
+        MANAGER_STARTUP_FAST_PATH_WINDOW if active_test_backend() == "postgres" else 1
+    )
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    tids = [str(source.write(body)) for _ in range(window + 1)]
+    for tid in tids:
+        harness.register_tid(tid)
+    spawn = multiprocessing.get_context("spawn")
+    publications = {tid: spawn.Event() for tid in tids}
+    releases = {tid: spawn.Event() for tid in tids}
+    started = {tid: spawn.Event() for tid in tids}
+    ready = {tid: spawn.Event() for tid in tids}
+    admitted_receipt = threading.Event()
+    processes: list[BaseProcess] = []
+
+    def launch(
+        _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
+    ) -> BaseProcess:
+        tid = child_spec.tid
+        assert tid is not None
+        process = spawn.Process(
+            target=_publish_waiting_task,
+            args=(
+                child_spec.model_dump(mode="json"),
+                kwargs["runtime_identity"].to_dict(),
+                ready[tid],
+                releases[tid],
+                publications[tid],
+                started[tid],
+            ),
+        )
+        processes.append(process)
+        process.start()
+        assert process.pid is not None
+        harness.register_pid(process.pid)
+        assert started[tid].wait(timeout=30.0)
+        if tid == tids[window]:
+            assert admitted_receipt.wait(timeout=30.0)
+        return process
+
+    def received(count: int) -> bool:
+        return (
+            all(tid in manager._child_processes for tid in tids[:count])
+            and not manager._active_child_launches
+        )
+
+    builds: list[frozenset[str]] = []
+    real_create = watcher_mod.create_activity_waiter_for_queues
+
+    def counted(queues: Sequence[Queue], *, stop_event: threading.Event) -> Any:
+        builds.append(frozenset(queue.name for queue in queues))
+        return real_create(queues, stop_event=stop_event)
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", launch)
+    monkeypatch.setattr(watcher_mod, "create_activity_waiter_for_queues", counted)
+    try:
+        manager._admission_refresh_after = time.monotonic() + 120.0
+        manager._next_inactive_probe_at = time.monotonic() + 120.0
+        drive_until(
+            lambda: received(window),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+            wait_slice=30.0,
+        )
+        manager._ensure_wait_strategy_started()
+        filled = builds[-1]
+        assert {task_state_queue_name(tid) for tid in tids[:window]} <= filled
+        assert task_state_queue_name(tids[window]) not in filled
+        builds.clear()
+
+        swapped = filled - {task_state_queue_name(tids[0])} | {
+            task_state_queue_name(tids[window])
+        }
+        publications[tids[0]].set()
+        drive_until(
+            lambda: (
+                tids[0] not in manager._startup_feedback
+                and tids[window] in manager._active_child_launches
+            ),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+            wait_slice=30.0,
+        )
+        # The wait after the settling turn runs while the admitted launch is
+        # still active: its receipt is held.
+        manager._ensure_wait_strategy_started()
+        assert builds == [swapped]
+
+        admitted_receipt.set()
+        drive_until(
+            lambda: received(window + 1),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+            wait_slice=30.0,
+        )
+        manager._ensure_wait_strategy_started()
+        assert set(manager._startup_feedback) == set(tids[1:])
+        assert builds == [swapped]
+    finally:
+        admitted_receipt.set()
+        _release_waiting_tasks(publications, releases)
+        _join_waiting_processes(processes)
+
+
 def test_startup_handoff_reactivates_pending_public_queue(manager: Manager) -> None:
     """Startup evidence makes known backlog runnable without rediscovery."""
     manager._refresh_scheduler_evidence()
@@ -763,6 +909,9 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
 
     Hold periodic reconciliation beyond the observation deadline. The real
     publication and reactor notification must own admission and exact handoff.
+    Selecting a launch makes it eligible for interest, which the next wait
+    installs [MA-1.8]. A publication that lands before that wait (and before
+    the receipt) is read only by the receipt turn's exact handoff read.
     """
     # Launch-result reconciliation also runs the missing-publication fallback,
     # independently of the periodic fence below. Freeze the Manager's wall clock
@@ -795,6 +944,7 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
     spawn = multiprocessing.get_context("spawn")
     started, before_publish = spawn.Event(), spawn.Event()
     ready, release = spawn.Event(), spawn.Event()
+    receipt_gate = threading.Event()
     processes: list[BaseProcess] = []
 
     def launch(
@@ -813,9 +963,15 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         )
         processes.append(process)
         process.start()
-        # Finish fixture import before returning the actual process receipt;
-        # publication stays held until the observer is established.
+        # Finish fixture import before returning the actual process receipt.
         assert started.wait(timeout=30.0)
+        if publish_before_interest:
+            # The child's constructor snapshot commits; the test then holds
+            # the receipt while the Manager installs interest, runs turns and
+            # waits.
+            before_publish.set()
+            assert ready.wait(timeout=30.0)
+            assert receipt_gate.wait(timeout=30.0)
         return process
 
     monkeypatch.setattr(manager_mod, "launch_task_process", launch)
@@ -827,6 +983,30 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
             reserved_queue=reserved,
             message_timestamp=request_id,
         )
+        feedback = manager._startup_feedback[str(request_id)]
+        state_name = f"weft.state.tasks.{request_id}"
+        if publish_before_interest:
+            # The publication commits before the next wait installs interest.
+            assert ready.wait(timeout=30.0)
+            assert feedback.queue is None
+        # The next wait installs interest for the selected launch, before its
+        # receipt is handled.
+        manager._ensure_wait_strategy_started()
+        assert feedback.queue is not None and feedback.queue.name == state_name
+        if publish_before_interest:
+            # The publication is visible, but only the receipt turn may read
+            # it: no cursor read or handoff happens before the receipt.
+            for _ in range(3):
+                manager.process_once()
+                manager.wait_for_activity(timeout=0.05)
+            assert str(request_id) in manager._active_child_launches
+            assert manager._startup_feedback.get(str(request_id)) is feedback
+            assert feedback.publication_id is None
+            assert (
+                manager._queue(reserved).peek_one(exact_timestamp=request_id)
+                is not None
+            )
+            receipt_gate.set()
         drive_until(
             lambda: str(request_id) in manager._child_processes,
             bool,
@@ -834,38 +1014,35 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
             wait=manager.wait_for_activity,
             timeout=30.0,
         )
-        assert str(request_id) in manager._startup_feedback
-        feedback = manager._startup_feedback[str(request_id)]
-        state_name = f"weft.state.tasks.{request_id}"
-        if not publish_before_interest:
-            manager._ensure_wait_strategy_started()
-            assert feedback.queue is not None and feedback.queue.name == state_name
-        else:
-            assert feedback.queue is None
         assert state_name not in manager._queues
-        if invalid_first:
-            # An incomplete fact must not disarm the later task publication.
-            # Observe its real notification before releasing the constructor.
-            invalid_id = manager._queue(state_name).write("{}")
+        if publish_before_interest:
+            # The receipt turn's exact handoff read settled it.
+            assert str(request_id) not in manager._startup_feedback
+        else:
+            assert manager._startup_feedback[str(request_id)] is feedback
+            if invalid_first:
+                # An incomplete fact must not disarm the later task publication.
+                # Observe its real notification before releasing the constructor.
+                invalid_id = manager._queue(state_name).write("{}")
+                drive_until(
+                    lambda: feedback.publication_id,
+                    lambda stamp: stamp == invalid_id,
+                    step=manager.process_once,
+                    wait=manager.wait_for_activity,
+                    timeout=0.5,
+                )
+                manager.process_once()
+                assert str(request_id) in manager._startup_feedback
+                assert feedback.queue is not None and feedback.queue.name == state_name
+            before_publish.set()
+            assert ready.wait(timeout=30.0)
             drive_until(
-                lambda: feedback.publication_id,
-                lambda stamp: stamp == invalid_id,
+                lambda: str(request_id) in manager._startup_feedback,
+                lambda pending: not pending,
                 step=manager.process_once,
                 wait=manager.wait_for_activity,
                 timeout=0.5,
             )
-            manager.process_once()
-            assert str(request_id) in manager._startup_feedback
-            assert feedback.queue is not None and feedback.queue.name == state_name
-        before_publish.set()
-        assert ready.wait(timeout=30.0)
-        drive_until(
-            lambda: str(request_id) in manager._startup_feedback,
-            lambda pending: not pending,
-            step=manager.process_once,
-            wait=manager.wait_for_activity,
-            timeout=0.5,
-        )
         assert processes[0].is_alive()
         assert feedback.queue is None
         assert str(request_id) not in manager._startup_feedback
@@ -927,6 +1104,7 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         assert manager._queue(reserved).peek_one(exact_timestamp=child_id) is None
         assert not manager._startup_feedback
     finally:
+        receipt_gate.set()
         before_publish.set()
         release.set()
         for process in processes:

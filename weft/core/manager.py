@@ -2254,13 +2254,18 @@ class Manager(ServiceTask):
                 queue.close()
 
     def _activity_wait_queues(self) -> list[Queue]:
-        """Include startup observation without adding a delivery route [MA-1.8]."""
+        """Include startup observation without adding a delivery route [MA-1.8].
+
+        Selecting a launch makes its startup eligible for interest and the
+        next wait installs it, so the settlement that frees a window slot and
+        the launch it admits change the activity waiter once. A publication
+        may precede that wait; cursor reads wait for the launch receipt
+        (``_has_pending_observation``), whose exact read covers it.
+        """
         queues = super()._activity_wait_queues()
         # System-STOP drain targets wake the reactor on their own snapshots [MA-3].
         queues.extend(self._drain_stop_target_queues())
         for tid, record in self._startup_observation_items():
-            if tid in self._active_child_launches:
-                continue
             if record.queue is None:
                 record.queue = self._manager_context().queue(task_state_queue_name(tid))
             queues.append(record.queue)
@@ -2271,6 +2276,9 @@ class Manager(ServiceTask):
 
         The waiter installs interest before this check. A rejected publication
         advances only the cursor, retaining interest in subsequent evidence.
+        A launch whose receipt is not yet handled is not read here: only the
+        receipt turn can consume its evidence, and its exact handoff read
+        observes any earlier publication.
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
         """
         # System-STOP drain targets: a new snapshot row is a pending turn [MA-3].
@@ -2279,7 +2287,11 @@ class Manager(ServiceTask):
         records = tuple(self._startup_observation_items())
         if any(record.publication_pending for _tid, record in records):
             return True
-        interested = [(tid, record) for tid, record in records if record.queue]
+        interested = [
+            (tid, record)
+            for tid, record in records
+            if record.queue is not None and tid not in self._active_child_launches
+        ]
         if not interested:
             return False
         try:
