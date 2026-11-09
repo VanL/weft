@@ -102,6 +102,7 @@ from weft.core.heartbeat import upsert_heartbeat
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
 from weft.core.manager_services import ManagedServiceSpec
 from weft.core.monitor.task_monitor import TaskMonitor
+from weft.core.process_exit import open_process_exit_source
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
@@ -4215,6 +4216,54 @@ def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None
         adapter.close(timeout=1.0)
 
 
+def test_manager_child_sentinel_adapter_closes_owned_exit_sources_off_wait() -> None:
+    """The adapter owns a handed-over exit source until it retires it [MA-1.6a].
+
+    Replacing or removing a watched source closes it on the observer thread,
+    between waits, so no wait holds a closed descriptor or handle; closing the
+    adapter releases a source still in use. Each source is a real kernel exit
+    source for this (live) test process, so none fires during the test.
+    """
+
+    class OwnedSource:
+        def __init__(self) -> None:
+            source = open_process_exit_source(os.getpid())
+            assert source is not None
+            self.source = source
+            self.closed = threading.Event()
+            self.closer: threading.Thread | None = None
+
+        def fileno(self) -> int:
+            return self.source.fileno()
+
+        def close(self) -> None:
+            self.closer = threading.current_thread()
+            self.source.close()
+            self.closed.set()
+
+    adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
+    first, second, third = OwnedSource(), OwnedSource(), OwnedSource()
+    try:
+        adapter.watch_exit("held", first)
+        adapter.watch_exit("held", second)
+        assert first.closed.wait(10.0), "replaced source never closed"
+        assert first.closer is adapter._thread
+        assert not second.closed.is_set()
+
+        adapter.remove("held")
+        assert second.closed.wait(10.0), "removed source never closed"
+        assert second.closer is adapter._thread
+
+        adapter.watch_exit("other", third)
+        adapter.close(timeout=10.0)
+        assert third.closed.is_set()
+    finally:
+        adapter.close(timeout=10.0)
+        for owned in (first, second, third):
+            if not owned.closed.is_set():
+                owned.source.close()
+
+
 def test_manager_child_sentinel_adapter_chunks_large_windows_waits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4293,29 +4342,42 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     class SentinelFailure(BaseException):
         pass
 
-    kill_order: list[str] = []
+    # The forced reap signals each child through the identity-verified helper
+    # with the creation time recorded at launch [MA-3], [CC-3.2]; the helper
+    # is replaced by a recorder so no host process is signalled.
+    launched = {
+        "service": (424201, 1_700_000_001.0),
+        "child": (424202, 1_700_000_002.0),
+    }
+    names = {pid: name for name, (pid, _created) in launched.items()}
+    for tid, (pid, created) in launched.items():
+        manager._scheduler_residents[tid] = {
+            "host_processes": [{"pid": pid, "create_time": created}]
+        }
+    signalled: list[tuple[str, float | None, bool]] = []
+
+    def record_verified_signal(
+        pid: int, create_time: float | None, *, kill: bool, timeout: float = 0.5
+    ) -> bool:
+        del timeout
+        signalled.append((names[pid], create_time, kill))
+        return True
 
     class LiveProcess:
-        pid = None
         exitcode = None
 
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.kill_calls = 0
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
 
         def is_alive(self) -> bool:
-            return self.kill_calls == 0
+            return True
 
         def join(self, timeout: float | None = None) -> None:
             del timeout
 
-        def kill(self) -> None:
-            self.kill_calls += 1
-            kill_order.append(self.name)
-
     failure = SentinelFailure("sentinel observer failed during shutdown")
-    service_process = LiveProcess("service")
-    process = LiveProcess("child")
+    service_process = LiveProcess(launched["service"][0])
+    process = LiveProcess(launched["child"][0])
     manager._child_processes["service"] = ManagedChild(
         process=cast(BaseProcess, service_process),
         ctrl_queue="Tservice.ctrl_in",
@@ -4325,13 +4387,16 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
         process=cast(BaseProcess, process),
         ctrl_queue="Tchild.ctrl_in",
     )
+    monkeypatch.setattr(
+        manager_mod, "terminate_verified_process_tree", record_verified_signal
+    )
     manager._child_sentinel_adapter._results.put(
         manager_mod._ManagerChildSentinelFailure(failure)
     )
     manager._child_sentinel_adapter._result_event.set()
     monkeypatch.setattr(manager, "_cleanup_children", lambda **_kwargs: False)
     monkeypatch.setattr(manager, "_send_stop_command", lambda _queue: None)
-    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
+    monkeypatch.setattr(manager, "_managed_processes_for_child", lambda _tid: {})
     monkeypatch.setattr(
         manager, "_drain_active_child_launches_for_cleanup", lambda _: None
     )
@@ -4344,14 +4409,20 @@ def test_manager_sentinel_failure_during_shutdown_still_reaps_children(
     )
     monkeypatch.setattr(manager, "_unregister_atexit_callback", lambda: None)
 
-    with pytest.raises(SentinelFailure) as exc_info:
-        manager._cleanup_task_resources(time.monotonic() + 1.0)
+    try:
+        with pytest.raises(SentinelFailure) as exc_info:
+            manager._cleanup_task_resources(time.monotonic() + 1.0)
+    finally:
+        for tid in launched:
+            manager._scheduler_residents.pop(tid, None)
 
     assert exc_info.value is failure
-    assert process.kill_calls == 1
     assert manager._child_processes == {}
-    assert kill_order == ["child"]
-    assert service_process.kill_calls == 0
+    child_created = launched["child"][1]
+    assert signalled == [
+        ("child", child_created, False),
+        ("child", child_created, True),
+    ]
 
 
 def test_manager_sentinel_failure_without_children_is_not_dropped(
@@ -8739,10 +8810,12 @@ def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
         ctrl_queue=None,
         persistent=False,
     )
+    trapping_created = process_create_time(trapping.pid)
+    assert trapping_created is not None
     monkeypatch.setattr(
         manager,
-        "_managed_pids_for_child",
-        lambda tid: {trapping.pid} if tid == "trapping" else set(),
+        "_managed_processes_for_child",
+        lambda tid: {trapping.pid: trapping_created} if tid == "trapping" else {},
     )
 
     try:
@@ -8761,7 +8834,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_managed_pid(
             trapping.wait(timeout=2.0)
 
 
-def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-214] exception
+def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8795,15 +8868,19 @@ def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # n
             except subprocess.TimeoutExpired:
                 pass
 
-        def kill(self) -> None:
-            parent.kill()
-
     manager._child_processes["tree"] = ManagedChild(
         process=cast(BaseProcess, PopenChild()),
         ctrl_queue=None,
         persistent=False,
     )
-    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda tid: set())
+    # Every launched child carries its launch identity; the forced reap
+    # signals the PID only while it verifies [MA-3], [LIVENESS.R5].
+    parent_created = process_create_time(parent.pid)
+    assert parent_created is not None
+    manager._scheduler_residents["tree"] = {
+        "host_processes": [{"pid": parent.pid, "create_time": parent_created}]
+    }
+    monkeypatch.setattr(manager, "_managed_processes_for_child", lambda tid: {})
     monkeypatch.setattr(manager, "_send_stop_command", lambda *a, **k: None)
 
     try:
@@ -8819,6 +8896,7 @@ def test_manager_terminate_children_kills_sigterm_trapping_descendant_tree(  # n
             "SIGTERM-trapping descendant survived the direct-child tree rung"
         )
     finally:
+        manager._scheduler_residents.pop("tree", None)
         for pid in (worker_pid,):
             if _process_running(pid):
                 try:
@@ -8851,24 +8929,28 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
         ctrl_queue=None,
         persistent=False,
     )
+    managed_created = 1_700_000_003.0
     monkeypatch.setattr(
         manager,
-        "_managed_pids_for_child",
-        lambda tid: {515151} if tid == "child" else set(),
+        "_managed_processes_for_child",
+        lambda tid: {515151: managed_created} if tid == "child" else {},
     )
 
-    terminated: list[tuple[int, float, bool]] = []
+    terminated: list[tuple[int, float | None, float, bool]] = []
 
     def _record_terminate(
         pid: int,
+        create_time: float | None,
         *,
+        kill: bool,
         timeout: float = 0.5,
-        kill_after: bool = True,
-    ) -> set[int]:
-        terminated.append((pid, timeout, kill_after))
-        return {pid}
+    ) -> bool:
+        terminated.append((pid, create_time, timeout, kill))
+        return True
 
-    monkeypatch.setattr(manager_mod, "terminate_process_tree", _record_terminate)
+    monkeypatch.setattr(
+        manager_mod, "terminate_verified_process_tree", _record_terminate
+    )
 
     cleanup_budget = 5.0 if os.name == "nt" else 1.0
     deadline = time.monotonic() + cleanup_budget
@@ -8876,11 +8958,12 @@ def test_manager_cleanup_terminates_reaped_child_managed_pids(
 
     assert manager._child_processes == {}
     assert len(terminated) == 1
-    assert terminated[0][0] == 515151
+    # The recorded creation time reaches the verified helper [MA-3], [CC-3.2].
+    assert terminated[0][:2] == (515151, managed_created)
     # Split budget: TERM wait consumes at most half the remaining deadline so
-    # the kill_after=True SIGKILL reap wait fits inside the same budget.
-    assert 0.0 < terminated[0][1] <= cleanup_budget / 2.0
-    assert terminated[0][2] is True
+    # the helper's SIGKILL reap wait fits inside the same budget.
+    assert 0.0 < terminated[0][2] <= cleanup_budget / 2.0
+    assert terminated[0][3] is False
 
 
 def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
@@ -8908,8 +8991,8 @@ def test_manager_cleanup_retains_live_managed_pid_after_wrapper_exit(
     )
     monkeypatch.setattr(
         manager,
-        "_managed_pids_for_child",
-        lambda tid: {515151} if tid == "child" else set(),
+        "_managed_processes_for_child",
+        lambda tid: {515151: None} if tid == "child" else {},
     )
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda pid: pid == 515151)
     monkeypatch.setattr(
@@ -8954,7 +9037,7 @@ def test_manager_child_termination_uses_one_deadline_for_multiple_children(
         )
 
     monkeypatch.setattr(manager_mod, "pid_is_live", lambda _pid: True)
-    monkeypatch.setattr(manager, "_managed_pids_for_child", lambda _tid: set())
+    monkeypatch.setattr(manager, "_managed_processes_for_child", lambda _tid: {})
     monkeypatch.setattr(manager_mod, "terminate_process_tree", lambda *a, **k: set())
     real_time = manager_mod.time
 
@@ -9640,6 +9723,323 @@ def test_collect_drain_stop_targets_names_snapshot_only_task(
         assert targets[tid].escalate is True
     finally:
         _remove_drain_snapshots(make_queue, (tid,))
+
+
+@pytest.mark.parametrize("reused", [True, False], ids=["reused-pid", "same-process"])
+def test_drain_sigterm_rung_signals_a_child_pid_only_while_its_identity_matches(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    reused: bool,
+) -> None:
+    """The child SIGTERM rung re-verifies the launch identity first [MA-3].
+
+    The rung signals a tracked child by PID. Once a wrapper has exited and been
+    reaped, that PID may name another process, so host SIGTERM applies only
+    while the PID's ``(pid, create_time)`` still matches the identity the
+    Manager recorded when it launched the child (LIVENESS.R5). A live process
+    recorded with an older creation time stands in for the reused PID; the
+    same-process case shows the rung still signals the child it launched.
+    """
+
+    manager, _make_queue = manager_setup
+    tid = str(time.time_ns())
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(process.pid)
+        assert created is not None
+        manager._scheduler_residents[tid] = {
+            "host_processes": [
+                {
+                    "pid": process.pid,
+                    "create_time": created - 5.0 if reused else created,
+                }
+            ]
+        }
+        child = ManagedChild(
+            process=cast(BaseProcess, SimpleNamespace(pid=process.pid)),
+            ctrl_queue=f"T{tid}.ctrl_in",
+        )
+        escalation_ns = int(
+            (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS + 1.0) * 1_000_000_000
+        )
+        manager._drain_progress[tid] = manager_mod._StopProgress(
+            attempted_at=time.monotonic_ns() - escalation_ns
+        )
+
+        manager._signal_children_to_stop({tid: child})
+
+        assert manager._drain_progress[tid].term_attempted is True
+        if reused:
+            assert process.poll() is None, "signalled a process it never launched"
+        else:
+            process.wait(timeout=15.0)
+    finally:
+        manager._scheduler_residents.pop(tid, None)
+        manager._drain_progress.pop(tid, None)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=15.0)
+
+
+def test_drain_sigterm_rung_reaches_a_child_this_manager_launched(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """A real launch records the identity the child SIGTERM rung verifies [MA-3].
+
+    The rung signals a tracked child only when its launch-time
+    ``(pid, create_time)`` still matches, so a launch commit that stopped
+    recording that identity would silently disable the rung. A child launched
+    through the Manager's own path must still receive SIGTERM and exit.
+    """
+
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    try:
+        make_queue(manager._queue_names["inbox"]).write(
+            json.dumps(
+                {
+                    "name": "escalation-target",
+                    "spec": {
+                        "type": "command",
+                        "process_target": sys.executable,
+                        "args": ["-c", "import time; time.sleep(60)"],
+                    },
+                }
+            )
+        )
+        drive_manager_until(
+            manager, lambda: bool(manager._user_work_children()), timeout=30.0
+        )
+        tid, child = next(iter(manager._user_work_children().items()))
+        escalation_ns = int(
+            (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS + 1.0) * 1_000_000_000
+        )
+        manager._drain_progress[tid] = manager_mod._StopProgress(
+            attempted_at=time.monotonic_ns() - escalation_ns
+        )
+
+        manager._signal_children_to_stop({tid: child})
+
+        assert manager._drain_progress[tid].term_attempted is True
+        child.process.join(timeout=30.0)
+        assert not _process_running(child.process.pid)
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+class _ReapedWrapperView:
+    """The Manager's handle on a wrapper that another waiter reaped.
+
+    Once ``psutil.wait_procs`` (the SIGTERM rung's wait) reaps a direct child,
+    ``multiprocessing`` gets ``ECHILD``: ``is_alive()`` keeps returning True
+    and ``exitcode`` stays None. ``pid`` here is the PID it remembers, now held
+    by another process.
+    """
+
+    exitcode = None
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+
+
+def test_forced_reap_never_kills_a_reused_child_pid(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """The forced reap re-verifies a tracked child's launch identity [MA-3].
+
+    At drain-window expiry and in final cleanup the Manager force-reaps a
+    tracked child its process view still reports alive. That view lags once
+    another waiter reaped the wrapper, so the PID may already name another
+    process. Host forced reap applies only while ``(pid, create_time)``
+    matches the identity recorded at launch (LIVENESS.R5); a mismatch is
+    proof the launched wrapper is gone, so it is not reported as a survivor.
+    """
+
+    manager, _make_queue = manager_setup
+    tid = str(time.time_ns())
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(victim.pid)
+        assert created is not None
+        manager._scheduler_residents[tid] = {
+            "host_processes": [{"pid": victim.pid, "create_time": created - 5.0}]
+        }
+        manager._child_processes[tid] = ManagedChild(
+            process=cast(BaseProcess, _ReapedWrapperView(victim.pid)),
+            ctrl_queue=f"T{tid}.ctrl_in",
+        )
+
+        manager._terminate_children(time.monotonic() + 2.0, tids=(tid,))
+
+        assert tid not in manager._child_processes
+        assert victim.poll() is None, "force-reaped a process it never launched"
+        assert manager._last_child_cleanup_survivors == ()
+    finally:
+        manager._scheduler_residents.pop(tid, None)
+        manager._child_processes.pop(tid, None)
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait(timeout=15.0)
+
+
+def test_forced_reap_still_kills_a_child_this_manager_launched(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """A real launch that ignores STOP is still force-reaped [MA-3], [IMPL.10].
+
+    The forced reap now checks the launch identity first; a child launched
+    through the Manager's own path must still verify and be killed inside
+    the cleanup deadline. Its STOP goes to a queue it does not read, so only
+    the forced reap can end it.
+    """
+
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    try:
+        make_queue(manager._queue_names["inbox"]).write(
+            json.dumps(
+                {
+                    "name": "forced-reap-target",
+                    "spec": {
+                        "type": "command",
+                        "process_target": sys.executable,
+                        "args": ["-c", "import time; time.sleep(60)"],
+                    },
+                }
+            )
+        )
+        drive_manager_until(
+            manager, lambda: bool(manager._user_work_children()), timeout=30.0
+        )
+        tid, child = next(iter(manager._user_work_children().items()))
+        pid = child.process.pid
+        child.ctrl_queue = f"T{tid}.unread"
+
+        manager._terminate_children(time.monotonic() + 4.0, tids=(tid,))
+
+        assert tid not in manager._child_processes
+        assert not _process_running(pid)
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
+class _ExitedWrapper:
+    """A tracked wrapper that has exited; only its managed processes remain."""
+
+    pid = None
+    exitcode = 0
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+
+
+def test_forced_reap_never_kills_a_managed_pid_reused_during_the_wait(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed PIDs are re-verified right before the forced reap signals [MA-3].
+
+    The forced reap collects a child's managed processes from its task
+    snapshot, waits up to half its deadline for a graceful exit, then signals
+    them. A managed process can exit during that wait and its PID be reused,
+    so the reap signals a PID only while the creation time recorded for it
+    still matches (LIVENESS.R5). Collection is stubbed to report the identity
+    as it verified before the wait; the process now holding that PID was
+    created later, and must neither be signalled nor reported as a survivor.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns())
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(victim.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(
+                _drain_snapshot_payload(tid, pid=victim.pid, created=created - 5.0)
+            )
+        )
+        monkeypatch.setattr(
+            manager_mod,
+            "live_host_processes_from_handle",
+            lambda handle: handle.scoped_host_processes(),
+        )
+        manager._child_processes[tid] = ManagedChild(
+            process=cast(BaseProcess, _ExitedWrapper()),
+            ctrl_queue=f"T{tid}.ctrl_in",
+        )
+
+        manager._terminate_children(time.monotonic() + 2.0, tids=(tid,))
+
+        assert tid not in manager._child_processes
+        assert victim.poll() is None, "force-reaped a reused managed PID"
+        assert manager._last_child_cleanup_survivors == ()
+    finally:
+        manager._child_processes.pop(tid, None)
+        _remove_drain_snapshots(make_queue, (tid,))
+        if victim.poll() is None:
+            victim.kill()
+            victim.wait(timeout=15.0)
+
+
+def test_forced_reap_still_kills_a_live_managed_survivor(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """A managed process that is still the one recorded is force-reaped [MA-3].
+
+    Positive control for the re-verification: the task snapshot names a real
+    live process with its real creation time, the wrapper has exited, and the
+    forced reap must still kill that process inside its deadline.
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns())
+    survivor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(survivor.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid, pid=survivor.pid, created=created))
+        )
+        manager._child_processes[tid] = ManagedChild(
+            process=cast(BaseProcess, _ExitedWrapper()),
+            ctrl_queue=f"T{tid}.ctrl_in",
+        )
+
+        manager._terminate_children(time.monotonic() + 2.0, tids=(tid,))
+
+        assert survivor.wait(timeout=15.0) is not None
+        assert manager._last_child_cleanup_survivors == ()
+    finally:
+        manager._child_processes.pop(tid, None)
+        _remove_drain_snapshots(make_queue, (tid,))
+        if survivor.poll() is None:
+            survivor.kill()
+            survivor.wait(timeout=15.0)
 
 
 def test_first_stop_rung_is_one_broadcast_over_pending_targets(
@@ -11698,15 +12098,18 @@ def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
     )
     manager._child_processes["child"] = child
     managed_pid_live = [True]
+    # The hold watches the managed process's exit, so it must be a real
+    # process; only its reported liveness is scripted.
+    managed_pid = os.getpid()
     monkeypatch.setattr(
         manager,
         "_managed_pids_for_child",
-        lambda tid: {515151} if tid == "child" else set(),
+        lambda tid: {managed_pid} if tid == "child" else set(),
     )
     monkeypatch.setattr(
         manager_mod,
         "pid_is_live",
-        lambda pid: pid == 515151 and managed_pid_live[0],
+        lambda pid: pid == managed_pid and managed_pid_live[0],
     )
 
     assert manager._cleanup_children(retain_managed_survivors=True) is False
@@ -11715,6 +12118,104 @@ def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
     managed_pid_live[0] = False
     assert manager._cleanup_children(retain_managed_survivors=True) is True
     assert manager._child_processes == {}
+
+
+class _ShiftedClock:
+    """The real ``time`` module with an adjustable wall-clock offset."""
+
+    def __init__(self) -> None:
+        self.offset_ns = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def time_ns(self) -> int:
+        return time.time_ns() + self.offset_ns
+
+
+def test_stopping_drain_survivor_hold_publishes_no_due_clock_and_wakes_on_exit(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held wrapper's survivor wakes the drain; nothing spins meanwhile.
+
+    The stopping drain holds an exited wrapper while a managed process its
+    task snapshot names is live. Long after the wrapper's own sentinel fired,
+    that hold must publish no due child clock (a zero wait timeout is a busy
+    spin), and the survivor's exit must wake the reactor through the
+    child-sentinel adapter rather than a polling deadline ([WT-4.3],
+    [ALT-WT-002]). The Manager's wall clock is shifted, not slept.
+
+    Spec: [MA-1.6a], [MA-3]
+    """
+
+    manager, make_queue = manager_setup
+    clock = _ShiftedClock()
+    monkeypatch.setattr(manager_mod, "time", clock)
+    tid = str(time.time_ns())
+    survivor = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    wrapper = multiprocessing.get_context("spawn").Process(target=os._exit, args=(0,))
+    try:
+        created = process_create_time(survivor.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid, pid=survivor.pid, created=created))
+        )
+        # The task published its terminal proof; only its descendant remains.
+        make_queue(f"T{tid}.ctrl_out").write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "task",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            )
+        )
+        wrapper.start()
+        child = ManagedChild(
+            wrapper,
+            f"T{tid}.ctrl_in",
+            ctrl_out_queue=f"T{tid}.ctrl_out",
+            launched_ns=time.time_ns(),
+        )
+        manager._child_processes[tid] = child
+        manager._register_child_sentinel(tid, child)
+        manager._begin_shutdown_drain(
+            message_id=None,
+            reason="test",
+            event=None,
+            completion_event="manager_stop_drained",
+        )
+
+        assert manager._child_sentinel_adapter.wait(15.0), "wrapper exit not observed"
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert manager._child_processes == {tid: child}
+
+        clock.offset_ns = int(10 * MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1e9)
+        wait_timeout = manager.next_wait_timeout()
+        assert wait_timeout is not None and wait_timeout > 0, wait_timeout
+        clock.offset_ns = 0
+
+        assert survivor.stdin is not None
+        survivor.stdin.close()
+        assert manager._child_sentinel_adapter.wait(15.0), "survivor exit not observed"
+        survivor.wait(timeout=15.0)
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+
+        assert manager._child_processes == {}
+        assert manager.should_stop is True
+    finally:
+        if survivor.poll() is None:
+            survivor.kill()
+            survivor.wait(timeout=15.0)
+        wrapper.join(timeout=15.0)
+        _remove_drain_snapshots(make_queue, (tid,))
 
 
 def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(

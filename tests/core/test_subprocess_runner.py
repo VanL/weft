@@ -26,6 +26,7 @@ from typing import Any, cast
 import psutil
 import pytest
 
+from weft.core import process_exit
 from weft.core.runners import subprocess_runner
 from weft.core.runners.outcome import RunnerOutcome
 from weft.core.runners.subprocess_runner import (
@@ -193,7 +194,7 @@ def pidfd_binding(
 ) -> None:
     """Exercise existing real supervision proofs with either Linux binding."""
     if request.param:
-        monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+        monkeypatch.setattr(process_exit, "os", _WithoutPidfd(os))
 
 
 def _patch_native_pidfd(
@@ -211,10 +212,10 @@ def _patch_native_pidfd(
         assert name is None and use_errno
         return SimpleNamespace(pidfd_open=native)
 
-    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+    monkeypatch.setattr(process_exit, "os", _WithoutPidfd(os))
     monkeypatch.setattr(
-        subprocess_runner,
+        process_exit,
         "get_ctypes",
         lambda: _Forwarding(ctypes, CDLL=load_library),
     )
@@ -245,6 +246,10 @@ class _ObservedOverlapped:
 
 def _patch_os(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
     monkeypatch.setattr(subprocess_runner, "os", _Forwarding(os, **overrides))
+
+
+def _patch_exit_source_os(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    monkeypatch.setattr(process_exit, "os", _Forwarding(os, **overrides))
 
 
 _WINDOWS_RUNNER: Any = subprocess_runner
@@ -2533,7 +2538,7 @@ def test_pre_reaped_child_never_opens_reusable_pid_exit_source(
         def forbidden(_pid: int) -> Any:
             raise AssertionError("looked up an already-reaped PID")
 
-        monkeypatch.setattr(subprocess_runner, "_open_child_exit_source", forbidden)
+        monkeypatch.setattr(subprocess_runner, "open_process_exit_source", forbidden)
         outcome = _supervise_real_process(process, timeout=None)
         assert outcome.stdout == "reaped\n"
         _assert_owned_pipes_released(process)
@@ -2551,15 +2556,15 @@ def test_linux_pidfd_requirement_explains_capability_failure(
     def denied(_pid: int) -> int:
         raise failure
 
-    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    _patch_os(monkeypatch, pidfd_open=denied)
+    monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+    _patch_exit_source_os(monkeypatch, pidfd_open=denied)
 
     def forbidden() -> Any:
         raise AssertionError("retried Python syscall failure through libc")
 
-    monkeypatch.setattr(subprocess_runner, "get_ctypes", forbidden)
+    monkeypatch.setattr(process_exit, "get_ctypes", forbidden)
     with pytest.raises(RuntimeError, match=r"Linux 5\.3.*pidfd_open") as raised:
-        subprocess_runner._open_child_exit_source(os.getpid())
+        process_exit.open_process_exit_source(os.getpid())
     assert raised.value.__cause__ is failure
     assert str(failure) in str(raised.value)
 
@@ -2576,11 +2581,11 @@ def test_linux_pidfd_requirement_explains_missing_bindings(
             raise failure
         return _Forwarding(ctypes, CDLL=lambda *args, **kwargs: object())
 
-    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
-    monkeypatch.setattr(subprocess_runner, "get_ctypes", unavailable)
+    monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+    monkeypatch.setattr(process_exit, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(process_exit, "get_ctypes", unavailable)
     with pytest.raises(RuntimeError, match="libc.*pidfd_open") as raised:
-        subprocess_runner._open_child_exit_source(1)
+        process_exit.open_process_exit_source(1)
     if missing == "ctypes":
         assert raised.value.__cause__ is failure
     else:
@@ -2594,15 +2599,15 @@ def test_linux_libc_pidfd_converts_native_errno(
     """A native -1 preserves gone-child, capability, and resource semantics."""
     _patch_native_pidfd(monkeypatch, code=code)
     if code == errno.ESRCH:
-        assert subprocess_runner._open_child_exit_source(os.getpid()) is None
+        assert process_exit.open_process_exit_source(os.getpid()) is None
     elif code == errno.EPERM:
         with pytest.raises(RuntimeError) as raised:
-            subprocess_runner._open_child_exit_source(os.getpid())
+            process_exit.open_process_exit_source(os.getpid())
         assert isinstance(raised.value.__cause__, PermissionError)
         assert raised.value.__cause__.errno == code
     else:
         with pytest.raises(OSError) as failed:
-            subprocess_runner._open_child_exit_source(os.getpid())
+            process_exit.open_process_exit_source(os.getpid())
         assert failed.value.errno == code
 
 
@@ -2615,15 +2620,15 @@ def test_linux_libc_loader_error_is_not_a_syscall_capability_failure(
     def denied(*args: Any, **kwargs: Any) -> Any:
         raise failure
 
-    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    monkeypatch.setattr(subprocess_runner, "os", _WithoutPidfd(os))
+    monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+    monkeypatch.setattr(process_exit, "os", _WithoutPidfd(os))
     monkeypatch.setattr(
-        subprocess_runner,
+        process_exit,
         "get_ctypes",
         lambda: _Forwarding(ctypes, CDLL=denied),
     )
     with pytest.raises(OSError) as raised:
-        subprocess_runner._open_child_exit_source(os.getpid())
+        process_exit.open_process_exit_source(os.getpid())
     assert raised.value is failure
 
 
@@ -2635,18 +2640,16 @@ def test_linux_pidfd_accepts_descriptor_zero(
     if binding == "libc":
         _patch_native_pidfd(monkeypatch, descriptor=0)
     else:
-        monkeypatch.setattr(
-            subprocess_runner, "sys", _Forwarding(sys, platform="linux")
-        )
-        _patch_os(monkeypatch, pidfd_open=lambda pid: 0)
+        monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+        _patch_exit_source_os(monkeypatch, pidfd_open=lambda pid: 0)
 
         def forbidden() -> Any:
             raise AssertionError("loaded libc despite a Python pidfd wrapper")
 
-        monkeypatch.setattr(subprocess_runner, "get_ctypes", forbidden)
+        monkeypatch.setattr(process_exit, "get_ctypes", forbidden)
     closed: list[int] = []
-    monkeypatch.setattr(subprocess_runner.os, "close", closed.append)
-    source = subprocess_runner._open_child_exit_source(os.getpid())
+    monkeypatch.setattr(process_exit.os, "close", closed.append)
+    source = process_exit.open_process_exit_source(os.getpid())
     assert source is not None
     assert source.fileno() == 0
     source.close()
@@ -2746,13 +2749,13 @@ def test_linux_pidfd_preserves_exit_and_noncapability_errors(
     def failed(_pid: int) -> int:
         raise failure
 
-    monkeypatch.setattr(subprocess_runner, "sys", _Forwarding(sys, platform="linux"))
-    _patch_os(monkeypatch, pidfd_open=failed)
+    monkeypatch.setattr(process_exit, "sys", _Forwarding(sys, platform="linux"))
+    _patch_exit_source_os(monkeypatch, pidfd_open=failed)
     if code == errno.ESRCH:
-        assert subprocess_runner._open_child_exit_source(os.getpid()) is None
+        assert process_exit.open_process_exit_source(os.getpid()) is None
     else:
         with pytest.raises(OSError) as raised:
-            subprocess_runner._open_child_exit_source(os.getpid())
+            process_exit.open_process_exit_source(os.getpid())
         assert raised.value is failure
 
 
@@ -2763,7 +2766,7 @@ def test_live_child_exit_source_is_registered_before_first_reaping_poll(
 ) -> None:
     """A live child cannot fall between the exit watch and its owning poll."""
     process = open_supervised_process([sys.executable, "-c", "print('live')"])
-    real_source = subprocess_runner._open_child_exit_source
+    real_source = process_exit.open_process_exit_source
     real_poll = process.poll
     opened = False
 
@@ -2777,7 +2780,7 @@ def test_live_child_exit_source_is_registered_before_first_reaping_poll(
         assert opened, "child polled before exit-source acquisition"
         return real_poll()
 
-    monkeypatch.setattr(subprocess_runner, "_open_child_exit_source", watched)
+    monkeypatch.setattr(subprocess_runner, "open_process_exit_source", watched)
     monkeypatch.setattr(process, "poll", polled)
     try:
         assert _supervise_real_process(process, timeout=None).stdout == "live\n"

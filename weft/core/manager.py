@@ -143,6 +143,7 @@ from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
+from weft.core.process_exit import ProcessExitSource, open_process_exit_source
 from weft.core.task_evidence import parse_task_observation
 from weft.core.task_state import (
     latest_task_state_rows,
@@ -164,9 +165,11 @@ from weft.helpers import (
     process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
+    terminate_verified_process_tree,
 )
 from weft.liveness import analyze_liveness
 from weft.liveness.host import inspect_host_process
+from weft.liveness.models import RuntimeLiveness
 from weft.liveness.policy import mapping_row_is_live
 
 from .admission import (
@@ -291,6 +294,8 @@ class ManagedChild:
     sentinel_observed_ns: int = 0
     terminal_proof_observed: bool = False
     """The reap's proof read found task-owned terminal proof [MA-1.6a]."""
+    survivor_hold_pid: int = 0
+    """Live managed process a stopping drain holds this exited wrapper for."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,7 +436,14 @@ class _ManagerChildSentinelAdapter:
     Manager reactor remains the sole owner of Process objects, registry
     mutation, liveness checks, and reaping.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+    A TID's input is its child's process sentinel, or a process-exit source
+    handed over by ``watch_exit`` for a managed process the stopping drain
+    holds that child for. The adapter owns such a source: replacement,
+    removal or close retires it, and the observer thread closes a retired
+    source only between waits, so no wait ever holds a closed descriptor or
+    handle.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
     """
 
     def __init__(self, notify_activity: Callable[[], None]) -> None:
@@ -441,6 +453,8 @@ class _ManagerChildSentinelAdapter:
         self._notify_activity = notify_activity
         self._lock = threading.Lock()
         self._membership: dict[str, int] = {}
+        self._owned_sources: dict[str, ProcessExitSource] = {}
+        self._retired_sources: list[ProcessExitSource] = []
         self._suppressed: set[tuple[str, int]] = set()
         self._wake_token_pending = False
         self._stopping = False
@@ -498,7 +512,26 @@ class _ManagerChildSentinelAdapter:
                 return
             if previous is not None:
                 self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
             self._membership[tid] = sentinel
+            self._wake_observer_locked()
+
+    def watch_exit(self, tid: str, source: ProcessExitSource) -> None:
+        """Make an owned process-exit source this TID's input, replacing the last.
+
+        The adapter takes ownership of ``source`` and closes it once it is
+        replaced or removed, or when the adapter closes.
+        """
+        with self._lock:
+            if self._stopping or self._closed:
+                source.close()
+                return
+            previous = self._membership.get(tid)
+            if previous is not None:
+                self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
+            self._owned_sources[tid] = source
+            self._membership[tid] = source.fileno()
             self._wake_observer_locked()
 
     def remove(self, tid: str) -> None:
@@ -508,9 +541,21 @@ class _ManagerChildSentinelAdapter:
             if previous is None:
                 return
             self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
             if self._stopping or self._closed:
                 return
             self._wake_observer_locked()
+
+    def _retire_owned_source_locked(self, tid: str) -> None:
+        source = self._owned_sources.pop(tid, None)
+        if source is not None:
+            self._retired_sources.append(source)
+
+    def _close_retired_sources(self) -> None:
+        with self._lock:
+            retired, self._retired_sources = self._retired_sources, []
+        for source in retired:
+            source.close()
 
     def drain(
         self,
@@ -551,8 +596,13 @@ class _ManagerChildSentinelAdapter:
             if self._closed:
                 return
             self._closed = True
+            owned = list(self._owned_sources.values())
+            self._owned_sources.clear()
         self._recv_conn.close()
         self._send_conn.close()
+        for source in owned:
+            source.close()
+        self._close_retired_sources()
         for result in self.drain():
             if isinstance(result, _ManagerChildSentinelFailure):
                 raise result.error
@@ -575,6 +625,8 @@ class _ManagerChildSentinelAdapter:
     def _observe(self) -> None:
         try:
             while True:
+                # Between waits: no wait holds a retired source.
+                self._close_retired_sources()
                 with self._lock:
                     if self._stopping:
                         return
@@ -5236,7 +5288,11 @@ class Manager(ServiceTask):
     ) -> bool:
         """Reap exited wrappers without abandoning shutdown-owned descendants.
 
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        ``retain_managed_survivors`` (the stopping drain) holds an exited
+        wrapper while a managed process it names is live; see
+        ``_hold_for_managed_survivor``.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
         """
 
         autostart_child_exited = False
@@ -5245,10 +5301,11 @@ class Manager(ServiceTask):
             if deadline is not None and self._remaining_deadline(deadline) <= 0:
                 break
             if self._child_has_exited(child):
-                if retain_managed_survivors and any(
-                    pid_is_live(pid) for pid in self._managed_pids_for_child(tid)
+                if retain_managed_survivors and self._hold_for_managed_survivor(
+                    tid, child
                 ):
                     continue
+                child.survivor_hold_pid = 0
                 if child.terminal_retry_after_ns > time.time_ns():
                     continue
                 # Consume this retry before proof grace can publish its own deadline.
@@ -5350,6 +5407,49 @@ class Manager(ServiceTask):
             self._clear_admission_retry()
         return child_exited
 
+    def _hold_for_managed_survivor(self, tid: str, child: ManagedChild) -> bool:
+        """Hold an exited wrapper while a managed process it names is live.
+
+        The stopping drain keeps custody of the wrapper until every managed
+        process in its task snapshot has exited. The hold waits on one live
+        survivor's kernel exit source, handed to the child-sentinel adapter as
+        this TID's input, so that survivor's exit wakes the reactor; the next
+        evaluation then holds for another live survivor or releases the
+        wrapper. A held wrapper publishes no child deadline. If no exit source
+        can be opened, the hold is logged and bounded by the drain window: no
+        polling deadline replaces the missing sentinel ([WT-4.3],
+        [ALT-WT-002]).
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
+        """
+
+        live = sorted(
+            pid for pid in self._managed_pids_for_child(tid) if pid_is_live(pid)
+        )
+        if child.survivor_hold_pid in live:
+            return True
+        for pid in live:
+            try:
+                source = open_process_exit_source(pid)
+            except (OSError, RuntimeError):
+                logger.warning(
+                    "Manager %s cannot watch managed process %s of exited child "
+                    "%s; the drain window bounds the hold",
+                    self.tid,
+                    pid,
+                    tid,
+                    exc_info=True,
+                )
+                child.survivor_hold_pid = pid
+                return True
+            if source is None:
+                # It exited after the liveness check.
+                continue
+            self._child_sentinel_adapter.watch_exit(tid, source)
+            child.survivor_hold_pid = pid
+            return True
+        return False
+
     def _terminate_children(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         self,
         deadline: float,
@@ -5376,8 +5476,10 @@ class Manager(ServiceTask):
             }
 
         children: dict[str, ManagedChild] = in_scope()
-        managed_pids: dict[str, set[int]] = {
-            tid: self._managed_pids_for_child(tid) for tid in children
+        # Each managed PID keeps the creation time recorded for it, so it can
+        # be re-verified right before the signal after the graceful wait.
+        managed: dict[str, dict[int, float | None]] = {
+            tid: self._managed_processes_for_child(tid) for tid in children
         }
 
         observer_failure: BaseException | None = None
@@ -5394,9 +5496,7 @@ class Manager(ServiceTask):
         self._cleanup_children(deadline=deadline)
         children.update(in_scope())
         for tid in in_scope():
-            managed_pids.setdefault(tid, set()).update(
-                self._managed_pids_for_child(tid)
-            )
+            managed.setdefault(tid, {}).update(self._managed_processes_for_child(tid))
 
         if not children:
             if observer_failure is not None:
@@ -5421,9 +5521,7 @@ class Manager(ServiceTask):
             )
         children.update(in_scope())
         for tid in children:
-            managed_pids.setdefault(tid, set()).update(
-                self._managed_pids_for_child(tid)
-            )
+            managed.setdefault(tid, {}).update(self._managed_processes_for_child(tid))
 
         survivors: list[dict[str, Any]] = []
         for tid, child in list(children.items()):
@@ -5443,49 +5541,66 @@ class Manager(ServiceTask):
                     ):  # pragma: no cover - defensive
                         pass
                 kill_issued = False
-                if child.process.is_alive():
+                # Signal only the exact process this Manager launched, through
+                # the instance verified against its launch identity; the
+                # helper's wait leaves the wrapper's reap to multiprocessing
+                # [MA-3], [LIVENESS.R5], [CC-3.2].
+                pid = child.process.pid
+                created = self._launched_child_create_time(tid, child)
+                if child.process.is_alive() and isinstance(pid, int):
                     remaining = self._remaining_deadline(deadline)
-                    if child.process.pid is not None and remaining > 0:
+                    if remaining > 0:
                         # Split the remaining budget across the TERM wait and
                         # the SIGKILL reap wait so escalation for
                         # TERM-resistant descendants stays inside one caller
                         # deadline instead of being dropped entirely.
-                        terminate_process_tree(
-                            child.process.pid,
-                            timeout=remaining / 2.0,
-                            kill_after=True,
+                        terminate_verified_process_tree(
+                            pid, created, kill=False, timeout=remaining / 2.0
                         )
                     if child.process.is_alive():
-                        try:
-                            child.process.kill()
-                            kill_issued = True
-                        except OSError:  # pragma: no cover - defensive
-                            pass
-                managed_pids.setdefault(tid, set()).update(
-                    self._managed_pids_for_child(tid)
+                        kill_issued = terminate_verified_process_tree(
+                            pid,
+                            created,
+                            kill=True,
+                            timeout=self._remaining_deadline(deadline),
+                        )
+                managed.setdefault(tid, {}).update(
+                    self._managed_processes_for_child(tid)
                 )
-                for pid in managed_pids[tid]:
+                for managed_pid, managed_created in managed[tid].items():
                     remaining = self._remaining_deadline(deadline)
                     if remaining <= 0:
                         break
-                    terminate_process_tree(
-                        pid,
+                    # Collected before the graceful wait: the process may have
+                    # exited and its PID been reused since, so the helper
+                    # verifies the recorded identity at signal time [MA-3].
+                    terminate_verified_process_tree(
+                        managed_pid,
+                        managed_created,
+                        kill=False,
                         timeout=remaining / 2.0,
-                        kill_after=True,
                     )
                 try:
                     still_alive = child.process.is_alive()
                 except (AssertionError, OSError, ValueError):
                     still_alive = True
+                if still_alive and self._launched_child_liveness(tid, child) == "stale":
+                    # The launched process is provably gone; only the view
+                    # lags (the SIGTERM rung's psutil wait may have reaped it).
+                    still_alive = False
                 surviving_managed_pids = sorted(
-                    pid for pid in managed_pids.get(tid, set()) if pid_is_live(pid)
+                    managed_pid
+                    for managed_pid, managed_created in managed.get(tid, {}).items()
+                    if pid_is_live(managed_pid)
+                    and inspect_host_process(managed_pid, managed_created).evidence
+                    != "stale"
                 )
                 if still_alive or surviving_managed_pids:
                     survivors.append(
                         {
                             "tid": tid,
                             "pid": child.process.pid,
-                            "managed_pids": sorted(managed_pids.get(tid, set())),
+                            "managed_pids": sorted(managed.get(tid, {})),
                             "surviving_managed_pids": surviving_managed_pids,
                             "kill_issued": kill_issued,
                         }
@@ -5534,7 +5649,7 @@ class Manager(ServiceTask):
             (
                 tid,
                 child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-                partial(self._child_stop_escalation_pids, child),
+                partial(self._child_stop_escalation_pids, tid, child),
             )
             for tid, child in children.items()
         ]
@@ -5574,10 +5689,57 @@ class Manager(ServiceTask):
             for tid, _queue in pending:
                 self._drain_progress[tid] = _StopProgress(attempted_at=stamp)
 
-    @staticmethod
-    def _child_stop_escalation_pids(child: ManagedChild) -> tuple[int, ...]:
+    def _launched_child_liveness(
+        self, tid: str, child: ManagedChild
+    ) -> RuntimeLiveness:
+        """Classify a tracked child's PID against the identity it was launched with.
+
+        The Manager signals a child by PID, and once another waiter has reaped
+        the wrapper its PID may name another process while the process view
+        still reports it alive. The verdict is ``inspect_host_process`` on the
+        PID and the creation time recorded when this Manager launched the child
+        (its scheduler evidence): ``live`` only while they still match,
+        ``stale`` once the launched process is provably gone, and ``unknown``
+        without a recorded creation time. Only ``live`` permits a host signal.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+        docs/specifications/07-System_Invariants.md [LIVENESS.R5]
+        """
+
         pid = child.process.pid
-        return (pid,) if isinstance(pid, int) and pid > 0 else ()
+        if not isinstance(pid, int) or pid <= 0:
+            return "unknown"
+        return inspect_host_process(
+            pid, self._launched_child_create_time(tid, child)
+        ).evidence
+
+    def _launched_child_create_time(
+        self, tid: str, child: ManagedChild
+    ) -> float | None:
+        """Return the creation time recorded for the child's PID at launch.
+
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+        """
+
+        pid = child.process.pid
+        evidence = self._scheduler_residents.get(tid)
+        if not isinstance(pid, int) or evidence is None:
+            return None
+        launched = self._admission_host_processes(evidence).get(pid)
+        created = None if launched is None else launched["create_time"]
+        return None if created is None else float(created)
+
+    def _child_stop_escalation_pids(
+        self, tid: str, child: ManagedChild
+    ) -> tuple[int, ...]:
+        """Return the child's PID for the SIGTERM rung only while it verifies.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
+        """
+
+        if self._launched_child_liveness(tid, child) != "live":
+            return ()
+        return (cast(int, child.process.pid),)
 
     @staticmethod
     def _drain_target_live_pids(target: _ManagerDrainStopTarget) -> tuple[int, ...]:
@@ -8759,14 +8921,21 @@ class Manager(ServiceTask):
         }
         return durable_sources | {source for source in tracked_sources if source}
 
-    def _managed_pids_for_child(self, tid: str) -> set[int]:
+    def _managed_processes_for_child(self, tid: str) -> dict[int, float | None]:
+        """Map the child's live managed PIDs to their recorded creation times.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 4, [MA-3]
+        """
         handle = self._latest_tid_runtime_handle(tid)
         if handle is None:
-            return set()
+            return {}
         # Create-time-gated so a recycled PID held by a stale mapping is never
         # force-reaped ([MA-1] item 4); falls back to liveness when no create_time
         # was recorded. Mirrors the liveness path's resolution.
-        return {pid for pid, _create_time in live_host_processes_from_handle(handle)}
+        return dict(live_host_processes_from_handle(handle))
+
+    def _managed_pids_for_child(self, tid: str) -> set[int]:
+        return set(self._managed_processes_for_child(tid))
 
     def _enqueue_autostart_request(
         self, payload: dict[str, Any], inbox_message: Any
@@ -9510,7 +9679,13 @@ class Manager(ServiceTask):
         ]
 
     def _manager_child_timeouts(self, *, now_ns: int) -> list[float]:
-        """Return child sentinel and post-exit deadlines."""
+        """Return child sentinel and post-exit deadlines.
+
+        A wrapper the stopping drain holds for a live survivor publishes none:
+        the survivor's exit source wakes the drain.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
+        """
 
         timeouts: list[float] = []
         sentinel_recheck_ns = int(MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1_000_000_000)
@@ -9518,6 +9693,10 @@ class Manager(ServiceTask):
             MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000
         )
         for child in self._child_processes.values():
+            if child.survivor_hold_pid > 0:
+                # The held wrapper's exit is settled; its survivor's exit
+                # source, not a clock, wakes the drain [MA-3].
+                continue
             if child.terminal_retry_after_ns > 0:
                 timeouts.append(
                     self._timeout_until_ns(child.terminal_retry_after_ns, now_ns=now_ns)
