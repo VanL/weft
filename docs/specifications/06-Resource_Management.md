@@ -195,7 +195,9 @@ Enforcement mechanics and security boundary:
   `sample_delay` in `weft/core/resource_monitor.py`. While any limit is
   configured (`memory_mb`, `cpu_percent`, `max_fds`, or `max_connections`
   is set), polls are one cadence apart, so enforcement is unchanged by this
-  clock. Without a configured limit nothing is enforced and polls serve only
+  clock. The clock reads the runner's limits input, never the monitor, so the
+  monitor protocol is unchanged. Without a configured limit nothing is
+  enforced and polls serve only
   the reported metrics: the delay to the next poll equals the time already
   monitored, never less than one cadence, so polls fall at one, two, four,
   ... cadences. A supervising task with no limit therefore polls a number of
@@ -252,8 +254,9 @@ Enforcement mechanics and security boundary:
   `descendant_processes` in `weft/core/process_tree.py`. It keeps the
   contract of psutil's `children(recursive=True)`: a root that is no longer
   the process it was created for raises `NoSuchProcess`, a child older than
-  the root is a reused PID and is skipped, and a process that exits during
-  the walk is skipped. It asks the kernel for one parent's children at a
+  the root (whose creation time is read afresh, so a wall-clock correction
+  since the root was first observed cannot hide live children) is a reused
+  PID and is skipped, and a process that exits during the walk is skipped. It asks the kernel for one parent's children at a
   time, so its cost follows the task's own tree rather than the host's
   process count: macOS reads libproc `proc_listpids(PROC_PPID_ONLY)`, Linux
   reads `/proc/<pid>/task/<tid>/children` for every thread of the parent

@@ -46,6 +46,32 @@ def test_descendant_processes_matches_psutil_for_a_two_level_tree(
         tree.kill()
 
 
+def test_descendant_processes_survives_a_stale_root_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root time cached before a backward clock correction hides no child.
+
+    The root object reports a creation time an hour later than the kernel's,
+    as one read before the wall clock was stepped back would. Its children
+    then look older than it; psutil reads the root's time afresh and keeps
+    them, and the walk must too.
+    """
+
+    tree = spawn_tree(tmp_path, depth=2, fanout=1)
+    try:
+        root = psutil.Process(tree.root.pid)
+        stale_create_time = root.create_time() + 3600.0
+        monkeypatch.setattr(root, "create_time", lambda: stale_create_time)
+        expected = {child.pid for child in root.children(recursive=True)}
+        assert expected == tree.descendant_pids
+
+        walked = descendant_processes(root)
+
+        assert {child.pid for child in walked} == expected
+    finally:
+        tree.kill()
+
+
 def test_descendant_processes_rejects_a_root_that_has_exited() -> None:
     """An exited root raises NoSuchProcess instead of naming a PID's new owner."""
 

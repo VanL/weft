@@ -62,7 +62,10 @@ def descendant_processes(root: psutil.Process) -> list[psutil.Process]:
 
     if not root.is_running():
         raise psutil.NoSuchProcess(root.pid)
-    root_create_time = root.create_time()
+    # Read the root's creation time afresh, as psutil does: a value cached on
+    # ``root`` can predate a backward wall-clock correction, which would make
+    # live children look older than the root and drop them as reused PIDs.
+    root_create_time = psutil.Process(root.pid).create_time()
     descendants: list[psutil.Process] = []
     seen: set[int] = set()
     stack = [root.pid]

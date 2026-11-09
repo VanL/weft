@@ -1244,6 +1244,7 @@ class HostTaskRunner:
                 monitor,
                 timeout=self._timeout,
                 handle=_host_handle(process.pid),
+                limits=self._limits,
             )
             ready_timeout = max(
                 AGENT_SESSION_READY_TIMEOUT_SECONDS,

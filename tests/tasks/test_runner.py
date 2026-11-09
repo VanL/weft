@@ -1062,6 +1062,7 @@ def _spawn_agent_session_for_target(
     *,
     timeout: float | None = None,
     monitor: Any | None = None,
+    limits: LimitsSection | None = None,
 ) -> AgentSession:
     ctx = multiprocessing.get_context("spawn")
     ctx.set_executable(sys.executable)
@@ -1076,6 +1077,7 @@ def _spawn_agent_session_for_target(
         response_receiver,
         monitor=monitor,
         timeout=timeout,
+        limits=limits,
     )
 
 
@@ -1100,9 +1102,10 @@ def _agent_session_hold_then_reply_worker(
 
 
 _CONFIGURED_LIMIT = LimitsSection(memory_mb=1024)
-"""A limit no test process reaches. Configuring any limit is what makes
-sampling enforcement on the monitor's interval ([RM-5.1]); without one,
-sampling serves metrics only and follows the doubling schedule."""
+"""A limit no test process reaches. A runner limits input that configures any
+limit makes sampling enforcement on the monitor's interval ([RM-5.1]);
+without one, sampling serves metrics only and follows the doubling
+schedule."""
 
 
 class _RecordingLimitMonitor(BaseResourceMonitor):
@@ -1118,9 +1121,8 @@ class _RecordingLimitMonitor(BaseResourceMonitor):
         *,
         polling_interval: float,
         violation_at: int | None = None,
-        limits: LimitsSection | None = _CONFIGURED_LIMIT,
     ) -> None:
-        super().__init__(limits=limits, polling_interval=polling_interval)
+        super().__init__(polling_interval=polling_interval)
         self.sample_times: list[float] = []
         self._violation_at = violation_at
 
@@ -1232,6 +1234,7 @@ def test_agent_session_samples_limits_at_monitor_interval(
     session = _spawn_agent_session_for_target(
         functools.partial(_agent_session_hold_then_reply_worker, 5.0),
         monitor=monitor,
+        limits=_CONFIGURED_LIMIT,
     )
     wait_times: list[float] = []
     real_wait_seconds = session._terminal_handoff_wait_seconds
@@ -1290,6 +1293,7 @@ def test_agent_session_wait_after_slow_sample_ends_at_the_sampling_deadline(
     session = _spawn_agent_session_for_target(
         functools.partial(_agent_session_hold_then_reply_worker, 0.4),
         monitor=monitor,
+        limits=_CONFIGURED_LIMIT,
     )
     waits: list[tuple[float, float | None]] = []
     real_wait_seconds = session._terminal_handoff_wait_seconds
@@ -1329,6 +1333,7 @@ def test_agent_session_short_items_cannot_starve_sampling() -> None:
     session = _spawn_agent_session_for_target(
         functools.partial(_agent_session_hold_then_reply_worker, 0.02),
         monitor=monitor,
+        limits=_CONFIGURED_LIMIT,
     )
     statuses: list[str] = []
     try:
@@ -1360,7 +1365,7 @@ def test_agent_session_without_limits_samples_every_work_item() -> None:
     Spec: [RM-5.1]
     """
 
-    monitor = _RecordingLimitMonitor(polling_interval=0.2, limits=None)
+    monitor = _RecordingLimitMonitor(polling_interval=0.2)
     session = _spawn_agent_session_for_target(
         functools.partial(_agent_session_hold_then_reply_worker, 0.02),
         monitor=monitor,
@@ -1522,7 +1527,6 @@ def test_agent_session_invalidating_verdict_closes_session(verdict: str) -> None
 
     class LimitMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
-        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.stopped = False
@@ -1563,7 +1567,6 @@ def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() ->
 
     class ExplodingMetricsMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
-        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.stopped = False
@@ -1717,7 +1720,6 @@ def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # no
 
     class LateLimitMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
-        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.check_calls = 0
@@ -2743,6 +2745,80 @@ def test_task_runner_agent_session_continues_conversation() -> None:
     assert second.status == "ok"
     assert second.value is not None
     assert second.value.aggregate_public_output() == "history:hello"
+
+
+class _PrivateLimitsMonitor(BaseResourceMonitor):
+    """A custom monitor that keeps its limits private.
+
+    The documented monitor protocol ([RM-5.1]) is start, stop, snapshot,
+    check_limits and last_metrics plus the keyword constructor. It requires
+    neither a ``limits`` attribute nor a call to the base constructor.
+    """
+
+    samples: ClassVar[int] = 0
+
+    def __init__(
+        self, *, limits: Any | None = None, polling_interval: float = 1.0
+    ) -> None:
+        self._private_limits = limits
+        self.polling_interval = polling_interval
+
+    def start(self, pid: int) -> None:
+        del pid
+
+    def stop(self) -> None:
+        return None
+
+    def snapshot(self) -> ResourceMetrics:
+        return ResourceMetrics(memory_mb=1.0)
+
+    def check_limits(self) -> tuple[bool, str | None]:
+        type(self).samples += 1
+        return True, None
+
+    def last_metrics(self) -> ResourceMetrics | None:
+        return ResourceMetrics(memory_mb=1.0)
+
+
+def test_task_runner_agent_session_accepts_a_monitor_without_limits_attribute() -> None:
+    """A persistent session takes its sampling clock from the runner's limits.
+
+    Spec: [RM-5.1]
+    """
+
+    _PrivateLimitsMonitor.samples = 0
+    runner = TaskRunner(
+        target_type="agent",
+        tid="123",
+        function_target=None,
+        process_target=None,
+        agent={
+            "runtime": "llm",
+            "model": TEST_MODEL_ID,
+            "conversation_scope": "per_task",
+            "runtime_config": {
+                "plugin_modules": ["tests.fixtures.llm_test_models"],
+            },
+        },
+        args=None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=LimitsSection(),
+        monitor_class=f"{__name__}._PrivateLimitsMonitor",
+        monitor_interval=0.05,
+    )
+
+    session = runner.start_agent_session()
+    try:
+        result = session.execute("hello")
+    finally:
+        session.close()
+
+    assert result.status == "ok"
+    assert result.metrics is not None
+    assert _PrivateLimitsMonitor.samples >= 1
 
 
 def test_task_runner_agent_session_startup_uses_dedicated_ready_timeout(

@@ -221,6 +221,7 @@ class AgentSession:
         *,
         timeout: float | None,
         handle: RunnerHandle | None = None,
+        limits: Any | None = None,
     ) -> None:
         self._process = process
         self._request_queue = request_queue
@@ -228,6 +229,9 @@ class AgentSession:
         self._monitor = monitor
         self._timeout = timeout
         self._handle = handle
+        # The runner's limits input chooses the sampling clock ([RM-5.1]);
+        # the monitor protocol does not expose limits.
+        self._limits = limits
         self._last_metrics: ResourceMetrics | None = None
         self._closed = False
         # Session-scoped next limit-sample instant ([RM-5.1]); with a limit
@@ -422,7 +426,7 @@ class AgentSession:
 
         self._request_queue.put(make_execute_request(work_item))
         start_time = time.monotonic()
-        if self._monitor is not None and not limits_configured(self._monitor.limits):
+        if self._monitor is not None and not limits_configured(self._limits):
             # Without a limit nothing is enforced and sampling is metrics
             # only: each work item samples at its start and then on the
             # doubling schedule from that start ([RM-5.1]).
@@ -584,7 +588,7 @@ class AgentSession:
             if self._monitor is not None:
                 sampled_at = time.monotonic()
                 self._next_limit_sample_at = sampled_at + sample_delay(
-                    monitor.limits,
+                    self._limits,
                     interval=interval,
                     elapsed=sampled_at - start_time,
                 )

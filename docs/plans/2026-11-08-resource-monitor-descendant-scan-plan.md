@@ -142,7 +142,8 @@ Comprehension questions (answer before editing):
    Answer: both follow kernel parent links from the root; the walker keeps
    psutil's identity rule (the root must still be the process it was created
    for; a child older than the root is a reused PID and is neither kept nor
-   walked).
+   walked), and, like psutil, reads the root's creation time afresh for that
+   comparison rather than the value cached on the root object.
 
 ## Invariants, Constraints, and Failure Policy
 
@@ -154,8 +155,9 @@ Comprehension questions (answer before editing):
   grandchildren count toward limits and are killed.
 - No TaskSpec, queue, payload, CLI, or public extension contract changes.
   `BaseResourceMonitor` gains no method; custom monitors keep the documented
-  constructor. A monitor's `limits` attribute (already part of
-  `BaseResourceMonitor`) is read to choose the clock.
+  protocol and constructor. Every loop chooses the clock from the runner's
+  own limits input; no loop reads a `limits` attribute from the monitor
+  (review finding F2; `AgentSession` receives the runner's `limits`).
 - Races are normal: a process that exits mid-walk is skipped. A failing
   platform source (libproc missing, `CONFIG_PROC_CHILDREN` absent) selects
   psutil once, with a warning; no per-call detection or retry.
@@ -175,6 +177,8 @@ Comprehension questions (answer before editing):
 | Work items shorter than one interval still report no metrics | N | unchanged |
 | Persistent agent session without a limit: each work item samples at its start (session-scoped instant only while a limit is configured) | C | each item reports its own metrics; nothing is enforced, so a reset postpones nothing |
 | Docker runner without a limit: `docker stats` follows the same doubling clock | C | same clock for every monitor; Docker stats calls are the most expensive samples |
+| The walker reads the root's creation time afresh for the reused-PID comparison, as psutil does, so a wall-clock correction cannot hide live descendants (review finding F1) | N | [WT-4.4] no capability diminution; equivalence with psutil |
+| Persistent agent sessions choose the clock from the runner's limits input (`AgentSession(limits=...)`), not from the monitor; a custom monitor needs no `limits` attribute and need not call the base constructor, as on the baseline (review finding F2) | N | [WT-2a.9] one current contract; the documented monitor protocol ([RM-5.1]) is unchanged |
 | Spec text: the old example "calling `os.setsid()`" does not leave a parent-PID tree (verified: psutil and the walker both still list a `setsid` child); removed and stated correctly | N (spec correction) | specs describe what is |
 
 ## Proposed Spec Delta
@@ -226,7 +230,9 @@ Replacement (`docs/specifications/06-Resource_Management.md`):
   `sample_delay` in `weft/core/resource_monitor.py`. While any limit is
   configured (`memory_mb`, `cpu_percent`, `max_fds`, or `max_connections`
   is set), polls are one cadence apart, so enforcement is unchanged by this
-  clock. Without a configured limit nothing is enforced and polls serve only
+  clock. The clock reads the runner's limits input, never the monitor, so the
+  monitor protocol is unchanged. Without a configured limit nothing is
+  enforced and polls serve only
   the reported metrics: the delay to the next poll equals the time already
   monitored, never less than one cadence, so polls fall at one, two, four,
   ... cadences. A supervising task with no limit therefore polls a number of
@@ -299,8 +305,9 @@ Replacement (`docs/specifications/06-Resource_Management.md`):
   `descendant_processes` in `weft/core/process_tree.py`. It keeps the
   contract of psutil's `children(recursive=True)`: a root that is no longer
   the process it was created for raises `NoSuchProcess`, a child older than
-  the root is a reused PID and is skipped, and a process that exits during
-  the walk is skipped. It asks the kernel for one parent's children at a
+  the root (whose creation time is read afresh, so a wall-clock correction
+  since the root was first observed cannot hide live children) is a reused
+  PID and is skipped, and a process that exits during the walk is skipped. It asks the kernel for one parent's children at a
   time, so its cost follows the task's own tree rather than the host's
   process count: macOS reads libproc `proc_listpids(PROC_PPID_ONLY)`, Linux
   reads `/proc/<pid>/task/<tid>/children` for every thread of the parent
@@ -345,7 +352,10 @@ Not in scope (owned elsewhere or recorded as follow-up):
    as well as `psutil.Error` there, since a native leaf raises `OSError`).
 3. Clock. Add `limits_configured` and `sample_delay` to
    `weft/core/resource_monitor.py`; use `sample_delay` at each of the four
-   re-arm sites; in `AgentSession.execute`, reset the instant per work item
+   re-arm sites, always with the runner's own limits input (pass
+   `limits=self._limits` to `AgentSession` from
+   `HostTaskRunner.start_agent_session`; never read limits from the
+   monitor); in `AgentSession.execute`, reset the instant per work item
    only when no limit is configured. Stop if any limited-path cadence
    changes.
 4. Tests (below), then spec text, mapping, and backlinks (strategy B).
@@ -359,8 +369,10 @@ memory).
 
 - `tests/core/test_process_tree.py`: two-level, thread-forked tree compared
   with psutil on the running platform, with psutil's host-wide scan made
-  unavailable on macOS and Linux to prove the leaf is used; an exited root
-  raises `NoSuchProcess`.
+  unavailable on macOS and Linux to prove the leaf is used; a root object
+  whose cached creation time is an hour later than the kernel's (as after a
+  backward clock correction) still yields every descendant psutil yields;
+  an exited root raises `NoSuchProcess`.
 - `tests/specs/resource_management/test_resource_metrics.py`: a snapshot of
   a chain whose grandchild holds 128 MiB reports at least 128 MiB (replaces
   a test that mocked `psutil.Process` and asserted the
@@ -371,11 +383,15 @@ memory).
   - the sampling clock, for command and function targets, with and without
     a limit: without one, 3 to 8 samples in a 2 s run and metrics still
     reported; with one, at least 10 (about 40 nominal);
-  - a persistent agent session without a limit samples every work item.
-  - Fixture changes: the recording "limit" monitors used by the agent-session
-    cadence tests now configure a limit (their contract is enforcement
-    cadence), and one mock-based kill-path test stubs
-    `descendant_processes` instead of `root.children`.
+  - a persistent agent session without a limit samples every work item;
+  - `TaskRunner.start_agent_session` with a custom monitor that keeps its
+    limits private and skips the base constructor executes and reports
+    metrics.
+  - Fixture changes: the agent-session cadence tests pass a configured limit
+    to the session through `_spawn_agent_session_for_target(limits=...)`
+    (their contract is enforcement cadence); the monitor fixtures are as on
+    the baseline. One mock-based kill-path test stubs `descendant_processes`
+    instead of `root.children`.
 - `tests/tasks/test_task_interactive.py`: the existing interval-reschedule
   test configures a limit; a new test proves the doubling reschedule without
   one.
@@ -480,3 +496,24 @@ host, four xdist workers throughout.
   the `/proc` leaf, matched the parent-PID map for a root with a child forked
   by a live worker thread, and raised `NoSuchProcess` for an exited root.
   CI exercises the Linux leaf through `tests/core/test_process_tree.py`.
+
+### Cross-family review, round 1
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at bb475514 against 08c2f87b.
+Verdict: blocker: F1, F2.
+
+The reviewer judged the freshness D row (no-limit metrics come from a
+sample in the latter half of the run) consistent with [WT-4.3].
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | P2 | `weft/core/process_tree.py`: the walker compared the root's cached creation time with fresh child creation times; after a backward wall-clock correction live descendants look older than the root and were skipped as reused PIDs, dropping them from metrics and limit enforcement. psutil re-reads the root's time at that point (reproduced with a controlled clock-skew probe). | Accepted, fixed: `descendant_processes` keeps the `is_running()` identity check and then reads the comparison time from a fresh `psutil.Process(root.pid).create_time()`, as psutil's `children()` does; [RM-5.1] states the fresh read. New test `tests/core/test_process_tree.py::test_descendant_processes_survives_a_stale_root_creation_time` gives the root object a cached creation time one hour later than the kernel's and requires psutil's set; at bb475514 it fails with `assert set() == {<child>, <grandchild>}`. |
+| F2 | P2 | `weft/core/runners/sessions.py`: persistent sessions read `self._monitor.limits`, which the documented monitor protocol ([RM-5.1]) does not require; a custom monitor that keeps limits privately or skips the base constructor worked on the baseline and raised `AttributeError` after the execute request was enqueued. | Accepted, fixed: `AgentSession` takes the runner's own `limits` input (`HostTaskRunner.start_agent_session` passes `limits=self._limits`) and both the per-item reset and `sample_delay` use it; no loop reads limits from a monitor. [RM-5.1] states that the clock reads the runner's limits input. New test `tests/tasks/test_runner.py::test_task_runner_agent_session_accepts_a_monitor_without_limits_attribute` loads such a monitor through `monitor_class` and executes a work item; at bb475514 it fails with `AttributeError: '_PrivateLimitsMonitor' object has no attribute 'limits'` at `sessions.py:425`. The test fixtures that gained a `limits` attribute in bb475514 are restored to the baseline; cadence tests pass the limit to the session instead. Difference-register row added. |
+
+Verification after the fixes (four xdist workers): SQLite `tests/core/test_process_tree.py
+tests/tasks/test_runner.py tests/specs tests/tasks/test_task_interactive.py
+tests/tasks/test_agent_execution.py tests/core/test_subprocess_runner.py`:
+554 passed, 10 skipped; PostgreSQL (`./bin/pytest-pg`, same targets): 554
+passed, 21 skipped; `ruff check .`, `ruff format --check` on touched files,
+the repo mypy command (502 source files), and `bin/check-doc-paths`: clean.
