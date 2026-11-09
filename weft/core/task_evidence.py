@@ -27,7 +27,6 @@ from weft._constants import (
     TASK_LIFECYCLE_STATUS_VALUES,
     TASK_TERMINAL_ENVELOPE_SOURCES,
     TERMINAL_ENVELOPE_TYPE,
-    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WRAPPER_LOST_ERROR,
@@ -532,17 +531,34 @@ def coerce_terminal_envelope(
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
+    if terminal_record_status(payload) is None:
         return None
     if payload.get("tid") != tid:
         return None
     source = payload.get("source")
     if not isinstance(source, str) or source not in TASK_TERMINAL_ENVELOPE_SOURCES:
         return None
-    status = payload.get("status")
-    if not isinstance(status, str) or status not in TERMINAL_TASK_STATUSES:
-        return None
     return payload
+
+
+def terminal_record_status(payload: Mapping[str, Any]) -> str | None:
+    """Return the terminal status a typed terminal record declares.
+
+    A task's terminal record is both its lifecycle event and a typed envelope:
+    ``type="terminal"`` with the task's terminal ``status`` ([MF-3]). The
+    record's own status is the verdict; the event name is history only, and a
+    row without the discriminator (a drain start, an activity hint) is never
+    terminal proof.
+
+    Spec: [MF-3], [OBS.13.4]
+    """
+
+    if payload.get("type") != TERMINAL_ENVELOPE_TYPE:
+        return None
+    status = payload.get("status")
+    if isinstance(status, str) and status in TERMINAL_TASK_STATUSES:
+        return status
+    return None
 
 
 def terminal_status_from_event(payload: dict[str, Any]) -> str | None:
@@ -561,16 +577,6 @@ def terminal_status_from_event(payload: dict[str, Any]) -> str | None:
                     status = state_status
     if status in TERMINAL_TASK_STATUSES:
         return status
-    event = payload.get("event")
-    taskspec = payload.get("taskspec")
-    state = taskspec.get("state") if isinstance(taskspec, dict) else None
-    completed_at = state.get("completed_at") if isinstance(state, dict) else None
-    if (
-        isinstance(event, str)
-        and event in TERMINAL_TASK_EVENTS
-        and isinstance(completed_at, int)
-    ):
-        return TERMINAL_TASK_EVENTS[event]
     return None
 
 

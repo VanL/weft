@@ -1353,7 +1353,7 @@ def test_wait_for_completion_treats_control_stop_as_terminal_event() -> None:
 
 
 @pytest.mark.sqlite_only
-def test_wait_for_terminal_state_accepts_terminal_task_activity() -> None:
+def test_wait_for_terminal_state_accepts_typed_terminal_record() -> None:
     harness = WeftTestHarness()
     repo_cwd = os.getcwd()
     try:
@@ -1370,8 +1370,10 @@ def test_wait_for_terminal_state_accepts_terminal_task_activity() -> None:
                 json.dumps(
                     {
                         "tid": tid,
-                        "event": "task_activity",
+                        "event": "work_completed",
                         "status": "completed",
+                        "type": "terminal",
+                        "source": "task",
                     }
                 )
             )
@@ -1385,7 +1387,7 @@ def test_wait_for_terminal_state_accepts_terminal_task_activity() -> None:
 
 
 @pytest.mark.sqlite_only
-def test_wait_for_terminal_state_rejects_unexpected_terminal_activity() -> None:
+def test_wait_for_terminal_state_rejects_unexpected_terminal_record() -> None:
     harness = WeftTestHarness()
     repo_cwd = os.getcwd()
     try:
@@ -1402,8 +1404,10 @@ def test_wait_for_terminal_state_rejects_unexpected_terminal_activity() -> None:
                 json.dumps(
                     {
                         "tid": tid,
-                        "event": "task_activity",
+                        "event": "work_failed",
                         "status": "failed",
+                        "type": "terminal",
+                        "source": "task",
                     }
                 )
             )

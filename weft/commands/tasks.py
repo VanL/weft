@@ -908,7 +908,6 @@ def _enrich_known_snapshot(
     )
     diagnostic = _reconciliation_diagnostic(
         lifecycle_status=snapshot.status,
-        status_reason=None,
         runtime_observation=RuntimeObservation(live, source, strength),
     )
     stale = system_cmd._stale_liveness_reason(

@@ -459,6 +459,8 @@ def test_raw_row_lifetime_report_promotes_available_taskspec() -> None:
             {
                 "tid": "1779000000000000400",
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "taskspec": {
                     "tid": "1779000000000000400",

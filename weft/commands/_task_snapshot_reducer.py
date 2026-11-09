@@ -26,7 +26,6 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_KEY_TASK_MONITOR,
     RUNNER_DIAGNOSTICS_FIELD,
-    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
 )
 from weft.core.task_evidence import TaskEvidenceSnapshot, parse_task_projection
@@ -118,7 +117,6 @@ class FoldedTaskRecord:
     metadata: dict[str, Any]
     event_payload: dict[str, Any] | None
     runner_diagnostics: dict[str, Any] | None
-    status_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +211,6 @@ def reduce_task_event(
         metadata={},
         event_payload=None,
         runner_diagnostics=None,
-        status_reason=None,
     )
     current_terminal = record.status in TERMINAL_TASK_STATUSES
     event = payload.get("event", "unknown")
@@ -243,7 +240,7 @@ def reduce_task_event(
         return record
     state_raw = taskspec.get("state") or {}
     state = state_raw if isinstance(state_raw, Mapping) else {}
-    status, status_reason = _reconcile_lifecycle_status(payload, state)
+    status = _lifecycle_status(payload, state)
     if current_terminal and status not in TERMINAL_TASK_STATUSES:
         return record
 
@@ -292,7 +289,6 @@ def reduce_task_event(
             )
             else None
         ),
-        status_reason=status_reason,
     )
 
 
@@ -422,7 +418,6 @@ def _select_snapshot_policy(
     local_evidence = probe_plan.draft.local_evidence
     reconciliation = _reconciliation_diagnostic(
         lifecycle_status=public_status,
-        status_reason=probe_plan.draft.record.status_reason,
         runtime_observation=evidence.runtime_observation,
     )
     if local_evidence is not None and local_evidence.reconciliation is not None:
@@ -620,35 +615,28 @@ def _normalized_text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _reconcile_lifecycle_status(
+def _lifecycle_status(
     payload: Mapping[str, Any],
     state: Mapping[str, Any],
-) -> tuple[str, str | None]:
+) -> str:
+    """Return the lifecycle status a task-log record states for itself [MF-3]."""
+
     payload_status = payload.get("status")
     if isinstance(payload_status, str) and payload_status in TERMINAL_TASK_STATUSES:
-        return payload_status, None
+        return payload_status
     state_status = state.get("status")
     if isinstance(state_status, str) and state_status in TERMINAL_TASK_STATUSES:
-        return state_status, None
-    completed_at = state.get("completed_at")
-    event = payload.get("event")
-    if (
-        isinstance(completed_at, int)
-        and isinstance(event, str)
-        and event in TERMINAL_TASK_EVENTS
-    ):
-        return TERMINAL_TASK_EVENTS[event], "contradictory_terminal_event_status"
+        return state_status
     if isinstance(payload_status, str) and payload_status:
-        return payload_status, None
+        return payload_status
     if isinstance(state_status, str) and state_status:
-        return state_status, None
-    return "created", None
+        return state_status
+    return "created"
 
 
 def _reconciliation_diagnostic(
     *,
     lifecycle_status: str,
-    status_reason: str | None,
     runtime_observation: RuntimeObservation | None,
 ) -> dict[str, Any] | None:
     if lifecycle_status not in TERMINAL_TASK_STATUSES:
@@ -658,19 +646,6 @@ def _reconciliation_diagnostic(
         evidence="none",
         strength="unknown",
     )
-    if status_reason == "contradictory_terminal_event_status":
-        diagnostic: dict[str, Any] = {
-            "classification": (
-                "runtime_conflict" if observation.live else "stale_status_payload"
-            ),
-            "reason": status_reason,
-            "lifecycle_status": lifecycle_status,
-            "runtime_evidence": observation.evidence,
-            "runtime_evidence_strength": observation.strength,
-        }
-        if observation.live:
-            diagnostic["runtime_status"] = "running"
-        return diagnostic
     if not observation.live:
         return None
     reason = (

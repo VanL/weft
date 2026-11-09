@@ -80,8 +80,6 @@ from weft._constants import (
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TASK_INACTIVE_QUEUE_DISCOVERY_INTERVAL_SECONDS,
     TERMINAL_ENVELOPE_TYPE,
-    TERMINAL_TASK_EVENTS,
-    TERMINAL_TASK_STATUSES,
     WEFT_ADMISSION_MAX_CONNECTIONS,
     WEFT_ADMISSION_RESERVE_FRACTION,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -106,6 +104,7 @@ from weft.core.service_convergence import (
     project_manager_service_record,
 )
 from weft.core.spawn_requests import submit_spawn_request
+from weft.core.task_evidence import terminal_record_status
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import (
     Consumer,
@@ -9002,9 +9001,7 @@ def _first_terminal_log_id(
     for payload, timestamp in entries:
         if payload.get("tid") != tid:
             continue
-        if payload.get("event") in TERMINAL_TASK_EVENTS or (
-            payload.get("status") in TERMINAL_TASK_STATUSES
-        ):
+        if terminal_record_status(payload) is not None:
             return timestamp
     return None
 

@@ -41,6 +41,8 @@ def test_monitor_collation_captures_successful_task_summary_without_reserved_pro
 ):
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1779000000000000001",
         "taskspec": {
@@ -85,6 +87,8 @@ def test_monitor_collation_captures_successful_task_summary_without_reserved_pro
 def test_monitor_collation_marks_failure_like_terminal_for_reserved_probe() -> None:
     payload = {
         "event": "work_failed",
+        "type": "terminal",
+        "source": "task",
         "status": "failed",
         "tid": "1779000000000000002",
         "taskspec": {

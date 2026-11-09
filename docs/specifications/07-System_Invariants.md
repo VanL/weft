@@ -584,9 +584,15 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     retryable table state. Parents may be physically retired only after raw
     deletion, summary emission, disposition, task-local control cleanup, any
     required reserved cleanup proof, and zero remaining child refs are all
-    recorded. Schema 5 parents already marked `raw_deleted_at_ns` while child
-    refs remain are normalized only by the version 5 to 6 migration; version 6
-    startup rejects that noncanonical state. Orphan raw-log recovery records
+    recorded, and only once the family's completion (or, without one, its
+    last-seen time) is older than the task-log retention period
+    (`WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`). Schema 5 parents already
+    marked `raw_deleted_at_ns` while child refs remain are normalized only by
+    the version 5 to 6 migration; version 6 startup rejects that noncanonical
+    state. A version 6 family that was never summarized or disposed and whose
+    latest record states a terminal status receives that record as terminal
+    proof once, through the version 6 to 7 migration; families a version 6
+    Monitor already summarized keep their recorded state. Orphan raw-log recovery records
     `orphan_raw_recovery_checked_at_ns` only after proving no raw broker rows
     remain; probe/delete errors leave the family retryable, and new raw
     task-log evidence clears the marker through normal collation merge.
@@ -1362,16 +1368,20 @@ scan-limited, or error-limited pass must not close a task family.
 Terminal family disposition records retryable compact table state while raw
 deletion, summary, and runtime cleanup remain incomplete. Once raw deletion,
 summary emission, disposition, task-local control cleanup, and any required
-reserved cleanup proof are all recorded and no child message refs remain, the
-Monitor may physically retire the compact parent family row. Open families are
+reserved cleanup proof are all recorded, no child message refs remain, and the
+family's completion (or last-seen time) is older than the task-log retention
+period, the Monitor may physically retire the compact parent family row. Open families are
 classified operationally:
 `suspected_inactive` requires a usable reporting interval and a reporting gap;
 `stale_open` requires the explicit hard-age threshold for families without a
 usable interval. Neither classification is public lifecycle truth.
 Task-log cleanup must use a scan-depth limit separate from the processed batch
 size, so backlog catch-up can make progress without a hot private loop.
-Task-log cleanup must not treat diagnostic rows such as `task_activity` as
-terminal lifecycle proof solely because their status field is terminal-looking.
+Task-log terminal lifecycle proof is the task's typed terminal record
+(`type="terminal"` with a terminal `status`, [MF-3]), and the family's terminal
+status is that record's own `status`. Rows without the discriminator, such as
+`task_activity` hints and a Manager's `running` drain-start rows, are never
+terminal lifecycle proof, whatever their event name or status.
 Ordinary supervised cleanup may delete standard task-local `T{tid}.reserved`
 queues only through the TaskMonitor-owned runtime cleanup slice when the Monitor
 table already proves the family terminal/disposed/raw-deleted, or when no
@@ -1473,6 +1483,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) makes the typed terminal record the only task-log terminal proof and records the retention gate and v6 to v7 repair in [OBS.13.4].
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 

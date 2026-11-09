@@ -461,6 +461,36 @@ def reset_raw_deleted_parents_with_children(
         """
 
 
+def select_v6_unprocessed_open_collations(table: str) -> str:
+    """Build the v6-to-v7 scan of open families never summarized or disposed."""
+
+    return f"""
+        SELECT context_key, tid, lifecycle_json
+        FROM {identifier(table)}
+        WHERE terminal_seen = 0
+          AND summary_emitted_at_ns IS NULL
+          AND disposition_at_ns IS NULL
+        ORDER BY context_key, tid
+        """
+
+
+def mark_v6_stranded_collation_terminal(table: str) -> str:
+    """Build the v6-to-v7 update recording a family's own terminal record."""
+
+    return f"""
+        UPDATE {identifier(table)}
+        SET terminal_seen = 1,
+            terminal_event = ?,
+            terminal_status = ?,
+            terminal_message_id = last_message_id,
+            status = ?,
+            reserved_probe_needed = ?,
+            lifecycle_json = ?,
+            updated_at_ns = ?
+        WHERE context_key = ? AND tid = ? AND terminal_seen = 0
+        """
+
+
 def mark_migrated_tombstone_parent_raw_deleted(
     collations_table: str,
     messages_table: str,

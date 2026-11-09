@@ -52,6 +52,7 @@ from weft._constants import (
     QUEUE_INTERNAL_RESERVED_SUFFIX,
     SERVICE_IDLE_EXIT_SECONDS,
     SERVICE_STATUS_ACTIVE,
+    SERVICE_STATUS_SUPERSEDED,
     SERVICE_STATUS_TERMINAL,
     SERVICE_TYPE_MANAGED,
     STALE_SERVICE_OWNER_DISPOSITION_REASONS,
@@ -74,7 +75,7 @@ from weft.commands._spawn_submission import reconcile_submitted_spawn
 from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.heartbeat import upsert_heartbeat
-from weft.core.manager import Manager
+from weft.core.manager import ManagedChild, Manager
 from weft.core.manager_runtime import build_manager_spec
 from weft.core.monitor.collation import update_from_task_log_payload
 from weft.core.monitor.policies.dead_task import DeadTaskLogCoalesceGroup
@@ -88,6 +89,7 @@ from weft.core.monitor.store import (
     MonitorSummaryReadyTask,
     MonitorTaskCollationRecord,
     MonitorTaskEventUpdate,
+    open_monitor_store,
 )
 from weft.core.monitor.task_monitor import (
     MaintenanceWorker,
@@ -105,8 +107,10 @@ from weft.core.service_convergence import (
 )
 from weft.core.spawn_requests import observe_spawn_request_custody
 from weft.core.task_state import task_state_queue_name
+from weft.core.tasks import Consumer
 from weft.core.tasks.heartbeat import HeartbeatTask
 from weft.core.tasks.liveness_monitor import LivenessMonitor
+from weft.core.tasks.runner import RunnerOutcome
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
 from weft.helpers import encode_tid, iter_queue_entries
 
@@ -324,6 +328,8 @@ def test_monitor_control_correction_after_disposition_preserves_task_owned_winne
             terminal = update_from_task_log_payload(
                 {
                     "event": "work_failed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "failed",
                     "tid": tid,
                     "taskspec": _projection_taskspec(tid),
@@ -3668,6 +3674,8 @@ def test_task_monitor_ping_includes_cached_collation_store_status(
         json.dumps(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": "1778084345905438721",
                 "taskspec": {
@@ -3752,6 +3760,8 @@ def test_task_monitor_processor_delete_requires_delete_processor(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438722",
     }
@@ -3797,6 +3807,8 @@ def test_task_monitor_processor_delete_removes_exact_task_log_rows(
         json.dumps(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": "1778084345905438723",
             }
@@ -3842,6 +3854,8 @@ def test_task_monitor_delete_retains_terminal_rows_until_retention_age(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": tid,
     }
@@ -3922,6 +3936,11 @@ def test_task_monitor_retained_ingest_batches_store_and_delete_work(
                     "status": status,
                     "tid": tid,
                     "sequence": index,
+                    **(
+                        {"type": TERMINAL_ENVELOPE_TYPE, "source": "task"}
+                        if index == 4
+                        else {}
+                    ),
                 }
             )
         )
@@ -3995,6 +4014,8 @@ def test_task_monitor_retained_ingest_handles_own_tid_before_checkpoint(
         json.dumps(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": other_tid,
             }
@@ -4052,6 +4073,8 @@ def test_task_monitor_skips_terminal_summary_after_partial_fifo_pass(
     tid = "1778084345905438728"
     terminal_payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": tid,
     }
@@ -4355,6 +4378,8 @@ def test_task_monitor_processor_delete_reconciles_already_absent_exact_rows(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438724",
     }
@@ -4449,6 +4474,8 @@ def test_task_monitor_recovers_orphan_raw_task_log_rows_after_bad_raw_mark(
         },
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "sequence": 2,
@@ -4532,6 +4559,8 @@ def test_task_monitor_marks_orphan_recovery_checked_when_raw_rows_absent(
     terminal = update_from_task_log_payload(
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
         },
@@ -4608,6 +4637,8 @@ def test_task_monitor_orphan_recovery_leaves_failed_probe_retryable(
     terminal = update_from_task_log_payload(
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
         },
@@ -4683,6 +4714,8 @@ def test_task_monitor_orphan_recovery_reports_bounded_waypoint(
         terminal = update_from_task_log_payload(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": tid,
             },
@@ -4760,6 +4793,8 @@ def test_task_monitor_failed_summary_disposition_blocks_processor_delete(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438725",
     }
@@ -4824,6 +4859,8 @@ def test_task_monitor_collated_external_log_precedes_processor_delete(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438730",
     }
@@ -5000,6 +5037,8 @@ def test_task_monitor_jsonl_then_delete_emits_lifetime_report_before_delete(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438733",
     }
@@ -5062,6 +5101,8 @@ def test_task_monitor_jsonl_then_delete_defers_external_failure_and_deletes(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438734",
     }
@@ -5148,6 +5189,8 @@ def test_task_monitor_jsonl_then_delete_flushes_accumulated_deferred_reports(
             json.dumps(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                 }
@@ -5330,6 +5373,8 @@ def test_task_monitor_jsonl_then_delete_blocks_when_external_and_deferred_fail(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438735",
     }
@@ -5473,6 +5518,8 @@ def test_task_monitor_terminal_disposition_deletes_task_runtime_queues(
         json.dumps(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": tid,
                 "taskspec": taskspec,
@@ -5566,6 +5613,8 @@ def test_task_monitor_deletes_controls_for_already_disposed_family(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -5666,6 +5715,8 @@ def test_task_monitor_terminal_control_cleanup_retains_completion_evidence(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -5782,6 +5833,8 @@ def test_task_monitor_control_cleanup_does_not_mark_when_queue_delete_fails(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -5844,6 +5897,8 @@ def test_task_monitor_terminal_cleanup_repairs_control_deleted_without_dispositi
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": {
@@ -6063,6 +6118,8 @@ def test_task_monitor_reserved_cleanup_marks_absent_reserved_probe_checked(
             update = update_from_task_log_payload(
                 {
                     "event": "work_failed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "failed",
                     "tid": tid,
                     "taskspec": {
@@ -6162,6 +6219,8 @@ def test_task_monitor_reserved_cleanup_retains_launch_custody_until_checkpoint_r
             update = update_from_task_log_payload(
                 {
                     "event": "work_failed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "failed",
                     "tid": tid,
                     "taskspec": {
@@ -6286,6 +6345,8 @@ def test_task_monitor_reserved_cleanup_respects_min_age_gate(
             update = update_from_task_log_payload(
                 {
                     "event": "work_failed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "failed",
                     "tid": tid,
                     "taskspec": {
@@ -6379,6 +6440,8 @@ def test_task_monitor_reserved_cleanup_keeps_failed_delete_retryable(
             update = update_from_task_log_payload(
                 {
                     "event": "work_failed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "failed",
                     "tid": tid,
                     "taskspec": {
@@ -6462,6 +6525,8 @@ def test_task_monitor_reserved_cleanup_reports_bounded_waypoint(
                 update = update_from_task_log_payload(
                     {
                         "event": "work_failed",
+                        "type": "terminal",
+                        "source": "task",
                         "status": "failed",
                         "tid": tid,
                         "taskspec": {
@@ -6907,6 +6972,8 @@ def test_task_monitor_dead_task_cleanup_does_not_coalesce_task_log_refs(
     tid = "1778084345905438865"
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": tid,
         "taskspec": {
@@ -7129,6 +7196,8 @@ def test_task_monitor_terminal_disposition_does_not_delete_manager_control_queue
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -8133,6 +8202,8 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
             json.dumps(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -8156,6 +8227,8 @@ def test_task_monitor_terminal_control_cleanup_is_bounded_by_family(
                 update = update_from_task_log_payload(
                     {
                         "event": "work_completed",
+                        "type": "terminal",
+                        "source": "task",
                         "status": "completed",
                         "tid": tid,
                         "taskspec": {
@@ -8266,6 +8339,8 @@ def test_task_monitor_runtime_cleanup_runs_control_before_reserved_work(
                 update = update_from_task_log_payload(
                     {
                         "event": "work_completed",
+                        "type": "terminal",
+                        "source": "task",
                         "status": "completed",
                         "tid": tid,
                         "taskspec": {
@@ -8366,6 +8441,8 @@ def test_task_monitor_runtime_cleanup_dispatches_three_cleanup_kinds(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": terminal_tid,
                     "taskspec": {
@@ -8541,6 +8618,8 @@ def test_task_monitor_discovery_cadence_survives_frequent_store_cycles(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": {
@@ -8661,6 +8740,8 @@ def test_task_monitor_store_retires_eligible_family_despite_reserved_delete_fail
                 update = update_from_task_log_payload(
                     {
                         "event": f"work_{status}",
+                        "type": "terminal",
+                        "source": "task",
                         "status": status,
                         "tid": tid,
                         "taskspec": {
@@ -8754,7 +8835,13 @@ def test_task_monitor_retires_proven_family_without_ingestion_catchup(
             assert store is not None
             for tid, status in ((eligible_tid, "completed"), (unproved_tid, "failed")):
                 update = update_from_task_log_payload(
-                    {"event": f"work_{status}", "status": status, "tid": tid},
+                    {
+                        "event": f"work_{status}",
+                        "type": "terminal",
+                        "source": "task",
+                        "status": status,
+                        "tid": tid,
+                    },
                     message_id=int(tid),
                 )
                 assert update is not None
@@ -8852,6 +8939,8 @@ def test_task_monitor_runtime_cleanup_keeps_reserved_pending_after_control_budge
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": control_tid,
                     "taskspec": {
@@ -9008,6 +9097,8 @@ def test_task_monitor_runtime_cleanup_deadline_stops_between_families(
         update = update_from_task_log_payload(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": tid,
                 "taskspec": taskspec,
@@ -9205,6 +9296,8 @@ def test_task_monitor_raw_store_delete_reconciles_missing_refs_without_stall(
     terminal = update_from_task_log_payload(
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": taskspec,
@@ -9856,6 +9949,8 @@ def test_task_monitor_terminal_control_cleanup_worker_error_is_retryable(
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -9928,6 +10023,8 @@ def test_task_monitor_collated_external_failure_blocks_processor_delete(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438731",
     }
@@ -9984,6 +10081,8 @@ def test_task_monitor_raw_external_logs_and_deletes_without_store(
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": "1778084345905438732",
     }
@@ -10417,6 +10516,11 @@ def _seed_terminal_family_backlog(
                         "status": status,
                         "tid": tid,
                         "sequence": sequence,
+                        **(
+                            {"type": TERMINAL_ENVELOPE_TYPE, "source": "task"}
+                            if sequence == 2
+                            else {}
+                        ),
                     }
                 )
             )
@@ -10463,6 +10567,11 @@ def _seed_backdated_terminal_family_backlog(
                         "tid": tid,
                         "sequence": sequence,
                         "taskspec": {"state": state},
+                        **(
+                            {"type": TERMINAL_ENVELOPE_TYPE, "source": "task"}
+                            if sequence == 2
+                            else {}
+                        ),
                     }
                 )
             )
@@ -13102,6 +13211,8 @@ def test_task_monitor_delete_recheck_cleans_terminal_family_with_undecidable_row
             update = update_from_task_log_payload(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": taskspec,
@@ -13581,7 +13692,15 @@ def test_task_monitor_store_ownership_characterization(
     log = make_queue(WEFT_GLOBAL_LOG_QUEUE)
     tid = "1778084345905438301"
     message_id = log.write(
-        json.dumps({"tid": tid, "event": "work_completed", "status": "completed"})
+        json.dumps(
+            {
+                "tid": tid,
+                "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
+                "status": "completed",
+            }
+        )
     )
     initial_rows = len(list(log.peek_generator()))
     opened: list[bool] = []
@@ -13832,6 +13951,11 @@ def test_snapshot_protection_does_not_starve_later_cleanup(
                         "tid": tid,
                         "event": event,
                         "status": status,
+                        **(
+                            {}
+                            if tid in open_tids
+                            else {"type": TERMINAL_ENVELOPE_TYPE, "source": "task"}
+                        ),
                         "taskspec": {
                             "tid": tid,
                             "version": "1.0",
@@ -14204,6 +14328,8 @@ def test_maintenance_worker_open_family_presence_check(
                         update_from_task_log_payload(
                             {
                                 "event": "work_completed",
+                                "type": "terminal",
+                                "source": "task",
                                 "status": "completed",
                                 "tid": tid,
                                 "taskspec": taskspec,
@@ -14420,6 +14546,8 @@ def test_task_monitor_raw_mode_young_rows_keep_it_past_the_idle_window(
             json.dumps(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": str(time.time_ns()),
                 }
@@ -14605,6 +14733,81 @@ def _stop_drained_manager(
     return tid
 
 
+def _superseded_childless_manager(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """Supersede a real Manager with no user work: its final ``manager_superseded``.
+
+    The Manager's own registry row is rewritten as ``superseded``, as a
+    replacement Manager does, and its next registry heartbeat observes it.
+    """
+
+    del service_clock
+    tid = str(time.time_ns())
+    manager = _scoped_manager(weft_harness, tid)
+    registry = weft_harness.context.queue(
+        WEFT_SERVICES_REGISTRY_QUEUE, persistent=False
+    )
+    try:
+        manager.process_once()
+        own_rows = [
+            payload
+            for payload in (json.loads(body) for body in registry.peek_generator())
+            if payload.get("owner_tid") == tid
+        ]
+        assert own_rows
+        registry.write(
+            json.dumps({**own_rows[-1], "status": SERVICE_STATUS_SUPERSEDED})
+        )
+        manager._register_manager()
+        assert manager.should_stop
+    finally:
+        registry.close()
+        manager.cleanup()
+    return tid
+
+
+def _limit_violating_consumer(
+    weft_harness: WeftTestHarness,
+    service_clock: dict[str, int],
+) -> str:
+    """Finish a real Consumer on a resource-limit outcome; return its TID."""
+
+    del service_clock
+    tid = str(time.time_ns())
+    task = Consumer(
+        weft_harness.context.broker_target,
+        TaskSpec(
+            tid=tid,
+            name="limit-violation",
+            spec=SpecSection(type="function", function_target="test:func"),
+            io=IOSection(
+                inputs={"inbox": f"T{tid}.inbox"},
+                outputs={"outbox": f"T{tid}.outbox"},
+                control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
+            ),
+            state=StateSection(),
+        ),
+    )
+    try:
+        task.taskspec.mark_running()
+        outcome = RunnerOutcome(
+            status="limit",
+            value=None,
+            error="memory limit",
+            stdout=None,
+            stderr=None,
+            returncode=None,
+            duration=0.01,
+        )
+        with pytest.raises(RuntimeError):
+            task._ensure_outcome_ok(outcome, timestamp=None, metrics_payload=None)
+    finally:
+        task.cleanup()
+    return tid
+
+
 @pytest.mark.parametrize(
     ("terminal_event", "terminal_status", "run_producer"),
     [
@@ -14612,6 +14815,8 @@ def _stop_drained_manager(
         ("heartbeat_service_superseded", "completed", _superseded_heartbeat),
         ("manager_idle_shutdown", "completed", _idle_shutdown_manager),
         ("manager_stop_drained", "cancelled", _stop_drained_manager),
+        ("manager_superseded", "cancelled", _superseded_childless_manager),
+        ("work_limit_violation", "killed", _limit_violating_consumer),
     ],
 )
 def test_task_monitor_retires_service_and_manager_exit_families(
@@ -14679,6 +14884,308 @@ def test_task_monitor_retires_service_and_manager_exit_families(
 
             # Past the retention window the family retires and nothing it
             # left keeps the Monitor alive.
+            retention_ns = int(
+                worker._monitor_config.task_log_retention_period_seconds * 1_000_000_000
+            )
+            worker._run_monitor_store_cycle(
+                now_ns=time.time_ns() + retention_ns + 1_000_000_000,
+                task_log_owner="collated_store",
+            )
+            assert store.get_task(tid) is None
+            assert worker._retained_work_pending() is False
+    finally:
+        task.stop()
+
+
+class _UserWorkChild:
+    """Process double for a user-work child that stays alive until removed."""
+
+    pid = None
+    exitcode = None
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+
+def _begin_manager_drain(
+    weft_harness: WeftTestHarness,
+    drain_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Manager, str]:
+    """Start a real Manager drain that a live user-work child holds open.
+
+    A leadership drain revalidates its leader; the registry readers report
+    the lower-TID leader as active so the drain completes instead of resuming.
+    """
+
+    tid = str(time.time_ns())
+    manager = _scoped_manager(weft_harness, tid)
+    manager.process_once()
+    leader_tid = str(int(tid) - 1)
+    if drain_kind == "leadership":
+        leaders = {leader_tid: {"tid": leader_tid}}
+        monkeypatch.setattr(
+            manager, "_read_active_manager_records", lambda **_kwargs: leaders
+        )
+        monkeypatch.setattr(
+            manager, "_active_dispatch_manager_records", lambda: leaders
+        )
+    manager._child_processes["child"] = ManagedChild(
+        process=cast(Any, _UserWorkChild()),
+        ctrl_queue=f"T{int(tid) + 1}.ctrl_in",
+        persistent=False,
+    )
+    if drain_kind == "stop":
+        ctrl_in = weft_harness.context.queue(f"T{tid}.ctrl_in", persistent=False)
+        try:
+            ctrl_in.write(encode_control_message(CONTROL_STOP))
+        finally:
+            ctrl_in.close()
+        for _ in range(20):
+            manager.process_once()
+            if manager._draining:
+                break
+    elif drain_kind == "leadership":
+        manager._begin_leadership_drain(leader_tid=leader_tid)
+    else:
+        manager._begin_superseded_shutdown()
+    assert manager._draining
+    assert manager.taskspec.state.status == "running"
+    return manager, tid
+
+
+def _finish_manager_drain(manager: Manager) -> None:
+    """Let the held child go and run the Manager to its drained record."""
+
+    manager._child_processes.clear()
+    for _ in range(20):
+        manager.process_once()
+        if manager.should_stop:
+            break
+    assert manager.should_stop
+    assert manager.taskspec.state.status == "cancelled"
+
+
+def _task_log_records(make_queue: Callable[[str], Queue], tid: str) -> list[Any]:
+    return [
+        payload
+        for payload in (
+            json.loads(body)
+            for body in make_queue(WEFT_GLOBAL_LOG_QUEUE).peek_generator()
+        )
+        if payload.get("tid") == tid
+    ]
+
+
+@pytest.mark.parametrize(
+    ("drain_kind", "start_event", "drained_event"),
+    [
+        ("stop", "control_stop", "manager_stop_drained"),
+        ("leadership", "manager_leadership_yielded", "manager_leadership_drained"),
+        ("superseded", "manager_superseded", "manager_superseded_drained"),
+    ],
+)
+def test_monitor_collation_does_not_close_a_manager_on_its_drain_start(
+    broker_env: BrokerEnv,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    drain_kind: str,
+    start_event: str,
+    drained_event: str,
+) -> None:
+    """A Manager's drain-start row is not terminal proof; its drained record is.
+
+    A Manager that stops, yields or is superseded while user work runs
+    publishes a nonterminal drain-start row (status ``running``,
+    ``draining``), then the typed terminal record when the drain completes
+    ([MF-3], [MA-3]). The collation reducer must close the family on the
+    record that says it is terminal, never on the drain start (forward-only
+    lifecycle, [STATE.1]). Mutation caught: terminality read from an event
+    name that the Manager also publishes on a drain start (``control_stop``).
+    """
+
+    _db_path, make_queue = broker_env
+    manager, tid = _begin_manager_drain(weft_harness, drain_kind, monkeypatch)
+    try:
+        [start_row] = [
+            row
+            for row in _task_log_records(make_queue, tid)
+            if row.get("event") == start_event
+        ]
+        assert start_row["draining"] is True
+        start = update_from_task_log_payload(start_row, message_id=1)
+        assert start is not None
+        assert (start.terminal_seen, start.terminal_status) == (False, None)
+
+        _finish_manager_drain(manager)
+    finally:
+        manager.cleanup()
+    [drained_row] = [
+        row
+        for row in _task_log_records(make_queue, tid)
+        if row.get("event") == drained_event
+    ]
+    drained = update_from_task_log_payload(drained_row, message_id=2)
+    assert drained is not None
+    assert (drained.terminal_seen, drained.terminal_status) == (True, "cancelled")
+
+
+def test_task_monitor_keeps_a_stopping_manager_open_until_its_drained_record(
+    broker_env: BrokerEnv,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STOP-draining Manager's family stays open until the drain completes.
+
+    The STOP drain-start row (``control_stop`` at ``running``) is not terminal
+    proof, so a Monitor cycle during the drain leaves the family open and runs
+    no terminal cleanup for a Manager that still serves its children
+    ([OBS.13.4], [OBS.13.7]). The ``manager_stop_drained`` record then closes
+    it with status ``cancelled`` and becomes its terminal identity
+    ([MF-3]). Mutation caught: the drain-start row closing the family early.
+    """
+
+    db_path, _make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    monitor = TaskMonitor(
+        db_path,
+        _marked_task_monitor_spec("1778089999999999712"),
+        config=_idle_monitor_config(),
+    )
+    manager, tid = _begin_manager_drain(weft_harness, "stop", monkeypatch)
+    try:
+        _drive_one_monitor_cycle(monitor)
+        with _maintenance_for(monitor) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            during = store.get_task(tid)
+            assert during is not None
+            assert (during.terminal_seen, during.summary_emitted_at_ns) == (
+                False,
+                None,
+            )
+
+        _finish_manager_drain(manager)
+        _drive_one_monitor_cycle(monitor)
+        with _maintenance_for(monitor) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            after = store.get_task(tid)
+            assert after is not None
+            assert (
+                after.terminal_seen,
+                after.terminal_event,
+                after.terminal_status,
+            ) == (True, "manager_stop_drained", "cancelled")
+            assert after.summary_emitted_at_ns is not None
+    finally:
+        manager.cleanup()
+        monitor.stop()
+
+
+def test_task_monitor_retires_a_family_stranded_by_the_v6_reducer(
+    broker_env: BrokerEnv,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A family the v6 reducer left open is repaired once and then retires.
+
+    The leaked contexts held families whose last record was a service idle
+    exit: v6 collated it with ``terminal_seen=0`` and deleted the raw row, so
+    nothing could ever close the family. Opening the store as v7 records the
+    record's own terminal status ([MF-3]); the Monitor then summarizes,
+    disposes and cleans it, and retires it past the retention window like any
+    terminal family ([OBS.13.4]), leaving no retained work (owner ruling
+    10.3).
+    """
+
+    db_path, _make_queue = broker_env
+    service_clock = {"ns": 10**12}
+    monkeypatch.setattr(
+        service_task_mod, "_service_monotonic_ns", lambda: service_clock["ns"]
+    )
+    tid = str(time.time_ns())
+    message_id = int(tid) + 1
+    taskspec = make_heartbeat_taskspec(tid, weft_harness.root).model_dump(mode="json")
+    taskspec["state"] = {
+        **taskspec["state"],
+        "status": "completed",
+        "return_code": 0,
+        "completed_at": int(tid) + 1,
+    }
+    update = update_from_task_log_payload(
+        {
+            "event": "service_idle_exit",
+            "tid": tid,
+            "status": "completed",
+            "type": TERMINAL_ENVELOPE_TYPE,
+            "source": "task",
+            "return_code": 0,
+            "taskspec": taskspec,
+        },
+        message_id=message_id,
+    )
+    assert update is not None
+    # What the v6 event-name reducer stored for this record.
+    v6_update = replace(
+        update,
+        terminal_seen=False,
+        terminal_event=None,
+        terminal_status=None,
+        reserved_probe_needed=False,
+        lifecycle={**update.lifecycle, "terminal_status": None},
+    )
+    seed = open_monitor_store(weft_harness.context)
+    seed.ensure_schema()
+    seed.record_task_log_updates(
+        WEFT_GLOBAL_LOG_QUEUE, (v6_update,), checkpoint_message_id=None
+    )
+    seed.delete_task_messages_after_raw_delete(
+        (message_id,), deleted_at_ns=message_id + 1
+    )
+    with (
+        weft_harness.context.broker() as broker,
+        broker.sidecar(transaction=True) as session,
+    ):
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (json.dumps({"version": 6}), "schema_version"),
+        )
+
+    task = TaskMonitor(
+        db_path,
+        _marked_task_monitor_spec("1778089999999999713"),
+        config=_idle_monitor_config(),
+    )
+    try:
+        for _ in range(2):
+            _drive_one_monitor_cycle(task)
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            record = store.get_task(tid)
+            assert record is not None
+            assert (
+                record.terminal_seen,
+                record.terminal_event,
+                record.terminal_status,
+            ) == (True, "service_idle_exit", "completed")
+            assert record.summary_emitted_at_ns is not None
+            assert record.disposition_at_ns is not None
+            assert record.task_control_deleted_at_ns is not None
+
             retention_ns = int(
                 worker._monitor_config.task_log_retention_period_seconds * 1_000_000_000
             )

@@ -1047,7 +1047,9 @@ def test_monitor_store_accepts_complete_empty_unversioned_schema(
 
     store.ensure_schema()
 
-    assert _monitor_meta_value(ctx, "schema_version") == {"version": 6}
+    assert _monitor_meta_value(ctx, "schema_version") == {
+        "version": WEFT_MONITOR_SCHEMA_VERSION
+    }
     assert {table: _monitor_table_columns(ctx, table) for table in tables} == (
         columns_before
     )
@@ -1784,7 +1786,7 @@ def test_monitor_store_migrates_v5_owned_json_and_obsolete_delete_state(
             )
         )
 
-    assert json.loads(str(version_row[0])) == {"version": 6}
+    assert json.loads(str(version_row[0])) == {"version": WEFT_MONITOR_SCHEMA_VERSION}
     lifecycle = json.loads(str(collation_row[0]))
     bookkeeping = json.loads(str(collation_row[1]))
     deferred = json.loads(str(deferred_row[0]))
@@ -1851,11 +1853,86 @@ def test_monitor_store_v5_migration_creates_absent_deferred_table(
     store.ensure_schema()
 
     assert _monitor_table_exists(ctx, "weft_monitor_deferred_writes") is True
-    assert _monitor_meta_value(ctx, "schema_version") == {"version": 6}
+    assert _monitor_meta_value(ctx, "schema_version") == {
+        "version": WEFT_MONITOR_SCHEMA_VERSION
+    }
     assert (
         _monitor_table_columns(ctx, "weft_monitor_task_collations")
         == _RELEASE_V5_EVOLVED_COLLATION_COLUMNS
     )
+
+
+def test_monitor_store_v6_migration_closes_families_stranded_on_their_terminal_record(
+    tmp_path: Path,
+) -> None:
+    """Upgrading a v6 store records the terminal proof the v6 reducer missed.
+
+    Through v6 the reducer read terminality from an event-name map, so a
+    family whose last record was a service or Manager exit kept
+    ``terminal_seen=0`` forever. The one-time v6-to-v7 migration takes that
+    record's own terminal status as the family's terminal proof ([MF-3],
+    [OBS.13.4]). It leaves alone a family whose last row is not terminal (a
+    running task, a Manager drain start), an activity hint, and a family the
+    Monitor already summarized. Rerunning schema setup changes nothing.
+    """
+
+    ctx = _context(tmp_path)
+    store = open_monitor_store(ctx)
+    store.ensure_schema()
+    stranded = {
+        "1779000000000000701": ("service_idle_exit", "completed"),
+        "1779000000000000702": ("manager_superseded", "cancelled"),
+    }
+    untouched = {
+        "1779000000000000703": ("task_started", "running"),
+        "1779000000000000704": ("manager_leadership_yielded", "running"),
+        "1779000000000000705": ("task_activity", "completed"),
+        "1779000000000000706": ("manager_idle_shutdown", "completed"),
+    }
+    for index, (tid, (event, status)) in enumerate({**stranded, **untouched}.items()):
+        store.upsert_task_event(
+            _update(tid, int(tid) + 10 + index, event=event, status=status)
+        )
+    summarized_tid = "1779000000000000706"
+    store.mark_summary_emitted(summarized_tid, int(summarized_tid) + 50)
+    before = {tid: store.get_task(tid) for tid in untouched}
+    with ctx.broker() as broker, broker.sidecar(transaction=True) as session:
+        session.run(
+            "UPDATE weft_monitor_meta SET value_json = ? WHERE key = ?",
+            (json.dumps({"version": 6}), "schema_version"),
+        )
+
+    store.ensure_schema()
+    store.ensure_schema()
+
+    assert _monitor_meta_value(ctx, "schema_version") == {
+        "version": WEFT_MONITOR_SCHEMA_VERSION
+    }
+    for tid, (event, status) in stranded.items():
+        record = store.get_task(tid)
+        assert record is not None
+        assert (
+            record.terminal_seen,
+            record.terminal_event,
+            record.terminal_status,
+            record.status,
+            record.terminal_message_id,
+            record.reserved_probe_needed,
+            record.lifecycle.get("terminal_status"),
+        ) == (
+            True,
+            event,
+            status,
+            status,
+            record.last_message_id,
+            status != "completed",
+            status,
+        )
+        assert record.summary_emitted_at_ns is None
+    for tid, previous in before.items():
+        current = store.get_task(tid)
+        assert current is not None and previous is not None
+        assert replace(current, updated_at_ns=0) == replace(previous, updated_at_ns=0)
 
 
 def test_monitor_store_v5_migration_rolls_back_all_changes_on_failure(
@@ -2003,7 +2080,7 @@ def test_monitor_store_v5_migration_rolls_back_on_raw_probe_error(
     )
 
 
-@pytest.mark.parametrize("version", [4, 7])
+@pytest.mark.parametrize("version", [4, WEFT_MONITOR_SCHEMA_VERSION + 1])
 def test_monitor_store_rejects_unsupported_schema_versions(
     tmp_path: Path, version: int
 ) -> None:

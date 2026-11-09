@@ -81,6 +81,8 @@ def test_external_collation_preserves_adapter_notification_edges(
         json.dumps(
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": completed_tid,
                 "taskspec": {

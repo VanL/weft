@@ -33,7 +33,6 @@ from weft._constants import (
     STATUS_RUNTIMELESS_STALE_AFTER_SECONDS,
     TASK_MONITOR_RESERVED_CLEANUP_MIN_AGE_SECONDS,
     TASK_MONITOR_WEFT_ANOMALY_CLASSIFICATIONS,
-    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_EXTERNAL_ENABLED_DEFAULT,
@@ -1081,20 +1080,12 @@ def _lifecycle_conflict_reason(payload: dict[str, Any]) -> str | None:
         payload,
         "completed_at",
     )
-    event = _event_from_payload(payload)
     if (
         isinstance(status, str)
         and status not in TERMINAL_TASK_STATUSES
         and completed_at is not None
     ):
         return "nonterminal_status_with_completed_at"
-    if (
-        isinstance(status, str)
-        and status not in TERMINAL_TASK_STATUSES
-        and isinstance(event, str)
-        and event in TERMINAL_TASK_EVENTS
-    ):
-        return "nonterminal_status_with_terminal_event"
     return None
 
 

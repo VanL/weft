@@ -6,8 +6,9 @@ logging, table creation, or deletion.
 
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.3], [CC-3.4]
-- docs/specifications/05-Message_Flow_and_State.md [MF-5]
-- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.13], [OBS.17]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
+- docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.4], [OBS.13.13],
+  [OBS.17]
 """
 
 from __future__ import annotations
@@ -20,13 +21,16 @@ from weft._constants import (
     RUNNER_DIAGNOSTICS_FIELD,
     STATUS_COMPLETED,
     TASK_TERMINAL_ENVELOPE_SOURCES,
-    TERMINAL_TASK_EVENTS,
     TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_RAW_BODY_PREVIEW_BYTES,
 )
 from weft.core.queue_window import DecodedQueueWindowRow, payload_string
-from weft.core.task_evidence import TaskEvidenceSnapshot, select_terminal_envelope
+from weft.core.task_evidence import (
+    TaskEvidenceSnapshot,
+    select_terminal_envelope,
+    terminal_record_status,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +232,13 @@ def update_from_task_log_payload(
     queue_name: str = WEFT_GLOBAL_LOG_QUEUE,
     message_id: int,
 ) -> MonitorTaskEventUpdate | None:
-    """Return a Monitor-store update for one task-log JSON object."""
+    """Return a Monitor-store update for one task-log JSON object.
+
+    The row is terminal proof exactly when it is the task's typed terminal
+    record; its own status is the terminal status.
+
+    Spec: [MF-3], [OBS.13.4]
+    """
 
     tid = payload_string(payload, "tid")
     if tid is None:
@@ -236,7 +246,7 @@ def update_from_task_log_payload(
 
     event = payload_string(payload, "event")
     status = payload_string(payload, "status")
-    terminal_status = _terminal_status(event=event, status=status)
+    terminal_status = terminal_record_status(payload)
     terminal_seen = terminal_status is not None
     taskspec = _mapping(payload.get("taskspec"))
     taskspec_state = _mapping(taskspec.get("state") if taskspec else None)
@@ -286,14 +296,6 @@ def update_from_task_log_payload(
         },
         reserved_probe_needed=(terminal_seen and terminal_status != STATUS_COMPLETED),
     )
-
-
-def _terminal_status(*, event: str | None, status: str | None) -> str | None:
-    if event is not None:
-        return TERMINAL_TASK_EVENTS.get(event)
-    if status in TERMINAL_TASK_STATUSES:
-        return status
-    return None
 
 
 def _taskspec_summary(taskspec: Mapping[str, Any] | None) -> dict[str, Any]:
