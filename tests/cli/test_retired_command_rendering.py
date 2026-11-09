@@ -110,7 +110,17 @@ def test_prune_live_cli_reports_write_failure_after_successful_delete(
     tid = "1770000000000001008"
     with context.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False) as queue:
         old_id = queue.write(json.dumps({"tid": tid, "status": "created"}))
-        keep_id = queue.write(json.dumps({"tid": tid, "status": "completed"}))
+        # The typed terminal record is the task-log terminal proof [MF-3].
+        keep_id = queue.write(
+            json.dumps(
+                {
+                    "tid": tid,
+                    "status": "completed",
+                    "type": "terminal",
+                    "source": "task",
+                }
+            )
+        )
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("occupied", encoding="utf-8")
     result = CliRunner().invoke(
