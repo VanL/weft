@@ -2194,10 +2194,11 @@ class Manager(ServiceTask):
     def _activity_wait_queues(self) -> list[Queue]:
         """Include startup observation without adding a delivery route [MA-1.8].
 
-        Interest starts in the turn that selects the launch, before process
-        creation, so the settlement that frees a window slot and the launch it
-        admits change the activity waiter once. Cursor reads still wait for
-        the launch receipt (``_has_pending_observation``).
+        Selecting a launch makes its startup eligible for interest and the
+        next wait installs it, so the settlement that frees a window slot and
+        the launch it admits change the activity waiter once. A publication
+        may precede that wait; cursor reads wait for the launch receipt
+        (``_has_pending_observation``), whose exact read covers it.
         """
         queues = super()._activity_wait_queues()
         # System-STOP drain targets wake the reactor on their own snapshots [MA-3].

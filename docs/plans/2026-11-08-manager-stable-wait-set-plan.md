@@ -23,10 +23,13 @@ lookup on this machine), which is the cost the burst profile reports as
 `wait_setup` (8.2% of wall) and most of the plugin-discovery share of Manager
 busy time.
 
-This plan installs a startup's notification interest in the turn that selects
-its launch, before process creation, so the settlement that frees a window
-slot and the launch it admits change the waiter once. It records the
-SimpleBroker follow-ups that remove the remaining per-construction cost.
+This plan makes a startup eligible for notification interest when its launch
+is selected, so the next wait installs it and the settlement that frees a
+window slot and the launch it admits change the waiter once. Registration is
+not guaranteed before process creation: the launch worker starts before that
+wait, so a child can publish first; the receipt turn's exact read covers that
+publication, as it does today. The plan records the SimpleBroker follow-ups
+that remove the remaining per-construction cost.
 
 ## Premise check (what the brief asked for and what is possible)
 
@@ -134,9 +137,11 @@ Comprehension questions (answer before editing):
 1. `Manager._activity_wait_queues` stops skipping active launches. A selected
    ordinary launch's record already exists (created in
    `_checkpoint_admission_launch` before the worker starts), so its queue joins
-   the waiter at the wait that ends the selection turn. In a window-bound
-   steady state the settlement that freed the slot and this selection happen in
-   the same turn, so the removal and the addition share one construction; the
+   the waiter at the wait that ends the selection turn. The worker may create
+   the process, and the child may publish, before that wait; the receipt
+   turn's exact read observes such a publication. In a window-bound steady
+   state the settlement that freed the slot and this selection happen in the
+   same turn, so the removal and the addition share one construction; the
    receipt turn changes nothing.
 2. `Manager._has_pending_observation` keeps reading publication cursors only
    for launches whose receipt has been handled: it skips TIDs in
@@ -163,7 +168,7 @@ Rejected alternatives (recorded so they are not retried):
 
 | Change | Class | Theory basis |
 | --- | --- | --- |
-| Startup interest is registered at launch selection, not at the wait after the receipt | C | [WT-4.1]: interest exists before the fact can be published, so no publication is missed; the receipt-time exact read is unchanged |
+| A selected launch's interest is installed at the first wait after selection, not at the wait after the receipt | C | [WT-4.1]: interest is installed earlier than before, and a publication that precedes it (the worker may already have created the process) is observed by the unchanged receipt-time exact read, so no publication is missed |
 | A window-bound launch costs one waiter construction instead of two | C | [WT-4.2]: same primitive, fewer constructions |
 | Up to one additional transient interest (the selected launch) while the worker lane runs | N | Window occupancy already counts selected launches, so interests stay at most W ([MA-1.8]) |
 | A publication that lands before the receipt is handled can wake one wait that finds no cursor to read and resumes waiting | C | [WT-4.3]: the strategy return reads facts and continues; the receipt turn's read settles it. Before this change the same publication waited for the receipt's local wake |
@@ -183,18 +188,24 @@ notification-only interest" through "There are at most W outstanding
 interests (one on SQLite)." with:
 
 > Each unfinished ordinary startup has one transient notification-only interest
-> in `weft.state.tasks.<tid>` from the turn that selects its launch, before
-> process creation, so the settlement that frees a window slot and the launch
-> it admits change the activity waiter once. Its publication cursor is read
-> only after the launch-worker receipt is handled; until then the receipt
-> turn's exact handoff read observes any publication. There are at most W
-> outstanding interests (one on SQLite).
+> in `weft.state.tasks.<tid>`. Selecting its launch makes the startup eligible
+> for interest, and the next wait installs it, so the settlement that frees a
+> window slot and the launch it admits change the activity waiter once. A
+> publication may land before that wait installs interest. Its publication
+> cursor is read only after the launch-worker receipt is handled, and the
+> receipt turn's exact handoff read observes any earlier publication. There
+> are at most W outstanding interests (one on SQLite).
+
+(Revised after the cross-family review, finding F1: the first draft said
+"from the turn that selects its launch, before process creation", which
+overstated the ordering.)
 
 Add to `## Related Plans`:
 
 > - [Manager startup interest from launch selection](../plans/2026-11-08-manager-stable-wait-set-plan.md)
->   registers startup interest at launch selection so one settlement and the
->   launch it admits rebuild the activity waiter once, and records the
+>   installs startup interest at the first wait after launch selection so one
+>   settlement and the launch it admits rebuild the activity waiter once, and
+>   records the
 >   SimpleBroker plugin-lookup follow-up ([MA-1.8], [SB-0.4]).
 
 [QUEUE.7] ("active notification interests bounded by the [MA-1.8] startup
@@ -212,23 +223,28 @@ edited.
    then count real waiter constructions (a delegating spy around
    `weft.core.tasks.multiqueue_watcher.create_activity_waiter_for_queues`, the
    same pattern as `tests/tasks/test_multiqueue_watcher.py`) while one
-   publication is released and the Manager settles it and receives the
-   admitted launch. Periodic maintenance is held off, so the settlement proves
-   the notification wake. Assert one construction whose membership swaps the
-   settled TID for the admitted one. Confirm it fails with two constructions on
-   the base code.
+   publication is released and the Manager settles it and selects the
+   admitted launch. Hold the admitted launch's receipt (a test-owned
+   `threading.Event` in the `launch_task_process` stand-in) until the wait
+   after the settling turn has run while that launch is still active, so a
+   fast receipt cannot fold the two edges together; then release it, let the
+   receipt turn run, and assert there is no second construction. Periodic
+   maintenance is held off, so the settlement proves the notification wake.
+   Assert one construction whose membership swaps the settled TID for the
+   admitted one. Confirm it fails on the base code.
 2. Implement the two `Manager` edits in the Design section, with docstrings
    citing [MA-1.8].
-3. Update `test_positive_startup_snapshot_wakes_admission_without_maintenance_tick`:
-   the `publish_before_interest` case cannot occur any more (interest precedes
-   process creation). Restate it as `publish_before_receipt`: the child
-   publishes, the test holds the launch receipt (a test-owned
-   `threading.Event` inside the existing `launch_task_process` stand-in) while
-   the Manager runs turns and waits, asserts that no cursor read or handoff
-   happened before the receipt, then releases the receipt and asserts the
-   receipt turn's exact read settled the startup. Every case also asserts
-   that interest exists right after selection. Keep the other cases
-   unchanged.
+3. Update `test_positive_startup_snapshot_wakes_admission_without_maintenance_tick`.
+   Its old `publish_before_interest` case asserted that no interest existed
+   after the receipt, which is no longer the contract. Keep the case name and
+   its reachable ordering: the child publishes before the next wait installs
+   interest while the test holds the launch receipt (a test-owned
+   `threading.Event` inside the existing `launch_task_process` stand-in). The
+   test then installs interest at the existing setup boundary, runs turns and
+   waits, asserts that no cursor read or handoff happened before the receipt,
+   releases the receipt, and asserts the receipt turn's exact read settled
+   the startup. Every case asserts that the first wait after selection
+   installs interest before the receipt. Keep the other cases unchanged.
 4. Apply the spec delta and the Related Plans backlink.
 5. Run the verification gates below.
 
@@ -313,7 +329,8 @@ Author pass after implementation (not independent):
   membership in place and that [SB-0.4] forbids backend listener calls; the
   corrected scope stands.
 - Correctness: the only new reachable effect is a selected launch's queue in
-  the waiter before its receipt. A publication in that interval can return
+  the waiter before its receipt (installed by the first wait after selection;
+  the child may already have published). A publication in that interval can return
   one wait, which reads no cursor for that launch and continues; the receipt
   turn's `_reconcile_launch_now` reads it. The active-launch exclusion in
   `_has_pending_observation` is load-bearing (without it, the turn reconciled
@@ -341,14 +358,32 @@ Author pass after implementation (not independent):
   new test and all five `test_positive_startup_snapshot_wakes_...` cases
   (`feedback.queue` is `None` after selection); removing the active-launch
   exclusion in `_has_pending_observation` fails the two
-  `publish_before_receipt` cases (cursor advanced before the receipt).
-- Gates on the implementation tree: SQLite
+  `publish_before_interest` cases (cursor advanced before the receipt).
+- After review finding F2, the new test holds the admitted launch's receipt.
+  Rerun of the first control on the strengthened test: it fails on SQLite and
+  on PostgreSQL with a single removal-only construction where the swap is
+  expected (the base code excludes the still-active admitted launch). The
+  second control was rerun on the revised `publish_before_interest` cases:
+  both fail at `feedback.publication_id is None`.
+- Gates on the first implementation tree (`eccbaf9c`): SQLite
   `tests/core/test_manager_family_maintenance.py tests/core/test_admission_recovery.py tests/core/test_manager.py tests/tasks/test_multiqueue_watcher.py -n 4`:
   475 passed, 5 skipped (PostgreSQL-only). PostgreSQL `./bin/pytest-pg` on
   the same four files: 471 passed, 12 skipped. `tests/specs`: 165 passed.
   `ruff check .`, `ruff format --check` on touched Python files, the repo
   mypy command, `bin/check-doc-paths`, and `git diff --check` pass.
+- Gates after the review fixes: SQLite
+  `tests/core/test_manager_family_maintenance.py tests/core/test_admission_recovery.py -n 4`:
+  75 passed. PostgreSQL `./bin/pytest-pg tests/core/test_manager_family_maintenance.py`:
+  43 passed. `tests/specs`: 165 passed. `ruff check .`, `ruff format --check`,
+  the repo mypy command, `bin/check-doc-paths`, and `git diff --check` pass.
 
 ## Review and execution record
 
-Cross-family review: to be filled by the coordinator.
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at eccbaf9c against 08c2f87b.
+Verdict: no blocker.
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | P3 | Registration is not guaranteed before process creation: `_launch_child_task` starts the launch worker before the next wait installs the new membership, so a child can publish before interest exists. The receipt's exact read covers that safely, but the spec (03 [MA-1.8]), the difference-register row, and the claim that `publish_before_interest` "cannot occur" overstate the ordering. | Accepted, fixed: [MA-1.8] text, the plan's goal, design item 1, register row 1, spec-delta block and task 3, and the `Manager._activity_wait_queues` docstring now say selection makes the startup eligible, the next wait installs interest, and the receipt-time read covers an earlier publication. The `publish_before_interest` case is kept with its reachable ordering: the child publishes before the next wait installs interest while the receipt is held; the test asserts no interest yet, then interest installed, no cursor read or handoff before the receipt, and settlement in the receipt turn. |
+| F2 | P3 | `test_settlement_and_admitted_launch_share_one_waiter_rebuild` fences publication but not the admitted launch's receipt; if the receipt is handled before waiter setup, the baseline also swaps membership in one construction, so the test can pass reverted code under a legal fast-receipt schedule. | Accepted, fixed: the admitted launch's receipt is held by a test-owned `threading.Event` until the wait setup after the settling turn has run while that launch is still active; the test asserts the single swap construction there, releases the receipt, drives the receipt turn, and asserts no second construction. The control (base active-launch skip restored) now fails on both backends with a removal-only construction. |

@@ -33,7 +33,7 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
-- [Manager startup interest from launch selection](../plans/2026-11-08-manager-stable-wait-set-plan.md) registers startup interest at launch selection so one settlement and the launch it admits rebuild the activity waiter once, and records the SimpleBroker plugin-lookup follow-up ([MA-1.8], [SB-0.4]).
+- [Manager startup interest from launch selection](../plans/2026-11-08-manager-stable-wait-set-plan.md) installs startup interest at the first wait after launch selection so one settlement and the launch it admits rebuild the activity waiter once, and records the SimpleBroker plugin-lookup follow-up ([MA-1.8], [SB-0.4]).
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
@@ -549,12 +549,13 @@ the source idle again when empty. A negative startup-readiness decision suppress
 unchanged blocked backlog as ordinary wait activity.
 
 Each unfinished ordinary startup has one transient notification-only interest
-in `weft.state.tasks.<tid>` from the turn that selects its launch, before
-process creation, so the settlement that frees a window slot and the launch
-it admits change the activity waiter once. Its publication cursor is read
-only after the launch-worker receipt is handled; until then the receipt
-turn's exact handoff read observes any publication. There are at most W
-outstanding interests (one on SQLite).
+in `weft.state.tasks.<tid>`. Selecting its launch makes the startup eligible
+for interest, and the next wait installs it, so the settlement that frees a
+window slot and the launch it admits change the activity waiter once. A
+publication may land before that wait installs interest. Its publication
+cursor is read only after the launch-worker receipt is handled, and the
+receipt turn's exact handoff read observes any earlier publication. There
+are at most W outstanding interests (one on SQLite).
 These queues participate in the existing activity waiter, not delivery: no
 handler, consumption, reservation or task-state mutation is added. Install
 interest before reading and retain a strict publication cursor per TID. A new

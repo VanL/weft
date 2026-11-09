@@ -694,11 +694,13 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
 ) -> None:
     """One settlement and the launch it admits replace the waiter once [MA-1.8].
 
-    Startup notification interest is registered when a launch is selected, so
-    the turn that settles one startup and selects the next changes the shared
-    activity waiter once; the later launch receipt changes nothing. The real
-    SimpleBroker factory is counted, not replaced. Periodic maintenance and the
-    absence fallback are held, so only the released publication can settle.
+    Selecting a launch makes its startup eligible for interest, so the first
+    wait after the turn that settles one startup and selects the next changes
+    the shared activity waiter once; the later launch receipt changes nothing.
+    The admitted launch's receipt is held until that wait has run, so a fast
+    receipt cannot fold the two edges together. The real SimpleBroker factory
+    is counted, not replaced. Periodic maintenance and the absence fallback are
+    held, so only the released publication can settle.
     """
     now_ns = time.time_ns()
     monkeypatch.setattr(
@@ -733,6 +735,7 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
     releases = {tid: spawn.Event() for tid in tids}
     started = {tid: spawn.Event() for tid in tids}
     ready = {tid: spawn.Event() for tid in tids}
+    admitted_receipt = threading.Event()
     processes: list[BaseProcess] = []
 
     def launch(
@@ -756,6 +759,8 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
         assert process.pid is not None
         harness.register_pid(process.pid)
         assert started[tid].wait(timeout=30.0)
+        if tid == tids[window]:
+            assert admitted_receipt.wait(timeout=30.0)
         return process
 
     def received(count: int) -> bool:
@@ -790,7 +795,27 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
         assert task_state_queue_name(tids[window]) not in filled
         builds.clear()
 
+        swapped = filled - {task_state_queue_name(tids[0])} | {
+            task_state_queue_name(tids[window])
+        }
         publications[tids[0]].set()
+        drive_until(
+            lambda: (
+                tids[0] not in manager._startup_feedback
+                and tids[window] in manager._active_child_launches
+            ),
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+            wait_slice=30.0,
+        )
+        # The wait after the settling turn runs while the admitted launch is
+        # still active: its receipt is held.
+        manager._ensure_wait_strategy_started()
+        assert builds == [swapped]
+
+        admitted_receipt.set()
         drive_until(
             lambda: received(window + 1),
             bool,
@@ -800,13 +825,10 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
             wait_slice=30.0,
         )
         manager._ensure_wait_strategy_started()
-        assert tids[0] not in manager._startup_feedback
         assert set(manager._startup_feedback) == set(tids[1:])
-        assert builds == [
-            filled - {task_state_queue_name(tids[0])}
-            | {task_state_queue_name(tids[window])}
-        ]
+        assert builds == [swapped]
     finally:
+        admitted_receipt.set()
         _release_waiting_tasks(publications, releases)
         _join_waiting_processes(processes)
 
@@ -867,7 +889,7 @@ def test_startup_handoff_reactivates_pending_public_queue(manager: Manager) -> N
 
 
 @pytest.mark.parametrize(
-    "persistent,invalid_first,publish_before_receipt",
+    "persistent,invalid_first,publish_before_interest",
     [
         (False, False, False),
         (True, False, False),
@@ -881,14 +903,15 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
     monkeypatch: pytest.MonkeyPatch,
     persistent: bool,
     invalid_first: bool,
-    publish_before_receipt: bool,
+    publish_before_interest: bool,
 ) -> None:
     """A real delayed snapshot releases startup before the absence fallback.
 
     Hold periodic reconciliation beyond the observation deadline. The real
     publication and reactor notification must own admission and exact handoff.
-    Interest is registered when the launch is selected [MA-1.8]; a publication
-    that lands before the receipt is handled settles in the receipt turn.
+    Selecting a launch makes it eligible for interest, which the next wait
+    installs [MA-1.8]. A publication that lands before that wait (and before
+    the receipt) is read only by the receipt turn's exact handoff read.
     """
     # Launch-result reconciliation also runs the missing-publication fallback,
     # independently of the periodic fence below. Freeze the Manager's wall clock
@@ -942,9 +965,10 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         process.start()
         # Finish fixture import before returning the actual process receipt.
         assert started.wait(timeout=30.0)
-        if publish_before_receipt:
+        if publish_before_interest:
             # The child's constructor snapshot commits; the test then holds
-            # the receipt while the Manager runs turns and waits.
+            # the receipt while the Manager installs interest, runs turns and
+            # waits.
             before_publish.set()
             assert ready.wait(timeout=30.0)
             assert receipt_gate.wait(timeout=30.0)
@@ -961,13 +985,17 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         )
         feedback = manager._startup_feedback[str(request_id)]
         state_name = f"weft.state.tasks.{request_id}"
-        # Interest is installed for the selected launch before its receipt.
+        if publish_before_interest:
+            # The publication commits before the next wait installs interest.
+            assert ready.wait(timeout=30.0)
+            assert feedback.queue is None
+        # The next wait installs interest for the selected launch, before its
+        # receipt is handled.
         manager._ensure_wait_strategy_started()
         assert feedback.queue is not None and feedback.queue.name == state_name
-        if publish_before_receipt:
+        if publish_before_interest:
             # The publication is visible, but only the receipt turn may read
             # it: no cursor read or handoff happens before the receipt.
-            assert ready.wait(timeout=30.0)
             for _ in range(3):
                 manager.process_once()
                 manager.wait_for_activity(timeout=0.05)
@@ -987,7 +1015,7 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
             timeout=30.0,
         )
         assert state_name not in manager._queues
-        if publish_before_receipt:
+        if publish_before_interest:
             # The receipt turn's exact handoff read settled it.
             assert str(request_id) not in manager._startup_feedback
         else:
