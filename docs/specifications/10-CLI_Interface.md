@@ -437,13 +437,25 @@ separate. The setting is a minimum, not exact expiry or an audit guarantee.
 
 _Implementation mapping_: `weft/commands/system.py` owns status collection and
 the explicit task/manager/service JSON projections and `cmd_status()`;
+`weft/commands/system.py::_collect_manager_records` reads Manager rows through
+`weft/core/manager_runtime.py::list_manager_records(observe=True)`;
 `weft/cli/app.py` registers `weft status` and reuses the shared task projection
-for task list/status JSON.
+for task list/status JSON. Plan:
+[Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md).
 
 Current behavior:
 
 - summarizes the active context
 - shows manager registry information and task snapshots
+- lists each Manager's latest registry row. An `active` row is listed when its
+  runtime liveness is `live`, or `unknown` and younger than
+  `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS`, and carries `liveness`
+  (`live` or `unknown`) in JSON and plain text; a definitively stale row and
+  an older unknown row are omitted. A row is `unknown` when this process
+  cannot prove the Manager's runtime, for example an external-supervisor row
+  whose liveness provider is not loaded here. Status sends no PING to resolve
+  it and never selects an unknown row as the active Manager ([MA-1]). Other
+  Manager rows carry no `liveness`
 - shows manager-owned service snapshots for heartbeat and TaskMonitor
 - can emit JSON
 - external status JSON uses [SB-0.2] strings for
@@ -1142,6 +1154,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
+- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md) keeps an unexpired `active` Manager row whose runtime liveness is `unknown` in `weft status`, labelled `liveness: "unknown"`, without a PING ([CLI-1.2.1], [MA-1], [PY-2]).
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `weft system stop`, the one command that stops the manager and the context's internal services.

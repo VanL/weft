@@ -1289,14 +1289,18 @@ def test_system_and_manager_namespaces_expose_shared_runtime_state() -> None:
         system_manager = next(
             item for item in status_snapshot.managers if item.tid == manager_tid
         )
+        # Project status labels an observed active row's liveness [PY-2].
+        assert system_manager.liveness == "live"
         assert replace(
             system_manager,
             dispatch_refusals={},
             dispatch_refusals_source=None,
+            liveness=None,
         ) == replace(
             manager_snapshot,
             dispatch_refusals={},
             dispatch_refusals_source=None,
+            liveness=None,
         )
 
 

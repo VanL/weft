@@ -218,7 +218,7 @@ def _collect_manager_records(
         ctx,
         include_stopped=include_stopped,
         canonical_only=False,
-        probe_stale=False,
+        observe=True,
     )
 
 

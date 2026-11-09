@@ -444,6 +444,101 @@ def test_system_status_manager_snapshot_includes_internal_spawn_queues(
     assert manager.internal_reserved == internal_reserved
 
 
+def test_system_status_lists_unknown_manager_without_ping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status keeps an unproven active Manager as `unknown` and writes nothing.
+
+    A missing liveness probe is unknown evidence, not proof of death
+    ([WT-2a.13]); a bulk status read sends no PING ([CLI-1.2.1], [MA-1]).
+    Definitively stale and expired-unknown rows stay omitted.
+    """
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    live_tid = "1780000000000000401"
+    unknown_tid = "1780000000000000402"
+    stale_tid = "1780000000000000403"
+    expired_tid = "1780000000000000404"
+
+    probe_calls: list[str] = []
+    real_probe = manager_runtime.send_keyed_ping_probe
+
+    def _recording_probe(*args: Any, **kwargs: Any) -> Any:
+        probe_calls.append(str(kwargs.get("tid", "")))
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(manager_runtime, "send_keyed_ping_probe", _recording_probe)
+
+    unprobed_supervisor = _runtime_handle(
+        "manager-supervisor",
+        "container:status-unknown",
+        kind="supervised-process",
+        authority="external-supervisor",
+        observations={"liveness_provider": "weft-status-test-unregistered"},
+    )
+    live_create_time = psutil.Process().create_time()
+    with ctx.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=False) as registry:
+        for tid, handle in (
+            (
+                live_tid,
+                _runtime_handle("host", str(os.getpid()), host_pids=[os.getpid()]),
+            ),
+            (unknown_tid, unprobed_supervisor),
+            (
+                stale_tid,
+                _runtime_handle(
+                    "host",
+                    str(os.getpid()),
+                    observations={
+                        "host_processes": [
+                            {"pid": os.getpid(), "create_time": live_create_time + 50}
+                        ]
+                    },
+                ),
+            ),
+        ):
+            registry.write(
+                json.dumps(
+                    _manager_service_payload(
+                        ctx, tid=tid, name=f"mgr-{tid[-3:]}", runtime_handle=handle
+                    )
+                )
+            )
+        expired_at = time.time_ns() - int(
+            (manager_runtime.MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS + 60)
+            * 1_000_000_000
+        )
+        registry.insert_messages(
+            [
+                (
+                    json.dumps(
+                        _manager_service_payload(
+                            ctx,
+                            tid=expired_tid,
+                            name="mgr-expired",
+                            runtime_handle=unprobed_supervisor,
+                        )
+                    ),
+                    expired_at,
+                )
+            ]
+        )
+    last_timestamp_before = collect_broker_status(ctx).last_timestamp
+
+    snapshot = status_cmd.system_status(ctx)
+
+    assert {manager.tid: manager.liveness for manager in snapshot.managers} == {
+        live_tid: "live",
+        unknown_tid: "unknown",
+    }
+    assert probe_calls == []
+    for tid in (live_tid, unknown_tid, stale_tid, expired_tid):
+        with ctx.queue(f"T{tid}.ctrl_in", persistent=False) as ctrl_in:
+            assert ctrl_in.peek_many(limit=10) == []
+    assert collect_broker_status(ctx).last_timestamp == last_timestamp_before
+
+
 def test_status_services_include_independent_liveness_monitor_inventory(
     tmp_path: Path,
 ) -> None:

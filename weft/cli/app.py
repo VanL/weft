@@ -230,6 +230,11 @@ def _render_status_snapshot(
                     f"    requests: {manager.requests or ''}",
                     f"    outbox: {manager.outbox or ''}",
                     f"    timestamp: {manager.timestamp or 0}",
+                    *(
+                        (f"    liveness: {manager.liveness}",)
+                        if manager.liveness is not None
+                        else ()
+                    ),
                 )
             )
             lines.extend("    " + line for line in dispatch_refusal_lines(manager))

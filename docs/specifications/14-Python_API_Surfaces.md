@@ -420,7 +420,9 @@ and `integrations/weft_django/tests/test_weft_django.py`.
   `proof_source: str | None = None`, `proof_detail: str | None = None`,
   `dispatch_eligible: bool | None = None`,
   `canonical_candidate: bool | None = None`, and
-  `canonical: bool | None = None`; diagnostic mode populates them.
+  `canonical: bool | None = None`; diagnostic mode populates them. Project
+  status populates only `liveness` (`live` or `unknown`) on `active` rows
+  ([CLI-1.2.1]).
   `started_here: bool | None = None` is populated only by
   `cmd_manager_start` so the CLI can preserve its started-versus-existing
   lifecycle message without a second semantic query.
@@ -613,6 +615,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md) has project status populate `ManagerSnapshot.liveness` (`live` or `unknown`) on `active` rows ([PY-2], [CLI-1.2.1]).
 - [Deep-dive review remediation plan](../plans/2026-11-06-deep-dive-review-remediation-plan.md) aligns `cmd_task_tid(reverse=...)` and the [PY-2] verb/type inventory (`42` verbs, `SystemStopResult`, and `system stop`).
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
 - retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.

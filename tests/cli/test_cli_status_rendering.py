@@ -304,6 +304,46 @@ def test_status_service_health_warnings_are_rendered(
     assert "deferred_writes=3" in output
 
 
+def test_status_text_renders_observed_manager_liveness(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plain status labels an observed Manager row's liveness [CLI-1.2.1]."""
+    observed_tid = "1779200000000000301"
+    unobserved_tid = "1779200000000000302"
+    _render_status_snapshot(
+        types.SystemStatusSnapshot(
+            broker={},
+            managers=[
+                types.ManagerSnapshot(
+                    tid=observed_tid,
+                    status="active",
+                    name="manager",
+                    runtime_handle=None,
+                    timestamp=None,
+                    liveness="unknown",
+                ),
+                types.ManagerSnapshot(
+                    tid=unobserved_tid,
+                    status="draining",
+                    name="manager",
+                    runtime_handle=None,
+                    timestamp=None,
+                ),
+            ],
+            tasks=[],
+        ),
+        json_output=False,
+    )
+    lines = capsys.readouterr().out.splitlines()
+    observed = lines.index(f"  - tid: {observed_tid}")
+    unobserved = lines.index(f"  - tid: {unobserved_tid}")
+    liveness_lines = [
+        index for index, line in enumerate(lines) if line.startswith("    liveness:")
+    ]
+    assert [lines[index] for index in liveness_lines] == ["    liveness: unknown"]
+    assert observed < liveness_lines[0] < unobserved
+
+
 def test_task_list_and_task_status_json_use_status_task_json_payload_for_wall_clock_timestamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `weft status` lists an active Manager whose runtime it cannot prove from the
+  status process, such as an externally supervised (containerized) Manager
+  whose liveness provider is not loaded there, instead of hiding it. The row
+  carries `liveness: "unknown"` (live rows carry `"live"`) in JSON and plain
+  text until the 300 s unknown window expires. Status still sends no PING and
+  never selects an unknown Manager as the active one ([CLI-1.2.1], [MA-1]).
+
 ## [0.9.122] - 2026-11-06
 
 ### Changed

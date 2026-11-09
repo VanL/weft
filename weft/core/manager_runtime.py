@@ -233,15 +233,26 @@ def _manager_registry_disposition(
     *,
     probe_stale: bool,
     probe_cache: dict[str, int | None] | None,
+    observe: bool = False,
     broker: Any | None = None,
 ) -> _ManagerRegistryDisposition:
-    """Filter one active manager row without taking delete custody ([MA-1])."""
+    """Filter one active manager row without taking delete custody ([MA-1]).
+
+    An observer never probes: it keeps a live or unexpired unknown row and
+    stamps that ``liveness`` on it, because a missing probe is unknown
+    evidence, not proof of death ([CLI-1.2.1], [WT-2a.13]).
+    """
 
     liveness = manager_registry_record_liveness(record)
+    if liveness == "stale" or (
+        liveness == "unknown" and _manager_record_unknown_is_expired(record)
+    ):
+        return "omit"
+    if observe:
+        record["liveness"] = liveness
+        return "keep"
     if liveness == "live":
         return "keep"
-    if liveness == "stale" or _manager_record_unknown_is_expired(record):
-        return "omit"
     if (
         probe_stale
         and is_canonical_manager_record(record)
@@ -276,6 +287,7 @@ def _snapshot_registry(
     prune_stale: bool = True,
     probe_stale: bool = False,
     probe_cache: dict[str, int | None] | None = None,
+    observe: bool = False,
     queue: Queue | None = None,
     broker: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -316,6 +328,7 @@ def _snapshot_registry(
                     record,
                     probe_stale=probe_stale,
                     probe_cache=probe_cache,
+                    observe=observe,
                     broker=broker,
                 )
                 if disposition == "omit":
@@ -1064,18 +1077,25 @@ def list_manager_records(
     include_stopped: bool = False,
     canonical_only: bool = False,
     prune_stale: bool = True,
-    probe_stale: bool | None = None,
+    observe: bool = False,
     broker: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Return manager registry records for command-layer consumers."""
+    """Return manager registry records for command-layer consumers.
 
-    active_probe = prune_stale if probe_stale is None else probe_stale
+    ``observe`` is the passive project-status read: no PING, and unexpired
+    unknown active rows are kept with their ``liveness`` ([CLI-1.2.1], [MA-1]).
+    Other readers keep an unknown row only on a matched PONG or PID-namespace
+    ambiguity.
+    """
+
+    probe = prune_stale and not observe
     records = list(
         _snapshot_registry(
             context,
             prune_stale=prune_stale,
-            probe_stale=active_probe,
-            probe_cache={} if active_probe else None,
+            probe_stale=probe,
+            probe_cache={} if probe else None,
+            observe=observe,
             broker=broker,
         ).values()
     )
