@@ -3403,107 +3403,52 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
     assert "sensitive" not in caplog.text
 
 
-def test_host_monitor_final_metrics_failure_uses_snapshot_before_stop(
+@pytest.mark.parametrize("target_type", ["command", "function"])
+def test_task_runner_work_item_ending_before_first_sample_reports_no_metrics(
+    target_type: str,
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
-    metrics = ResourceMetrics(memory_mb=19.5)
+    """A work item that ends before its first sample reports no metrics.
 
-    class Monitor:
-        def start(self, _pid: int) -> None:
-            calls.append("start")
+    The built-in monitor observes a live runtime ([RM-5.1]). Once the worker
+    has been reaped there is nothing left to sample, so the outcome carries no
+    metrics and a healthy task logs no monitor failure.
 
-        def last_metrics(self) -> None:
-            calls.append("last_metrics")
-            raise RuntimeError("sensitive final metrics failure")
+    Spec: [RM-5.1]
+    """
 
-        def snapshot(self) -> ResourceMetrics:
-            calls.append("snapshot")
-            return metrics
-
-        def stop(self) -> None:
-            calls.append("stop")
-
-    monkeypatch.setattr(
-        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
-    )
-    runner = _build_function_host_runner(
-        timeout=5.0,
-        monitor_class="tests.fake:Monitor",
+    command = target_type == "command"
+    runner = TaskRunner(
+        target_type=target_type,
+        tid=None,
+        function_target=(
+            None if command else "tests.tasks.sample_targets:echo_payload"
+        ),
+        process_target=sys.executable if command else None,
+        agent=None,
+        args=["-c", "print('done')"] if command else None,
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=30.0,
+        limits=LimitsSection(),
+        monitor_class="weft.core.resource_monitor.ResourceMonitor",
+        # The first sample is due one interval after start, long after the
+        # work item has ended.
         monitor_interval=60.0,
     )
 
-    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
-        outcome = runner.run("payload")
+    with caplog.at_level(logging.WARNING, logger="weft.core.runners"):
+        outcome = runner.run({} if command else "payload")
 
     assert outcome.status == "ok"
-    assert outcome.value == "payload"
-    assert outcome.metrics is metrics
-    assert calls == ["start", "last_metrics", "snapshot", "stop"]
-    monitor_messages = [
-        record.getMessage()
-        for record in caplog.records
-        if "resource" in record.getMessage()
-    ]
-    assert monitor_messages == ["Failed to collect final host resource metrics"]
-    assert all(record.exc_info is None for record in caplog.records)
-    assert "sensitive" not in caplog.text
-
-
-def test_host_monitor_snapshot_and_stop_failures_do_not_replace_outcome(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    class Monitor:
-        def start(self, _pid: int) -> None:
-            calls.append("start")
-
-        def check_limits(self) -> tuple[bool, str | None]:
-            return True, None
-
-        def last_metrics(self) -> None:
-            calls.append("last_metrics")
-
-        def snapshot(self) -> ResourceMetrics:
-            calls.append("snapshot")
-            raise RuntimeError("sensitive snapshot failure")
-
-        def stop(self) -> None:
-            calls.append("stop")
-            raise RuntimeError("sensitive stop failure")
-
-    monkeypatch.setattr(
-        host_module, "load_resource_monitor", lambda *_a, **_k: Monitor()
-    )
-    runner = _build_function_host_runner(
-        timeout=5.0,
-        monitor_class="tests.fake:Monitor",
-        monitor_interval=60.0,
-    )
-
-    with caplog.at_level(logging.WARNING, logger="weft.core.runners.host"):
-        outcome = runner.run("payload")
-
-    assert outcome.status == "ok"
-    assert outcome.value == "payload"
     assert outcome.metrics is None
-    assert calls[0] == "start"
-    assert "last_metrics" in calls
-    assert calls[-2:] == ["snapshot", "stop"]
-    monitor_messages = [
+    runner_warnings = [
         record.getMessage()
         for record in caplog.records
-        if "resource" in record.getMessage()
+        if record.name.startswith("weft.core.runners")
     ]
-    assert monitor_messages == [
-        "Failed to snapshot final host resource metrics",
-        "Failed to stop host resource monitor",
-    ]
-    assert all(record.exc_info is None for record in caplog.records)
-    assert "sensitive" not in caplog.text
+    assert runner_warnings == []
 
 
 ONE_SHOT_EVENT_ORDER: tuple[TerminalHandoffEventKind, ...] = (
