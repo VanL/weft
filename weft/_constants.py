@@ -789,6 +789,16 @@ MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS: Final[float] = 30.0
 MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS: Final[float] = 300.0
 """Age after which external-supervisor manager registry records are stale."""
 
+SERVICE_OWNER_REFRESH_INTERVAL_SECONDS: Final[float] = (
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS / 3
+)
+"""How often a task launched with a managed service key re-stamps its owner row.
+
+Derived, not configurable: a third of the registry retention window, so one
+missed refresh still leaves the row inside the window and a live owner's
+latest row never reaches retention or the runtime prune
+(docs/specifications/03-Manager_Architecture.md [MA-1] item 7)."""
+
 MANAGER_PID_LIVENESS_RECHECK_INTERVAL: Final[float] = 0.5
 """Throttle for repeated PID-liveness probes during stop-if-absent manager waits."""
 

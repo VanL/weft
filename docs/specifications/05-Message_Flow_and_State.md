@@ -544,7 +544,7 @@ Current rules:
 - the heartbeat service is driven by the shared task reactor loop. It handles
   at most one bounded control/inbox-rejection/table-build/due-emission turn in
   `process_once()`, exposes the next registration due time and the earliest
-  lease expiry through `next_wait_timeout()` (with an empty table the only deadline is the idle clock), and leaves all destination queue writes on the
+  lease expiry through `next_wait_timeout()` (with an empty table the only deadlines are the idle clock and the owner-row refresh of [MA-1] item 7), and leaves all destination queue writes on the
   main task thread. It does not inspect inbox/control pending state in
   `next_wait_timeout()`; queue wakeup belongs to `MultiQueueWatcher`, and the
   heartbeat timer is only the timeout supplied to that same wait path. It holds
@@ -561,10 +561,11 @@ Current rules:
   and a cancel committed after it may be followed by at most one emission.
 - the service ends itself after `SERVICE_IDLE_EXIT_SECONDS` with an empty
   table and no live non-superseded manager. With an empty table its only
-  deadline is that idle clock and it otherwise blocks on its watcher (its
-  `ctrl_in` lane and its notification interest in `weft.state.heartbeats`);
-  with rows its deadlines are the next due emission and the earliest lease
-  expiry, and the idle clock is not armed.
+  deadlines are that idle clock and its owner-row refresh ([MA-1] item 7),
+  and it otherwise blocks on its watcher (its `ctrl_in` lane and its
+  notification interest in `weft.state.heartbeats`); with rows its deadlines
+  are the next due emission, the earliest lease expiry and the owner-row
+  refresh, and the idle clock is not armed.
 - duplicate heartbeat services converge through the manager-owned singleton
   service contract. Live ownership is proved by tracked child state, a live
   runtime handle, including the task process host handle in TID mappings, or
@@ -814,8 +815,9 @@ Current rules:
   TaskMonitor-owned built-in cycle worker group; the reactor stays available
   for task-local PING/STATUS/STOP/KILL and schedule bookkeeping while the
   worker scans, writes Monitor-store rows, and applies exact deletes.
-  The monitor's only clock is its own cycle deadline, published through
-  `next_wait_timeout()`. The first cycle runs on the first enabled turn and
+  The monitor's only clock of its own is its cycle deadline, published through
+  `next_wait_timeout()`; the shared service idle clock and owner-row refresh
+  ([MA-1] item 7) come from its base classes. The first cycle runs on the first enabled turn and
   anchors a fixed periodic grid: ticks fall at that cycle's start plus
   whole multiples of `WEFT_TASK_MONITOR_INTERVAL_SECONDS`, and the grid is
   never re-anchored. A cycle runs at each grid tick and consumes, at its

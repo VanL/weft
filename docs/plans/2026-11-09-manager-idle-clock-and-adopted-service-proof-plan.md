@@ -1,7 +1,7 @@
 # Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof
 
 Status: draft
-Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]; docs/specifications/05-Message_Flow_and_State.md [MF-3.2] (audited, unchanged)
+Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]; docs/specifications/01-Core_Components.md [CC-2] (BaseTask, ServiceTask and HeartbeatTask deadlines); docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-5] (service deadlines)
 Superseded by: none
 
 Class: 5 (spec-changing) with risky triggers. Normative text in
@@ -20,7 +20,16 @@ session by the coordinating agent:
   supervision-only internal services do not reset the Manager's idle clock.
 - **C2.** PONG-probe aged service-owner registry rows through the existing
   `_service_pong_candidate`, instead of losing live proof. The 300-second
-  retention rule stays. No new mechanism.
+  retention rule stays. No new mechanism. *Superseded by the revision
+  below; kept as the record of what slice 2 first built.*
+- **C2, revised (owner decision B, 2026-11-09).** The owner: "the existing
+  service should refresh the row, although I don't know at what frequency.
+  If we start a new service, it should be taken care of by the existing
+  coordination/supersession process." Then, choosing option B: every task
+  launched with a managed service key, internal service or autostart,
+  refreshes its own registry owner row on its own clock through
+  `BaseTask.next_wait_timeout`, and the C2 aged-row PING path is removed.
+  One mechanism.
 
 ## 1. Goal
 
@@ -49,8 +58,11 @@ internal services do. Today it cannot when they cycle:
 
 After this plan: C1 makes supervision-only internal-service activity
 invisible to the idle clock while every kind of real work still resets it;
-C2 re-proves an aged owner row with the existing keyed PING, so the adopter
-keeps proof and stops counting attempts.
+C2 (revised) has every task launched with a managed service key re-stamp
+its own owner row on its own clock, so the row a reader sees is never older
+than a third of the retention window while its owner lives: an adopter, or a
+successor after a launcher crash, keeps live proof from the registry with no
+PING and launches no duplicate.
 
 ## 2. Source Documents
 
@@ -61,8 +73,11 @@ Governing specs (baseline in `## Spec Baseline`):
   fallback), the `_Implementation mapping_` lines [MA-1.5] and [MA-1.6a]
 - `docs/specifications/05-Message_Flow_and_State.md` [MF-3.2]: the heartbeat
   ends itself after `SERVICE_IDLE_EXIT_SECONDS` once no live non-superseded
-  Manager remains. Audited; it says nothing about the Manager's own idle
-  clock and stays unchanged.
+  Manager remains. Nothing here about the Manager's idle clock changes; the
+  revised C2 adds the owner-row refresh to the heartbeat's and TaskMonitor's
+  stated deadlines.
+- `docs/specifications/01-Core_Components.md` [CC-2]: BaseTask owns the
+  refresh; ServiceTask keeps its deadline; the HeartbeatTask deadline list.
 
 Theory (`docs/program-theory.md`): [WT-2a.13] (independent lifetimes; death
 needs proof; a failed probe is `unknown`), [WT-2a.12] (a protocol is a
@@ -138,16 +153,32 @@ is `live`, a dead host-pid handle is `terminal`, otherwise a keyed PING via
 launches and a `terminal` row when it reaps it; nobody refreshes the
 `active` row. An adopter has no tracked child, so after 300 s it has no
 candidate. `reduce_managed_service_state` then returns `wait_uncertain`,
-then `degraded_wait`, forever.
+then `degraded_wait`, forever. An autostart child carries the same
+Manager-written row: its launch's `service_key` is the autostart source
+(`Manager._launch_child_task`), and a Consumer never refreshes it, so after a
+launcher crash a successor that starts more than 300 s after the launch sees
+no live owner and, with empty state, enqueues a duplicate (base behaviour).
+The Manager already refreshes its own row this way
+(`Manager._refresh_manager_registration`, every 30 s).
 
 ### Files to modify
 
-- `weft/core/manager.py` (C1: sites A to G; C2: `_observed_service_candidates_by_key`,
-  one new method `_service_candidate_from_aged_owner_record`, one extracted
-  helper shared with `_service_candidate_from_service_owner_record`)
-- `weft/core/service_convergence.py` (C2: `ServiceConvergenceDecision.aged_live`)
+- `weft/core/manager.py` (C1: sites A to G; C2 as revised: the
+  extracted `_service_owner_record_evidence` stays; the aged-row PING path
+  of the first C2 is removed)
+- `weft/core/tasks/base.py` (revised C2: `managed_service_owner_key`,
+  `BaseTask._service_owner_refresh_timeout`,
+  `BaseTask._refresh_service_owner_row`, the refresh deadline in
+  `BaseTask.next_wait_timeout`, the call in `BaseTask.process_once`, the
+  `services_registry` support route)
+- `weft/core/tasks/service.py` (revised C2: `ServiceTask.next_wait_timeout`
+  keeps the refresh deadline)
+- `weft/_constants.py` (revised C2: `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS`,
+  derived as a third of `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS`)
 - `tests/core/test_manager.py` (new tests; one existing test inverted)
-- `tests/core/test_service_convergence.py` (C2: reducer field)
+- `tests/tasks/test_service_task.py` (revised C2: refresh tests)
+- `docs/specifications/01-Core_Components.md`,
+  `docs/specifications/05-Message_Flow_and_State.md` (revised C2: deadlines)
 - `docs/ruff-suppression-registry.md` (C2: one `C901` suppression fewer)
 - `docs/specifications/03-Manager_Architecture.md` (delta below)
 - `docs/plans/README.md` (index row, file count)
@@ -170,10 +201,13 @@ then `degraded_wait`, forever.
    idle clock? *Expected: it only stops the clock while a user-work child
    is live; it says nothing about resets. Services are already excluded
    from it, yet sites A to G reset `_last_activity_ns` to now.*
-2. Why must an aged row whose host process is proven dead not be PINGed?
-   *Expected: nobody reads a dead task's `ctrl_in`; a PING per pass would
-   accumulate unconsumed rows (consume-to-disappear, [WT-2]) and an
-   unanswered probe would keep the key uncertain for nothing.*
+2. (Revised C2.) Why does the refresh re-write the launcher's row instead
+   of building a new one from the task's own fields? *Expected: the
+   launcher's row already carries the authoritative runtime handle and its
+   provenance (`manager_tid`, shown by `weft status`); re-stamping keeps the
+   row a reader sees identical except for its broker timestamp, and the
+   refresh needs no second payload builder. A task with no live row of its
+   own has nothing to refresh.*
 
 ## 4. Invariants and Constraints
 
@@ -187,15 +221,22 @@ then `degraded_wait`, forever.
   `_spawn_request_service_key(..., desired_keys=INTERNAL_SERVICE_KEYS)` names
   a built-in key; convergence state exactly when its key is in
   `INTERNAL_SERVICE_KEYS`. No second list.
-- **No new timer, no new state.** The idle clock keeps its one deadline.
-  C2 adds no cache of PONG results and no registry refresh.
-- **[WT-2a.13].** An unanswered or pending PING on an aged row is unknown
-  evidence: it never yields `terminal` and never authorizes a relaunch.
-  The 300-second retention rule stays: an aged row is never `live` by its
-  handle alone.
-- **[ALT-WT-003].** The re-proof uses the existing keyed PING with
-  `reply_to` set to the Manager's `ctrl_in`; nothing polls the service's
-  `ctrl_out`.
+- **No new state for C1.** The idle clock keeps its one deadline.
+- **One proof mechanism for adopted services (revised C2).** The owner
+  re-stamps its own row; no Manager PINGs an aged row and no reader caches
+  proof. The 300-second retention rule stays: an aged row is never `live`.
+- **One refresh clock per managed task, on its own clock.** The deadline is
+  published through `next_wait_timeout` and serviced in `process_once`;
+  nothing renews per turn. Interval `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS`,
+  derived from the retention constant, with no knob. The [WT-7] falsifier
+  "Event-driven against absence" asks which event cannot arrive: nothing
+  announces that a row is nearing the retention window, because readers
+  judge absence by age, so the owner re-asserts on a clock.
+- **A refresh is not work.** It touches neither `_has_work` (the task's idle
+  exit) nor any Manager idle-activity queue (C1). An ordinary task without a
+  managed service key publishes no refresh deadline and writes nothing.
+- **A stopping or terminal task does not refresh**, so a dead or wedged
+  owner's row ages out as before ([WT-2a.13]: absence stays `unknown`).
 - Service supervision itself does not change: ensure, relaunch, restart
   backoff, duplicate convergence and detach on exit behave as before.
 - Not touched: `_idle_clock_running`, `next_wait_timeout`, leadership,
@@ -209,9 +250,12 @@ then `degraded_wait`, forever.
 | 2 | A Manager may idle-exit while a built-in service is missing, in restart backoff, being relaunched, or unproved. The service request already written stays in `weft.spawn.internal`; a launch in flight is committed and detached by the existing cleanup ([IMPL.10]); the next Manager's ensure finds or relaunches the service. Before: the Manager waited for convergence to settle. | A (owner, C1) | as row 1; [MA-1] item 7 (services are context-level singletons, not Manager custody) |
 | 2a | A due autostart scan (every second while the autostart directory exists) no longer holds an idle Manager at the verdict. The scan itself still runs in that turn's convergence pass; a manifest it finds still holds the Manager as an `ensure` obligation or a pending public spawn. | N (a check, not work; a manifest dropped in the last second before an idle exit waits for the next Manager, like any submission racing an exit) | [MA-1] item 7 "checking for work is not work"; [WT-4.3] "A quiet task costs nothing an operator can see" |
 | 3 | A pipeline-owned internal spawn request no longer resets the clock through the newest-row broker probe; it still does when pending (owned work), when reserved, and when its child launches, commits or exits. | N | covered by the remaining sites; same outcome |
-| 4 | A Manager sends one keyed PING to each service owner whose registry row is older than 300 s, on every reconciliation pass that collects registry evidence for that service once the previous probe is answered, and keeps live proof from the PONG. Before: no PING; proof lost; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cadence: the existing reconciliation triggers, unchanged: the stable audit (5 s), a due autostart scan (every second while the autostart directory exists, so up to about one PING/PONG pair per service per second), forced passes, and pending duplicate scans. Scope: mainly an adopter, whose only evidence is the registry; a Manager that tracks the service as its child collects registry evidence only on forced or duplicate-scan passes, and then also PINGs its own child's aged row. Only owners whose host process is not proven dead. | A (owner, C2) | [WT-2a.12] (a protocol is a message), [WT-2a.13] (death needs proof), [ALT-WT-003] |
-| 5 | A fresh Manager that finds a live service's owner row already aged waits for one PING round before deciding; before, it saw no candidate and enqueued a duplicate launch. | C (no loss; a duplicate is avoided) | [MA-1] item 7 singleton rule |
-| 6 | An aged row whose scoped host process is proven dead contributes no candidate and gets no PING, exactly as before. | N | [WT-2a.13] |
+| 4 | Revised C2: every task a Manager launched with a managed service key (heartbeat, TaskMonitor, LivenessMonitor, autostart services) re-writes its latest live owner row unchanged every 100 s (a third of the 300 s retention) and deletes the rows that one replaces; an adopter keeps live proof from the registry past 300 s, with no PING. Before: proof lost after 300 s; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cost: one registry write and one delete per managed task per 100 s, one more wake per 100 s for each managed task, and the wakes those writes give tasks with a registry interest. | A (owner, decision B) | [WT-2a.13] (death needs proof; a live owner keeps proving itself), [WT-4.2] "One owner for each resource" (the owner keeps its own row), [ALT-WT-023] |
+| 5 | After a launcher crash, a successor that starts more than 300 s after an `ensure` autostart service launched sees it live from its refreshed row and launches no duplicate. Before (base): no live candidate, `start_now`, two copies, and duplicate convergence could not see the original. | C (no loss; a duplicate is avoided) | [MA-1] item 7 singleton rule; owner decision B |
+| 6 | A live owner's latest row is never older than about 100 s, so neither the 300 s retention nor TaskMonitor's runtime prune (expired rows, after 3,600 s) can remove it; superseded own rows are deleted by the refresh itself. Closes owner question 1. | C | consume-to-disappear ([WT-2]) |
+| 7 | A stopping, terminal, dead or wedged owner stops refreshing; its row ages out as before, with no PING. | N | [WT-2a.13] |
+| 8 | The first C2 (aged-row PING, `aged_live`, review F1's probe-key rule) is removed; no Manager writes PINGs to service owners for proof any more. | N (replaced by row 4) | [WT-4.4] "As few concepts as possible" |
+| 9 | An ordinary task without a managed service key publishes no refresh deadline and writes no registry row. | N | [WT-4.3] "A quiet task costs nothing an operator can see" |
 
 ### 4b. Rollout, rollback, one-way doors
 
@@ -265,30 +309,53 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 - [MA-1.5] Idle timeout — `Manager._idle_clock_running` couples idle deadline publication and evaluation; `Manager.process_once` (idle-timeout check), `Manager._note_control_request_activity` (only canonical control requests reset idle activity), `Manager._read_broker_timestamp`, `Manager._update_idle_activity_from_broker` and `Manager._idle_activity_queue_names` (public spawn queues only), `Manager._managed_service_convergence_active` (only autostart convergence resets idle activity; a due autostart scan does not), `Manager._manager_owned_work_pending`, `Manager._autostart_ensure_obligation_pending`. The one supervision classifier is `Manager._child_is_supervision_only` for children and launch requests, `Manager._is_service_supervision_row` for internal spawn rows, and `INTERNAL_SERVICE_KEYS` for convergence state; `Manager._cleanup_children`, `Manager._commit_child_launch_success` and `Manager._handle_work_message` reset the clock only for work, through `Manager._note_idle_activity`.
 ```
 
-### Slice 2 (C2) — [MA-1] item 7: insert after "caller-owned TaskSpec metadata alone is not service authority."
+### Slice 2 (C2, revised by owner decision B) — [MA-1] item 7: insert after "caller-owned TaskSpec metadata alone is not service authority." (replaces the first slice-2 sentence about re-proving aged rows by `PING`)
 
 Replacement (`docs/specifications/03-Manager_Architecture.md`):
 
 ```text
-   caller-owned TaskSpec metadata alone is not service authority. A
-   service-owner registry row older than the 300-second registry retention
-   window is not live proof by itself, whatever its runtime handle says:
-   unless its scoped host process is proven dead, the manager re-proves that
-   owner with the same non-blocking keyed `PING`, and an unanswered or
-   pending probe is unknown evidence that never counts as terminal. This is
-   how a manager that adopted a predecessor's services keeps their proof.
+   caller-owned TaskSpec metadata alone is not service authority. Every task
+   a manager launched with a managed service key, a built-in internal service
+   or an autostart service, keeps its own service-owner row young: on its own
+   clock, every `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS` (a third of the
+   300-second registry retention window), it re-writes its latest live owner
+   row unchanged and deletes the rows that one replaces. A refresh is neither
+   work for the task's idle exit nor manager idle activity, and an ordinary
+   task without a service key does no refresh. So a live owner's latest row
+   never ages out of the retention window or reaches the runtime prune, and a
+   manager that adopted a predecessor's services, or a successor after a
+   launcher crash, sees them live from the registry and launches no
+   duplicate; a duplicate that does start converges as above. A task that
+   stops refreshing is dead or wedged, and its row ages out as before.
 ```
 
-### Slice 2 (C2) — `_Implementation mapping_` [MA-1.6a]: insert after "`Manager._service_pong_candidate`,"
+### Slice 2 (revised) — `_Implementation mapping_` [MA-1.6a]: insert after "`Manager._service_pong_candidate`," (replaces the aged-row mapping)
 
 ```text
-`Manager._service_candidate_from_aged_owner_record` (aged rows from `weft/core/service_convergence.py::ServiceConvergenceDecision.aged_live`),
+`weft/core/tasks/base.py::BaseTask._refresh_service_owner_row` with `BaseTask._service_owner_refresh_timeout` and `managed_service_owner_key` (owner-row refresh, published through `BaseTask.next_wait_timeout` and `ServiceTask.next_wait_timeout`),
 ```
+
+### Slice 2 (revised) — `01-Core_Components.md` [CC-2] and `05-Message_Flow_and_State.md` [MF-3.2], [MF-5]
+
+- BaseTask responsibilities: insert after "own reserved-queue policy
+  application": "for a task a manager launched with a managed service key,
+  re-stamp its own service-owner row in `weft.state.services` on its own
+  clock and publish that refresh deadline through `next_wait_timeout()`
+  ([MA-1] item 7); a task without a service key does no refresh".
+- ServiceTask: after "suppresses the inherited `BaseTask` poll-report
+  deadline" add "; it keeps the `BaseTask` owner-row refresh deadline
+  ([MA-1] item 7)".
+- HeartbeatTask (01) and the heartbeat bullets of [MF-3.2] (05): the
+  empty-table deadlines are the idle clock and the owner-row refresh; with
+  rows, the refresh joins the due emission and lease expiry.
+- TaskMonitor ([MF-5]): "The monitor's only clock of its own is its cycle
+  deadline …; the shared service idle clock and owner-row refresh ([MA-1]
+  item 7) come from its base classes."
 
 ### `## Related Plans` — insert as the first bullet
 
 ```text
-- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) keeps internal-service exits, relaunches and convergence off the idle clock and re-proves aged service-owner rows by keyed `PING` ([MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]).
+- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) keeps internal-service exits, relaunches and convergence off the idle clock, and has every managed service re-stamp its own service-owner row on its own clock ([MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]).
 ```
 
 ### Spans audited and unchanged
@@ -298,14 +365,22 @@ Replacement (`docs/specifications/03-Manager_Architecture.md`):
 - [MA-1] item 7 "Each service defines its own work and ends itself after
   `SERVICE_IDLE_EXIT_SECONDS`": the services' clock. Unchanged.
 - [MA-1.4] "the existing 300-second unknown-record age cutoff": manager rows
-  and recovery policy. Unchanged; slice 2 applies the same window to
-  service rows and keeps it.
-- [MF-3.2] heartbeat lifetime: unchanged.
+  and recovery policy. Unchanged; the revised slice 2 keeps the same window
+  for service rows and keeps live rows inside it.
+- [MA-1] item 4 "Readers do not delete registry rows": unchanged; a
+  refreshing task deletes only rows it owns, as the row's writer.
+- [MF-3.2] heartbeat lifetime: unchanged; only its deadline list gains the
+  refresh.
+- Theory [ALT-WT-004] "TaskMonitor's only clock is its cycle deadline":
+  not edited (a theory revision is out of scope); the entry refuses a
+  heartbeat as TaskMonitor's clock, and the refresh is a base-class
+  registry obligation, not a TaskMonitor work clock. Flagged for the owner.
 
 ## Deviation Log
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [MA-1] item 7, [MA-1.6a] | Slice 2 re-proves an aged owner row by a keyed `PING` (`aged_live`, `_service_candidate_from_aged_owner_record`, review F1's probe-key rule). | Every task launched with a managed service key re-stamps its own owner row every `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS`; the PING path, `aged_live` and their tests are removed. | Owner decision B, 2026-11-09 ("the existing service should refresh the row"). One mechanism; it also covers adopted autostart services after a launcher crash, which the PING path covered and internal-only refresh would not. | Revised slice 2 delta (03 item 7 and [MA-1.6a]; 01 [CC-2]; 05 [MF-3.2], [MF-5]); applied in the revision commit. |
 | [MA-1] item 5, [MA-1.5] | The idle verdict counts "unsettled autostart convergence", including a due autostart scan. | It ignores `autostart_scan_due`. | A real handoff probe (Manager 2 adopting live services, after slice 2) stayed alive past 720 s: an instrumented rerun showed every idle-clock reset at the convergence-active check with reasons `["autostart_scan_due"]` and 1.000 to 1.001 s since the last scan. The one-second scan fell due between the turn's convergence pass and its verdict; aged-row PING traffic gave the Manager the unaligned wakes that hit that window. A due scan is a check for work, not work (the rule this plan states). | Slice 1 delta, last sentence of the item 5 insertion; applied in the slice 1 commit. |
 
 ## 5. Tasks
@@ -361,7 +436,54 @@ Run the owning test files (§7) on the base commit and record pass counts.
 - Apply the slice 1 spec delta.
 - Stop if: a site needs a second classifier, a new field, or a timer.
 
-### Task 2 (C2) — aged owner rows are re-proved by PING
+### Task 2 (C2, revised by owner decision B) — managed services refresh their own owner rows
+
+- RED first, on `34faeb6a`:
+  `test_adopted_service_keeps_live_proof_by_refreshing_its_owner_row`,
+  `test_adopted_autostart_service_after_launcher_crash_is_live_not_duplicated`
+  and `test_managed_service_task_restamps_its_owner_row_on_its_own_clock`
+  (§6).
+- `weft/_constants.py`: `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS =
+  MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS / 3`; not configurable.
+- `weft/core/tasks/base.py`:
+  - `managed_service_owner_key(taskspec)`: the service key, only when the
+    metadata carries the Manager service authority stamp (public submission
+    strips reserved service metadata, so ordinary tasks have none).
+  - `__init__`: `_service_owner_key`, `_service_owner_refreshed_ns`
+    (monotonic, starts at construction; the launcher wrote a fresh row).
+  - `_service_owner_refresh_timeout()`: `None` without a key or while
+    stopping or terminal; else the time to the next refresh.
+  - `next_wait_timeout()`: the minimum of that and the poll-report timing.
+  - `_refresh_service_owner_row()`: when due, read the registry once
+    (`iter_queue_json_entries` + `collect_service_owner_records` for the key),
+    take the task's own rows, and if the latest is live re-write its payload
+    unchanged and delete every own row it replaces. A missing or non-live
+    row is left alone; a broker error is logged and retried next interval.
+  - `process_once()`: call it after `_process_reactor_turn()` on the
+    non-stopping branch.
+  - `_reactor_support_routes()`: declare `services_registry` for a keyed
+    task ([QUEUE.7]).
+- `weft/core/tasks/service.py`: `ServiceTask.next_wait_timeout()` returns the
+  minimum of the idle remainder and the refresh deadline (it does not call
+  the BaseTask poll-report part, which services suppress).
+- Remove the first C2: `Manager._service_candidate_from_aged_owner_record`,
+  the aged-row block (and review F1's probe-key rule) in
+  `_observed_service_candidates_by_key`, `ServiceConvergenceDecision.aged_live`,
+  `test_adopted_service_keeps_live_proof_past_registry_retention`,
+  `test_aged_owner_row_of_dead_host_process_is_not_pinged` and
+  `test_aged_live_owner_is_reported_apart_from_usable_records`. Keep the
+  extracted `_service_owner_record_evidence` (it still serves
+  `_service_candidate_from_service_owner_record` and keeps that method below
+  the complexity limit).
+- Apply the revised slice 2 spec delta.
+- Duplicates: no new code. With every live owner's row fresh, the existing
+  duplicate convergence sees both owners and sends KILL to the non-canonical
+  one (`test_task_monitor_duplicate_live_candidates_get_kill_signal`,
+  `test_liveness_monitor_duplicate_live_candidates_converge`).
+- Stop if: the refresh wants a per-turn write, a new knob, a Manager-side
+  PING, or a second payload builder.
+
+### Task 2 (first C2, superseded; kept as record) — aged owner rows are re-proved by PING
 
 - RED first: add
   `test_adopted_service_keeps_live_proof_past_registry_retention` (§6);
@@ -426,7 +548,28 @@ existing process seams.
   with an empty autostart directory, the scan due and this turn's
   convergence pass held (the ordering the probe hit), an expired idle clock
   reaches idle shutdown.
-- **C2** `test_adopted_service_keeps_live_proof_past_registry_retention`:
+- **C2 revised** `test_adopted_service_keeps_live_proof_by_refreshing_its_owner_row`:
+  a predecessor's heartbeat row, a canonical successor that adopts it, and
+  an in-process task with the heartbeat's service key and TID. With only the
+  original row treated as past retention (a seam on
+  `service_convergence.timestamp_is_expired` for that one row), convergence
+  gives no live proof and writes no PING (the row ages out as before). The
+  task's refresh comes due (seam on its refresh clock) and one turn
+  re-stamps the row; convergence then sees the owner live with no PING and
+  no relaunch, the Manager's idle clock has not moved, and an expired idle
+  clock reaches idle shutdown.
+- **C2 revised** `test_adopted_autostart_service_after_launcher_crash_is_live_not_duplicated`:
+  an `ensure` autostart manifest, the crashed launcher's row for its
+  service, the in-process service task refreshing it, then a successor
+  started with the original row past retention: no PING, no launch request,
+  `active_tid` is the original, and its only candidate is `live`.
+- **C2 revised** (`tests/tasks/test_service_task.py`)
+  `test_managed_service_task_restamps_its_owner_row_on_its_own_clock`
+  (nothing before the interval; the deadline is published; one re-stamped
+  row, same payload, newer stamp, the replaced row gone; nothing on the next
+  turn), `test_stopping_service_task_stops_refreshing_its_owner_row` and
+  `test_task_without_service_key_writes_no_registry_rows`.
+- **First C2 (superseded, tests removed)** `test_adopted_service_keeps_live_proof_past_registry_retention`:
   write a predecessor's heartbeat owner row (host-pid handle of a live
   process), construct a canonical Manager (it adopts the owner), then, with
   the existing instance seam `_manager_registry_retention_ns` shortened so
@@ -452,8 +595,8 @@ table, idle verdict.
 ## 7. Verification and Gates
 
 ```bash
-./.venv/bin/python -m pytest tests/core/test_manager.py tests/core/test_manager_services.py tests/core/test_service_convergence.py tests/tasks/test_service_task.py tests/tasks/test_heartbeat.py -n 4 -q
-./bin/pytest-pg tests/core/test_manager.py tests/core/test_manager_services.py tests/core/test_service_convergence.py tests/tasks/test_service_task.py tests/tasks/test_heartbeat.py
+./.venv/bin/python -m pytest tests/core/test_manager.py tests/core/test_manager_services.py tests/core/test_service_convergence.py tests/tasks/test_service_task.py tests/tasks/test_heartbeat.py tests/tasks/test_task_monitor.py tests/tasks/test_liveness_monitor.py tests/tasks/test_task_execution.py tests/specs -n 4
+./bin/pytest-pg tests/core/test_manager.py tests/core/test_manager_services.py tests/core/test_service_convergence.py tests/tasks/test_service_task.py tests/tasks/test_heartbeat.py tests/tasks/test_task_monitor.py tests/tasks/test_liveness_monitor.py tests/tasks/test_task_execution.py
 ./.venv/bin/ruff check .
 ./.venv/bin/ruff format --check <touched files>
 ./.venv/bin/mypy weft tests bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
@@ -493,6 +636,26 @@ Author's two-factor fit account ([WT-7] structure):
   reconciliation pass that collects registry evidence (up to about once a
   second while the autostart directory exists) for as long as it lives
   (register row 4).
+
+Revised account for the C2 revision (owner decision B):
+
+- Verdict: fits.
+- Rests on: [WT-2a.13] (a live owner keeps proving itself; absence stays
+  `unknown`), the [WT-4.2] row "One owner for each resource" (the owner
+  writes, refreshes and replaces its own row), [ALT-WT-023], the [WT-4.4]
+  row "As few concepts as possible" (one proof mechanism instead of two).
+- Refuses: a Manager-side PING for proof (removed); a per-turn renewal (the
+  2026-11-02 rule that rows carry their own lease with no per-tick renewal);
+  a configurable interval; extending the retention window.
+- Predicts, falsifiably: a live managed task's latest owner row is never
+  older than about 100 s; no successor duplicates a live service; a task
+  without a service key never writes the registry. A live owner's row
+  pruned, or a registry write from an ordinary task, falsifies it.
+- Fits worst: the [WT-4.3] row "A quiet task costs nothing an operator can
+  see" and the [WT-7] falsifier "Event-driven against absence": every
+  managed service gains one clock (one write and one delete per 100 s). The
+  answer recorded under §4 is that nothing announces a row nearing the
+  window, so the owner re-asserts on a clock.
 
 Comprehension answers (before the first edit): as recorded under §3.
 
@@ -583,22 +746,59 @@ Gates after the review fixes: owning files plus `tests/specs` on SQLite
 (499 files), `bin/ruff_suppression_index.py --check`,
 `bin/check-doc-paths`: clean.
 
+C2 revision (owner decision B), 2026-11-09:
+
+- Before building, the author reported one case an internal-only refresh
+  could not cover: an `ensure` autostart service adopted after a launcher
+  crash (its row is Manager-written and a Consumer never refreshed it). The
+  owner chose option B: every task launched with a managed service key
+  refreshes, and the PING path goes.
+- Design note: the refresh re-writes the task's latest live owner row
+  unchanged (fresh broker stamp) instead of building a new payload with
+  `build_service_owner_payload`; that row was built by the launcher through
+  that builder and carries the authoritative runtime handle and `manager_tid`
+  provenance that `weft status` shows, which a task-built row would lose.
+- RED on `34faeb6a`: the internal adoption test failed because the Manager
+  wrote a keyed PING to the aged owner; the autostart test failed with
+  `active_tid` `None` (state `ping_pending`); the refresh test failed with no
+  refresh deadline. The two guard tests (stopping task, task without a key)
+  were green on `34faeb6a`, which never refreshes.
+- Sensitivity: with only the refresh code (`base.py`, `service.py`,
+  `_constants.py`) reverted, all three behaviour tests failed, the autostart
+  one by enqueuing a duplicate launch (the base behaviour); restored
+  byte-for-byte. Mutations: a key for every task failed
+  `test_task_without_service_key_writes_no_registry_rows` (a 99.99 s refresh
+  deadline appeared); refreshing a stopping task failed
+  `test_stopping_service_task_stops_refreshing_its_owner_row` (the row was
+  re-stamped); restored byte-for-byte.
+- Duplicates: no new code; the existing
+  `test_task_monitor_duplicate_live_candidates_get_kill_signal` and
+  `test_liveness_monitor_duplicate_live_candidates_converge` pass: with both
+  owners' rows fresh, the non-canonical one gets KILL.
+- Gates: manager, manager-services, convergence, service-task, heartbeat,
+  task-monitor, liveness-monitor and task-execution files plus `tests/specs`
+  on SQLite `-n 4`: 1,154 passed, 5 skipped; the same task and manager files
+  on PostgreSQL (`./bin/pytest-pg`): 982 passed, 15 skipped; ruff, ruff
+  format, repo mypy (499 files), `bin/ruff_suppression_index.py --check`,
+  `bin/check-doc-paths`: clean.
+
 ## 9. Out of Scope
 
-- TaskMonitor's runtime prune deletes service-owner rows older than
-  `RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS` (one hour), live owners included
-  (`plan_service_owner_history_prune`). After that an adopter has no row to
-  re-prove. Pre-existing; owner question in §10.
-- An adopted service that dies after its row ages is not replaced by the
-  adopter (no candidate, as before). Pre-existing; owner question in §10.
+- An adopted service that dies, and so stops refreshing, is not replaced
+  by its adopter once its row ages out (no candidate, as before).
+  Pre-existing; owner question 2 in §10.
 - The unlinked-database leak itself (deleting a live context directory) is
   out of contract ([CTX.5], [WT-2a.11]); recorded as a lesson in a separate
   documentation commit.
 
 ## 10. Open owner questions
 
-1. Should TaskMonitor's runtime prune keep the latest `active` row of a
-   service whose host process is live? Today an adopter loses its only row
+1. **Closed by the C2 revision (register row 6).** With refresh, a live
+   owner's latest row is never older than about 100 s, so
+   `plan_service_owner_history_prune` (which protects a non-expired latest
+   live row) can never delete it, and the refresh itself deletes the owner's
+   superseded rows. The original question: should TaskMonitor's runtime prune
+   keep the latest `active` row of a service whose host process is live? Today an adopter loses its only row
    after one hour. Confirmed by the 2026-11-09 review, which reproduced both
    reducer outcomes: once `plan_service_owner_history_prune` removes an aged
    owner row (expired rows lose protection whatever their status; runtime
@@ -609,7 +809,11 @@ Gates after the review fixes: owning files plus `tests/specs` on SQLite
    still exits, so the uncertainty no longer leaks a Manager.
 2. Should an aged row whose scoped host process is proven dead count as
    `terminal` (as an in-window row does), so an adopter relaunches a dead
-   adopted service? This plan keeps today's "no candidate".
+   adopted service? With refresh, a row ages only after its owner stopped
+   refreshing; this plan keeps today's "no candidate".
+3. Theory wording: [ALT-WT-004] says "TaskMonitor's only clock is its cycle
+   deadline". The owner-row refresh adds a base-class clock to every managed
+   service, TaskMonitor included. Should the theory say "only work clock"?
 
 ## 11. Fresh-Eyes Review
 

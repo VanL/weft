@@ -286,6 +286,10 @@ Current responsibilities:
 - append complete best-effort runtime snapshots to the task's own
   `weft.state.tasks.<tid>` without reading state history, and maintain process titles
 - own reserved-queue policy application
+- for a task a manager launched with a managed service key, re-stamp its own
+  service-owner row in `weft.state.services` on its own clock and publish
+  that refresh deadline through `next_wait_timeout()` ([MA-1] item 7); a task
+  without a service key does no refresh
 - optionally claim and release one stable runtime endpoint name for the live task
 - expose `process_once()`, `wait_for_activity()`, `run_until_stopped()`,
   `stop()`, `cleanup()`, and `next_wait_timeout()` as the shared task-loop
@@ -591,7 +595,8 @@ Current task families:
   `weft.log.tasks` so long-lived manager, heartbeat, and TaskMonitor work
   cannot amplify the lifecycle log that cleanup itself consumes. Because that
   report is suppressed, `ServiceTask.next_wait_timeout()` also suppresses the
-  inherited `BaseTask` poll-report deadline. Each concrete service composes
+  inherited `BaseTask` poll-report deadline; it keeps the `BaseTask`
+  owner-row refresh deadline ([MA-1] item 7). Each concrete service composes
   only the clocks for work it actually performs. It does not
   implement a reactor turn policy and does not know about manager leadership,
   service keys, cleanup selection, heartbeat registration, or queue scheduling
@@ -717,8 +722,8 @@ Current task families:
 - `HeartbeatTask`: manager-supervised internal interval emitter for
   runtime-scoped periodic queue writes, a standing internal service of the
   canonical manager. It exposes only the next registration due time and the
-  earliest lease expiry through `next_wait_timeout()` (no deadline with an
-  empty table; singleton supersession is checked on each turn it runs) and returns from its protected `_process_reactor_turn()`
+  earliest lease expiry through `next_wait_timeout()` (with an empty table
+  only the shared service idle clock and owner-row refresh; singleton supersession is checked on each turn it runs) and returns from its protected `_process_reactor_turn()`
   hook after one bounded reactor turn; it does not run a private inner wait
   loop or task-local queue pending probe. Queue readiness is owned by
   `MultiQueueWatcher`.

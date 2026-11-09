@@ -51,6 +51,9 @@ from weft._constants import (
     INTERNAL_RUNTIME_ENDPOINT_NAME_KEY,
     INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
     INTERNAL_RUNTIME_TASK_CLASS_KEY,
+    INTERNAL_SERVICE_AUTHORITY_MANAGER,
+    INTERNAL_SERVICE_AUTHORITY_METADATA_KEY,
+    LIVE_SERVICE_STATUSES,
     LOCAL_WORKER_QUEUE_OPERATION_TIMEOUT_SECONDS,
     PIPELINE_OWNER_METADATA_KEY,
     PONG_EXTENSION_KEY,
@@ -63,6 +66,8 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_PRIORITY_NORMAL,
     QUEUE_RESERVED_SUFFIX,
+    SERVICE_OWNER_REFRESH_INTERVAL_SECONDS,
+    SERVICE_TYPE_MANAGED,
     STREAM_CHUNK_SIZE_BYTES,
     TASK_CLEANUP_TIMEOUT_SECONDS,
     TASK_WORKER_RESULT_DRAIN_MAX_PER_TURN,
@@ -73,6 +78,7 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
     get_weft_directory_name,
     load_config,
@@ -86,12 +92,15 @@ from weft.core.endpoints import (
     build_endpoint_record_payload,
     validate_endpoint_claim_name,
 )
+from weft.core.manager_services import service_key_from_metadata
 from weft.core.runtime_identity import get_runtime_identity
+from weft.core.service_convergence import collect_service_owner_records
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import RunnerHandle
 from weft.helpers import (
     encode_tid,
+    iter_queue_json_entries,
     process_create_time,
     redact_taskspec_dump,
     terminate_verified_process_tree,
@@ -100,6 +109,26 @@ from weft.helpers import (
 from .multiqueue_watcher import MultiQueueWatcher, QueueMessageContext, QueueMode
 
 logger = logging.getLogger(__name__)
+
+
+def managed_service_owner_key(taskspec: TaskSpec) -> str | None:
+    """Return the service key a Manager launched this task under, if any.
+
+    Only a Manager-authored service stamp names one: public submission strips
+    the reserved service metadata, so an ordinary task has no key and pays
+    nothing for owner-row refresh.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+    """
+
+    metadata = taskspec.metadata
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get(INTERNAL_SERVICE_AUTHORITY_METADATA_KEY)
+        != INTERNAL_SERVICE_AUTHORITY_MANAGER
+    ):
+        return None
+    return service_key_from_metadata(metadata)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +351,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         self._caller_pid = os.getppid()
         self._managed_pids: dict[int, float | None] = {}
         self._runtime_handle: RunnerHandle | None = None
+        # Managed-service owner-row refresh clock [MA-1] item 7.
+        self._service_owner_key = managed_service_owner_key(taskspec)
+        self._service_owner_refreshed_ns = time.monotonic_ns()
         self._kill_requested = False
         self._external_stop_handled = False
 
@@ -510,6 +542,9 @@ class BaseTask(MultiQueueWatcher, ABC):
                     "Pipeline owner metadata events_queue must be a non-empty string"
                 )
             routes["pipeline_owner_events"] = events_queue
+        if managed_service_owner_key(self.taskspec) is not None:
+            # A managed service re-stamps its own owner row [MA-1] item 7.
+            routes["services_registry"] = WEFT_SERVICES_REGISTRY_QUEUE
         return routes
 
     def _allowed_reactor_queue_aliases(self) -> set[frozenset[str]]:
@@ -1366,18 +1401,81 @@ class BaseTask(MultiQueueWatcher, ABC):
     def next_wait_timeout(self) -> float | None:
         """Return an optional wait timeout for the next task-loop turn.
 
-        The base task publishes only configured poll-report timing. Persistent
-        tasks compose their own clock work with this value.
+        The base task publishes configured poll-report timing and, for a task
+        launched with a managed service key, its owner-row refresh deadline.
+        Persistent tasks compose their own clock work with this value.
 
-        Spec: [CC-2.5]
+        Spec: [CC-2.5]; docs/specifications/03-Manager_Architecture.md [MA-1]
+        item 7
         """
 
+        refresh_timeout = self._service_owner_refresh_timeout()
         if getattr(self.taskspec.spec, "reporting_interval", "transition") != "poll":
-            return None
+            return refresh_timeout
         interval = getattr(self.taskspec.spec, "polling_interval", 1.0) or 1.0
-        return max(
+        poll_timeout = max(
             0.0, float(interval) - (time.monotonic() - self._last_poll_report_at)
         )
+        if refresh_timeout is None:
+            return poll_timeout
+        return min(poll_timeout, refresh_timeout)
+
+    def _service_owner_refresh_timeout(self) -> float | None:
+        """Return seconds until this task's owner row is due for a refresh.
+
+        ``None`` for a task without a managed service key, and for a stopping
+        or terminal task: a task that stops refreshing ages out of the
+        registry retention window as before.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+        """
+
+        if (
+            self._service_owner_key is None
+            or self.should_stop
+            or self.taskspec.state.status in TERMINAL_TASK_STATUSES
+        ):
+            return None
+        interval_ns = int(SERVICE_OWNER_REFRESH_INTERVAL_SECONDS * 1_000_000_000)
+        elapsed_ns = time.monotonic_ns() - self._service_owner_refreshed_ns
+        return max(0.0, (interval_ns - elapsed_ns) / 1_000_000_000)
+
+    def _refresh_service_owner_row(self) -> None:
+        """Re-stamp this task's own live owner row once its interval is due.
+
+        The row a launching Manager wrote is re-written unchanged, so its
+        runtime handle and provenance stay the launcher's, and the rows it
+        replaces are deleted: the registry keeps one young row per live owner,
+        which neither ages out of the retention window nor reaches the runtime
+        prune. A missing or non-live row is left alone. A refresh is not work
+        for the task's idle exit, and the registry is not Manager idle
+        activity. A failed read or write is retried at the next interval.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7
+        """
+
+        due_in = self._service_owner_refresh_timeout()
+        if due_in is None or due_in > 0:
+            return
+        self._service_owner_refreshed_ns = time.monotonic_ns()
+        registry = self._queue(WEFT_SERVICES_REGISTRY_QUEUE)
+        try:
+            read = collect_service_owner_records(
+                tuple(iter_queue_json_entries(registry, strict=True)),
+                service_key=self._service_owner_key,
+                service_type=SERVICE_TYPE_MANAGED,
+            )
+            own = sorted(
+                (record for record in read.records if record.owner_tid == self.tid),
+                key=lambda record: record.timestamp,
+            )
+            if not own or own[-1].status not in LIVE_SERVICE_STATUSES:
+                return
+            registry.write(json.dumps(dict(own[-1].payload)))
+            for record in own:
+                registry.delete(message_id=record.timestamp)
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Service owner row refresh deferred", exc_info=True)
 
     def _claim_or_verify_drive_owner_locked(
         self,
@@ -1448,6 +1546,7 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._process_stopping_reactor_turn()
             else:
                 self._process_reactor_turn()
+                self._refresh_service_owner_row()
             if (
                 self.enable_process_title
                 and not self.should_stop

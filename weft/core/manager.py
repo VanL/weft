@@ -7603,46 +7603,6 @@ class Manager(ServiceTask):
                 metadata["force_kill_pids"] = list(pids)
         return metadata, runtime_handle
 
-    def _service_candidate_from_aged_owner_record(
-        self,
-        record: ServiceOwnerRecord,
-        *,
-        resolve_unanswered: bool,
-    ) -> ServiceCandidate | None:
-        """Re-prove an owner row past the registry retention window by PING.
-
-        The aged row is no live proof by itself, whatever its handle says. A
-        locally reaped owner, or a scoped host process proven dead, ends it
-        with no probe, as before; otherwise the keyed PING is the evidence. A
-        pending or unanswered probe is unknown, so this never returns a
-        terminal candidate.
-
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7,
-        [MA-1.6a]
-        """
-
-        state = self._service_state(record.service_key)
-        if record.owner_tid in state.locally_terminal_tids:
-            return None
-        metadata, runtime_handle = self._service_owner_record_evidence(record)
-        if (
-            runtime_handle is not None
-            and runtime_handle.control.get("authority") == "host-pid"
-            and not handle_has_live_host_process(runtime_handle)
-        ):
-            return None
-        if "ctrl_in" not in metadata or "ctrl_out" not in metadata:
-            return None
-        return self._service_pong_candidate(
-            service_key=record.service_key,
-            tid=record.owner_tid,
-            timestamp=record.timestamp,
-            metadata=metadata,
-            ctrl_in_name=metadata["ctrl_in"],
-            source="service-registry-pong",
-            resolve_unanswered=resolve_unanswered,
-        )
-
     def _service_candidate_from_service_owner_record(
         self,
         record: ServiceOwnerRecord,
@@ -8122,31 +8082,6 @@ class Manager(ServiceTask):
                         resolve_unanswered=resolve_unanswered,
                     )
                 )
-            # An aged row loses no live owner: it is re-proved by PING [MA-1].
-            # A row its death evidence excludes keeps no probe key, so the
-            # sweep below retires any probe still pending for that owner.
-            aged = [
-                (
-                    record,
-                    self._service_candidate_from_aged_owner_record(
-                        record, resolve_unanswered=resolve_unanswered
-                    ),
-                )
-                for record in decision.aged_live
-            ]
-            observed_probe_sources.update(
-                self._service_probe_key(
-                    source="service-registry-pong",
-                    service_key=record.service_key,
-                    tid=record.owner_tid,
-                    timestamp=record.timestamp,
-                )
-                for record, candidate in aged
-                if candidate is not None
-            )
-            candidates_by_key.setdefault(service_key, []).extend(
-                candidate for _record, candidate in aged if candidate is not None
-            )
         for key, probe in tuple(self._service_probe_pending.items()):
             if (
                 probe.source == "service-registry-pong"

@@ -238,22 +238,28 @@ class ServiceTask(BaseTask):
         return
 
     def next_wait_timeout(self) -> float | None:
-        """Return the idle-clock remainder; services emit no poll-report timer.
+        """Return the idle-clock remainder and the owner-row refresh deadline.
 
-        With the idle clock set, no work, and no observation in progress, this
-        is the time left in the ``SERVICE_IDLE_EXIT_SECONDS`` window; a
-        subclass merges it into its own deadlines with ``min``. With work, or
-        while work is undetermined, there is no idle timeout: the pending
-        result wakes the reactor, so an expired window never spins.
+        Services emit no poll-report timer. With the idle clock set, no work,
+        and no observation in progress, the idle part is the time left in the
+        ``SERVICE_IDLE_EXIT_SECONDS`` window; a subclass merges the result into
+        its own deadlines with ``min``. With work, or while work is
+        undetermined, there is no idle timeout: the pending result wakes the
+        reactor, so an expired window never spins. A service launched with a
+        managed service key also publishes its owner-row refresh deadline.
 
         Spec: [CC-2.5], [MA-1] item 7, [MF-3.2]
         """
 
+        refresh_timeout = self._service_owner_refresh_timeout()
         idle_since = self._idle_since_monotonic_ns
         if idle_since is None or self._has_work() or self._work_undetermined():
-            return None
+            return refresh_timeout
         remaining_ns = _service_idle_exit_ns() - (_service_monotonic_ns() - idle_since)
-        return max(0.0, remaining_ns / 1_000_000_000)
+        idle_timeout = max(0.0, remaining_ns / 1_000_000_000)
+        if refresh_timeout is None:
+            return idle_timeout
+        return min(idle_timeout, refresh_timeout)
 
     def _reactor_support_routes(self) -> dict[str, str]:
         """Declare the service registry read by the idle rule [QUEUE.7].

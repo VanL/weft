@@ -35,6 +35,7 @@ import pytest
 
 import weft.core.manager as manager_mod
 import weft.core.manager_runtime as manager_runtime_mod
+import weft.core.service_convergence as service_convergence_mod
 import weft.core.tasks.base as base_task_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
@@ -66,6 +67,7 @@ from weft._constants import (
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS,
     MANAGER_DISPATCH_STALL_LOG_INTERVAL_SECONDS,
+    MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS,
     MANAGER_LEADERSHIP_CHECK_INTERVAL_SECONDS,
     MANAGER_PID_LIVENESS_RECHECK_INTERVAL,
     MANAGER_REGISTRY_HEARTBEAT_INTERVAL_SECONDS,
@@ -98,7 +100,7 @@ from weft.context import WeftContext, build_context
 from weft.core.control_messages import encode_control_message
 from weft.core.heartbeat import upsert_heartbeat
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
-from weft.core.manager_services import ManagedServiceSpec
+from weft.core.manager_services import ManagedServiceSpec, service_metadata
 from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.service_convergence import (
     build_manager_service_payload,
@@ -7061,21 +7063,84 @@ def test_due_autostart_scan_alone_does_not_hold_an_idle_manager(
         manager.cleanup()
 
 
-def test_adopted_service_keeps_live_proof_past_registry_retention(
+def _owner_row_timestamps(make_queue: Callable[[str], Any], tid: str) -> list[int]:
+    """Return the registry message IDs of every owner row naming ``tid``."""
+
+    return [
+        timestamp
+        for body, timestamp in make_queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_generator(
+            with_timestamps=True
+        )
+        if json.loads(body).get("owner_tid") == tid
+    ]
+
+
+def _age_registry_rows(
+    monkeypatch: pytest.MonkeyPatch, aged_timestamps: Collection[int]
+) -> None:
+    """Treat exactly these registry rows as past the 300 s retention window."""
+
+    aged = frozenset(aged_timestamps)
+    real_is_expired = service_convergence_mod.timestamp_is_expired
+    monkeypatch.setattr(
+        service_convergence_mod,
+        "timestamp_is_expired",
+        lambda timestamp, now_ns, ttl_ns: (
+            timestamp in aged or real_is_expired(timestamp, now_ns, ttl_ns)
+        ),
+    )
+
+
+def _service_owner_task(
+    db_path: BrokerTarget, *, tid: str, metadata: dict[str, Any], name: str
+) -> Consumer:
+    """Build the in-process stand-in for a launched managed service."""
+
+    return Consumer(
+        db_path,
+        TaskSpec(
+            tid=tid,
+            name=name,
+            spec=SpecSection(
+                type="function",
+                function_target="tests.tasks.sample_targets:echo_payload",
+            ),
+            io=IOSection(
+                inputs={"inbox": f"T{tid}.inbox"},
+                outputs={"outbox": f"T{tid}.outbox"},
+                control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
+            ),
+            state=StateSection(),
+            metadata=metadata,
+        ),
+    )
+
+
+def _force_owner_row_refresh(task: Consumer) -> None:
+    """Make the task's owner-row refresh due now, then run one turn."""
+
+    task._service_owner_refreshed_ns = time.monotonic_ns() - int(
+        (MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS / 3 + 1) * 1_000_000_000
+    )
+    task.process_once()
+
+
+def test_adopted_service_keeps_live_proof_by_refreshing_its_owner_row(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An adopted service's aged owner row is re-proved by PING, not lost.
+    """An adopted service keeps live proof past 300 s by refreshing its row.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
-    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2).
-    A successor Manager adopts a live heartbeat from its predecessor's owner
-    row. Once the row is past the 300-second registry retention window it is
-    not live proof by itself: the Manager sends the keyed PING, the PONG
-    re-proves the owner, nothing is relaunched, no uncertainty remains, and the
-    Manager then idle-exits normally. Named mutation: dropping an aged row (no
-    PING; "active service lacks live proof" on every pass).
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] items 5 and 7.
+    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2
+    (owner decision B). A successor Manager adopts a live heartbeat from its
+    predecessor's owner row. Once that row is past the retention window and
+    not refreshed, the successor has no live proof and sends no PING: the row
+    ages out as before. The service then re-stamps its own row on its own
+    clock; the successor sees it live again with no PING, the refresh moves
+    no idle clock, and the successor idle-exits normally. Named mutations: a
+    PING to the service; a refresh that leaves the aged row in place.
     """
 
     db_path, make_queue = broker_env
@@ -7087,6 +7152,7 @@ def test_adopted_service_keeps_live_proof_past_registry_retention(
         tid=owner_tid,
         runtime_handle=_host_runtime_handle(os.getpid()),
     )
+    (original_row,) = _owner_row_timestamps(make_queue, owner_tid)
     manager = Manager(
         db_path,
         make_manager_spec(unique_tid, idle_timeout=idle_timeout),
@@ -7094,33 +7160,42 @@ def test_adopted_service_keeps_live_proof_past_registry_retention(
             {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
         ),
     )
+    service = _service_owner_task(
+        db_path,
+        tid=owner_tid,
+        name="heartbeat-service",
+        metadata=service_metadata(
+            key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+            lifecycle="ensure",
+            extra={"internal": True, "role": "heartbeat_service"},
+        ),
+    )
     state = manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT)
     internal_inbox = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
     owner_ctrl_in = make_queue(f"T{owner_tid}.ctrl_in")
     try:
         assert state.active_tid == owner_tid
+        idle_since = manager._last_activity_ns
+
+        _age_registry_rows(monkeypatch, [original_row])
+        manager._run_managed_service_convergence(force=True)
+
+        assert owner_ctrl_in.peek_one() is None
+        assert state.active_tid == owner_tid
+        assert state.uncertain_attempts == 1
         assert internal_inbox.peek_one() is None
 
-        with monkeypatch.context() as aged:
-            aged.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
-            manager._run_managed_service_convergence(force=True)
+        _force_owner_row_refresh(service)
+        manager._run_managed_service_convergence(force=True)
 
-            probe = _service_probe_for(
-                manager, tid=owner_tid, source="service-registry-pong"
-            )
-            assert [json.loads(item) for item in drain(owner_ctrl_in)] == [
-                {
-                    "command": CONTROL_PING,
-                    "request_id": probe.request_id,
-                    "reply_to": manager._queue_names["ctrl_in"],
-                }
-            ]
-            _write_service_pong(manager, make_queue, probe)
-            manager._run_managed_service_convergence(force=True)
-
-            assert state.active_tid == owner_tid
-            assert state.uncertain_attempts == 0
-            assert internal_inbox.peek_one() is None
+        (refreshed_row,) = _owner_row_timestamps(make_queue, owner_tid)
+        assert refreshed_row > original_row
+        assert owner_ctrl_in.peek_one() is None
+        assert state.active_tid == owner_tid
+        assert state.uncertain_attempts == 0
+        assert internal_inbox.peek_one() is None
+        manager.process_once()
+        assert manager._last_activity_ns == idle_since
 
         manager._last_activity_ns = time.time_ns() - int(
             (idle_timeout + 1) * 1_000_000_000
@@ -7130,72 +7205,92 @@ def test_adopted_service_keeps_live_proof_past_registry_retention(
         assert manager.should_stop is True
         assert manager.taskspec.state.status == "completed"
     finally:
+        service.stop(join=False)
+        service.cleanup()
         manager.cleanup()
 
 
-def test_aged_owner_row_of_dead_host_process_is_not_pinged(
-    manager_setup: tuple[Manager, Callable[[str], Queue]],
+def test_adopted_autostart_service_after_launcher_crash_is_live_not_duplicated(
+    tmp_path: Path,
+    broker_env: BrokerEnv,
+    unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An aged row whose scoped host process is dead gets no PING, as before.
+    """A refreshing autostart service is adopted live, not launched twice.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
-    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2)
-    and review finding F1. Nobody reads a dead task's ``ctrl_in``, so a PING
-    per pass would pile up unconsumed rows; and a probe already pending for
-    that owner is retired by the scan, as it was before aged rows were
-    re-proved, so it cannot hold convergence active after a replacement.
-    Named mutations: routing every aged row to the PING; keeping the probe
-    key of an aged row its death evidence excludes.
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] items 6 and 7.
+    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2
+    (owner decision B). The launcher of an ``ensure`` autostart service
+    crashed; the service keeps running and re-stamps its own owner row; a
+    successor starts after the original row would be past the retention
+    window. The successor sees the service live from the refreshed row,
+    sends no PING, and enqueues no second launch. Named mutation: an
+    autostart task that does not refresh its row (the successor then has no
+    live owner and starts a duplicate).
     """
 
-    manager, make_queue = manager_setup
-    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
-    dead_tid = "1777000000000000160"
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        stdin=subprocess.DEVNULL,
+    db_path, make_queue = broker_env
+    autostart_dir, manifest_path = write_autostart_fixture(
+        tmp_path,
+        task_name="adopted-ensure",
+        manifest_name="adopted-ensure",
+        mode="ensure",
+        duration=0.0,
     )
-    try:
-        runtime_handle = _host_runtime_handle(process.pid)
-    finally:
-        process.kill()
-        process.wait(timeout=10.0)
+    source = str(manifest_path.resolve())
+    owner_tid = str(time.time_ns())
     _write_managed_service_owner(
         make_queue,
-        service_key=service_key,
-        tid=dead_tid,
-        runtime_handle=runtime_handle,
+        service_key=source,
+        tid=owner_tid,
+        runtime_handle=_host_runtime_handle(os.getpid()),
     )
-    (row_timestamp,) = [
-        timestamp
-        for body, timestamp in make_queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_generator(
-            with_timestamps=True
+    (original_row,) = _owner_row_timestamps(make_queue, owner_tid)
+    service = _service_owner_task(
+        db_path,
+        tid=owner_tid,
+        name="adopted-ensure",
+        metadata={
+            **service_metadata(key=source, lifecycle="ensure"),
+            INTERNAL_AUTOSTART_SOURCE_METADATA_KEY: source,
+            INTERNAL_AUTOSTART_ENABLED_METADATA_KEY: True,
+        },
+    )
+    owner_ctrl_in = make_queue(f"T{owner_tid}.ctrl_in")
+    manager: Manager | None = None
+    try:
+        _force_owner_row_refresh(service)
+        _age_registry_rows(monkeypatch, [original_row])
+        config = dict(load_config())
+        config["AUTOSTART_TASKS"] = False
+        config["AUTOSTART_DIR"] = str(autostart_dir)
+        manager = Manager(
+            db_path, make_manager_spec(unique_tid, idle_timeout=60.0), config=config
         )
-        if json.loads(body).get("owner_tid") == dead_tid
-    ]
-    probe_key = manager._service_probe_key(
-        source="service-registry-pong",
-        service_key=service_key,
-        tid=dead_tid,
-        timestamp=row_timestamp,
-    )
-    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
-        key=probe_key,
-        service_key=service_key,
-        tid=dead_tid,
-        row_timestamp=row_timestamp,
-        source="service-registry-pong",
-        request_id="pending-before-death",
-        created_turn=manager._loop_iteration,
-    )
-    monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
+        manager._autostart_enabled = True
+        enqueued: list[str] = []
+        monkeypatch.setattr(
+            manager,
+            "_enqueue_managed_service_request",
+            lambda service_spec: record_and_return(enqueued, service_spec.key, True),
+        )
 
-    candidates = manager._observed_service_candidates_by_key({service_key})
+        manager._tick_autostart(force=True)
 
-    assert candidates[service_key] == []
-    assert manager._service_probe_pending == {}
-    assert make_queue(f"T{dead_tid}.ctrl_in").peek_one() is None
+        assert enqueued == []
+        assert manager._service_state(source).active_tid == owner_tid
+        assert owner_ctrl_in.peek_one() is None
+        assert [
+            candidate.state
+            for candidate in manager._observed_service_candidates_by_key({source})[
+                source
+            ]
+        ] == ["live"]
+    finally:
+        service.stop(join=False)
+        service.cleanup()
+        if manager is not None:
+            manager.cleanup()
 
 
 def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
