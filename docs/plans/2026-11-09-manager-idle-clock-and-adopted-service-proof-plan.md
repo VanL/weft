@@ -148,6 +148,7 @@ then `degraded_wait`, forever.
 - `weft/core/service_convergence.py` (C2: `ServiceConvergenceDecision.aged_live`)
 - `tests/core/test_manager.py` (new tests; one existing test inverted)
 - `tests/core/test_service_convergence.py` (C2: reducer field)
+- `docs/ruff-suppression-registry.md` (C2: one `C901` suppression fewer)
 - `docs/specifications/03-Manager_Architecture.md` (delta below)
 - `docs/plans/README.md` (index row, file count)
 
@@ -374,15 +375,24 @@ Run the owning test files (§7) on the base commit and record pass counts.
   `_service_candidate_from_service_owner_record` builds today, and use it
   there (no behaviour change).
 - Add `_service_candidate_from_aged_owner_record(record, *, resolve_unanswered)`:
-  `None` when the handle has host-pid authority and its process is not
-  live, or when the row names no control queues; otherwise the result of
+  `None` when the owner is locally terminal, when the handle has host-pid
+  authority and its process is not live, or when the row names no control
+  queues; otherwise the result of
   `_service_pong_candidate(..., source="service-registry-pong")`. It never
   returns `terminal`.
-- In `_observed_service_candidates_by_key`, for each `decision.aged_live`
-  row whose owner is not locally terminal: add its probe key to
-  `observed_probe_sources` and append the candidate when not `None`.
+- In `_observed_service_candidates_by_key`, for every `decision.aged_live`
+  row: add its probe key to `observed_probe_sources` (so the end-of-scan
+  sweep keeps its pending probe) and extend the key's candidates with the
+  non-`None` results (written as comprehensions, which keeps the method
+  under the complexity limit).
+- The extraction removes the need for the `C901` suppression on
+  `_service_candidate_from_service_owner_record`: drop it and lower
+  `RUFF-SUP-012` and the global inventory in
+  `docs/ruff-suppression-registry.md` (regenerate the index with
+  `bin/ruff_suppression_index.py --write`).
 - Add a reducer test in `tests/core/test_service_convergence.py` for
-  `aged_live`.
+  `aged_live`, and `test_aged_owner_row_of_dead_host_process_is_not_pinged`
+  (no PING, no candidate for an aged row of a dead host process).
 - Apply the slice 2 spec delta.
 - Stop if: the aged path wants to return `terminal`, cache a PONG, or write
   the registry.
@@ -426,7 +436,10 @@ existing process seams.
   the window, move the clock past `idle_timeout`, and assert idle shutdown.
 - **C2** reducer: `reduce_service_ownership` reports an expired latest live
   row in `aged_live`, not in `records`, and never reports a superseded
-  older row of the same owner or a terminal row.
+  older row of the same owner or a non-live latest row.
+- **C2** `test_aged_owner_row_of_dead_host_process_is_not_pinged`: an aged
+  row whose host-pid handle names a dead process yields no candidate, no
+  pending probe and no row on its `ctrl_in`.
 - Sensitivity, per slice: revert only that slice's code, rerun its test,
   record the failure, restore exactly (`git diff` empty).
 
@@ -471,6 +484,29 @@ Slice 1 (C1), 2026-11-09:
   PostgreSQL (`./bin/pytest-pg`): 432 passed, 15 skipped; `tests/specs`:
   165 passed; ruff, ruff format, repo mypy (499 files), `bin/check-doc-paths`:
   clean.
+
+Slice 2 (C2), 2026-11-09:
+
+- RED on the slice-1 commit: `test_adopted_service_keeps_live_proof_past_registry_retention`
+  failed with "No pending service probe for <owner tid>" (the aged row was
+  dropped and nothing re-proved it).
+- Sensitivity: with only the slice-2 code (`weft/core/manager.py`,
+  `weft/core/service_convergence.py`) reverted, the adoption test failed
+  the same way and the reducer test failed (`ServiceConvergenceDecision`
+  has no `aged_live`); restored byte-for-byte. A mutation that removes only
+  the dead-host gate made `test_aged_owner_row_of_dead_host_process_is_not_pinged`
+  fail (a `ping_pending` candidate appeared for the dead owner).
+- Deviation from the drafted file list, within scope: the extraction made
+  the `C901` suppression on `_service_candidate_from_service_owner_record`
+  unused, so it was removed, `RUFF-SUP-012` lowered to 2 directives, the
+  global inventory to `C901=110`, and the ratchet mirror in
+  `tests/specs/test_ruff_policy.py` to 320 directives / 110 `C901` (the
+  2026-11-04 precedent `95a8893a`).
+- Gates: owning files plus `tests/specs` on SQLite `-n 4`: all passed after
+  the ratchet update (165 spec tests); owning files on PostgreSQL
+  (`./bin/pytest-pg`): 435 passed, 15 skipped; ruff, ruff format, repo mypy
+  (499 files), `bin/ruff_suppression_index.py --check`,
+  `bin/check-doc-paths`: clean.
 
 ## 9. Out of Scope
 

@@ -92,6 +92,8 @@ class ServiceConvergenceDecision:
     duplicate_live: tuple[ServiceOwnerRecord, ...]
     recent_lower_live_owner: bool
     uncertain: tuple[ServiceOwnerRecord, ...] = ()
+    aged_live: tuple[ServiceOwnerRecord, ...] = ()
+    """Latest live-status row per owner past ``ttl_ns``: no proof by itself."""
 
 
 def manager_service_key(context: WeftContext) -> str:
@@ -472,7 +474,13 @@ def reduce_service_ownership(
     ttl_ns: int,
     read_failed: bool = False,
 ) -> ServiceConvergenceDecision:
-    """Reduce service-owner evidence for one service key."""
+    """Reduce service-owner evidence for one service key.
+
+    ``aged_live`` names owners whose latest row is live but past ``ttl_ns``.
+    Such a row is no proof by itself and stays out of ``records``; a caller
+    may re-prove the owner (docs/specifications/03-Manager_Architecture.md
+    [MA-1] item 7).
+    """
 
     observed_now_ns = time.time_ns() if now_ns is None else now_ns
     scoped = tuple(record for record in records if record.service_key == service_key)
@@ -482,11 +490,18 @@ def reduce_service_ownership(
         now_ns=observed_now_ns,
         ttl_ns=ttl_ns,
     )
+    latest = reduce_latest_by_service_owner(scoped)
     usable = [
         record
-        for record in reduce_latest_by_service_owner(scoped)
+        for record in latest
         if not timestamp_is_expired(record.timestamp, observed_now_ns, ttl_ns)
     ]
+    aged_live = tuple(
+        record
+        for record in latest
+        if record.status in LIVE_SERVICE_STATUSES
+        and timestamp_is_expired(record.timestamp, observed_now_ns, ttl_ns)
+    )
     canonical = select_canonical_live_owner(usable)
     live = tuple(record for record in usable if record.status in LIVE_SERVICE_STATUSES)
     duplicate_live = tuple(
@@ -516,6 +531,7 @@ def reduce_service_ownership(
         if own_tid is not None
         else False,
         uncertain=uncertain,
+        aged_live=aged_live,
     )
 
 

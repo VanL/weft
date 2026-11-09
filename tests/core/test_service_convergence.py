@@ -112,6 +112,36 @@ def test_latest_superseded_row_excludes_older_active_owner() -> None:
     assert decision.canonical_live.owner_tid == "5"
 
 
+def test_aged_live_owner_is_reported_apart_from_usable_records() -> None:
+    """An owner whose latest live row is past the window is aged, not usable.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7. Plan
+    2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2): an
+    aged row is no proof by itself, so it stays out of ``records``, and the
+    caller learns of it through ``aged_live`` to re-prove it. A non-live latest
+    row, or an old row superseded by a fresh one, is never aged-live.
+    """
+
+    decision = reduce_service_ownership(
+        "manager:weft.spawn.requests:file:/tmp/weft.db",
+        (
+            _record("2", status="active", timestamp=100),
+            _record("3", status="active", timestamp=50),
+            _record("3", status="stopped", timestamp=60),
+            _record("4", status="active", timestamp=200),
+            _record("4", status="active", timestamp=900),
+        ),
+        own_tid=None,
+        now_ns=1_000,
+        ttl_ns=500,
+    )
+
+    assert [record.owner_tid for record in decision.records] == ["4"]
+    assert [(record.owner_tid, record.timestamp) for record in decision.aged_live] == [
+        ("2", 100)
+    ]
+
+
 @pytest.mark.parametrize("owner_tid", ["not-a-tid", "²", "٢"])
 def test_parse_service_owner_rejects_noncanonical_owner_tid(owner_tid: str) -> None:
     payload = _owner_payload(owner_tid)

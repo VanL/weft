@@ -7061,6 +7061,117 @@ def test_due_autostart_scan_alone_does_not_hold_an_idle_manager(
         manager.cleanup()
 
 
+def test_adopted_service_keeps_live_proof_past_registry_retention(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adopted service's aged owner row is re-proved by PING, not lost.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
+    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2).
+    A successor Manager adopts a live heartbeat from its predecessor's owner
+    row. Once the row is past the 300-second registry retention window it is
+    not live proof by itself: the Manager sends the keyed PING, the PONG
+    re-proves the owner, nothing is relaunched, no uncertainty remains, and the
+    Manager then idle-exits normally. Named mutation: dropping an aged row (no
+    PING; "active service lacks live proof" on every pass).
+    """
+
+    db_path, make_queue = broker_env
+    idle_timeout = 60.0
+    owner_tid = str(time.time_ns())
+    _write_managed_service_owner(
+        make_queue,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+        tid=owner_tid,
+        runtime_handle=_host_runtime_handle(os.getpid()),
+    )
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=idle_timeout),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    state = manager._service_state(INTERNAL_SERVICE_KEY_HEARTBEAT)
+    internal_inbox = make_queue(WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE)
+    owner_ctrl_in = make_queue(f"T{owner_tid}.ctrl_in")
+    try:
+        assert state.active_tid == owner_tid
+        assert internal_inbox.peek_one() is None
+
+        with monkeypatch.context() as aged:
+            aged.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
+            manager._run_managed_service_convergence(force=True)
+
+            probe = _service_probe_for(
+                manager, tid=owner_tid, source="service-registry-pong"
+            )
+            assert [json.loads(item) for item in drain(owner_ctrl_in)] == [
+                {
+                    "command": CONTROL_PING,
+                    "request_id": probe.request_id,
+                    "reply_to": manager._queue_names["ctrl_in"],
+                }
+            ]
+            _write_service_pong(manager, make_queue, probe)
+            manager._run_managed_service_convergence(force=True)
+
+            assert state.active_tid == owner_tid
+            assert state.uncertain_attempts == 0
+            assert internal_inbox.peek_one() is None
+
+        manager._last_activity_ns = time.time_ns() - int(
+            (idle_timeout + 1) * 1_000_000_000
+        )
+        manager.process_once()
+
+        assert manager.should_stop is True
+        assert manager.taskspec.state.status == "completed"
+    finally:
+        manager.cleanup()
+
+
+def test_aged_owner_row_of_dead_host_process_is_not_pinged(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An aged row whose scoped host process is dead gets no PING, as before.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
+    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2).
+    Nobody reads a dead task's ``ctrl_in``, so a PING per pass would pile up
+    unconsumed rows. Named mutation: routing every aged row to the PING.
+    """
+
+    manager, make_queue = manager_setup
+    service_key = INTERNAL_SERVICE_KEY_TASK_MONITOR
+    dead_tid = "1777000000000000160"
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        runtime_handle = _host_runtime_handle(process.pid)
+    finally:
+        process.kill()
+        process.wait(timeout=10.0)
+    _write_managed_service_owner(
+        make_queue,
+        service_key=service_key,
+        tid=dead_tid,
+        runtime_handle=runtime_handle,
+    )
+    monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
+
+    candidates = manager._observed_service_candidates_by_key({service_key})
+
+    assert candidates[service_key] == []
+    assert manager._service_probe_pending == {}
+    assert make_queue(f"T{dead_tid}.ctrl_in").peek_one() is None
+
+
 def test_manager_process_once_skips_idle_broker_probe_when_idle_disabled(
     broker_env: BrokerEnv,
     unique_tid: str,
