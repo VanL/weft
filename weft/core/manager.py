@@ -8123,6 +8123,17 @@ class Manager(ServiceTask):
                     )
                 )
             # An aged row loses no live owner: it is re-proved by PING [MA-1].
+            # A row its death evidence excludes keeps no probe key, so the
+            # sweep below retires any probe still pending for that owner.
+            aged = [
+                (
+                    record,
+                    self._service_candidate_from_aged_owner_record(
+                        record, resolve_unanswered=resolve_unanswered
+                    ),
+                )
+                for record in decision.aged_live
+            ]
             observed_probe_sources.update(
                 self._service_probe_key(
                     source="service-registry-pong",
@@ -8130,16 +8141,11 @@ class Manager(ServiceTask):
                     tid=record.owner_tid,
                     timestamp=record.timestamp,
                 )
-                for record in decision.aged_live
-            )
-            aged_candidates = (
-                self._service_candidate_from_aged_owner_record(
-                    record, resolve_unanswered=resolve_unanswered
-                )
-                for record in decision.aged_live
+                for record, candidate in aged
+                if candidate is not None
             )
             candidates_by_key.setdefault(service_key, []).extend(
-                candidate for candidate in aged_candidates if candidate is not None
+                candidate for _record, candidate in aged if candidate is not None
             )
         for key, probe in tuple(self._service_probe_pending.items()):
             if (

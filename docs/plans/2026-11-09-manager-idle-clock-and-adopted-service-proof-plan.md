@@ -209,7 +209,7 @@ then `degraded_wait`, forever.
 | 2 | A Manager may idle-exit while a built-in service is missing, in restart backoff, being relaunched, or unproved. The service request already written stays in `weft.spawn.internal`; a launch in flight is committed and detached by the existing cleanup ([IMPL.10]); the next Manager's ensure finds or relaunches the service. Before: the Manager waited for convergence to settle. | A (owner, C1) | as row 1; [MA-1] item 7 (services are context-level singletons, not Manager custody) |
 | 2a | A due autostart scan (every second while the autostart directory exists) no longer holds an idle Manager at the verdict. The scan itself still runs in that turn's convergence pass; a manifest it finds still holds the Manager as an `ensure` obligation or a pending public spawn. | N (a check, not work; a manifest dropped in the last second before an idle exit waits for the next Manager, like any submission racing an exit) | [MA-1] item 7 "checking for work is not work"; [WT-4.3] "A quiet task costs nothing an operator can see" |
 | 3 | A pipeline-owned internal spawn request no longer resets the clock through the newest-row broker probe; it still does when pending (owned work), when reserved, and when its child launches, commits or exits. | N | covered by the remaining sites; same outcome |
-| 4 | An adopter Manager sends one keyed PING to each adopted service whose owner row is older than 300 s, at the ordinary active-service cadence, and keeps live proof from the PONG. Before: no PING; proof lost; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cost: about one PING/PONG pair per adopted service per stable audit (5 s), only on an adopter, only for live services. | A (owner, C2) | [WT-2a.12] (a protocol is a message), [WT-2a.13] (death needs proof), [ALT-WT-003] |
+| 4 | A Manager sends one keyed PING to each service owner whose registry row is older than 300 s, on every reconciliation pass that collects registry evidence for that service once the previous probe is answered, and keeps live proof from the PONG. Before: no PING; proof lost; `uncertain_attempts` grew and `degraded_wait` warnings repeated. Cadence: the existing reconciliation triggers, unchanged: the stable audit (5 s), a due autostart scan (every second while the autostart directory exists, so up to about one PING/PONG pair per service per second), forced passes, and pending duplicate scans. Scope: mainly an adopter, whose only evidence is the registry; a Manager that tracks the service as its child collects registry evidence only on forced or duplicate-scan passes, and then also PINGs its own child's aged row. Only owners whose host process is not proven dead. | A (owner, C2) | [WT-2a.12] (a protocol is a message), [WT-2a.13] (death needs proof), [ALT-WT-003] |
 | 5 | A fresh Manager that finds a live service's owner row already aged waits for one PING round before deciding; before, it saw no candidate and enqueued a duplicate launch. | C (no loss; a duplicate is avoided) | [MA-1] item 7 singleton rule |
 | 6 | An aged row whose scoped host process is proven dead contributes no candidate and gets no PING, exactly as before. | N | [WT-2a.13] |
 
@@ -381,10 +381,12 @@ Run the owning test files (§7) on the base commit and record pass counts.
   `_service_pong_candidate(..., source="service-registry-pong")`. It never
   returns `terminal`.
 - In `_observed_service_candidates_by_key`, for every `decision.aged_live`
-  row: add its probe key to `observed_probe_sources` (so the end-of-scan
-  sweep keeps its pending probe) and extend the key's candidates with the
-  non-`None` results (written as comprehensions, which keeps the method
-  under the complexity limit).
+  row whose helper result is not `None`: add its probe key to
+  `observed_probe_sources` (so the end-of-scan sweep keeps its pending
+  probe) and extend the key's candidates with that result. A row the helper
+  excludes keeps no key, so the sweep retires any probe still pending for
+  that owner, as before (review F1). Written as comprehensions, which keeps
+  the method under the complexity limit.
 - The extraction removes the need for the `C901` suppression on
   `_service_candidate_from_service_owner_record`: drop it and lower
   `RUFF-SUP-012` and the global inventory in
@@ -438,8 +440,9 @@ existing process seams.
   row in `aged_live`, not in `records`, and never reports a superseded
   older row of the same owner or a non-live latest row.
 - **C2** `test_aged_owner_row_of_dead_host_process_is_not_pinged`: an aged
-  row whose host-pid handle names a dead process yields no candidate, no
-  pending probe and no row on its `ctrl_in`.
+  row whose host-pid handle names a dead process yields no candidate and no
+  row on its `ctrl_in`, and a probe already pending for that owner is
+  retired by the scan (review F1).
 - Sensitivity, per slice: revert only that slice's code, rerun its test,
   record the failure, restore exactly (`git diff` empty).
 
@@ -486,8 +489,10 @@ Author's two-factor fit account ([WT-7] structure):
   no PING is ever written to a dead service's `ctrl_in`. A Manager held
   alive by service churn, or a growing `T{dead}.ctrl_in`, falsifies it.
 - Fits worst: the [WT-4.3] row "A quiet task costs nothing an operator can
-  see": an adopter now sends one PING per adopted service per stable audit
-  for as long as it lives (register row 4).
+  see": an adopter now sends one PING per adopted service on each
+  reconciliation pass that collects registry evidence (up to about once a
+  second while the autostart directory exists) for as long as it lives
+  (register row 4).
 
 Comprehension answers (before the first edit): as recorded under §3.
 
@@ -559,6 +564,25 @@ except one that shortened the service-row retention to 30 s):
   (499 files), `bin/ruff_suppression_index.py --check`,
   `bin/check-doc-paths`: clean.
 
+Cross-family review, 2026-11-09: Tier 1, Codex (reviewer family OpenAI;
+author family Anthropic), run by the coordinating agent over the plan, the
+spec delta and the diff of the three commits. Verdict: no blocker. The
+reviewer found the scan-due exclusion consistent with "supervision-only
+activity does not reset idle", found no `D` register rows, judged that no
+further algorithm or mechanism is warranted, and confirmed open owner
+question 1 (§10).
+
+| ID | Severity | Location | Finding | Disposition |
+|----|----------|----------|---------|-------------|
+| F1 | P3 | `weft/core/manager.py`, aged-row block of `_observed_service_candidates_by_key` | Every aged live-status row kept its probe key even when death evidence excluded it, so a probe already pending for that owner was neither advanced nor retired; after a replacement started it still held convergence active and forced registry scans until the row disappeared. Baseline retired it. | Accepted, fixed: only an aged row routed to the PING keeps its probe key; an excluded row's pending probe is retired by the existing end-of-scan sweep (no new mechanism). `test_aged_owner_row_of_dead_host_process_is_not_pinged` now starts with a pending probe: RED on the previous tip (the probe survived the scan), green after; with only the fix reverted it failed again, restored byte-for-byte. |
+| F2 | P3 | Register row 4 | Understated the PING cadence (a due autostart scan also triggers reconciliation, so up to one PING per second after the previous PONG) and the scope (forced and duplicate-scan passes of locally tracked services). | Accepted, fixed: row 4 and the fit account's "fits worst" line now state the shared reconciliation cadence and scope. The cadence itself is unchanged. |
+
+Gates after the review fixes: owning files plus `tests/specs` on SQLite
+`-n 4`: 610 passed, 3 skipped; owning files on PostgreSQL
+(`./bin/pytest-pg`): 436 passed, 15 skipped; ruff, ruff format, repo mypy
+(499 files), `bin/ruff_suppression_index.py --check`,
+`bin/check-doc-paths`: clean.
+
 ## 9. Out of Scope
 
 - TaskMonitor's runtime prune deletes service-owner rows older than
@@ -575,7 +599,14 @@ except one that shortened the service-row retention to 30 s):
 
 1. Should TaskMonitor's runtime prune keep the latest `active` row of a
    service whose host process is live? Today an adopter loses its only row
-   after one hour.
+   after one hour. Confirmed by the 2026-11-09 review, which reproduced both
+   reducer outcomes: once `plan_service_owner_history_prune` removes an aged
+   owner row (expired rows lose protection whatever their status; runtime
+   pruning adds the 3,600 s minimum age), a surviving adopter keeps
+   `active_tid` and stays in `wait_uncertain`, then `degraded_wait`,
+   indefinitely, and a fresh Manager with empty state can `start_now` a
+   duplicate. Both predate this plan; with slice 1 an otherwise idle adopter
+   still exits, so the uncertainty no longer leaks a Manager.
 2. Should an aged row whose scoped host process is proven dead count as
    `terminal` (as an in-window row does), so an adopter relaunches a dead
    adopted service? This plan keeps today's "no candidate".

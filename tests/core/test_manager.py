@@ -7140,9 +7140,13 @@ def test_aged_owner_row_of_dead_host_process_is_not_pinged(
     """An aged row whose scoped host process is dead gets no PING, as before.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
-    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2).
-    Nobody reads a dead task's ``ctrl_in``, so a PING per pass would pile up
-    unconsumed rows. Named mutation: routing every aged row to the PING.
+    Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2 (C2)
+    and review finding F1. Nobody reads a dead task's ``ctrl_in``, so a PING
+    per pass would pile up unconsumed rows; and a probe already pending for
+    that owner is retired by the scan, as it was before aged rows were
+    re-proved, so it cannot hold convergence active after a replacement.
+    Named mutations: routing every aged row to the PING; keeping the probe
+    key of an aged row its death evidence excludes.
     """
 
     manager, make_queue = manager_setup
@@ -7162,6 +7166,28 @@ def test_aged_owner_row_of_dead_host_process_is_not_pinged(
         service_key=service_key,
         tid=dead_tid,
         runtime_handle=runtime_handle,
+    )
+    (row_timestamp,) = [
+        timestamp
+        for body, timestamp in make_queue(WEFT_SERVICES_REGISTRY_QUEUE).peek_generator(
+            with_timestamps=True
+        )
+        if json.loads(body).get("owner_tid") == dead_tid
+    ]
+    probe_key = manager._service_probe_key(
+        source="service-registry-pong",
+        service_key=service_key,
+        tid=dead_tid,
+        timestamp=row_timestamp,
+    )
+    manager._service_probe_pending[probe_key] = manager_mod._ServicePendingPongProbe(
+        key=probe_key,
+        service_key=service_key,
+        tid=dead_tid,
+        row_timestamp=row_timestamp,
+        source="service-registry-pong",
+        request_id="pending-before-death",
+        created_turn=manager._loop_iteration,
     )
     monkeypatch.setattr(manager, "_manager_registry_retention_ns", lambda: 1_000)
 
