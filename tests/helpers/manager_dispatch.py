@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -48,6 +49,26 @@ def retire_dispatch_workers(manager: Manager, releases: list[Path]) -> None:
         for worker in workers:
             worker.join(timeout=30.0)
     assert not [worker.name for worker in workers if worker.is_alive()]
+
+
+def observe_child_exit(manager: Manager, tid: str, *, timeout: float = 10.0) -> None:
+    """Deliver a real child's exit sentinel the way a Manager reactor turn does.
+
+    Tests that place a real process in the child table register its sentinel
+    here (registration is idempotent), wait for the adapter to report the
+    exit, and drain it, so cleanup sees the exit evidence a turn would.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+    """
+    child = manager._child_processes[tid]
+    manager._register_child_sentinel(tid, child)
+    deadline = time.monotonic() + timeout
+    while child.sentinel_observed_ns <= 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"exit sentinel of child {tid} was not observed")
+        manager._child_sentinel_adapter.wait(remaining)
+        manager._drain_child_sentinel_events()
 
 
 @dataclass

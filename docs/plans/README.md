@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 52 plan files in this directory.
+There are currently 53 plan files in this directory.
 
 ## Curation Policy
 
@@ -32,6 +32,7 @@ There are currently 52 plan files in this directory.
 | --- | --- | --- | --- |
 | [`2026-11-08-resource-monitor-descendant-scan-plan.md`](./2026-11-08-resource-monitor-descendant-scan-plan.md) | Resource Monitor Descendant Scan and Quiet Unlimited Sampling | `promoted` | none |
 | [`2026-11-08-manager-checkpoint-volume-plan.md`](./2026-11-08-manager-checkpoint-volume-plan.md) | Manager Checkpoint Volume | `promoted` | none |
+| [`2026-11-08-manager-event-driven-reaping-plan.md`](./2026-11-08-manager-event-driven-reaping-plan.md) | Manager Event-Driven Child Reaping | `draft` | none |
 | [`2026-11-07-ops-shaped-admission-burst-plan.md`](./2026-11-07-ops-shaped-admission-burst-plan.md) | Measure Admission on an Ops-Shaped Burst | `completed` | none |
 | [`2026-11-07-nested-admission-load-plan.md`](./2026-11-07-nested-admission-load-plan.md) | Stress Admission with Nested Work | `completed` | none |
 | [`2026-11-07-model-found-scheduler-and-registry-repairs-plan.md`](./2026-11-07-model-found-scheduler-and-registry-repairs-plan.md) | Model-Found Scheduler and Registry Repairs | `completed` | none |
