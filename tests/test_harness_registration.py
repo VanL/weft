@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest import mock
 from weakref import ref
 
 import pytest
@@ -23,6 +24,7 @@ from simplebroker import Queue
 from tests.conftest import _register_from_json, run_cli
 from tests.helpers import weft_harness as harness_mod
 from tests.helpers.weft_harness import WeftTestHarness
+from tests.taskspec.fixtures import create_valid_function_taskspec
 from weft._constants import (
     INTERNAL_SERVICE_KEY_HEARTBEAT,
     MANAGER_STARTUP_LOG_DIRNAME,
@@ -31,12 +33,12 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft.commands import tasks as task_cmd
-from weft.context import WeftContext
+from weft.context import WeftContext, build_context
 from weft.core import manager_runtime
 from weft.core.service_convergence import build_service_owner_payload
 from weft.core.task_state import task_state_queue_name
 from weft.ext import RunnerHandle
-from weft.helpers import pid_is_live
+from weft.helpers import pid_is_live, terminate_process_tree
 
 
 @pytest.mark.shared
@@ -1992,6 +1994,133 @@ def test_owned_cli_manager_is_reaped_when_test_body_fails() -> None:
     assert not pid_is_live(manager_pid)
     assert not any(pid_is_live(pid) for pid in heartbeat_pids)
     assert not harness.root.exists()
+
+
+def _second_context_pids(harness: WeftTestHarness, context: WeftContext) -> list[int]:
+    """Return the live Manager and heartbeat PIDs of a second context."""
+
+    manager_records = harness._list_active_manager_records(context)
+    assert len(manager_records) == 1
+    pids = harness._mapping_host_pids(manager_records[0])
+    service_pids: list[int] = []
+    deadline = time.monotonic() + HEARTBEAT_LAUNCH_WAIT_SECONDS
+    while not service_pids and time.monotonic() < deadline:
+        service_pids = [
+            pid
+            for processes in harness._live_internal_service_processes(context).values()
+            for pid, _create_time in processes
+        ]
+        # The launch lands in the registry from another process; there is no
+        # event to block on here.
+        time.sleep(0.1)
+    assert service_pids, "heartbeat service never launched"
+    pids.extend(service_pids)
+    assert all(pid_is_live(pid) for pid in pids)
+    return pids
+
+
+def _terminate_survivors(pids: list[int]) -> list[int]:
+    """Kill and return the PIDs still live, so a failed run leaves none behind."""
+
+    survivors = [pid for pid in pids if pid_is_live(pid)]
+    for pid in survivors:
+        terminate_process_tree(pid, timeout=10)
+    return survivors
+
+
+@pytest.mark.shared
+@pytest.mark.parametrize(
+    "shape", ["foreign_cwd", "spec_weft_context", "spec_relative_weft_context"]
+)
+def test_cleanup_stops_a_second_context_a_cli_call_started(
+    tmp_path: Path, shape: str
+) -> None:
+    """Teardown stops the Manager and services of a second context left running.
+
+    A CLI call can start a Manager in a context other than the harness's own:
+    a run from a foreign working directory, or a stored TaskSpec bound to
+    another ``weft_context``, which wins over ``--context``. A relative
+    ``weft_context`` names a root under the CLI's working directory, not under
+    the spec file's directory. Services outlive the Manager ([MA-1] item 7),
+    and the test here never stops that context, so only harness teardown can
+    ([TS-0]).
+    """
+    if shape == "foreign_cwd":
+        second_root = tmp_path / "second context"
+        cwd = second_root
+        args: tuple[object, ...] = ("run", sys.executable, "-c", "print('second')")
+    else:
+        cwd = tmp_path / "cwd"
+        second_root = cwd / "second context"
+        spec_dir = tmp_path / "specs"
+        spec_dir.mkdir()
+        spec = create_valid_function_taskspec(
+            function_target="tests.tasks.sample_targets:large_output"
+        ).model_dump(mode="json")
+        declared = (
+            str(second_root) if shape == "spec_weft_context" else second_root.name
+        )
+        spec["spec"].update(args=[], keyword_args={"size": 6}, weft_context=declared)
+        spec_path = spec_dir / "second-context-task.json"
+        spec_path.write_text(json.dumps(spec))
+        args = ("run", "--spec", spec_path)
+    second_root.mkdir(parents=True)
+    harness = WeftTestHarness()
+    started: list[int] = []
+    try:
+        with harness:
+            if shape != "foreign_cwd":
+                args = (*args, "--context", harness.root)
+            rc, out, err = run_cli(*args, cwd=cwd, harness=harness, stdin="")
+            assert rc == 0, (rc, out, err)
+            second = build_context(spec_context=second_root)
+            assert second.root != harness.context.root
+            started = _second_context_pids(harness, second)
+    finally:
+        survivors = _terminate_survivors(started)
+    assert survivors == []
+
+
+@pytest.mark.sqlite_only
+def test_cleanup_stops_each_configuration_a_root_was_run_with(tmp_path: Path) -> None:
+    """Two calls on one root with different broker settings are both stopped.
+
+    The first call reads the root under the harness's settings and starts
+    nothing; the second runs there with another database name, which selects
+    a different broker target for the same root. Teardown must resolve the
+    root under each configuration a call used ([TS-0]). SQLite only: on
+    PostgreSQL the test helper gives every configuration of one root that
+    root's schema (`postgres_schema_for_root`), so the settings cannot select
+    a different target there.
+    """
+    root = tmp_path / "shared root"
+    root.mkdir()
+    harness = WeftTestHarness()
+    started: list[int] = []
+    try:
+        with harness:
+            rc, out, err = run_cli("queue", "list", cwd=root, harness=harness)
+            assert rc == 0, (rc, out, err)
+            env = os.environ.copy()
+            env["WEFT_DEFAULT_DB_NAME"] = "second.db"
+            rc, out, err = run_cli(
+                "run",
+                sys.executable,
+                "-c",
+                "print('second')",
+                cwd=root,
+                env=env,
+                harness=harness,
+                stdin="",
+            )
+            assert rc == 0, (rc, out, err)
+            with mock.patch.dict(os.environ, {"WEFT_DEFAULT_DB_NAME": "second.db"}):
+                second = build_context(spec_context=root)
+            assert second.database_path == root.resolve() / "second.db"
+            started = _second_context_pids(harness, second)
+    finally:
+        survivors = _terminate_survivors(started)
+    assert survivors == []
 
 
 @pytest.mark.shared

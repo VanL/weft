@@ -188,6 +188,8 @@ def test_waiting_run_delivers_twenty_megabytes(
         sys.executable,
         "-c",
         "print('x' * (20 * 1024 * 1024))",
+        "--context",
+        weft_harness.context.root,
         cwd=tmp_path,
         harness=weft_harness,
         timeout=60,

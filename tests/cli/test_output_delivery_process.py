@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import REPO_ROOT, run_cli
+from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
 from tests.helpers.weft_harness import WeftTestHarness
 from tests.taskspec.fixtures import (
     create_valid_agent_taskspec,
@@ -103,23 +104,32 @@ def test_waiting_stored_spec_uses_rebound_custom_outputs_root(
     spec_path.write_text(json.dumps(spec))
     env = os.environ.copy()
     env["WEFT_DIRECTORY_NAME"] = ".custom-weft"
-    rc, out, err = run_cli(
-        "run",
-        "--spec",
-        spec_path,
-        "--context",
-        weft_harness.context.root,
-        cwd=tmp_path,
-        harness=weft_harness,
-        stdin="",
-        env=env,
-        timeout=60,
-    )
-    assert rc == 0, err
-    assert out == "x" * (2 * 1024 * 1024)
-    files = list((runtime_root / ".custom-weft" / "outputs").glob("*/*.dat"))
-    assert len(files) == 1
-    assert files[0].read_bytes() == out.encode()
+    prepare_project_root(runtime_root, env=env)
+    try:
+        rc, out, err = run_cli(
+            "run",
+            "--spec",
+            spec_path,
+            "--context",
+            weft_harness.context.root,
+            cwd=tmp_path,
+            harness=weft_harness,
+            stdin="",
+            env=env,
+            timeout=60,
+        )
+        assert rc == 0, err
+        assert out == "x" * (2 * 1024 * 1024)
+        files = list((runtime_root / ".custom-weft" / "outputs").glob("*/*.dat"))
+        assert len(files) == 1
+        assert files[0].read_bytes() == out.encode()
+    finally:
+        # The run starts a Manager and services in the spec's own context,
+        # which outlive the test unless stopped ([MA-1] item 7).
+        run_cli(
+            "system", "stop", "--context", runtime_root, cwd=tmp_path, env=env, stdin=""
+        )
+        cleanup_prepared_roots(runtime_root, env=env)
 
 
 def test_waiting_spill_resolves_symlinked_context_root(
