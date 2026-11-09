@@ -218,12 +218,13 @@ Comprehension questions (answer in the execution record before editing):
 |---|---|---|
 | H1. The launch-receipt turn on PostgreSQL makes no connection-usage read while the receipt is undurable and the missing-publication fallback is not due; any later reconciliation reads usage exactly as before | N (the reading could not change any outcome: release needs a durable receipt or handoff, and the fallback is not due) | [WT-4.4] measure, do not bake in inefficiency; [WT-4.1] the startup fact that wakes the Manager is the snapshot row, read on notification; [ALT-WT-002] no guess-timed poll |
 | H1 side effect: a usage-read failure can no longer abort that receipt-turn reconciliation | N (the aborted remainder was a no-op) | [WT-4.4] no over-armoring |
-| H2. A clean reap that observed task-owned proof does not scan ctrl_out a second time before skipping the failsafe; a reap that saw no proof, an unknown read, or a non-clean exit keeps the scan inside `_commit_wrapper_lost_envelope` | C (same evidence; additionally a consumer that removes the proof row between the two scans can no longer cause a spurious `wrapper_lost` envelope) | [MA-1.6a] proof observed once is proof; [WT-4.1] keep an identity (fact) you already have; [WT-4.2] short transactions |
+| H2. A clean reap that observed task-owned proof does not scan ctrl_out a second time before skipping the failsafe; a reap that saw no proof, an unknown read, or a non-clean exit keeps the scan inside `_commit_wrapper_lost_envelope`; retiring a reservation that was never handed off (`_record_reaped_admission` -> `_retire_scheduler_residents` -> `_commit_wrapper_lost_envelope`) keeps its existing scan, so that path still reads ctrl_out twice | C (same evidence; additionally a consumer that removes the proof row between the two scans can no longer cause a spurious `wrapper_lost` envelope) | [MA-1.6a] proof observed once is proof; [WT-4.1] keep an identity (fact) you already have; [WT-4.2] short transactions |
 | H3. A reap does not re-delete a reservation that snapshot handoff or reap-time retirement already acknowledged with confirmed absence; a reservation still held by the custody record, or a child with no custody record, is deleted as before | N (the row is confirmed absent; only the redundant transaction goes) | [MA-1.6a] "remaining unacknowledged" reservation; [WT-4.4] no over-armoring; [WT-4.2] short transactions |
-| H4. `manager_loop_summary` reads the three pending flags only when the event is emitted; a change in those flags alone no longer forces an emission before the rate-limit interval (it appears at the next emission) | C (diagnostic operational log; log formats are safe to change, `CLAUDE.md` §3; emitted content unchanged) | [WT-4.3] a quiet task costs nothing an operator can see; [WT-4.4] measure |
+| H4. `manager_loop_summary` reads the three pending flags only when the event is emitted; a change in those flags alone no longer forces an emission before the rate-limit interval (it appears at the next emission), and a transition that reverses between two emissions is not logged at all | D (diagnostic visibility only: prompt logging of pending-flag changes is lost; emitted summaries still carry freshly read flags; no execution, custody or admission effect; log formats are safe to change, `CLAUDE.md` §3) | [WT-4.4] measure, do not bake in inefficiency: three broker reads removed from every turn whose summary is suppressed (about 4,000 turns per 1,250-task run with the serve log at info or finer); [WT-4.3] a quiet task costs nothing an operator can see |
 | H5. `_handle_work_message` reads the control queue once, immediately before the launch, instead of before and after validation. A drain already known at handler entry still releases the request before validation (broker-free flag check, unchanged reason). A STOP still unread in ctrl_in at reservation still releases a valid request unlaunched (reason `control_disallowed_launch_after_validation` instead of `..._before_validation`); an invalid request reserved in that window gets the Manager's error policy instead of being returned to the source for the next Manager to reject | C (no launch is added; an invalid request reaches the same error disposition a successor would give it, one Manager earlier; the release reason is a debug log field) | [MA-3] STOP before launch is preserved by the later check, which covers the earlier window; [WT-4.4] measure; [WT-4.4] no over-armoring |
 
-No `D` rows.
+One `D` row, H4: a diagnostic-log visibility tradeoff justified under [WT-4.4].
+No `D` row touches execution, custody or admission.
 
 ## 7. Spec Baseline
 
@@ -242,22 +243,26 @@ Promotion strategy:
 ### [MA-1.8] and [MANAGER.18] — insert after "... or through existing failure/reap handling or the bounded missing-publication fallback below."
 
 > Attributed usage is read for an unfinished startup only when a reading can
-> settle it. Until its launch receipt is durable, attributed usage cannot
-> settle a startup (snapshot handoff, the missing-publication fallback,
-> failure or reap still can), so the receipt turn reads no connection usage.
+> settle it. While its launch receipt is undurable and the missing-publication
+> fallback is not due, attributed usage cannot settle the startup (snapshot
+> handoff, failure or reap still can), so no connection usage is read for it
+> then, including in the turn that handles the receipt.
 
 ### [MA-1.6a] — insert after "... or committing a Manager-source `wrapper_lost` envelope."
 
 > A reservation that snapshot handoff or retirement already acknowledged with
-> confirmed absence is not acknowledged again at reap, and one terminal-proof
-> read serves both the proof-grace decision and the failsafe check.
+> confirmed absence is not acknowledged again at reap. When the clean-exit
+> proof read finds task-owned proof, that read also settles the immediate
+> failsafe check; retiring a reservation that was never handed off keeps its
+> own terminal-evidence read.
 
 ### Related Plans (both files)
 
 > - [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md)
 >   removes Manager round trips that no contract needs from the launch receipt,
->   reap and dispatch handler: no usage read before a receipt is durable, one
->   terminal-proof read per reap, no second acknowledgement of an acknowledged
+>   reap and dispatch handler: no usage read for an undurable receipt before the
+>   missing-publication fallback is due, one terminal-proof read for a clean
+>   reap's failsafe check, no second acknowledgement of an acknowledged
 >   reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).
 
 ## 9. Tasks
@@ -417,7 +422,19 @@ Author pass after drafting:
 
 ## Review and execution record
 
-(Coordinator: cross-family review and benchmark results go here.)
+### Cross-family review
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at b0a15e3d against 75f5b270
+(perf/bench-allG). Verdict: no blocker.
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | P3 | "One terminal-proof read per reap" overstates H2: for a clean child whose reservation is still held, `_record_reaped_admission` -> `_retire_scheduler_residents` -> `_commit_wrapper_lost_envelope` scans ctrl_out again (confirmed with an in-memory probe); the new test waits for snapshot handoff and excludes that case. | Accepted, fixed: [MA-1.6a] text, the Related Plans entries in 03 and 07, the plan's spec-delta blocks and the H2 register row now limit the claim to the immediate clean-exit failsafe check and state that retiring a never-handed-off reservation keeps its existing scan. No code change. |
+| F2 | P3 | The new [MA-1.8] / [MANAGER.18] sentence says the receipt turn reads no usage, but `_advance_launch_custody` still reads usage for an undurable receipt once the missing-publication fallback is due. | Accepted, fixed: both spec paragraphs and the plan's spec-delta block now say no usage is read while the receipt is undurable and the missing-publication fallback is not due, including in the receipt turn; the Related Plans entries carry the same qualifier. No code change. |
+| F3 | P3 | H4 removes prompt logging of pending-flag changes and can hide intermediate transitions between emissions; class C understates the loss of diagnostic visibility. | Accepted, fixed: the H4 register row is now class D, justified under [WT-4.4] (three broker reads removed per suppressed turn; emitted summaries still carry fresh flags), and "No `D` rows" now names the one D row. No code change. |
+
+Benchmark results are recorded by the coordinator's program summary.
 
 ### Implementer execution log
 

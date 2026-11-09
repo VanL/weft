@@ -35,7 +35,7 @@ always be rolled back from the public request queue.
 
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes undurable process receipts before a turn's ordinary dispatch and the rest of the turn's checkpoint changes once when it ends; the [MA-1.8] dispatch barrier is unchanged ([MA-1.8], [MF-5]).
 - [Manager Event-Driven Child Reaping](../plans/2026-11-08-manager-event-driven-reaping-plan.md) makes the child's exit sentinel the Manager's only exit evidence, so turns and convergence passes never probe a live child, and reads a reaped child's snapshot through the Manager's own broker connection ([MA-1.6a], [MA-1.8]).
-- [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md) removes Manager round trips that no contract needs from the launch receipt, reap and dispatch handler: no usage read before a receipt is durable, one terminal-proof read per reap, no second acknowledgement of an acknowledged reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).
+- [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md) removes Manager round trips that no contract needs from the launch receipt, reap and dispatch handler: no usage read for an undurable receipt before the missing-publication fallback is due, one terminal-proof read for a clean reap's failsafe check, no second acknowledgement of an acknowledged reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).
 
 - [Manager startup interest from launch selection](../plans/2026-11-08-manager-stable-wait-set-plan.md) installs startup interest at the first wait after launch selection so one settlement and the launch it admits rebuild the activity waiter once, and records the SimpleBroker plugin-lookup follow-up ([MA-1.8], [SB-0.4]).
 - [Startup window narrows with measured headroom](../plans/2026-11-08-startup-window-settlement-plan.md) replaces the drop from W unfinished startups to one at H with a window proportional to measured headroom above H, keeping the per-startup headroom share the window has at H ([MA-1.8]).
@@ -393,8 +393,10 @@ Key responsibilities implemented in `weft/core/manager.py`:
    terminal proof or committing a
    Manager-source `wrapper_lost` envelope. A reservation that snapshot handoff or
    retirement already acknowledged with confirmed absence is not acknowledged
-   again at reap, and one terminal-proof read serves both the proof-grace
-   decision and the failsafe check. A successor that settles an adopted
+   again at reap. When the clean-exit proof read finds task-owned proof, that
+   read also settles the immediate failsafe check; retiring a reservation that
+   was never handed off keeps its own terminal-evidence read. A successor that
+   settles an adopted
    launch whose reservation was never handed off is bound by the same rule:
    it commits the envelope, or finds task-owned proof, before it acknowledges.
    A failed terminal-proof read is unknown, not
@@ -544,9 +546,10 @@ Startup settles independently for each TID when its wrapper becomes observable
 in `weft.state.tasks.<tid>` or attributed broker usage, or through existing
 failure/reap handling or the bounded missing-publication fallback below.
 Attributed usage is read for an unfinished startup only when a reading can
-settle it. Until its launch receipt is durable, attributed usage cannot
-settle a startup (snapshot handoff, the missing-publication fallback,
-failure or reap still can), so the receipt turn reads no connection usage.
+settle it. While its launch receipt is undurable and the missing-publication
+fallback is not due, attributed usage cannot settle the startup (snapshot
+handoff, failure or reap still can), so no connection usage is read for it
+then, including in the turn that handles the receipt.
 A negative startup-readiness decision suppresses ordinary source readiness until
 startup membership or launch-worker evidence changes, or the existing admission
 recheck deadline arrives. A due recheck can reopen the window with a fresh usage
