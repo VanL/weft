@@ -728,6 +728,8 @@ def test_cycle_snapshot_reduces_large_task_log_by_latest_tid(
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": target_tid,
             "taskspec": _taskspec_payload(
@@ -757,6 +759,8 @@ def test_cycle_snapshot_keeps_wazuh_like_failure_owned_by_task(
         ctx,
         {
             "event": "work_failed",
+            "type": "terminal",
+            "source": "task",
             "status": "failed",
             "tid": tid,
             "error": "Raw observation payload changed for an existing Wazuh source ID.",
@@ -904,6 +908,8 @@ def test_canonical_retention_prune_sees_superseded_rows_across_monitor_batches(
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": target_tid,
             "taskspec": _taskspec_payload(

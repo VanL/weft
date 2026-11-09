@@ -93,7 +93,6 @@ def _record(**changes: Any) -> FoldedTaskRecord:
         metadata={},
         event_payload={},
         runner_diagnostics=None,
-        status_reason=None,
     )
     return replace(base, **changes)
 
@@ -365,19 +364,9 @@ def test_plan_snapshot_probes_preserves_conditional_probe_order(
 
 
 def test_reduce_task_snapshot_reports_terminal_runtime_conflicts() -> None:
-    record = _record(
-        status="completed",
-        completed_at=3_000_000_000,
-        status_reason="contradictory_terminal_event_status",
-    )
+    record = _record(status="completed", completed_at=3_000_000_000)
     absent = _reduce(record)
-    assert absent.snapshot.reconciliation == {
-        "classification": "stale_status_payload",
-        "reason": "contradictory_terminal_event_status",
-        "lifecycle_status": "completed",
-        "runtime_evidence": "none",
-        "runtime_evidence_strength": "unknown",
-    }
+    assert absent.snapshot.reconciliation is None
 
     live = _reduce(
         record,
@@ -391,7 +380,7 @@ def test_reduce_task_snapshot_reports_terminal_runtime_conflicts() -> None:
     )
     assert live.snapshot.reconciliation == {
         "classification": "runtime_conflict",
-        "reason": "contradictory_terminal_event_status",
+        "reason": "terminal_lifecycle_with_live_runtime",
         "lifecycle_status": "completed",
         "runtime_status": "running",
         "runtime_evidence": "runner",

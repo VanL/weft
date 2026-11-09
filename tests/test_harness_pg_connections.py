@@ -60,6 +60,8 @@ def test_wait_reuses_pg_connections_and_closes(
                     json.dumps(
                         {
                             "tid": tid,
+                            "type": "terminal",
+                            "source": "task",
                             "event": "work_failed" if failure else "work_completed",
                             "status": "failed" if failure else "completed",
                         }

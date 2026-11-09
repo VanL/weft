@@ -457,8 +457,8 @@ Current behavior:
   `stale_created`, and `stale_liveness` observations are Unix clocks and stay
   JSON numbers
 - task `last_timestamp` is independently classified by its source. Ordinary
-  task-log replay, including `runtime_conflict`, `stale_status_payload`,
-  `stale_liveness`, superseded manager/internal-service, and runtime-missing
+  task-log replay, including `runtime_conflict`, `stale_liveness`,
+  superseded manager/internal-service, and runtime-missing
   reconciliations, retains a task-log row ID and uses [SB-0.2].
   Task-state projection timestamps retain broker row IDs and use [SB-0.2]. A timestamp sourced from
   `claimed_result_without_terminal`, `stale_created`, a pipeline-status body,
@@ -1141,6 +1141,8 @@ flags, and future queue or control ergonomics live in the companion doc:
 - [`10A-CLI_Interface_Planned.md`](10A-CLI_Interface_Planned.md)
 
 ## Related Plans
+
+- [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) removes the `stale_status_payload` reconciliation for old records whose status contradicts their event name ([CLI-1.2.1]).
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
 

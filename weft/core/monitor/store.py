@@ -50,6 +50,8 @@ from weft._constants import (
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     INTERNAL_SERVICE_ROLES,
     INTERNAL_SERVICE_RUNTIME_CLASSES,
+    STATUS_COMPLETED,
+    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
     WEFT_MONITOR_CHECKPOINT_META_PREFIX,
@@ -1531,6 +1533,67 @@ class _MonitorTableAccess:
             )
         )
 
+    def migrate_v6_to_v7(self, *, now_ns: int) -> int:
+        """Record terminal proof the v6 reducer missed; return families repaired.
+
+        Through v6 the collation reducer recognized a terminal record by its
+        event name, and service and Manager exits (``service_idle_exit``,
+        ``manager_idle_shutdown``, the drained and childless supersede/yield
+        records) were missing, so their families stayed open forever after
+        their raw rows were deleted. v7 trusts the record ([MF-3]): a family
+        whose latest record states a terminal status, and that was never
+        summarized or disposed, takes that record as its terminal proof. Every
+        such record carried ``type="terminal"``, since a task publishes a
+        terminal status only in its typed terminal record; ``task_activity``
+        hints never close a family ([OBS.13.4]). One pass over the open rows,
+        inside the schema transaction, run once by the version gate; the
+        update is guarded on ``terminal_seen = 0`` so a rerun changes nothing.
+
+        Spec: [MF-3], [OBS.13.4], [WT-2a.9] bounded forward migration
+        """
+
+        rows = tuple(
+            self._session.run(
+                monitor_sql.select_v6_unprocessed_open_collations(
+                    self._tables.task_collations
+                ),
+                fetch=True,
+            )
+        )
+        repaired = 0
+        for context_key, tid, lifecycle_json in rows:
+            lifecycle = _json_object(
+                lifecycle_json,
+                f"monitor collation {context_key}:{tid} lifecycle_json",
+            )
+            event = lifecycle.get("event")
+            status = lifecycle.get("status")
+            if (
+                not isinstance(event, str)
+                or event == "task_activity"
+                or not isinstance(status, str)
+                or status not in TERMINAL_TASK_STATUSES
+            ):
+                continue
+            lifecycle["terminal_status"] = status
+            self._session.run(
+                monitor_sql.mark_v6_stranded_collation_terminal(
+                    self._tables.task_collations
+                ),
+                (
+                    event,
+                    status,
+                    status,
+                    int(status != STATUS_COMPLETED),
+                    _json(lifecycle),
+                    now_ns,
+                    str(context_key),
+                    str(tid),
+                ),
+            )
+            repaired += 1
+        return repaired
+
     def verify_v6(self) -> None:
         """Fail unless all Monitor-owned stored data is canonical v6 data."""
 
@@ -2586,6 +2649,15 @@ class MonitorStore:
                     raw_message_is_absent=self._raw_message_is_absent,
                 )
                 access.verify_v6()
+                access.migrate_v6_to_v7(now_ns=time.time_ns())
+                access.write_meta(
+                    WEFT_MONITOR_SCHEMA_VERSION_KEY,
+                    {"version": WEFT_MONITOR_SCHEMA_VERSION},
+                )
+            elif version == 6:
+                access.verify_schema_structure()
+                access.verify_v6()
+                access.migrate_v6_to_v7(now_ns=time.time_ns())
                 access.write_meta(
                     WEFT_MONITOR_SCHEMA_VERSION_KEY,
                     {"version": WEFT_MONITOR_SCHEMA_VERSION},

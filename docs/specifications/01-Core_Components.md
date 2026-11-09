@@ -627,7 +627,9 @@ Current task families:
   After raw deletion is reconciled, child message rows are physically removed
   from `weft_monitor_task_messages`; after summary, disposition, raw deletion,
   task-local control cleanup, and any required reserved cleanup proof complete,
-  the compact parent collation row may also be physically retired. External
+  and once the family's completion (or, without one, its last-seen time) is
+  older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`, the compact parent
+  collation row may also be physically retired ([OBS.13.4]). External
   lifecycle retention output is owned by
   `weft/core/monitor/external_log.py`; `WEFT_TASK_MONITOR_LOG_SINK` remains
   monitor operational output, not the external lifecycle-retention contract.
@@ -1348,6 +1350,7 @@ effects, and own cleanup. (Plan:
 
 ## Related Plans
 
+- [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) states the retention gate on compact collation-row retirement ([CC-2.3]).
 - retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes process-title corroboration from host-pid liveness evidence under [CC-3.2]; a title is observability only.
 - retired: `2026-09-22-task-monitor-maintenance-worker-plan` (source 0ff8cfbf; see `docs/plans/README.md`): explicit maintenance construction and reactor-owned state under [IMPL.11].
 - retired: `2026-11-02-reactor-edge-timer-floors-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces fixed timer floors on service-worker, interactive and agent-session waits with their real event sources ([CC-2.2.1], [CC-3.5]).

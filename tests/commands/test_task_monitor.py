@@ -112,6 +112,8 @@ def test_foreground_scan_filters_malformed_rows_before_counts_and_checkpoint(
     tid = "1778084345905438703"
     valid_payload = {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": tid,
         "taskspec": _taskspec_payload(tid),
@@ -197,6 +199,8 @@ def test_follow_stream_advances_an_in_memory_high_water_without_checkpoint(
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": first_tid,
             "taskspec": _taskspec_payload(first_tid),
@@ -216,6 +220,8 @@ def test_follow_stream_advances_an_in_memory_high_water_without_checkpoint(
             ctx,
             {
                 "event": "work_completed",
+                "type": "terminal",
+                "source": "task",
                 "status": "completed",
                 "tid": second_tid,
                 "taskspec": _taskspec_payload(second_tid),
@@ -295,6 +301,8 @@ def test_monitor_checkpoint_advances_after_successful_sink_write(
             json.dumps(
                 {
                     "event": "work_completed",
+                    "type": "terminal",
+                    "source": "task",
                     "status": "completed",
                     "tid": tid,
                     "taskspec": _taskspec_payload(tid),
@@ -353,6 +361,8 @@ def test_monitor_restart_does_not_duplicate_after_checkpoint(workdir: Path) -> N
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": _taskspec_payload(tid),
@@ -401,6 +411,8 @@ def test_monitor_crash_window_duplicate_has_stable_summary_id(workdir: Path) -> 
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": _taskspec_payload(tid),
@@ -477,6 +489,8 @@ def test_terminal_log_success_summary_uses_terminal_log(workdir: Path) -> None:
         ctx,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": _taskspec_payload(tid),
@@ -525,6 +539,8 @@ def test_task_failure_without_task_monitor_anomaly_is_domain_failure(
         ctx,
         {
             "event": "work_failed",
+            "type": "terminal",
+            "source": "task",
             "status": "failed",
             "tid": tid,
             "error": "task failed",
@@ -671,6 +687,8 @@ def _replaced_client_context(tmp_path: Path) -> tuple[WeftContext, WeftContext]:
 def _completed_row(tid: str) -> dict[str, Any]:
     return {
         "event": "work_completed",
+        "type": "terminal",
+        "source": "task",
         "status": "completed",
         "tid": tid,
         "taskspec": _taskspec_payload(tid),

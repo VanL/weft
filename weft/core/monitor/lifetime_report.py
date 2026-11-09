@@ -4,7 +4,7 @@ The records built here are operational evidence only. They do not decide
 cleanup eligibility, scan queues, write files, or mutate Monitor tables.
 
 Spec references:
-- docs/specifications/05-Message_Flow_and_State.md [MF-5]
+- docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]
 - docs/specifications/07-System_Invariants.md [OBS.13], [OBS.13.12], [OBS.13.13], [OBS.17]
 """
 
@@ -19,11 +19,10 @@ from simplebroker import format_message_id
 from weft._constants import (
     TASK_LIFETIME_REPORT_RECORD_TYPE,
     TASK_MONITOR_POLICY_MONITOR_STORE_LIFECYCLE,
-    TERMINAL_TASK_EVENTS,
-    TERMINAL_TASK_STATUSES,
     WEFT_LOG_TASKS_EXTERNAL_SCHEMA_VERSION,
 )
 from weft.core.queue_window import QueueWindowRow
+from weft.core.task_evidence import terminal_record_status
 from weft.helpers.message_ids import normalize_exact_message_id
 
 from .collation import ControlTerminalObservation, selected_terminal_identity
@@ -378,8 +377,7 @@ def _lifetime_from_task_log_payload(
     status = _string(payload.get("status") if payload is not None else None) or _string(
         state.get("status") if state is not None else None
     )
-    event = _string(payload.get("event") if payload is not None else None)
-    terminal_status = _terminal_status(event=event, status=status)
+    terminal_status = terminal_record_status(payload) if payload is not None else None
     return _complete_lifetime(
         {
             "tid": tid,
@@ -586,14 +584,6 @@ def _metadata_string(
 ) -> str | None:
     metadata = _mapping(taskspec.get("metadata") if taskspec is not None else None)
     return _string(metadata.get(key) if metadata is not None else None)
-
-
-def _terminal_status(*, event: str | None, status: str | None) -> str | None:
-    if event is not None:
-        return TERMINAL_TASK_EVENTS.get(event)
-    if status in TERMINAL_TASK_STATUSES:
-        return status
-    return None
 
 
 def _complete_lifetime(values: Mapping[str, Any]) -> dict[str, Any]:

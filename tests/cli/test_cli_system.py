@@ -319,6 +319,8 @@ def test_task_stop_terminal_task_is_rejected_without_control_queue_residue(
         context,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": {
@@ -369,7 +371,12 @@ def test_system_prune_retention_dry_run_json(workdir: Path) -> None:
     _write_queue_json(
         context,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": "1770000000000000600", "status": "completed"},
+        {
+            "tid": "1770000000000000600",
+            "status": "completed",
+            "type": "terminal",
+            "source": "task",
+        },
     )
 
     rc, out, err = run_cli(
@@ -425,7 +432,12 @@ def test_system_prune_retention_apply_requires_archive_unless_force(
     _write_queue_json(
         context,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": "1770000000000000601", "status": "completed"},
+        {
+            "tid": "1770000000000000601",
+            "status": "completed",
+            "type": "terminal",
+            "source": "task",
+        },
     )
 
     rc, _out, err = run_cli(
@@ -1000,6 +1012,8 @@ def test_system_task_monitor_stdout_jsonl(workdir: Path) -> None:
         context,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": {
@@ -1149,6 +1163,8 @@ def test_system_task_monitor_disk_json_summary(workdir: Path) -> None:
         context,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": {
@@ -1206,6 +1222,8 @@ def test_system_task_monitor_uses_default_logs_dir(workdir: Path) -> None:
         context,
         {
             "event": "work_completed",
+            "type": "terminal",
+            "source": "task",
             "status": "completed",
             "tid": tid,
             "taskspec": {

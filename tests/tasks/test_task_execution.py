@@ -41,7 +41,6 @@ from weft._constants import (
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
-    TERMINAL_TASK_EVENTS,
     WEFT_ENDPOINTS_REGISTRY_QUEUE,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
@@ -56,6 +55,7 @@ from weft.core.monitor.task_monitor import TaskMonitor
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import sessions as sessions_module
 from weft.core.runners.sessions import AgentSession, CommandSession
+from weft.core.task_evidence import terminal_record_status
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import base as base_module
@@ -3085,7 +3085,7 @@ def test_deferred_control_wins_over_error_and_cancelled_outcomes(
 
     events = [json.loads(message) for message in drain_queue(log_queue)]
     terminal_events = [
-        event for event in events if event["event"] in TERMINAL_TASK_EVENTS
+        event for event in events if terminal_record_status(event) is not None
     ]
     assert [event["event"] for event in terminal_events] == [expected_event]
     assert terminal_events[0]["status"] == expected_status

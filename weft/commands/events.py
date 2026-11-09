@@ -19,7 +19,6 @@ import weft.commands.system as system_cmd
 from simplebroker import Queue
 from weft._constants import (
     TASK_HISTORY_MAX_MESSAGE_ID,
-    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.commands.types import TaskEvent, TaskSnapshot
@@ -34,7 +33,7 @@ from weft.core.task_evidence import (
     TaskEvidenceSnapshot,
     command_failure_return_code,
     read_task_history,
-    terminal_status_from_event,
+    terminal_record_status,
 )
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import TaskSpec
@@ -231,7 +230,7 @@ def iter_task_events(
                     timestamp=timestamp,
                     payload=payload,
                 )
-                if terminal_status_from_event(payload) in TERMINAL_TASK_STATUSES:
+                if terminal_record_status(payload) is not None:
                     terminal_seen = True
 
             if terminal_seen or not follow:

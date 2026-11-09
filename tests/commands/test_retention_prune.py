@@ -160,12 +160,18 @@ def test_task_log_dry_run_reports_superseded_rows_without_deleting(
     terminal_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed"},
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
     )
     latest_terminal_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed", "event": "task_completed"},
+        {
+            "tid": tid,
+            "status": "completed",
+            "type": "terminal",
+            "source": "task",
+            "event": "task_completed",
+        },
     )
 
     result = run_retention_prune(
@@ -206,7 +212,7 @@ def test_retention_selector_includes_candidate_at_exact_minimum_age(
     _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed"},
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
     )
     monkeypatch.setattr(
         retention_pruning.time,
@@ -238,7 +244,7 @@ def test_task_log_apply_requires_archive_and_deletes_exact_rows(
     keep_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed"},
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
     )
 
     missing_archive = run_retention_prune(
@@ -293,7 +299,7 @@ def test_retention_limit_applies_to_dry_run_and_apply(
     latest_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed"},
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
     )
     config = RetentionPruneConfig(
         context_path=ctx.root,
@@ -353,7 +359,7 @@ def test_retention_apply_report_error_is_classified_after_delete(
     keep_id = _write_json(
         ctx,
         WEFT_GLOBAL_LOG_QUEUE,
-        {"tid": tid, "status": "completed"},
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
     )
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("occupied", encoding="utf-8")
@@ -486,7 +492,11 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
     old_id_a = _write_json(
         ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_a, "status": "created"}
     )
-    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_a, "status": "completed"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid_a, "status": "completed", "type": "terminal", "source": "task"},
+    )
 
     result_a = run_retention_prune(
         RetentionPruneConfig(
@@ -506,7 +516,11 @@ def test_task_log_apply_appends_to_same_day_archive_across_runs(
     old_id_b = _write_json(
         ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_b, "status": "created"}
     )
-    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid_b, "status": "completed"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid_b, "status": "completed", "type": "terminal", "source": "task"},
+    )
 
     result_b = run_retention_prune(
         RetentionPruneConfig(
@@ -577,7 +591,13 @@ def _concurrent_append_worker(
         archive_path=archive,
         min_age_seconds=0,
     )
-    payload = {"tid": run_id, "status": "completed", "filler": "x" * 2048}
+    payload = {
+        "tid": run_id,
+        "status": "completed",
+        "type": "terminal",
+        "source": "task",
+        "filler": "x" * 2048,
+    }
     payload_text = json.dumps(payload)
     candidates = [
         RetentionPruneCandidate(
@@ -670,7 +690,11 @@ def test_ctrl_out_terminal_with_log_is_deleted_and_unrelated_row_is_preserved(
     ctx = _context(tmp_path)
     archive = tmp_path / "archive.jsonl"
     tid = "1770000000000001003"
-    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
+    )
     terminal_id = _write_json(
         ctx,
         f"T{tid}.ctrl_out",
@@ -756,7 +780,11 @@ def test_outbox_final_result_with_terminal_log_is_deleted(tmp_path: Path) -> Non
     ctx = _context(tmp_path)
     archive = tmp_path / "archive.jsonl"
     tid = "1770000000000001005"
-    _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+    _write_json(
+        ctx,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
+    )
     result_id = _write_json(
         ctx,
         f"T{tid}.outbox",
@@ -818,7 +846,11 @@ def test_task_local_data_is_report_only_but_force_archives_and_deletes(
     ctx = _context(tmp_path)
     tid = "1770000000000001006"
     if terminal_log:
-        _write_json(ctx, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"})
+        _write_json(
+            ctx,
+            WEFT_GLOBAL_LOG_QUEUE,
+            {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
+        )
     queue_name = f"T{tid}.{suffix}"
     work_id = _write_json(ctx, queue_name, payload, persistent=persistent)
 
@@ -952,12 +984,20 @@ def test_client_prune_preserves_resolved_directory_and_broker(
     seeded = {
         _write_json(context, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "created"}),
         _write_json(
-            context, WEFT_GLOBAL_LOG_QUEUE, {"tid": tid, "status": "completed"}
+            context,
+            WEFT_GLOBAL_LOG_QUEUE,
+            {"tid": tid, "status": "completed", "type": "terminal", "source": "task"},
         ),
         _write_json(
             context,
             WEFT_GLOBAL_LOG_QUEUE,
-            {"tid": tid, "status": "completed", "event": "task_completed"},
+            {
+                "tid": tid,
+                "status": "completed",
+                "type": "terminal",
+                "source": "task",
+                "event": "task_completed",
+            },
         ),
     }
     client = WeftClient.from_weft_context(context)
@@ -979,7 +1019,14 @@ def test_client_prune_preserves_resolved_directory_and_broker(
         {"tid": stream_tid, "session_id": "stale", "queue": "T1.outbox"},
     )
     _write_json(
-        context, WEFT_GLOBAL_LOG_QUEUE, {"tid": stream_tid, "status": "completed"}
+        context,
+        WEFT_GLOBAL_LOG_QUEUE,
+        {
+            "tid": stream_tid,
+            "status": "completed",
+            "type": "terminal",
+            "source": "task",
+        },
     )
 
     runtime = client.system.prune(

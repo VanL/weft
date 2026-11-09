@@ -402,7 +402,10 @@ traversed. External Monitor JSONL is projected at the final write or
 durable-deferred handoff boundary, and deterministic lifetime-report identity
 is computed before that projection.
 
-Schema 6 requires the following named table columns and key structures. The
+Schema 7 keeps every schema 6 table, column, key and index requirement below
+unchanged; it differs from schema 6 only in the stored-data repair described
+for the version 6 to 7 migration. Schema 6 requires the following named table
+columns and key structures. The
 displayed column order is descriptive, not a physical-layout contract. Monitor
 SQL names every selected and inserted column; physical column ordinal position
 must not affect schema acceptance, reads, writes, or migration.
@@ -558,17 +561,18 @@ broker database itself. Broker queue rows still go through public SimpleBroker
 queue APIs; Monitor-table SQL is allowed only for the Monitor-owned tables
 listed above.
 
-Monitor schema version 6 has one migration edge. A newly created store writes
-version 6. Existing Monitor tables with no version metadata may be initialized
-as version 6 only when every Monitor-owned table is empty; non-empty
-unversioned stores fail. Version 5 migrates transactionally to version 6.
-Version 6 verifies the required tables, semantic required-column definitions
+Monitor schema version 7 is current. A newly created store writes version 7.
+Existing Monitor tables with no version metadata may be initialized as the
+current version only when every Monitor-owned table is empty; non-empty
+unversioned stores fail. Version 5 migrates transactionally through version 6
+to version 7, and version 6 migrates transactionally to version 7. Startup
+verifies the required tables, semantic required-column definitions
 independent of physical order, ordered primary keys, and required named-index
-shapes before reading owned data. It performs no schema DDL and does not
-recreate a missing required object. Only the new/empty path and the version 5
-migration may create or alter Monitor schema objects. Versions below 5 and
-above 6 fail as unsupported. There is no generic "lower than current" version
-advance.
+shapes before reading owned data. Version 6 and version 7 startup perform no
+schema DDL and do not recreate a missing required object. Only the new/empty
+path and the version 5 migration may create or alter Monitor schema objects.
+Versions below 5 and above 7 fail as unsupported. There is no generic "lower
+than current" version advance.
 
 The version 5 to 6 migration rewrites only the explicitly owned JSON
 message-ID fields. It also upgrades pending version 5 deferred external
@@ -592,6 +596,21 @@ normalization succeeds in the same transaction. Checkpoint-prefixed metadata
 must contain canonical `message_id`. Ordinary version 6 readers accept only
 the canonical stored form. Startup fails on malformed owned data; there is no
 tolerant current reader or normal-cycle old-release repair lane.
+
+The version 6 to 7 migration is a data-only, one-time repair. Through
+version 6 the collation reducer recognized terminal records by event name and
+missed the terminal records of service and Manager exits, so those families
+stayed open after their raw rows were deleted. In one pass over collation rows
+with `terminal_seen = 0` that were never summarized or disposed, a row whose
+stored latest lifecycle record states a terminal status (and is not a
+`task_activity` hint) is marked terminal with that record's event, status and
+message ID, and `reserved_probe_needed` when the status is not `completed`.
+Other rows, including families already summarized, are unchanged. The update
+is guarded on `terminal_seen = 0`, runs inside the schema transaction, and
+the version advances only after it succeeds. A version 6 Monitor rejects a
+version 7 store as newer; rolling back to it requires resetting the
+`schema_version` metadata to 6, which is safe because version 7 data is valid
+version 6 data.
 
 Monitor repair handles only states reachable from the current writer and
 current cleanup transactions, including interrupted exact deletion,
@@ -882,6 +901,7 @@ connection-pooling designs are tracked in the companion doc:
 ## Related Plans
 
 - [Task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md) measures which process holds which PostgreSQL connection per task phase and keeps one result reader per wait ([SB-0.4]).
+- [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) adds Monitor schema version 7 and its one-time version 6 to 7 repair of stranded terminal families ([SB-0.4a]).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.

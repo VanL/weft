@@ -1059,8 +1059,12 @@ TASK_HISTORY_MAX_MESSAGE_ID: Final[int] = (1 << 63) - 1
 TASK_MONITOR_SCHEMA_VERSION: Final[int] = 1
 """JSONL schema version for task monitor operational records."""
 
-WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 6
-"""Schema version for Monitor-owned durable collation tables."""
+WEFT_MONITOR_SCHEMA_VERSION: Final[int] = 7
+"""Schema version for Monitor-owned durable collation tables.
+
+v7 repairs v6 families left open by the event-name terminal reducer
+(``_MonitorTableAccess.migrate_v6_to_v7`` in ``weft/core/monitor/store.py``).
+"""
 
 WEFT_MONITOR_META_TABLE: Final[str] = "weft_monitor_meta"
 """Monitor-owned metadata table for schema version and checkpoints."""
@@ -1758,18 +1762,6 @@ WALL_CLOCK_TASK_LAST_TIMESTAMP_EVENTS: Final[frozenset[str]] = frozenset(
     }
 )
 """Task snapshot events whose ``last_timestamp`` comes from an internal body."""
-
-TERMINAL_TASK_EVENTS: Final[Mapping[str, str]] = {
-    "control_stop": "cancelled",
-    "task_signal_stop": "cancelled",
-    "control_kill": "killed",
-    "task_signal_kill": "killed",
-    "work_failed": "failed",
-    "work_timeout": "timeout",
-    "work_limit_violation": "failed",
-    "work_completed": "completed",
-}
-"""Task-log events that prove terminal lifecycle status when completion is set."""
 
 TASK_LOG_START_EVENTS: Final[frozenset[str]] = frozenset(
     {

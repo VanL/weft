@@ -36,14 +36,10 @@ from weft._constants import (
     QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     SERVICE_TYPE_MANAGED,
-    TERMINAL_TASK_STATUSES,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_INTERNAL_SPAWN_REQUESTS_QUEUE,
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
-)
-from weft._constants import (
-    TERMINAL_TASK_EVENTS as CANONICAL_TERMINAL_TASK_EVENTS,
 )
 from weft._exceptions import CommandExecutionError, WeftError
 from weft.commands import system as system_cmd
@@ -59,6 +55,7 @@ from weft.core.service_convergence import (
     project_manager_service_record,
     reduce_latest_by_service_owner,
 )
+from weft.core.task_evidence import terminal_record_status
 from weft.core.task_state import iter_task_state_rows, list_task_state_tids
 from weft.ext import RunnerHandle
 from weft.helpers import (
@@ -739,19 +736,7 @@ class WeftTestHarness:
 
     @staticmethod
     def _terminal_status_from_task_log(data: dict[str, object]) -> str | None:
-        event = data.get("event")
-        if isinstance(event, str):
-            event_status = CANONICAL_TERMINAL_TASK_EVENTS.get(event)
-            if event_status is not None:
-                return event_status
-        status = data.get("status")
-        if (
-            event == "task_activity"
-            and isinstance(status, str)
-            and status in TERMINAL_TASK_STATUSES
-        ):
-            return status
-        return None
+        return terminal_record_status(data)
 
     def report_completion_wait_stats(self) -> list[dict[str, float]]:
         """Return polling statistics from prior wait_for_completion calls.

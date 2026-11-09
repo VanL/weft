@@ -911,7 +911,9 @@ Current rules:
   same durable-before-delete rule used by the selected monitor mode.
   Version 5 child rows marked with `deleted_at_ns` are physically removed by
   the version 5 to 6 schema migration, not by a normal-cycle compatibility
-  lane. Replaying the same raw row after a delete failure is idempotent. A
+  lane. Families a version 6 Monitor left open on their own terminal record
+  receive that record as terminal proof once, through the version 6 to 7
+  schema migration ([SB-0.4a]). Replaying the same raw row after a delete failure is idempotent. A
   terminal family may emit a
   compact operational summary only after the FIFO pass reaches a
   completed high-water mark: the scanned FIFO prefix reaches queue end before a
@@ -955,9 +957,11 @@ Current rules:
   delete/probe errors.
   Once no child message rows remain and raw deletion, summary emission,
   disposition, task-local control cleanup, and any required reserved cleanup
-  proof have all been recorded, the Monitor may physically retire the compact
-  parent row from
-  `weft_monitor_task_collations`.
+  proof have all been recorded, and the family's completion (or, without one,
+  its last-seen time) is older than `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`,
+  the Monitor may physically retire the compact parent row from
+  `weft_monitor_task_collations`. Until then a terminal family is retained
+  work that keeps the TaskMonitor active.
   A separate maintenance worker slice may delete eligible stale standard
   `T{tid}.reserved` queues after monitor-table proof or stale no-monitor
   evidence, while preserving active runtime owners. Missing standard reserved
@@ -1994,9 +1998,15 @@ self-maintenance, and explicit operator commands for force and compaction:
   malformed rows are deleted at fold time. Family summaries are emitted only
   after a
   completed FIFO high-water pass, never after a scan-limited or error-limited
-  pass. Rows with non-terminal events such as
-  `task_activity` do not close lifecycle groups solely because they carry a
-  terminal-looking status. Terminal disposition may clear standard task-local
+  pass. A row closes its lifecycle group only when it is the task's typed
+  terminal record (`type="terminal"` with a terminal `status`, [MF-3]), and
+  the group's terminal status is that record's own `status`; the event name
+  is history, not the verdict. Rows without the discriminator never close a
+  group, whatever their event or status: `task_activity` hints and a
+  Manager's drain-start rows (`control_stop`, `manager_leadership_yielded`,
+  `manager_superseded` published at `running` with `draining`) leave the
+  family open until the drained terminal record arrives. Terminal disposition
+  may clear standard task-local
   residual `ctrl_in` and `inbox` queues left by forced process death or cleanup
   failure. Standard `ctrl_out`, `outbox`, and `reserved` remain retention-gated
   under their separate observation and reserved clocks. Standard completion/
@@ -2264,6 +2274,9 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 - [Measured memory admission and startup-window parity](../plans/2026-11-09-measured-memory-admission-plan.md) adds the measured_memory_exhausted dispatch refusal and per-lane refusal reasons under [MF-5].
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([MF-5]).
+- [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md): collation and lifetime reports take terminality and status from the task's typed terminal record, the event-name map is removed, and the version 6 to 7 Monitor migration closes families stranded by the old reducer ([MF-3], [MF-5], [OBS.13.4]).
+
+- [Service and Manager Exit Records Close Their Monitor Families](../plans/2026-11-09-terminal-idle-events-plan.md): the Monitor collates `service_idle_exit`, `heartbeat_service_superseded`, `manager_idle_shutdown` and the Manager drain-completion records as terminal proof ([MF-3], [MF-5], [OBS.13.4]).
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 

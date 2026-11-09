@@ -1121,65 +1121,6 @@ def test_terminal_log_status_wins_over_weak_live_host_pid(
     assert payload["tasks"] == []
 
 
-@pytest.mark.parametrize(
-    ("event", "expected_status"),
-    [
-        ("control_stop", "cancelled"),
-        ("task_signal_stop", "cancelled"),
-        ("control_kill", "killed"),
-        ("task_signal_kill", "killed"),
-        ("work_failed", "failed"),
-        ("work_timeout", "timeout"),
-        ("work_completed", "completed"),
-    ],
-)
-def test_terminal_event_reconciles_stale_running_status_payload(
-    tmp_path: Path,
-    event: str,
-    expected_status: str,
-) -> None:
-    root = prepare_project_root(tmp_path)
-    ctx = build_context(spec_context=root)
-    tid = str(1_844_674_407_370_955_200 + len(event))
-    started = 1_762_000_000_000_000_000
-    completed = started + 1_000_000_000
-
-    _write_task_log_entry(
-        ctx=ctx,
-        tid=tid,
-        event=event,
-        status="running",
-        state_status="running",
-        started_at=started,
-        completed_at=completed,
-        name=f"stale-{event}",
-    )
-
-    snapshot = status_cmd._collect_task_snapshots(
-        ctx, include_terminal=True, tid_filters={tid}, include_log_history=True
-    )[0]
-
-    assert snapshot is not None
-    assert snapshot.event == event
-    assert snapshot.status == expected_status
-    assert snapshot.completed_at == completed
-    assert snapshot.activity is None
-    assert snapshot.waiting_on is None
-    assert snapshot.reconciliation is not None
-    assert snapshot.reconciliation["classification"] == "stale_status_payload"
-    assert snapshot.reconciliation["reason"] == "contradictory_terminal_event_status"
-
-    status_snapshot = status_cmd.cmd_status(
-        all=True, context=root, include_log_history=True
-    )
-    assert isinstance(status_snapshot, SystemStatusSnapshot)
-    payload = asdict(status_snapshot)
-
-    assert payload is not None
-    task = payload["tasks"][0]
-    assert task["last_timestamp"] == snapshot.last_timestamp
-
-
 def test_status_preserves_active_manager_while_terminal_manager_row_stays_terminal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1218,8 +1159,7 @@ def test_status_preserves_active_manager_while_terminal_manager_row_stays_termin
         ctx=ctx,
         tid=old_tid,
         event="task_signal_stop",
-        status="running",
-        state_status="running",
+        status="cancelled",
         started_at=started,
         completed_at=completed,
         name="old-manager",

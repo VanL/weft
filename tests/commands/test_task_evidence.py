@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
@@ -13,11 +14,15 @@ import pytest
 
 from tests.helpers.test_backend import prepare_project_root
 from tests.tasks.test_task_execution import make_function_taskspec
+from weft._constants import WEFT_GLOBAL_LOG_QUEUE
+from weft.commands import events as events_cmd
 from weft.commands import system as status_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands.types import SystemStatusSnapshot
-from weft.context import build_context
+from weft.context import WeftContext, build_context
 from weft.core import task_evidence
+from weft.core.monitor.runtime import reduce_task_log_messages
+from weft.core.pruning import retention as retention_mod
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.ext import RunnerHandle, RunnerRuntimeDescription
@@ -27,6 +32,8 @@ pytestmark = [pytest.mark.shared]
 
 LIVE_PONG_PROBE_TIMEOUT = 20.0
 LIVE_PONG_DRIVE_TIMEOUT = 25.0
+TYPED_RECORD_FOLLOW_TIMEOUT = 0.5
+"""Bound for ``events --follow`` on a row that never ends the task."""
 
 
 def _runner_handle(
@@ -1180,3 +1187,81 @@ def test_discovery_rejects_terminal_envelope_with_other_taskspec_identity(
         assert task_evidence.discover_task_observation(ctx, tid) is None
     finally:
         control.close()
+
+
+def _write_log_row(ctx: WeftContext, payload: dict[str, Any]) -> None:
+    with ctx.queue(WEFT_GLOBAL_LOG_QUEUE, persistent=False) as queue:
+        queue.write(json.dumps(payload))
+
+
+def _log_evidence_reader(ctx: WeftContext, payload: dict[str, Any]) -> bool:
+    del ctx
+    return task_evidence.log_terminal_evidence(payload, tid=payload["tid"]) is not None
+
+
+def _monitor_runtime_reader(ctx: WeftContext, payload: dict[str, Any]) -> bool:
+    del ctx
+    [row] = reduce_task_log_messages([(json.dumps(payload), 1)]).rows
+    return row.terminal
+
+
+def _retention_reader(ctx: WeftContext, payload: dict[str, Any]) -> bool:
+    _write_log_row(ctx, payload)
+    rows, _scanned = retention_mod._read_task_log_rows(ctx)
+    [row] = [row for row in rows if row.tid == payload["tid"]]
+    return row.terminal
+
+
+def _events_follow_reader(ctx: WeftContext, payload: dict[str, Any]) -> bool:
+    _write_log_row(ctx, payload)
+    try:
+        list(
+            events_cmd.iter_task_events(
+                ctx, payload["tid"], follow=True, timeout=TYPED_RECORD_FOLLOW_TIMEOUT
+            )
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        _log_evidence_reader,
+        _monitor_runtime_reader,
+        _retention_reader,
+        _events_follow_reader,
+    ],
+    ids=["log_terminal_evidence", "monitor_runtime", "retention", "events_follow"],
+)
+def test_task_log_readers_take_terminality_only_from_the_typed_record(
+    tmp_path: Path,
+    reader: Callable[[WeftContext, dict[str, Any]], bool],
+) -> None:
+    """Every task-log reader shares the typed terminal record rule ([MF-3]).
+
+    A task's terminal record carries ``type="terminal"`` with its terminal
+    status; a row without the discriminator is not terminal proof, whatever
+    its event or status. One rule, ``task_evidence.terminal_record_status``,
+    serves terminal evidence, the TaskMonitor runtime reducer, retention
+    pruning and ``weft events --follow`` ([WT-4] shared function, shared
+    code). Mutation caught: a reader classifying by status alone.
+    """
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    typed = {
+        "tid": "1844674407370955301",
+        "event": "manager_superseded",
+        "status": "cancelled",
+        "type": "terminal",
+        "source": "task",
+    }
+    untyped = {
+        "tid": "1844674407370955302",
+        "event": "work_completed",
+        "status": "completed",
+    }
+
+    assert reader(ctx, typed) is True
+    assert reader(ctx, untyped) is False

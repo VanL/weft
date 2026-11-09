@@ -7,7 +7,7 @@ from typing import Any
 
 from weft._constants import TERMINAL_TASK_STATUSES
 from weft.context import WeftContext
-from weft.core.task_evidence import terminal_status_from_event
+from weft.core.task_evidence import terminal_record_status
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.helpers import encode_tid
 
@@ -24,7 +24,7 @@ def write_task_observation(ctx: WeftContext, event: dict[str, Any]) -> None:
             return
     else:
         state = taskspec.get("state", {})
-        status = terminal_status_from_event(event) or state.get(
+        status = terminal_record_status(event) or state.get(
             "status", event.get("status", "unknown")
         )
         existing = read_task_state_snapshot(ctx, tid)
@@ -101,7 +101,7 @@ def _continue_task_observation(
     payload = existing[1]
     projection = payload["projection"]
     projection["event"] = event["event"]
-    terminal_status = terminal_status_from_event(event)
+    terminal_status = terminal_record_status(event)
     if terminal_status is not None:
         payload["terminal"] = True
         projection["status"] = terminal_status
