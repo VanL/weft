@@ -364,6 +364,13 @@ Key responsibilities implemented in `weft/core/manager.py`:
    launcher crash, sees them live from the registry and launches no
    duplicate; a duplicate that does start converges as above. A task that
    stops refreshing is dead or wedged, and its row ages out as before.
+   The registry is a declared support route of such a task ([QUEUE.7]), so
+   it cannot also name `weft.state.services` as one of its queue roles;
+   construction rejects that topology. Services and autostart tasks still
+   running from a release before the refresh never re-stamp their rows, so
+   an upgrade first stops each context with `weft system stop` ([MA-3]) and
+   the next manager launches them under the refreshing code; Weft keeps no
+   second proof path for the mixed-version window.
    Task-owned
    terminal proof for that TID (terminal envelope or terminal task-log status)
    wins over host process liveness, so a service process still unwinding after

@@ -186,7 +186,9 @@ A live task declares every construction-fixed delivery role and
   it peeks, never a delivery role. The heartbeat service is the queue's only
   reader and deleter: it deletes only rows it rejects, rows a newer row of the
   same `heartbeat_id` supersedes, and rows whose lease has expired. The
-  Manager holds no interest in, reads, or deletes that queue.
+  Manager holds no interest in, reads, or deletes that queue. A task
+  launched with a managed service key declares `weft.state.services` as a
+  fixed support route for its owner-row refresh ([MA-1] item 7).
   Registration precedes the initial read; changed publications
   can return control even without delivery readiness. Rejected evidence retains
   interest with a strict publication cursor; gate release, exit/failure and
@@ -1473,6 +1475,8 @@ doc:
 - [`07A-System_Invariants_Planned.md`](07A-System_Invariants_Planned.md)
 
 ## Related Plans
+
+- [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) makes `weft.state.services` a fixed support route of every task launched with a managed service key ([QUEUE.7]).
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 

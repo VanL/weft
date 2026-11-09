@@ -178,7 +178,11 @@ The Manager already refreshes its own row this way
 - `tests/core/test_manager.py` (new tests; one existing test inverted)
 - `tests/tasks/test_service_task.py` (revised C2: refresh tests)
 - `docs/specifications/01-Core_Components.md`,
-  `docs/specifications/05-Message_Flow_and_State.md` (revised C2: deadlines)
+  `docs/specifications/05-Message_Flow_and_State.md` (revised C2: deadlines;
+  plan backlinks)
+- `docs/specifications/07-System_Invariants.md` (review F3: [QUEUE.7] names
+  the `services_registry` support route; plan backlink)
+- `CHANGELOG.md`, `README.md` (review F1: the change and the upgrade step)
 - `docs/ruff-suppression-registry.md` (C2: one `C901` suppression fewer)
 - `docs/specifications/03-Manager_Architecture.md` (delta below)
 - `docs/plans/README.md` (index row, file count)
@@ -256,12 +260,38 @@ The Manager already refreshes its own row this way
 | 7 | A stopping, terminal, dead or wedged owner stops refreshing; its row ages out as before, with no PING. | N | [WT-2a.13] |
 | 8 | The first C2 (aged-row PING, `aged_live`, review F1's probe-key rule) is removed; no Manager writes PINGs to service owners for proof any more. | N (replaced by row 4) | [WT-4.4] "As few concepts as possible" |
 | 9 | An ordinary task without a managed service key publishes no refresh deadline and writes no registry row. | N | [WT-4.3] "A quiet task costs nothing an operator can see" |
+| 10 | Mixed versions only (review F1): services and autostart tasks still running from pre-refresh code never re-stamp their rows; 300 s after their last row a new Manager sees no live owner (a fresh successor starts a duplicate; an existing adopter waits). Removed by the documented upgrade step, `weft system stop` before or while upgrading (§4b). | D (during mixed-version operation only) | [WT-4.4] "No compatibility code: contract changes update all producers and consumers in one coordinated release"; owner rule: no backward-compatibility shims, break cleanly, note it in the CHANGELOG |
+| 11 | A task launched with a managed service key declares `weft.state.services` as a support route, so it can no longer name that queue as its outbox or another queue role; the topology check rejects it at construction. Ordinary tasks keep the baseline topology (review F3). | D (an unreasonable configuration, rejected loudly) | [WT-4.2] "One owner for each resource" (the registry route belongs to the task's owner-row duty); [WT-4.3] closed reactor inputs; [QUEUE.7] collision guard |
 
 ### 4b. Rollout, rollback, one-way doors
 
 No persisted format, queue name or public surface changes. Each slice is
 one commit and reverts independently; C2's idle-exit assertion relies on C1,
 so revert C2 before C1 if both go. No one-way door.
+
+Upgrade (revised C2, review F1). A clean break with an operator-controlled
+transition, per the owner's standing rule (no backward-compatibility code;
+break cleanly and note it in the CHANGELOG). Services and autostart tasks
+already running from code that predates the refresh never re-stamp their
+rows, so 300 s after their last launcher-written row a Manager on the new
+code sees no live owner: a fresh successor starts a duplicate, and an
+existing adopter waits as `wait_uncertain`. Step: run `weft system stop` in
+each context before or while upgrading. It stops the active Manager, whose
+STOP drain first stops every live user-work task of the context, autostart
+tasks included, found through their own snapshots ([MA-3] phase 1); it then
+stops the context's internal services by registry record. The next Manager
+launches services and autostart tasks under the new code. A context with no
+active Manager has no drain, so an autostart task still running there is
+stopped with `weft task stop`. Recorded in the CHANGELOG, README (internal
+services) and spec 03 [MA-1] item 7. No second proof mechanism is kept for
+the transition.
+
+A mixed-version check is not added as a separate test: an old service that
+never refreshes is exactly the "task that stops refreshing" path, already
+covered by phase 1 of `test_adopted_service_keeps_live_proof_by_refreshing_its_owner_row`
+(an existing adopter: no proof, no PING) and by the autostart test's
+sensitivity run (a fresh successor: duplicate launch); the stop step's
+mechanics are covered by the existing `weft system stop` tests.
 
 ## Spec Baseline
 
@@ -567,8 +597,16 @@ existing process seams.
   `test_managed_service_task_restamps_its_owner_row_on_its_own_clock`
   (nothing before the interval; the deadline is published; one re-stamped
   row, same payload, newer stamp, the replaced row gone; nothing on the next
-  turn), `test_stopping_service_task_stops_refreshing_its_owner_row` and
-  `test_task_without_service_key_writes_no_registry_rows`.
+  turn), `test_ending_service_task_stops_refreshing_its_owner_row`
+  (parametrized: a stopping task, and a terminal task that is not stopping,
+  so each guard is exercised on its own; named
+  `test_stopping_service_task_stops_refreshing_its_owner_row` before review
+  F3's round) and `test_task_without_service_key_writes_no_registry_rows`.
+- **Review F3** `test_managed_task_cannot_use_the_service_registry_as_a_queue_role`:
+  a Consumer whose outbox is `weft.state.services` is rejected at
+  construction (`ValueError` naming `services_registry`) when it carries a
+  managed service key, and built as before when it does not (register
+  row 11).
 - **First C2 (superseded, tests removed)** `test_adopted_service_keeps_live_proof_past_registry_retention`:
   write a predecessor's heartbeat owner row (host-pid handle of a live
   process), construct a canonical Manager (it adopts the owner), then, with
@@ -809,6 +847,24 @@ write, and the Manager's service state every 5 s:
 - A first autostart run used an invalid command (`process_target` with an
   argument inside it); every launch failed at once and the `ensure` policy
   relaunched it about every 0.4 s, so it tested nothing and is discarded.
+
+Cross-family review of `9a408b78`, 2026-11-09: Tier 1, run by the
+coordinating agent over the theory, agent-context guidance, specs, plan and
+the 12-file delta (read-only inspection and in-memory probes). Blockers F1
+and F2; F3 and one test-coverage note.
+
+| ID | Severity | Location | Finding | Disposition |
+|----|----------|----------|---------|-------------|
+| F1 | P2 | §4b; `service_convergence.py` retention; the removed aged-row PING path | Services already running baseline code never refresh; 300 s after their last row a new Manager discards it: a fresh successor gets `start_now` (a duplicate) and an existing adopter `wait_uncertain`. The rollout section and register omitted the loss. | Accepted, fixed as a documented clean break with an operator-controlled transition (owner's standing rule: no compatibility code, break cleanly, note it in the CHANGELOG). Upgrade step `weft system stop` per context in §4b, the CHANGELOG, the README and spec 03 [MA-1] item 7; register row 10 (`D` during mixed-version operation only, [WT-4.4]). No second proof mechanism. No separate mixed-version test (§4b says why). |
+| F2 | P3 | Register row 8; the service-candidate PING fallback in `manager.py` | A fresh owner row with no host-checkable proof still reaches `_service_pong_candidate`, so the Manager still writes service-owner proof PINGs; row 8's claim was false. | Decided by the owner on 2026-11-09: the self-refreshed row is the proof and the fallback PING is removed. Handled in the commit after this one. |
+| F3 | P3 | `BaseTask._reactor_support_routes`; §4a | The `services_registry` support route rejects a managed Consumer whose outbox is `weft.state.services`, which baseline built; unlisted. | Accepted: the collision guard stays ([QUEUE.7] requires every fixed support route to be declared); register row 11 (`D`, [WT-4.2], [WT-4.3]); regression test `test_managed_task_cannot_use_the_service_registry_as_a_queue_role` (managed rejected, ordinary built). Spec 07 [QUEUE.7] names the route. |
+| note | — | `tests/tasks/test_service_task.py` | The stopping test did not exercise the terminal-status guard on its own. | Accepted: the test is parametrized with a terminal, not-stopping case. Mutations: removing the terminal-status guard fails only the terminal case; dropping the `services_registry` route fails the managed F3 case; each restored byte-for-byte. |
+
+Gates after the F1 and F3 fixes: the eight owning files plus `tests/specs`
+on SQLite `-n 4`: 1,157 passed, 5 skipped; the eight owning files on
+PostgreSQL (`./bin/pytest-pg`): 985 passed, 15 skipped; ruff, ruff format,
+repo mypy (499 files), `bin/ruff_suppression_index.py --check`,
+`bin/check-doc-paths`: clean.
 
 ## 9. Out of Scope
 

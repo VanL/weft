@@ -923,6 +923,14 @@ endpoints, pipelines), so deployments do not need external cron jobs running
 `WEFT_TASK_MONITOR_MAINTENANCE_INTERVAL_SECONDS`. Maintenance results appear
 in the monitor's STATUS reply under the `maintenance` block.
 
+Internal services and autostart tasks keep their own service-owner rows in
+`weft.state.services` young: each re-stamps its row every 100 seconds, so a
+Manager that adopted them, or a successor after a crash, sees them live and
+starts no duplicate. When upgrading from a release without that refresh, run
+`weft system stop` in each context first (or while upgrading) so the next
+Manager launches its services and autostart tasks under the new code; an
+old service left running is taken for dead 300 seconds after its last row.
+
 ### Reservation Pattern
 
 Weft implements inbox -> reserved -> outbox flow for reliable message processing:

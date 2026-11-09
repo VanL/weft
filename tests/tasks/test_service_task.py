@@ -40,6 +40,7 @@ from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
 )
+from weft.core.tasks import Consumer
 from weft.core.tasks.base import TaskWorkerResult
 from weft.core.tasks.multiqueue_watcher import QueueMessageContext
 from weft.core.tasks.service import (
@@ -1295,16 +1296,20 @@ def test_managed_service_task_restamps_its_owner_row_on_its_own_clock(
         task.stop()
 
 
-def test_stopping_service_task_stops_refreshing_its_owner_row(
+@pytest.mark.parametrize("ending", ["stopping", "terminal"])
+def test_ending_service_task_stops_refreshing_its_owner_row(
     broker_env: BrokerEnv,
     unique_tid: str,
+    ending: str,
 ) -> None:
-    """A task that is stopping leaves its owner row to age out as before.
+    """A stopping or terminal task leaves its owner row to age out as before.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 7.
     Plan 2026-11-09-manager-idle-clock-and-adopted-service-proof Task 2.
-    Named mutation: refreshing from a stopping or terminal task, which would
-    keep a dead owner's row young.
+    Each guard is exercised on its own: ``should_stop`` with a running
+    status, and a terminal status without ``should_stop``. Named mutation:
+    refreshing from a stopping or terminal task, which would keep a dead
+    owner's row young.
     """
 
     db_path, make_queue = broker_env
@@ -1314,7 +1319,12 @@ def test_stopping_service_task_stops_refreshing_its_owner_row(
         make_service_taskspec(unique_tid, metadata=_managed_service_metadata()),
     )
     try:
-        task.should_stop = True
+        if ending == "stopping":
+            task.should_stop = True
+        else:
+            task._activate_service_task()
+            task.taskspec.mark_completed(return_code=0)
+            assert task.should_stop is False
         task._service_owner_refreshed_ns = (
             time.monotonic_ns() - _REFRESH_INTERVAL_NS - 1
         )
@@ -1348,3 +1358,47 @@ def test_task_without_service_key_writes_no_registry_rows(
         assert task.next_wait_timeout() is None
     finally:
         task.stop()
+
+
+@pytest.mark.parametrize("managed", [True, False])
+def test_managed_task_cannot_use_the_service_registry_as_a_queue_role(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    managed: bool,
+) -> None:
+    """A managed task reserves ``weft.state.services`` for its owner row.
+
+    Spec: docs/specifications/07-System_Invariants.md [QUEUE.7];
+    docs/specifications/03-Manager_Architecture.md [MA-1] item 7. Plan
+    2026-11-09-manager-idle-clock-and-adopted-service-proof, review F3. A
+    task launched with a managed service key re-stamps its own row in the
+    registry, so the registry is one of its support routes and cannot also
+    be its outbox; an ordinary task keeps the baseline topology. Named
+    mutation: dropping the support route (the managed task would be built).
+    """
+
+    db_path, _make_queue = broker_env
+    taskspec = TaskSpec(
+        tid=unique_tid,
+        name="registry-outbox",
+        spec=SpecSection(
+            type="function",
+            function_target="tests.tasks.sample_targets:echo_payload",
+        ),
+        io=IOSection(
+            inputs={"inbox": f"T{unique_tid}.inbox"},
+            outputs={"outbox": WEFT_SERVICES_REGISTRY_QUEUE},
+            control={
+                "ctrl_in": f"T{unique_tid}.{QUEUE_CTRL_IN_SUFFIX}",
+                "ctrl_out": f"T{unique_tid}.ctrl_out",
+            },
+        ),
+        state=StateSection(),
+        metadata=_managed_service_metadata() if managed else {},
+    )
+    if managed:
+        with pytest.raises(ValueError, match="services_registry"):
+            Consumer(db_path, taskspec)
+        return
+    task = Consumer(db_path, taskspec)
+    task.stop()

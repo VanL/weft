@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Internal-service exits, relaunches and convergence no longer reset the
+  Manager idle clock, and a due autostart manifest scan is no longer counted
+  as work for the idle verdict, so a Manager with no user work idle-exits on
+  time while its services keep running ([MA-1] item 5, [MA-1.5]).
+- Every task a Manager launched with a managed service key (built-in internal
+  services and autostart services) re-stamps its own service-owner row in
+  `weft.state.services` every `SERVICE_OWNER_REFRESH_INTERVAL_SECONDS` (100 s,
+  a third of the 300 s registry retention window), so a Manager that adopted
+  them, or a successor after a launcher crash, sees them live and launches no
+  duplicate. The Manager no longer re-proves aged service rows by `PING`
+  ([MA-1] item 7, [MA-1.6a]).
+- Such a task declares `weft.state.services` as a fixed support route, so it
+  can no longer use that queue as its outbox or another queue role;
+  construction rejects that topology ([QUEUE.7]).
+- Upgrade step: run `weft system stop` in each context before or while
+  upgrading to this release. Services and autostart tasks still running from
+  the previous release never re-stamp their owner rows; 300 s after their
+  last row a Manager on the new release sees no live owner and starts a
+  duplicate (or, if it already adopted them, waits on them as uncertain).
+  Stopping the context lets the next Manager launch them under the new code.
+  In a context with no active Manager, stop any still-running autostart task
+  with `weft task stop`. There is no compatibility path for the
+  mixed-version window.
+
 ## [0.9.122] - 2026-11-06
 
 ### Changed
