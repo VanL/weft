@@ -100,7 +100,7 @@ lifecycle. Exact target/config behavior is covered by
 real-backend task/session cleanup is covered by
 `tests/core/test_task_runtime_connections.py`. `weft/context.py::build_context`
 skips broker creation for a context inherited from the runtime identity;
-`tests/commands/test_observation_connections.py::test_runtime_parent_opens_no_context_broker_and_validates_its_reader_once`
+`tests/commands/test_observation_connections.py::test_runtime_parent_opens_no_context_broker_and_releases_its_reader_between_passes`
 covers it with a real nested task on both backends.
 
 Related plan: `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).

@@ -985,9 +985,13 @@ def _iter_consuming_result(
             tid, materialized, include_history=include_history
         )
         # One reader facade serves every pass. Closing it after each pass ends
-        # its session lease, so no data connection spans a wait; the next pass
-        # reacquires through the same facade and SimpleBroker's first-use
-        # facade validation runs once per wait, not once per pass [SB-0.4].
+        # its session lease, so the task releases its reader connection
+        # between passes while its activity subscription stays open; the next
+        # pass reacquires through the same facade. SimpleBroker keeps
+        # admission on the process session, so when that lease was the
+        # session's last, the next pass revalidates the PostgreSQL target, a
+        # cost accepted over holding a pooled data connection across the wait
+        # [SB-0.4].
         reader = (
             resources.enter_context(context.queue(names[0], persistent=True))
             if release_while_waiting

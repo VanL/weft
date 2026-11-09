@@ -271,6 +271,7 @@ validates the target on first use.
 | A runtime-inherited `build_context()` no longer opens the broker on PostgreSQL. SQLite already skipped an existing file. | C | [WT-4.1] keep an identity you already have; [WT-2a.8] SimpleBroker validates on first use; [WT-4.2] connection count is scarce |
 | In a task process, a broker that became unreachable after launch now fails at the first queue operation (for example `submit`) instead of at `connect()`. It is the same failure, reported to the same caller. | C | [WT-4.4] no over-armoring; [ALT-WT-011] no hidden preflight |
 | The result reader keeps one facade per wait, so first-use facade validation runs once per wait | C | [SB-0.4] warm facade reuse; [WT-4.2] one owner per resource |
+| Integration with SimpleBroker 8.8.0 (2026-11-09; supersedes the row above): a waiting parent revalidates the PostgreSQL target on every pass after a release, costing one inspection connection, five catalog statements and a fresh connection pool per pass (5 passes, 5 validations in the regression test's wait). Cause: Weft drops the last reference to the process session on every pass; under 8.7.2 the kept reader facade cached validation (once per wait), but 8.8.0 keeps admission on the process session, so closing the reader's lease ends the session and its admission | D | [WT-4.2] "On PostgreSQL the scarce resource is connection count": releasing the connection between passes is preferred over holding a session, whose pooled data connection stays open 10–20 s after each pass and counts against the capacity the waiting parent's children need. Owner interim decision 2026-11-09. Path to remove it: SimpleBroker follow-up "release a session's pooled data connections while keeping the session and its admission alive" (SB-F3 below) |
 | Physical opens per subsequent observation pass drop from 2 to 1, and 5 catalog statements per subsequent pass are removed (the first pass still validates and opens data) | C (measured) | [WT-4.4] measure, do not bake in inefficiency |
 | The data connection is released before every wait | N | 2026-11-07 nested admission load plan |
 | Held sessions per running task: 2 for a leaf, 3 for a waiting parent | N (unchanged; see SB-F1) | [ALT-WT-001] investigate resource lifetime |
@@ -350,7 +351,11 @@ gate on them ([WT-2a.8]).
 - **SB-F3. Session-retaining release.** Once SB-F1(b) exists, the result
   reader can keep one process session and runner across passes and return
   only the physical connection. That removes per-pass pool construction (a
-  new psycopg_pool and its worker threads per pass).
+  new psycopg_pool and its worker threads per pass). Since SimpleBroker 8.8.0
+  keeps project-target admission on the process session, this is also the
+  path that removes per-pass revalidation (register, the 2026-11-09 D row):
+  release a session's pooled data connections while keeping the session and
+  its admission alive.
 
 ## 12. Rollback and rollout
 
@@ -379,6 +384,7 @@ processes can coexist. There is no rollout order and no one-way door.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [SB-0.4] | First-use facade validation runs once per wait | With SimpleBroker 8.8.0, every pass after a release revalidates the PostgreSQL target | 8.8.0 keeps admission on the process session and the reader's per-pass close ends that session; owner chose to keep releasing the connection (2026-11-09, interim) | Applied on `perf/integration`: [SB-0.4] now states per-pass revalidation and the reason; register D row added |
 
 ## Fresh-eyes review (author)
 
@@ -404,3 +410,26 @@ context inputs keep broker initialization, and the test is falsifiable.
 | --- | --- | --- | --- |
 | F1 | nit | §3 probe topology totals 9 tasks, not 10. | Accepted, fixed: §3 states 9 tasks and lists the families. |
 | F2 | nit | §8 "opens per pass drop from 2 to 1" omits the first pass, which still validates and opens data. | Accepted, fixed: the register row now says subsequent passes. |
+
+### Integration with SimpleBroker 8.8.0 (2026-11-09)
+
+On `perf/integration`, after the SimpleBroker 8.8.0 / `simplebroker-pg`
+4.8.0 bump, the regression test's waiting thread opened 4-5 PostgreSQL
+connections during its wait where it had opened 1 (it passed at `3911f43f`,
+on 8.7.2). Counting `PostgresBackendPlugin.validate_target` calls showed the
+cause: one validation per observation pass (5 passes, 5 validations), each
+with its own inspection connection and a new connection pool. SimpleBroker
+8.8.0 ([SB-API-11]) records project-target admission on the process
+session, and a session whose last lease is released starts unadmitted; the
+reader's per-pass close is that last lease. Holding a caller session across
+the wait (tried, reverted) stops the revalidation but left one pooled data
+connection held at every wait (`held_at_waits == [1, 1, 1, 1, 1, 1]`).
+
+Owner decision (2026-11-09, interim while the SimpleBroker-side fix is
+investigated): keep releasing the reader connection between passes and
+accept the per-pass revalidation. [SB-0.4] and the `_result_wait.py`
+comment now say so, the register carries the D row, and the regression test
+became
+`test_runtime_parent_opens_no_context_broker_and_releases_its_reader_between_passes`:
+no context broker at `connect()`, no data connection held at any wait, and
+validations on the waiting thread equal to the observation passes it made.

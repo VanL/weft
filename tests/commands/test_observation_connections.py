@@ -32,11 +32,13 @@ PG_LISTENER_THREAD_PREFIX = "simplebroker-pg-listener"
 
 
 def observe_runtime_parent_connections(payload: dict[str, Any]) -> dict[str, Any]:
-    """Report one runtime parent's physical connections per phase [SB-0.4], [PY-1].
+    """Report one runtime parent's connections and validations per phase.
 
     Runs inside a spawned task worker. It resolves its context, submits one
     child that finishes only after this parent's first quiet wait, and records
-    the PostgreSQL connections its own process opens and still holds.
+    the PostgreSQL connections its own process opens and still holds, the
+    result-observation passes its waiting thread makes, and the PostgreSQL
+    target validations SimpleBroker runs on that thread ([SB-0.4], [PY-1]).
     """
     opened: list[str] = []
     live: dict[int, str] = {}
@@ -60,6 +62,30 @@ def observe_runtime_parent_connections(payload: dict[str, Any]) -> dict[str, Any
         psycopg.Connection.connect = classmethod(counted_connect)
         psycopg.connect = psycopg.Connection.connect
         psycopg.Connection.close = counted_close
+
+    # SimpleBroker validates a PostgreSQL project target through its backend
+    # plugin's ``validate_target`` hook; count calls per thread there.
+    validations: list[str] = []
+    if importlib.util.find_spec("simplebroker_pg") is not None:
+        pg_plugin: Any = importlib.import_module("simplebroker_pg.plugin")
+        original_validate = pg_plugin.PostgresBackendPlugin.validate_target
+
+        def counted_validate(plugin: Any, *args: Any, **kwargs: Any) -> Any:
+            validations.append(threading.current_thread().name)
+            return original_validate(plugin, *args, **kwargs)
+
+        pg_plugin.PostgresBackendPlugin.validate_target = counted_validate
+
+    # Each result-observation pass starts by acquiring fresh evidence through
+    # the reader, exactly once per pass.
+    passes: list[str] = []
+    original_acquire = _result_wait._acquire_result_observation
+
+    def counted_acquire(*args: Any, **kwargs: Any) -> Any:
+        passes.append(threading.current_thread().name)
+        return original_acquire(*args, **kwargs)
+
+    _result_wait._acquire_result_observation = counted_acquire
 
     release = Path(payload["release_file"])
     held_at_waits: list[int] = []
@@ -90,14 +116,17 @@ def observe_runtime_parent_connections(payload: dict[str, Any]) -> dict[str, Any
             payload={"kwargs": {"path": str(release), "timeout": 25.0}},
         )
     waiting_thread = threading.current_thread().name
-    wait_start = len(opened)
+    validation_start = len(validations)
     settled = child.result(timeout=25.0)
     return {
         "status": settled.status,
         "value": settled.value,
         "context_connections": context_connections,
         "held_at_waits": held_at_waits,
-        "waiting_thread_connections": opened[wait_start:].count(waiting_thread),
+        "waiting_thread_passes": passes.count(waiting_thread),
+        "waiting_thread_validations": validations[validation_start:].count(
+            waiting_thread
+        ),
     }
 
 
@@ -284,17 +313,21 @@ def test_result_wait_reuses_physical_connections(
     assert all(connection.closed for connection in connections)
 
 
-def test_runtime_parent_opens_no_context_broker_and_validates_its_reader_once(
+def test_runtime_parent_opens_no_context_broker_and_releases_its_reader_between_passes(
     weft_harness: WeftTestHarness,
 ) -> None:
-    """A waiting parent keeps no data connection and reuses one result reader.
+    """A waiting parent releases its reader connection between passes.
 
     Verifies, through a real Manager, wrapper, worker, and child:
     - the parent's `connect()` reuses the inherited launch target and opens no
       broker connection to resolve its context ([PY-1])
-    - every quiet result wait holds no data connection, only the listener
-    - the waiting thread validates one reader facade for the whole wait, not
-      one per observation pass ([SB-0.4])
+    - the parent releases its reader connection before every quiet result
+      wait; only its activity subscription (the listener) stays open
+    - each pass after a release revalidates the PostgreSQL target, because
+      SimpleBroker keeps admission on the process session and the released
+      lease was that session's last: validations on the waiting thread equal
+      its observation passes. Weft accepts this cost over holding a pooled
+      data connection across the wait ([SB-0.4]; owner decision 2026-11-09)
     - submission and the nested result stay correct on both backends
     """
     ctx = weft_harness.context
@@ -320,11 +353,15 @@ def test_runtime_parent_opens_no_context_broker_and_validates_its_reader_once(
     assert report["status"] == "completed"
     assert report["value"] == "done"
     assert report["held_at_waits"], "the parent must wait before its child ends"
+    # A pass precedes every wait and another follows it.
+    assert report["waiting_thread_passes"] >= 2, report
     if ctx.backend_name != "postgres":
         return
     assert report["context_connections"] == 0
-    assert report["held_at_waits"] == [0] * len(report["held_at_waits"])
-    assert report["waiting_thread_connections"] == 1, report
+    assert report["held_at_waits"] == [0] * len(report["held_at_waits"]), report
+    assert report["waiting_thread_validations"] == report["waiting_thread_passes"], (
+        report
+    )
 
 
 @pytest.mark.parametrize("operation", ["result", "realtime"])

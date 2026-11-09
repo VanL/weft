@@ -195,13 +195,21 @@ Related plan: [Burst result observation](../plans/2026-10-09-burst-result-observ
 The bounded observation owners in `weft/commands/_result_wait.py`, `result.py`,
 `events.py`, `run.py`, and `tasks.py` normally retain persistent queue leases
 until their existing close/finally boundary. A runtime task collecting
-only a final PostgreSQL result with routes known at entry retains its queue
-activity subscription while waiting and owns a data connection only for
-each observation pass. It keeps one reader Queue for the whole wait and
-closes that Queue's session lease after each pass, before waiting, and
-preserves any caller-owned session. The next wake reacquires a data
-connection through the same reader for fresh evidence, so SimpleBroker's
-first-use facade validation runs once per wait, not once per pass.
+only a final PostgreSQL result with routes known at entry releases its
+reader connection between passes; its activity subscription stays open. It
+keeps one reader Queue for the whole wait and closes that Queue's session
+lease after each pass, before waiting, and preserves any caller-owned
+session. The next wake reacquires a data connection through the same reader
+for fresh evidence. SimpleBroker keeps project-target admission on the
+process session, so when the closed lease was that session's last, each
+pass after a release revalidates the PostgreSQL target: one inspection
+connection, five catalog statements, and a fresh connection pool. Weft
+accepts that cost rather than holding a session across the wait, because a
+held session keeps a pooled data connection open for 10–20 s after each
+pass and on PostgreSQL the scarce resource is connection count ([WT-4.2]);
+the cost, its cause, and the SimpleBroker follow-up that removes it are
+recorded in [the task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md)
+(owner decision, 2026-11-09).
 Regression coverage lives in
 `tests/commands/test_observation_connections.py` and
 `tests/system/test_admission_stress.py`. See the
