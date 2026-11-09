@@ -2485,6 +2485,22 @@ class BaseTask(MultiQueueWatcher, ABC):
             return
         self._register_tid_state()
 
+    def _task_state_barrier(self) -> None:
+        """Append the edges an open owner step holds, before what follows.
+
+        Call it before a write that readers must see after the snapshot
+        (a result or stream frame follows the runtime authority it was
+        produced under) and before any operation that can block, so no edge
+        waits behind either. Outside a step, or with nothing held, it does
+        nothing.
+
+        Spec: [OBS.6a]
+        """
+
+        if self._task_state_stale:
+            self._task_state_stale = False
+            self._register_tid_state()
+
     @contextmanager
     def _task_state_step(self) -> Iterator[None]:
         """Publish one complete snapshot for every edge of one owner step.
@@ -2496,8 +2512,9 @@ class BaseTask(MultiQueueWatcher, ABC):
         carried. On exit, normal or exceptional, the step writes that row
         (while non-terminal) and then one complete snapshot if any edge is
         unpublished. Nested steps join the outermost one. A task family opts
-        in by opening steps around its own owner work; families that never
-        open one keep publishing at each edge.
+        in by opening steps around owner work that does not block, and calls
+        ``_task_state_barrier()`` before any write a held snapshot must
+        precede; families that never open one keep publishing at each edge.
 
         Spec: [OBS.6a], [CC-2.2]
         """
@@ -2514,11 +2531,9 @@ class BaseTask(MultiQueueWatcher, ABC):
                 self._activity_row_pending = False
                 if self.taskspec.state.status not in TERMINAL_TASK_STATUSES:
                     self._emit_activity_event()
-            if self._task_state_stale:
-                # One best-effort attempt, as at an edge; a failed terminal
-                # append keeps its latch open for the next terminal report.
-                self._task_state_stale = False
-                self._register_tid_state()
+            # One best-effort attempt, as at an edge; a failed terminal append
+            # keeps its latch open for the next terminal report.
+            self._task_state_barrier()
 
     def register_managed_pid(self, pid: int | None) -> None:
         """Track a subprocess PID owned by this task for cleanup/observability."""

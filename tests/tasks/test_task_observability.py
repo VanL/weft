@@ -23,6 +23,8 @@ from tests.helpers.typing import BrokerEnv, TaskFactory
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
+    CONSUMER_ACTIVE_WORKER_LANE,
+    CONSUMER_WORKER_EVENT_LANE,
     CONTROL_PAUSE,
     CONTROL_STOP,
     PROCESS_TITLE_CONTEXT_LENGTH,
@@ -40,8 +42,9 @@ from weft.core.manager import Manager
 from weft.core.task_evidence import parse_task_observation, parse_task_projection
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.base import BaseTask
+from weft.core.tasks.consumer import _ConsumerWorkerEvent, _ConsumerWorkResult
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.ext import RunnerHandle
+from weft.ext import RunnerHandle, RunnerOutcome
 from weft.helpers import encode_tid
 
 
@@ -578,7 +581,12 @@ def test_persistent_work_item_completion_is_one_owner_step(
     task_factory: TaskFactory,
     unique_tid: str,
 ) -> None:
-    """Returning to ``waiting`` rides on the completion report [OBS.6a], [CC-2.2]."""
+    """A completed item appends the runtime release, then one final state.
+
+    [OBS.6a], [CC-2.2]: the joined host worker's release is appended before
+    the result is written; returning to ``waiting`` rides on the completion
+    report, and the item's final state is appended exactly once.
+    """
     _db_path, make_queue = broker_env
     mapping_queue = make_queue(task_state_queue_name(unique_tid))
     log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
@@ -610,10 +618,117 @@ def test_persistent_work_item_completion_is_one_owner_step(
     ]
     completed = _task_log_rows(log_queue, unique_tid)[-1]
     assert (completed["activity"], completed["waiting_on"]) == ("waiting", inbox_name)
-    latest = json.loads(mapping_queue.peek_many(limit=100)[-1])
-    assert latest["projection"]["status"] == "running"
-    assert latest["projection"]["event"] == "work_item_completed"
-    assert (latest["activity"], latest["waiting_on"]) == ("waiting", inbox_name)
+
+    snapshots = [json.loads(body) for body in mapping_queue.peek_many(limit=100)]
+    task_process = str(task._task_pid)
+    states = [
+        (
+            row["projection"]["status"],
+            row["projection"]["event"],
+            row.get("activity"),
+            row.get("waiting_on"),
+            row["runtime_handle"]["id"],
+        )
+        for row in snapshots
+    ]
+    assert states[0][:4] == ("created", "task_initialized", "waiting", inbox_name)
+    assert states[1] == ("running", "work_started", "working", None, task_process)
+    # Live worker identity, if a drain published it before the outcome.
+    assert all(state[4] != task_process for state in states[2:-2])
+    # The release names the task process again, before the result.
+    assert states[-2] == ("running", "work_started", "working", None, task_process)
+    # One final-state append for the item.
+    assert states[-1] == (
+        "running",
+        "work_item_completed",
+        "waiting",
+        inbox_name,
+        task_process,
+    )
+
+
+@pytest.mark.parametrize(
+    "worker_reported",
+    [True, False],
+    ids=["host-worker-released", "authority-only-in-outcome"],
+)
+def test_outcome_runtime_authority_is_visible_when_the_result_is(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_reported: bool,
+) -> None:
+    """A result follows the runtime authority it was produced under [OBS.6a].
+
+    Worker identity and the outcome arrive in one drain of worker results.
+    A reported host worker is released, so the task process is the published
+    authority when the result appears ([OBS.11a]); a runner that names its
+    authority only in the outcome has that authority published first. No
+    runner available to tests supplies its handle only in the outcome, so the
+    worker-result channel, the Consumer's boundary for runner events,
+    carries those events through the real turn, drain and commit path.
+    """
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    outbox_name = spec.io.outputs["outbox"]
+    queue_type = type(mapping_queue)
+    real_write = queue_type.write
+    authority_at_result: list[str] = []
+
+    def observing_write(queue: Queue, message: str, *args: Any, **kwargs: Any) -> int:
+        if queue.name == outbox_name:
+            latest = json.loads((mapping_queue.peek_many(limit=100) or [])[-1])
+            authority_at_result.append(latest["runtime_handle"]["id"])
+        return real_write(queue, message, *args, **kwargs)
+
+    monkeypatch.setattr(queue_type, "write", observing_write)
+    worker_pid = 424242
+    handle = RunnerHandle(
+        runner="host",
+        kind="process",
+        id=str(worker_pid),
+        control={"authority": "host-pid"},
+        observations={"host_pids": [worker_pid]},
+    )
+    task._begin_work_item(None)
+    task._active_work_in_flight = True
+    if worker_reported:
+        task._publish_worker_result(
+            CONSUMER_WORKER_EVENT_LANE,
+            value=_ConsumerWorkerEvent(kind="worker_started", pid=worker_pid),
+        )
+        task._publish_worker_result(
+            CONSUMER_WORKER_EVENT_LANE,
+            value=_ConsumerWorkerEvent(kind="runtime_handle", runtime_handle=handle),
+        )
+    task._publish_worker_result(
+        CONSUMER_ACTIVE_WORKER_LANE,
+        value=_ConsumerWorkResult(
+            timestamp=None,
+            initial_transition=True,
+            live_command_streaming=False,
+            outcome=RunnerOutcome(
+                status="ok",
+                value="done",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+                runtime_handle=handle,
+            ),
+        ),
+    )
+
+    task.process_once()
+
+    assert task.taskspec.state.status == "completed"
+    assert authority_at_result == [
+        str(task._task_pid) if worker_reported else str(worker_pid)
+    ]
 
 
 def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(

@@ -202,7 +202,10 @@ Comprehension questions (answer before editing):
 | `task_initialized` and `work_spawning` rows carry the activity that the removed `task_activity` rows carried; `task_activity` rows remain for activity changes no same-step report carries and for every non-Consumer task | C | [WT-4.4]; log fold yields the same activity and waiting_on (with the reducer rule below) |
 | Log fold: a row that carries `activity` sets both `activity` and `waiting_on` (absent means none) | N | Producers build both from one state; no current producer emits `waiting_on` without `activity` |
 | Consumer process title goes straight to `created:waiting` (the transient `init` title is skipped) | C | Process-local display; same steady title |
-| Within a Consumer step, an appended snapshot is visible at the end of the step rather than at the edge (milliseconds; no wait occurs inside a step) | C | [WT-2a.6]; readers that act do so after the step |
+| Within a Consumer step (a work-item start, or one drain of worker results), a held snapshot becomes visible at the step's end or at an earlier barrier rather than at its edge. Steps exclude interactive session work (whose input write can block) and agent-session start; a barrier appends before any blocking call (agent-session close) and before any write that must follow the snapshot, so no edge waits behind a blocking operation | C | [WT-2a.6]; [WT-4.1] no held fact behind a wait |
+| The runtime authority an outcome carries is published before the result is written, for every runner: a released host worker names the task process again; a handle supplied with the outcome (or identity drained with it) is appended first. Unchanged from the baseline order; review finding F1 | N | [OBS.11a]; [WT-2a.13] |
+| The work-start snapshot is appended before the worker lane starts, so it always names the task process; worker identity follows in its own drain step | N | [WT-2a.6] |
+| Persistent work-item completion appends the host runtime release, then one final-state row (`waiting`, `work_item_completed`); the `waiting` activity becomes visible with the completion row instead of before it (display only; no reader acts on activity) | C | [WT-4.4] |
 | Terminal mapping latch is set by any successful terminal append (step flush, or a late runtime-handle append) instead of only by the terminal report's own append | N | [OBS.6a] "exactly once per task" |
 | A non-interactive, non-`stream_output` Consumer no longer scans outbox and `ctrl_out` at cleanup; it no longer deletes another task's empty final stream marker in a shared outbox | C | `cleanup_on_exit` deletes task-owned scratch artifacts only ([TS-1]) |
 
@@ -221,15 +224,21 @@ Promotion strategy B (atomic):
 ### [OBS.6a] — insert after "...or when the write is itself a report (construction, restart republish)."
 
 > A task may coalesce the edges it detects within one owner step: inside a
-> `Consumer` reactor turn (and its direct work-item start) each edge marks the
-> snapshot stale, and the step's end appends one complete snapshot, so every
-> fact of the state after the step is published once and a state superseded
-> within the same step is not appended separately. Any complete append made
-> inside a step covers the edges detected before it, and an edge whose state
-> readers must see before a later write of the same step appends at the edge
-> (the release of a joined one-shot host worker precedes the result). A
-> task's construction snapshot carries the live activity the task starts
-> with. Other task families append at each edge.
+> `Consumer` work-item start and inside each drain of its worker results,
+> each edge marks the snapshot stale, and the step's end appends one complete
+> snapshot, so every fact of the state after the step is published once and
+> a state superseded within the same step is not appended separately. Any
+> complete append made inside a step covers the edges detected before it. A
+> step holds no edge across an operation that can block or across a write
+> that readers must see after the snapshot: it appends first. A result or
+> stream frame follows the runtime authority it was produced under, for
+> every runner (a joined one-shot host worker is released, naming the live
+> task process again). Interactive session work does not coalesce. A task's
+> construction snapshot carries the live activity the task starts with.
+> Other task families append at each edge.
+
+(Revised after review round 1, F1 and F2; the round-1 text coalesced a whole
+`Consumer` reactor turn.)
 
 and replace "The terminal transition publishes its mapping exactly once per
 task, latched only on a successful write" with "The terminal transition
@@ -238,8 +247,10 @@ terminal append".
 
 ### OBS.6 `_Implementation mapping_` — append
 
-> `weft/core/tasks/base.py::BaseTask._task_state_step` and
-> `weft/core/tasks/consumer.py::Consumer._process_reactor_turn` own
+> `weft/core/tasks/base.py::BaseTask._task_state_step`,
+> `weft/core/tasks/base.py::BaseTask._task_state_barrier`,
+> `weft/core/tasks/consumer.py::Consumer._begin_work_item` and
+> `weft/core/tasks/consumer.py::Consumer._drain_worker_results` own
 > owner-step coalescing ([OBS.6a]).
 
 ### [CC-2.2] — insert after "registration itself performs one append attempt and does not inspect global mapping history."
@@ -280,13 +291,19 @@ terminal append".
    snapshot and titles the process with the current status when it applies.
    `Consumer` returns `("waiting", inbox)` and no longer calls
    `_set_activity("waiting")` in its constructor.
-4. `Consumer`: wrap `_process_reactor_turn` and `_begin_work_item` in the
-   step. Do not override `_process_stopping_reactor_turn`: every family
-   shares BaseTask's stopping turn
-   (`tests/tasks/test_task_execution.py::test_stopping_turn_policy_is_shared_by_all_concrete_task_families`);
-   a stopping turn publishes at each edge as before. The host branch of
-   `_register_outcome_runtime` keeps its immediate append (row 8 precedes
-   the result); the runtime-handle branch goes through the edge.
+4. `Consumer`: open the step in `_begin_work_item` (it ends before the
+   worker lane starts) and in an override of `_drain_worker_results` (one
+   batch of worker results). Do not coalesce the reactor turn: a turn can
+   hold interactive session input (`session.send()` may block on a full
+   pipe), output drains, agent-session start and other blocking calls.
+   Add `BaseTask._task_state_barrier()` (append what the open step holds)
+   and call it at the end of `_register_outcome_runtime` for every runner
+   (the result follows its runtime authority), before each live stream
+   frame, and before closing an agent session. Do not override
+   `_process_stopping_reactor_turn`: every family shares BaseTask's
+   stopping turn
+   (`tests/tasks/test_task_execution.py::test_stopping_turn_policy_is_shared_by_all_concrete_task_families`).
+   Stop if a step would contain a call that can block with an edge held.
 5. `Consumer._cleanup_task_resources`: purge stream markers only when
    `spec.interactive or spec.stream_output` (and not live command
    streaming, unchanged).
@@ -313,9 +330,21 @@ publication. `broker_env`/`task_factory` fixtures (`tests/conftest.py`).
     terminal `completed`; the total is at most 6 (it is 9 today).
   RED on baseline: first snapshot has no activity; `task_activity` rows
   present.
-- Same file: a persistent Consumer that completes one work item appends one
-  snapshot for the item's completion step (activity back to `waiting`,
-  event `work_item_completed`) and writes no `task_activity` row for it.
+- Same file: a persistent Consumer that completes one work item writes no
+  `task_activity` row for it and appends, in order: the start row (task
+  process authority), any worker-identity rows (worker authority), the
+  host runtime release (task process, still `working`), and exactly one
+  final-state row (`waiting`, `work_item_completed`). Duplicate release or
+  final appends fail it (review F3).
+- Same file: worker identity and the outcome are published to the
+  worker-result channel and applied in one real turn; the runtime authority
+  in the newest snapshot when the result is written is the task process
+  (reported host worker, released) or the outcome's handle (authority only
+  in the outcome). RED on `6a3230ae` for the second case (review F1).
+- `tests/tasks/test_task_interactive.py`: when the first input is written to
+  a started interactive session, the newest snapshot already reports
+  `running` with the session process in its host PIDs. RED on `6a3230ae`
+  (still `created`) (review F2).
 - `tests/commands/test_task_snapshot_reducer.py`: folding `task_initialized`
   (`waiting`, inbox) then `work_spawning` (`working`, no `waiting_on`)
   yields `waiting_on=None`. RED on baseline (keeps the inbox).
@@ -380,7 +409,8 @@ from any row). Rollback: revert the commit; no data migration.
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
 | [OBS.6a] | Coalesce the outcome runtime release (row 8) into the terminal snapshot | Row 8 stays an immediate append before the result | Found by the existing result-observation test: readers evaluate runtime authority between the result write and terminal proof | Promoted in [OBS.6a] ("an edge whose state readers must see before a later write of the same step appends at the edge") |
-| [CC-2.2.1], [IMPL.10] | Consumer overrides `_process_stopping_reactor_turn` with a step | No override; stopping turns publish at each edge | Every family shares BaseTask's stopping turn by contract test | None needed (the [OBS.6a] text names the reactor turn hook) |
+| [CC-2.2.1], [IMPL.10] | Consumer overrides `_process_stopping_reactor_turn` with a step | No override; stopping turns publish at each edge | Every family shares BaseTask's stopping turn by contract test | None needed |
+| [OBS.6a] | Round 1: one step per Consumer reactor turn | Steps are the work-item start and each worker-result drain, with barriers before results, stream frames and agent-session close; interactive work never coalesces | Review F1 (non-host authority published after the result) and F2 (a turn contains blocking interactive input and output drains) | Promoted: [OBS.6a] text revised in this change |
 
 ## Review and execution record
 
@@ -396,7 +426,27 @@ Execution evidence (author, before the coordinator's review):
   19 write transactions and ~97 statements per wrapper before; 12-13 write
   transactions and 67-71 statements after. Snapshots 9 -> 4-5, log rows
   6 -> 4, cleanup stream-marker peeks 2 -> 0.
+- After the round-1 fixes (same probe): 13 write transactions and 70-71
+  statements per wrapper; 5 snapshots (construction, work start, worker
+  identity, runtime release, terminal), 4 log rows.
+- Round-1 RED evidence on `6a3230ae` sources (new tests run against them,
+  sources then restored byte-for-byte): authority-only-in-outcome case
+  `assert ['<task pid>'] == ['424242']` (the outcome's authority was not yet
+  published when the result was written); interactive first input
+  `assert 'created' == 'running'`.
 
-Reserved for the coordinator's cross-family review. The class-5/hardening
-review-before-implementation gate was not run by the author: the track brief
-assigns plan and work review to the coordinator after implementation.
+The class-5/hardening review-before-implementation gate was not run by the
+author: the track brief assigns plan and work review to the coordinator after
+implementation.
+
+### Review round 1
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+attempt 1 failed (model at capacity), attempt 2 scoped-change review of
+plan+implementation at 6a3230ae against 08c2f87b. Verdict: blocker: F1, F2.
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | P2 | Non-host runtime authority could publish after the result: `_register_outcome_runtime()` deferred its handle edge inside the turn step while `_commit_work_outcome()` wrote the output first (identity and outcome in one drain, or a handle supplied only with the outcome) | Accepted, fixed: `BaseTask._task_state_barrier()` appends what a step holds; `_register_outcome_runtime` ends with it for every runner; live stream frames and agent-session close are preceded by it; [OBS.6a] says a result or stream frame follows the runtime authority it was produced under. New parametrized test `test_outcome_runtime_authority_is_visible_when_the_result_is` (RED on 6a3230ae for the authority-only-in-outcome case). Register row added |
+| F2 | P2 | The coalescing scope (the whole reactor turn) included blocking interactive work: session identity and `running` were held across `session.send()` and output drains, so the register's "milliseconds; no wait occurs" premise was false | Accepted, fixed: the reactor turn no longer opens a step; steps are `_begin_work_item` (ends before the worker lane starts) and Consumer's `_drain_worker_results` (interactive work never uses worker lanes); barrier before agent-session close. Register row corrected. New test `test_interactive_session_identity_is_published_before_first_input` (RED on 6a3230ae: snapshot still `created` at the first input) |
+| F3 | P3 | The persistent completion test checked only the newest snapshot, so duplicate appends passed; the host release means persistent completion appends release plus final state | Accepted, fixed: the test asserts the whole row sequence (start, worker identity only with worker authority, one release, exactly one final-state row); plan counts aligned (section 7). On 6a3230ae it also failed intermittently under -n 4, because the turn step merged the start row with worker identity |

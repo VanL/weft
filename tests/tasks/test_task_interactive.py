@@ -27,6 +27,7 @@ from weft._constants import (
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.runners.sessions import CommandSession
 from weft.core.task_evidence import coerce_terminal_envelope
+from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 from weft.core.tasks import interactive as interactive_module
 from weft.core.tasks.base import BaseTask
@@ -1313,6 +1314,50 @@ def test_interactive_close_sentinel_purged_on_cleanup(
     assert not any(_is_final_marker(msg) for msg in ctrl_after)
 
     task.stop(join=False)
+
+
+def test_interactive_session_identity_is_published_before_first_input(
+    monkeypatch: pytest.MonkeyPatch, broker_env: BrokerEnv, unique_tid: str
+) -> None:
+    """Session input can block on a full pipe; publication precedes it [OBS.6a].
+
+    When the first input is written to a started session, the task's newest
+    snapshot already reports ``running`` with the session process as runtime
+    evidence, so a blocked write cannot leave the task published as waiting
+    with no session identity.
+    """
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    mapping = make_queue(task_state_queue_name(unique_tid))
+    observed: list[tuple[str, list[int], int | None]] = []
+    real_send = CommandSession.send
+
+    def observing_send(session: CommandSession, data: str) -> None:
+        if not observed:
+            latest = json.loads((mapping.peek_many(limit=100) or [])[-1])
+            observed.append(
+                (
+                    latest["projection"]["status"],
+                    latest["runtime_handle"]["observations"]["host_pids"],
+                    session.pid,
+                )
+            )
+        real_send(session, data)
+
+    monkeypatch.setattr(CommandSession, "send", observing_send)
+    task = Consumer(db_path, spec)
+    inbox = make_queue(spec.io.inputs["inbox"])
+    try:
+        inbox.write(json.dumps({"stdin": "hello\n"}))
+        _drive_interactive(task, lambda: bool(observed))
+        inbox.write(json.dumps({"close": True}))
+        _drive_interactive(task, lambda: _finished(task))
+    finally:
+        task.cleanup()
+
+    status, host_pids, session_pid = observed[0]
+    assert status == "running"
+    assert session_pid is not None and session_pid in host_pids
 
 
 def test_interactive_streaming_session_records(

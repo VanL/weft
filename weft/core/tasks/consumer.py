@@ -131,30 +131,39 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     def _process_reactor_turn(self) -> None:
         """Run one Consumer turn behind the owner-enforcing template.
 
-        The turn is one owner step: the edges it detects (work start, worker
-        identity, outcome, terminal state) publish one snapshot when the turn
-        ends ([OBS.6a]).
-
         Spec:
-        - docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.2.1], [CC-2.3]
+        - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3]
         - docs/specifications/05-Message_Flow_and_State.md [MF-2]
-        - docs/specifications/07-System_Invariants.md [OBS.6a]
+        """
+        self._in_reactor_turn = True
+        try:
+            if self._active_work_in_flight:
+                self._drain_worker_results()
+                if self._active_work_in_flight:
+                    self._poll_active_control_once()
+                self._drain_worker_results()
+                self._maybe_emit_poll_report()
+            else:
+                super()._process_reactor_turn()
+        finally:
+            self._in_reactor_turn = False
+        if self._interactive_mode:
+            self._interactive_flush_outputs()
+
+    def _drain_worker_results(self, *, max_results: int | None = None) -> int:
+        """Apply one batch of worker results as one owner step ([OBS.6a]).
+
+        Worker identity edges from one batch publish one snapshot. The step
+        appends what it holds before a stream frame or result is written
+        and before an agent session is closed, so no edge waits behind a
+        write it must precede or a blocking call. Interactive sessions do no
+        worker-lane work and never enter this step.
+
+        Spec: docs/specifications/07-System_Invariants.md [OBS.6a];
+        docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.5]
         """
         with self._task_state_step():
-            self._in_reactor_turn = True
-            try:
-                if self._active_work_in_flight:
-                    self._drain_worker_results()
-                    if self._active_work_in_flight:
-                        self._poll_active_control_once()
-                    self._drain_worker_results()
-                    self._maybe_emit_poll_report()
-                else:
-                    super()._process_reactor_turn()
-            finally:
-                self._in_reactor_turn = False
-            if self._interactive_mode:
-                self._interactive_flush_outputs()
+            return super()._drain_worker_results(max_results=max_results)
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox handling with reserve semantics and control queue peeking.
@@ -346,9 +355,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
-        """Release joined one-shot host workers before publishing idle identity.
+        """Publish the outcome's runtime authority before any result is written.
 
-        Spec: docs/specifications/01-Core_Components.md [CC-3.2]
+        Joined one-shot host workers are released first, so the published
+        authority is the live task process again.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-3.2];
+        docs/specifications/07-System_Invariants.md [OBS.6a]
         """
         if (
             self.taskspec.spec.runner.name == "host"
@@ -359,12 +372,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             # Sessions use their own teardown; outcomes retain historical handles.
             self._managed_pids.clear()
             self._runtime_handle = None
-            # Append now, even inside the turn's step: readers that see the
-            # result before terminal proof must find the live task process as
-            # runtime authority, not the joined worker ([OBS.6a], [OBS.11a]).
-            self._register_tid_state()
-            return
-        self.register_runtime_handle(outcome.runtime_handle)
+            self._task_state_edge()
+        else:
+            self.register_runtime_handle(outcome.runtime_handle)
+        # The result follows the runtime authority it was produced under, for
+        # every runner: a reader that sees the result before terminal proof
+        # must find that authority (for a joined host worker, the live task
+        # process again), so append before any output ([OBS.6a], [OBS.11a]).
+        self._task_state_barrier()
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
@@ -627,6 +642,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if stream not in {"stdout", "stderr"}:
             raise RuntimeError("Stream chunk event missing stream name")
 
+        # A frame follows the worker identity it was produced under ([OBS.6a]).
+        self._task_state_barrier()
         self._begin_streaming_session(
             mode="stream",
             metadata={
@@ -1127,6 +1144,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         if self._uses_agent_session():
+            # Closing the session can block; hold no snapshot edge across it.
+            self._task_state_barrier()
             self._shutdown_agent_session()
 
         self._finalize_deferred_active_control()

@@ -445,8 +445,10 @@ positive process supervision retain their existing protections.
 
 _Implementation mapping_: `weft/core/runtime_identity.py`,
 `weft/core/task_state.py`, `weft/core/tasks/base.py::BaseTask._build_tid_state_payload`,
-`weft/core/tasks/base.py::BaseTask._task_state_step` and
-`weft/core/tasks/consumer.py::Consumer._process_reactor_turn` (owner-step
+`weft/core/tasks/base.py::BaseTask._task_state_step`,
+`weft/core/tasks/base.py::BaseTask._task_state_barrier`,
+`weft/core/tasks/consumer.py::Consumer._begin_work_item` and
+`weft/core/tasks/consumer.py::Consumer._drain_worker_results` (owner-step
 coalescing, [OBS.6a]),
 `weft/core/manager.py::Manager._build_tid_state_payload`,
 `tests/core/test_task_state.py`, `tests/core/test_runtime_identity.py`,
@@ -466,16 +468,18 @@ snapshot and Manager launch-event contract.
   equal runtime handle, and a known managed PID are suppressed at their call
   sites) or when the write is itself a report (construction, restart
   republish). A task may coalesce the edges it detects within one owner
-  step: inside a `Consumer` reactor turn (and its direct work-item start)
-  each edge marks the snapshot stale, and the step's end appends one
-  complete snapshot, so every fact of the state after the step is published
-  once and a state superseded within the same step is not appended
-  separately. Any complete append made inside a step covers the edges
-  detected before it, and an edge whose state readers must see before a
-  later write of the same step appends at the edge (the release of a joined
-  one-shot host worker precedes the result). A task's construction snapshot
-  carries the live activity the task starts with. Other task families append
-  at each edge. The terminal transition publishes its mapping exactly once per
+  step: inside a `Consumer` work-item start and inside each drain of its
+  worker results, each edge marks the snapshot stale, and the step's end
+  appends one complete snapshot, so every fact of the state after the step
+  is published once and a state superseded within the same step is not
+  appended separately. Any complete append made inside a step covers the
+  edges detected before it. A step holds no edge across an operation that
+  can block or across a write that readers must see after the snapshot: it
+  appends first. A result or stream frame follows the runtime authority it
+  was produced under, for every runner (a joined one-shot host worker is
+  released, naming the live task process again). Interactive session work
+  does not coalesce. A task's construction snapshot carries the live
+  activity the task starts with. Other task families append at each edge. The terminal transition publishes its mapping exactly once per
   task, latched only on a successful terminal append so a failed terminal
   append retries on the next terminal report. Completion publication attempts precede
   the terminal mapping; clearing terminal activity changes only owner-local
