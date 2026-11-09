@@ -1,6 +1,6 @@
 # Bootstrap Skips a Resident Without Identity; Reconciliation Retries Only Transient Failures
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.6], [MANAGER.11]
 Superseded by: none
 

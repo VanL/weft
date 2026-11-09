@@ -1,6 +1,6 @@
 # Manager Startup Interest From Launch Selection
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8], [MA-3]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/01-Core_Components.md [CC-2.1], [CC-2.2.1]; docs/specifications/07-System_Invariants.md QUEUE.7, QUEUE.8
 Superseded by: none
 

@@ -1,6 +1,6 @@
 # Status Lists Unproven Managers as Unknown
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/10-CLI_Interface.md [CLI-1.2.1]; docs/specifications/03-Manager_Architecture.md [MA-1] item 4 and the `weft.state.services` custody paragraph; docs/specifications/14-Python_API_Surfaces.md [PY-2]
 Superseded by: none
 

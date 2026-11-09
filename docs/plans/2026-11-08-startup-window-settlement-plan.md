@@ -1,6 +1,6 @@
 # Startup Window Narrows With Measured Headroom
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md [MANAGER.18]
 Superseded by: none
 

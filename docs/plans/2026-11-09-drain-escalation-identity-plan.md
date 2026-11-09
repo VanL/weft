@@ -1,6 +1,6 @@
 # Drain and Cleanup Signals Verify Process Identity
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-3]; docs/specifications/07-System_Invariants.md [LIVENESS.R5]
 Superseded by: none
 

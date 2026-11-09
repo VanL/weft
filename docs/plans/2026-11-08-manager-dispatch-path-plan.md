@@ -1,6 +1,6 @@
 # Manager Dispatch and Launch-Result Round Trips
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8], [MA-3]; docs/specifications/07-System_Invariants.md [MANAGER.11], [MANAGER.18], [OBS.6]; docs/specifications/05-Message_Flow_and_State.md [MF-5], [MF-6]
 Superseded by: none
 

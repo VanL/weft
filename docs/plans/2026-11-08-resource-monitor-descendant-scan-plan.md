@@ -1,6 +1,6 @@
 # Resource Monitor Descendant Scan and Quiet Unlimited Sampling
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/06-Resource_Management.md [RM-5.1]
 Superseded by: none
 

@@ -1,6 +1,6 @@
 # Manager Event-Driven Child Reaping
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8], [MA-3]; docs/specifications/07-System_Invariants.md [IMPL.8], [IMPL.10]
 Superseded by: none
 

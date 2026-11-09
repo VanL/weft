@@ -1,6 +1,6 @@
 # Task Connection Footprint on PostgreSQL
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]; docs/specifications/14-Python_API_Surfaces.md [PY-1]; docs/specifications/05-Message_Flow_and_State.md [MF-5]
 Superseded by: none
 

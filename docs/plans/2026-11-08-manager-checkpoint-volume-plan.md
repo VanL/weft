@@ -1,6 +1,6 @@
 # Manager Checkpoint Volume
 
-Status: promoted
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/07-System_Invariants.md [OBS.6], [OBS.6a], [MANAGER.11]; docs/specifications/03-Manager_Architecture.md [MA-1.8]
 Superseded by: none
 

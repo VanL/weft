@@ -1,6 +1,6 @@
 # The Monitor Trusts the Typed Terminal Record
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13.4]; docs/specifications/04-SimpleBroker_Integration.md [SB-0.4a]; docs/specifications/00-Quick_Reference.md (`WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`); docs/specifications/01-Core_Components.md [CC-2.3]; docs/specifications/10-CLI_Interface.md [CLI-1.2.1]
 Superseded by: none
 

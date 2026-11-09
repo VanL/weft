@@ -1,6 +1,6 @@
 # Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]; docs/specifications/01-Core_Components.md [CC-2] (BaseTask, ServiceTask and HeartbeatTask deadlines); docs/specifications/05-Message_Flow_and_State.md [MF-3.2], [MF-5] (service deadlines)
 Superseded by: none
 

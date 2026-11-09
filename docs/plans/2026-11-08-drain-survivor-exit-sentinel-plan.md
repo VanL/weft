@@ -1,6 +1,6 @@
 # Stopping-Drain Survivor Exit Sentinel
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]; docs/specifications/06-Resource_Management.md [RM-5.2]
 Superseded by: none
 

@@ -1,6 +1,6 @@
 # Measured Memory Admission and Startup-Window Parity
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/03-Manager_Architecture.md [MA-1.8]; docs/specifications/07-System_Invariants.md [MANAGER.18]; docs/specifications/05-Message_Flow_and_State.md [MF-5]; docs/specifications/00-Quick_Reference.md (Environment Variables)
 Superseded by: none
 

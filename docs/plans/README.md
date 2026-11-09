@@ -30,22 +30,22 @@ There are currently 66 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-09-measured-memory-admission-plan.md`](./2026-11-09-measured-memory-admission-plan.md) | Measured Memory Admission and Startup-Window Parity | `draft` | none |
-| [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain and Cleanup Signals Verify Process Identity | `draft` | none |
-| [`2026-11-09-typed-terminal-record-plan.md`](./2026-11-09-typed-terminal-record-plan.md) | The Monitor Trusts the Typed Terminal Record | `draft` | none |
-| [`2026-11-09-terminal-idle-events-plan.md`](./2026-11-09-terminal-idle-events-plan.md) | Service and Manager Exit Records Close Their Monitor Families | `draft` | none |
-| [`2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md`](./2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) | Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof | `draft` | none |
-| [`2026-11-09-status-lists-unknown-managers-plan.md`](./2026-11-09-status-lists-unknown-managers-plan.md) | Status Lists Unproven Managers as Unknown | `draft` | none |
-| [`2026-11-08-resource-monitor-descendant-scan-plan.md`](./2026-11-08-resource-monitor-descendant-scan-plan.md) | Resource Monitor Descendant Scan and Quiet Unlimited Sampling | `promoted` | none |
-| [`2026-11-08-manager-checkpoint-volume-plan.md`](./2026-11-08-manager-checkpoint-volume-plan.md) | Manager Checkpoint Volume | `promoted` | none |
-| [`2026-11-08-manager-event-driven-reaping-plan.md`](./2026-11-08-manager-event-driven-reaping-plan.md) | Manager Event-Driven Child Reaping | `draft` | none |
-| [`2026-11-08-manager-stable-wait-set-plan.md`](./2026-11-08-manager-stable-wait-set-plan.md) | Manager Startup Interest From Launch Selection | `draft` | none |
-| [`2026-11-08-task-broker-traffic-plan.md`](./2026-11-08-task-broker-traffic-plan.md) | Task Broker Traffic: One Snapshot per Owner Step | `draft` | none |
-| [`2026-11-08-task-connection-footprint-plan.md`](./2026-11-08-task-connection-footprint-plan.md) | Task Connection Footprint on PostgreSQL | `draft` | none |
-| [`2026-11-08-startup-window-settlement-plan.md`](./2026-11-08-startup-window-settlement-plan.md) | Startup Window Narrows With Measured Headroom | `draft` | none |
-| [`2026-11-08-manager-dispatch-path-plan.md`](./2026-11-08-manager-dispatch-path-plan.md) | Manager Dispatch and Launch-Result Round Trips | `draft` | none |
-| [`2026-11-08-drain-survivor-exit-sentinel-plan.md`](./2026-11-08-drain-survivor-exit-sentinel-plan.md) | Stopping-Drain Survivor Exit Sentinel | `draft` | none |
-| [`2026-11-08-bootstrap-resident-without-identity-plan.md`](./2026-11-08-bootstrap-resident-without-identity-plan.md) | Bootstrap Skips a Resident Without Identity; Reconciliation Retries Only Transient Failures | `draft` | none |
+| [`2026-11-09-measured-memory-admission-plan.md`](./2026-11-09-measured-memory-admission-plan.md) | Measured Memory Admission and Startup-Window Parity | `completed` | none |
+| [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain and Cleanup Signals Verify Process Identity | `completed` | none |
+| [`2026-11-09-typed-terminal-record-plan.md`](./2026-11-09-typed-terminal-record-plan.md) | The Monitor Trusts the Typed Terminal Record | `completed` | none |
+| [`2026-11-09-terminal-idle-events-plan.md`](./2026-11-09-terminal-idle-events-plan.md) | Service and Manager Exit Records Close Their Monitor Families | `completed` | none |
+| [`2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md`](./2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) | Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof | `completed` | none |
+| [`2026-11-09-status-lists-unknown-managers-plan.md`](./2026-11-09-status-lists-unknown-managers-plan.md) | Status Lists Unproven Managers as Unknown | `completed` | none |
+| [`2026-11-08-resource-monitor-descendant-scan-plan.md`](./2026-11-08-resource-monitor-descendant-scan-plan.md) | Resource Monitor Descendant Scan and Quiet Unlimited Sampling | `completed` | none |
+| [`2026-11-08-manager-checkpoint-volume-plan.md`](./2026-11-08-manager-checkpoint-volume-plan.md) | Manager Checkpoint Volume | `completed` | none |
+| [`2026-11-08-manager-event-driven-reaping-plan.md`](./2026-11-08-manager-event-driven-reaping-plan.md) | Manager Event-Driven Child Reaping | `completed` | none |
+| [`2026-11-08-manager-stable-wait-set-plan.md`](./2026-11-08-manager-stable-wait-set-plan.md) | Manager Startup Interest From Launch Selection | `completed` | none |
+| [`2026-11-08-task-broker-traffic-plan.md`](./2026-11-08-task-broker-traffic-plan.md) | Task Broker Traffic: One Snapshot per Owner Step | `completed` | none |
+| [`2026-11-08-task-connection-footprint-plan.md`](./2026-11-08-task-connection-footprint-plan.md) | Task Connection Footprint on PostgreSQL | `completed` | none |
+| [`2026-11-08-startup-window-settlement-plan.md`](./2026-11-08-startup-window-settlement-plan.md) | Startup Window Narrows With Measured Headroom | `completed` | none |
+| [`2026-11-08-manager-dispatch-path-plan.md`](./2026-11-08-manager-dispatch-path-plan.md) | Manager Dispatch and Launch-Result Round Trips | `completed` | none |
+| [`2026-11-08-drain-survivor-exit-sentinel-plan.md`](./2026-11-08-drain-survivor-exit-sentinel-plan.md) | Stopping-Drain Survivor Exit Sentinel | `completed` | none |
+| [`2026-11-08-bootstrap-resident-without-identity-plan.md`](./2026-11-08-bootstrap-resident-without-identity-plan.md) | Bootstrap Skips a Resident Without Identity; Reconciliation Retries Only Transient Failures | `completed` | none |
 | [`2026-11-07-ops-shaped-admission-burst-plan.md`](./2026-11-07-ops-shaped-admission-burst-plan.md) | Measure Admission on an Ops-Shaped Burst | `completed` | none |
 | [`2026-11-07-nested-admission-load-plan.md`](./2026-11-07-nested-admission-load-plan.md) | Stress Admission with Nested Work | `completed` | none |
 | [`2026-11-07-model-found-scheduler-and-registry-repairs-plan.md`](./2026-11-07-model-found-scheduler-and-registry-repairs-plan.md) | Model-Found Scheduler and Registry Repairs | `completed` | none |

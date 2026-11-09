@@ -1,6 +1,6 @@
 # Service and Manager Exit Records Close Their Monitor Families
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/05-Message_Flow_and_State.md [MF-3], [MF-5]; docs/specifications/07-System_Invariants.md [OBS.13.4], [OBS.13.9]; docs/specifications/00-Quick_Reference.md (`WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS`)
 Superseded by: none
 

@@ -1,6 +1,6 @@
 # Task Broker Traffic: One Snapshot per Owner Step
 
-Status: draft
+Status: completed
 Source specs: docs/specifications/07-System_Invariants.md [OBS.6], [OBS.6a]; docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.4], [CC-2.5]; docs/specifications/02-TaskSpec.md [TS-1] (`cleanup_on_exit`); docs/specifications/05-Message_Flow_and_State.md [MF-5]
 Superseded by: none
 
