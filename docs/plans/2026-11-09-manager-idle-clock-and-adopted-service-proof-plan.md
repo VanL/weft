@@ -463,7 +463,31 @@ idle-exits near 600 s, no `uncertain_attempts`) and the unlinked-database
 ## 8. Review and execution record
 
 Author family: Anthropic (Claude). Cross-family review: owned by the
-coordinating agent; not yet run.
+coordinating agent; not yet run. The other-family two-factor fit account and
+the theory-versus-code audit refresh ([WT-7]) are due with that review and
+at closure.
+
+Author's two-factor fit account ([WT-7] structure):
+
+- Verdict: fits.
+- Rests on: [WT-2a.13] (a Manager, its tasks and the context-level services
+  have independent lifetimes; absence is `unknown`), [ALT-WT-023] (a
+  Manager ensures services and does not own their lifetime), [WT-2a.12]
+  and [ALT-WT-003] (proof by a keyed PING pushed to the requester's
+  `ctrl_in`), the [WT-4.4] row "As few concepts as possible" (one existing
+  classifier, one existing probe; no timer, cache or registry refresh).
+- Refuses: refreshing service-owner rows or extending the retention window
+  (a new mechanism; [ALT-WT-010]); treating an unanswered PING as death
+  ([WT-2a.13]); a second idle clock for services (the [WT-7] falsifier
+  "Event-driven against absence").
+- Predicts, falsifiably: a Manager with no work idle-exits within
+  `idle_timeout` of its last real work however its services behave; an
+  adopter shows no `uncertain_attempts` past 300 s while its services live;
+  no PING is ever written to a dead service's `ctrl_in`. A Manager held
+  alive by service churn, or a growing `T{dead}.ctrl_in`, falsifies it.
+- Fits worst: the [WT-4.3] row "A quiet task costs nothing an operator can
+  see": an adopter now sends one PING per adopted service per stable audit
+  for as long as it lives (register row 4).
 
 Comprehension answers (before the first edit): as recorded under §3.
 
@@ -505,6 +529,33 @@ Slice 2 (C2), 2026-11-09:
 - Gates: owning files plus `tests/specs` on SQLite `-n 4`: all passed after
   the ratchet update (165 spec tests); owning files on PostgreSQL
   (`./bin/pytest-pg`): 435 passed, 15 skipped; ruff, ruff format, repo mypy
+  (499 files), `bin/ruff_suppression_index.py --check`,
+  `bin/check-doc-paths`: clean.
+
+Runtime probes and final gates, 2026-11-09 (clean handoff: Manager 1 with a
+20 s idle timeout launches the services and exits; Manager 2 adopts them;
+every probe stops its context in `finally`; diagnostic hooks were read-only
+except one that shortened the service-row retention to 30 s):
+
+- Slices 1 and 2 as first committed, natural retention, Manager 2 idle
+  timeout 600 s: Manager 2 kept proof (per-service `uncertain_attempts`
+  alternated 0 and 1 as each PING was answered, never accumulating) but was
+  still alive at 721 s. A hook on every write of the idle clock showed each
+  reset at the convergence-active verdict with reasons
+  `["autostart_scan_due"]`, 1.000 to 1.001 s after the last scan (15 resets
+  between 290 s and 544 s in a 420 s-timeout rerun). Recorded in the
+  Deviation Log and fixed in slice 1.
+- After the fix, 30 s retention, Manager 2 idle timeout 150 s: Manager 2
+  exited at 150.2 s with no idle-clock write after construction.
+- After the fix, natural retention, Manager 2 idle timeout 600 s:
+  Manager 2 exited at 600.8 s (5 s polling) with no idle-clock write after
+  construction, through the aged-row PING phase from about 280 s; it never
+  relaunched a service: the context stop found exactly the three services
+  Manager 1 had launched, by their original TIDs.
+- Final gates on the rebuilt branch: owning files plus `tests/specs` on
+  SQLite `-n 4`: 610 passed, 3 skipped; the three `slow` tests of
+  `tests/core/test_manager.py`: passed; owning files on PostgreSQL
+  (`./bin/pytest-pg`): 436 passed, 15 skipped; ruff, ruff format, repo mypy
   (499 files), `bin/ruff_suppression_index.py --check`,
   `bin/check-doc-paths`: clean.
 
