@@ -2613,20 +2613,38 @@ class Manager(ServiceTask):
         except (BrokerError, OSError, RuntimeError):
             return None
 
+    def _scheduler_evidence_identity(
+        self, tid: str, evidence: Mapping[str, Any]
+    ) -> RuntimeIdentity:
+        """Read a retained row's recorded runtime identity.
+
+        A row that records no context, ancestry, scheduling class or
+        connection owner cannot name this Manager's identity, so it takes the
+        foreign-identity path.
+
+        Spec: [MA-1.8]
+        """
+        try:
+            return RuntimeIdentity(
+                tid=tid,
+                context=evidence["context"],
+                backend_name=self._admission_backend_name(),
+                root_tid=evidence["root_tid"],
+                submitter_tid=evidence.get("submitter_tid"),
+                ancestry_tids=tuple(evidence["ancestry_tids"]),
+                scheduling_class=evidence["scheduling_class"],
+                connection_owner=evidence["connection_owner"],
+            )
+        except KeyError as missing:
+            raise RuntimeIdentityMismatch(
+                f"scheduler evidence records no {missing.args[0]}"
+            ) from missing
+
     def _adopt_scheduler_evidence(self, tid: str, evidence: Mapping[str, Any]) -> None:
         """Merge immutable lineage and scoped wrapper/worker evidence [OBS.6]."""
         if evidence.get("root_tid") is None or evidence.get("role") == "manager":
             return
-        identity = RuntimeIdentity(
-            tid=tid,
-            context=evidence["context"],
-            backend_name=self._admission_backend_name(),
-            root_tid=evidence["root_tid"],
-            submitter_tid=evidence.get("submitter_tid"),
-            ancestry_tids=tuple(evidence["ancestry_tids"]),
-            scheduling_class=evidence["scheduling_class"],
-            connection_owner=evidence["connection_owner"],
-        )
+        identity = self._scheduler_evidence_identity(tid, evidence)
         if identity.context != canonical_runtime_context(self._db_path):
             raise RuntimeIdentityMismatch(
                 "scheduler evidence belongs to another context"
@@ -2885,7 +2903,9 @@ class Manager(ServiceTask):
             self._retire_scheduler_residents(selected)
             if self._scheduler_checkpoint_dirty:
                 self._publish_scheduler_checkpoint()
-        except (BrokerError, OSError, RuntimeError, ValueError, TypeError, KeyError):
+        except (BrokerError, OSError, RuntimeError):
+            # Retry only unavailable broker work, including a failed first
+            # checkpoint; a malformed retained row is a defect [MA-1.8].
             logger.debug("Unable to reconcile scheduler evidence", exc_info=True)
         else:
             self._admission_bootstrapped = True
@@ -2895,7 +2915,7 @@ class Manager(ServiceTask):
             )
 
     def _warn_skipped_bootstrap_evidence(self, skipped: Mapping[str, str]) -> None:
-        """Report foreign identity evidence once per TID [MA-1.8]."""
+        """Report foreign or absent identity evidence once per TID [MA-1.8]."""
         new = {
             tid: reason
             for tid, reason in skipped.items()
@@ -2904,7 +2924,7 @@ class Manager(ServiceTask):
         if new:
             example_tid, example_reason = next(iter(new.items()))
             logger.warning(
-                "Manager bootstrap ignored %s retained row(s) that name another runtime identity (for example %s: %s). Retained state written under another context is not adopted.",
+                "Manager bootstrap ignored %s retained row(s) that do not carry this Manager's runtime identity (for example %s: %s). Retained state from another context, or with no recorded identity, is not adopted.",
                 len(new),
                 example_tid,
                 example_reason,
