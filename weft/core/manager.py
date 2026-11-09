@@ -164,6 +164,7 @@ from weft.helpers import (
     process_create_time,
     redact_taskspec_dump,
     terminate_process_tree,
+    terminate_verified_process_tree,
 )
 from weft.liveness import analyze_liveness
 from weft.liveness.host import inspect_host_process
@@ -5371,61 +5372,59 @@ class Manager(ServiceTask):
                     ):  # pragma: no cover - defensive
                         pass
                 kill_issued = False
-                # The process view can report a wrapper alive after another
-                # waiter reaped it; signal its PID only while the launch
-                # identity still verifies [MA-3], [LIVENESS.R5].
-                if (
-                    child.process.is_alive()
-                    and self._launched_child_liveness(tid, child) == "live"
-                ):
+                # Signal only the exact process this Manager launched, through
+                # the instance verified against its launch identity; the
+                # helper's wait leaves the wrapper's reap to multiprocessing
+                # [MA-3], [LIVENESS.R5], [CC-3.2].
+                pid = child.process.pid
+                created = self._launched_child_create_time(tid, child)
+                if child.process.is_alive() and isinstance(pid, int):
                     remaining = self._remaining_deadline(deadline)
                     if remaining > 0:
                         # Split the remaining budget across the TERM wait and
                         # the SIGKILL reap wait so escalation for
                         # TERM-resistant descendants stays inside one caller
                         # deadline instead of being dropped entirely.
-                        terminate_process_tree(
-                            cast(int, child.process.pid),
-                            timeout=remaining / 2.0,
-                            kill_after=True,
+                        terminate_verified_process_tree(
+                            pid, created, kill=False, timeout=remaining / 2.0
                         )
-                    if (
-                        child.process.is_alive()
-                        and self._launched_child_liveness(tid, child) == "live"
-                    ):
-                        try:
-                            child.process.kill()
-                            kill_issued = True
-                        except OSError:  # pragma: no cover - defensive
-                            pass
+                    if child.process.is_alive():
+                        kill_issued = terminate_verified_process_tree(
+                            pid,
+                            created,
+                            kill=True,
+                            timeout=self._remaining_deadline(deadline),
+                        )
                 managed.setdefault(tid, {}).update(
                     self._managed_processes_for_child(tid)
                 )
-                for pid, created in managed[tid].items():
+                for managed_pid, managed_created in managed[tid].items():
                     remaining = self._remaining_deadline(deadline)
                     if remaining <= 0:
                         break
                     # Collected before the graceful wait: the process may have
-                    # exited and its PID been reused since [MA-3], [LIVENESS.R5].
-                    if inspect_host_process(pid, created).evidence != "live":
-                        continue
-                    terminate_process_tree(
-                        pid,
+                    # exited and its PID been reused since, so the helper
+                    # verifies the recorded identity at signal time [MA-3].
+                    terminate_verified_process_tree(
+                        managed_pid,
+                        managed_created,
+                        kill=False,
                         timeout=remaining / 2.0,
-                        kill_after=True,
                     )
                 try:
                     still_alive = child.process.is_alive()
                 except (AssertionError, OSError, ValueError):
                     still_alive = True
                 if still_alive and self._launched_child_liveness(tid, child) == "stale":
-                    # The launched process is provably gone; only the view lags.
+                    # The launched process is provably gone; only the view
+                    # lags (the SIGTERM rung's psutil wait may have reaped it).
                     still_alive = False
                 surviving_managed_pids = sorted(
-                    pid
-                    for pid, created in managed.get(tid, {}).items()
-                    if pid_is_live(pid)
-                    and inspect_host_process(pid, created).evidence != "stale"
+                    managed_pid
+                    for managed_pid, managed_created in managed.get(tid, {}).items()
+                    if pid_is_live(managed_pid)
+                    and inspect_host_process(managed_pid, managed_created).evidence
+                    != "stale"
                 )
                 if still_alive or surviving_managed_pids:
                     survivors.append(
@@ -5539,14 +5538,27 @@ class Manager(ServiceTask):
         """
 
         pid = child.process.pid
-        evidence = self._scheduler_residents.get(tid)
-        if not isinstance(pid, int) or pid <= 0 or evidence is None:
+        if not isinstance(pid, int) or pid <= 0:
             return "unknown"
+        return inspect_host_process(
+            pid, self._launched_child_create_time(tid, child)
+        ).evidence
+
+    def _launched_child_create_time(
+        self, tid: str, child: ManagedChild
+    ) -> float | None:
+        """Return the creation time recorded for the child's PID at launch.
+
+        Spec: docs/specifications/05-Message_Flow_and_State.md [MF-5]
+        """
+
+        pid = child.process.pid
+        evidence = self._scheduler_residents.get(tid)
+        if not isinstance(pid, int) or evidence is None:
+            return None
         launched = self._admission_host_processes(evidence).get(pid)
         created = None if launched is None else launched["create_time"]
-        return inspect_host_process(
-            pid, None if created is None else float(created)
-        ).evidence
+        return None if created is None else float(created)
 
     def _child_stop_escalation_pids(
         self, tid: str, child: ManagedChild
