@@ -90,9 +90,12 @@ def _finish_and_retire_history(
             )
             assert update is not None
             store.upsert_task_event(update)
+            # Retain the nonterminal rows that carry live activity: a Consumer
+            # reports activity on its lifecycle rows rather than separate
+            # task_activity rows ([CC-2.2]).
             if (
                 retain_nonterminal_history
-                and payload.get("event") == "task_activity"
+                and payload.get("activity") is not None
                 and not update.terminal_seen
             ):
                 continue

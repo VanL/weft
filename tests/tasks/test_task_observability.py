@@ -23,6 +23,8 @@ from tests.helpers.typing import BrokerEnv, TaskFactory
 from tests.tasks import sample_targets as targets  # noqa: F401
 from weft import helpers as weft_helpers
 from weft._constants import (
+    CONSUMER_ACTIVE_WORKER_LANE,
+    CONSUMER_WORKER_EVENT_LANE,
     CONTROL_PAUSE,
     CONTROL_STOP,
     PROCESS_TITLE_CONTEXT_LENGTH,
@@ -40,8 +42,9 @@ from weft.core.manager import Manager
 from weft.core.task_evidence import parse_task_observation, parse_task_projection
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks.base import BaseTask
+from weft.core.tasks.consumer import _ConsumerWorkerEvent, _ConsumerWorkResult
 from weft.core.taskspec import IOSection, SpecSection, StateSection, TaskSpec
-from weft.ext import RunnerHandle
+from weft.ext import RunnerHandle, RunnerOutcome
 from weft.helpers import encode_tid
 
 
@@ -484,6 +487,248 @@ def test_terminal_state_report_publishes_terminal_tid_state_when_activity_empty(
     assert task._activity is None
     assert task_mappings[0]["terminal"] is False
     assert task_mappings[-1]["terminal"] is True
+
+
+def _task_log_rows(log_queue: Queue, tid: str) -> list[dict[str, Any]]:
+    rows = [json.loads(body) for body in log_queue.peek_many(limit=1000) or []]
+    return [row for row in rows if row.get("tid") == tid]
+
+
+def _worker_identity_published(mapping_queue: Queue, task_pid: int) -> bool:
+    rows = [json.loads(body) for body in mapping_queue.peek_many(limit=100) or []]
+    return any(
+        isinstance(row.get("runtime_handle"), dict)
+        and row["runtime_handle"].get("id") != str(task_pid)
+        for row in rows
+    )
+
+
+def test_one_shot_lifecycle_publishes_one_snapshot_per_owner_step(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    tmp_path: Any,
+) -> None:
+    """Each owner step appends the state after the step once [OBS.6a], [CC-2.2].
+
+    Construction and the work-start step each write one snapshot that already
+    carries the live activity; lifecycle rows carry that activity instead of
+    separate ``task_activity`` rows. A live worker's identity is published
+    while it runs, and the terminal snapshot closes the lifecycle.
+    """
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    release = tmp_path / "release"
+    spec = build_function_spec(
+        unique_tid, function_target="tests.tasks.sample_targets:wait_for_file"
+    )
+    inbox_name = spec.io.inputs["inbox"]
+    task = task_factory(spec)
+    make_queue(inbox_name).write(json.dumps({"args": [str(release)]}))
+
+    drive_task_until(
+        task,
+        lambda: _worker_identity_published(mapping_queue, task._task_pid),
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
+    release.touch()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
+
+    snapshots = [json.loads(body) for body in mapping_queue.peek_many(limit=100)]
+    states = [
+        (
+            row["projection"]["status"],
+            row["projection"]["event"],
+            row.get("activity"),
+            row.get("waiting_on"),
+        )
+        for row in snapshots
+    ]
+    assert states[0] == ("created", "task_initialized", "waiting", inbox_name)
+    assert states[1] == ("running", "work_started", "working", None)
+    assert all(status != "spawning" for status, *_rest in states)
+    # Before its result becomes visible, the task names its own live process
+    # as runtime authority again, not the joined worker ([OBS.11a]).
+    released = snapshots[-2]
+    assert released["projection"]["status"] == "running"
+    assert released["runtime_handle"]["id"] == str(task._task_pid)
+    assert snapshots[-1]["terminal"] is True
+    assert states[-1][0] == "completed"
+    # Construction, work start, live worker identity (one or two drains of
+    # worker events), runtime release, terminal: at most six appends, not nine.
+    assert len(snapshots) <= 6
+
+    rows = _task_log_rows(log_queue, unique_tid)
+    assert [row["event"] for row in rows] == [
+        "task_initialized",
+        "work_spawning",
+        "work_started",
+        "work_completed",
+    ]
+    assert (rows[0]["activity"], rows[0]["waiting_on"]) == ("waiting", inbox_name)
+    for row in rows[1:3]:
+        assert row["activity"] == "working"
+        assert "waiting_on" not in row
+
+
+def test_persistent_work_item_completion_is_one_owner_step(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+) -> None:
+    """A completed item appends the runtime release, then one final state.
+
+    [OBS.6a], [CC-2.2]: the joined host worker's release is appended before
+    the result is written; returning to ``waiting`` rides on the completion
+    report, and the item's final state is appended exactly once.
+    """
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    spec = build_function_spec(unique_tid)
+    spec = TaskSpec.model_validate(
+        {
+            **spec.model_dump(mode="json"),
+            "spec": {**spec.spec.model_dump(mode="json"), "persistent": True},
+        }
+    )
+    inbox_name = spec.io.inputs["inbox"]
+    task = task_factory(spec)
+    make_queue(inbox_name).write(json.dumps({"args": ["payload"]}))
+
+    drive_task_until(
+        task,
+        lambda: any(
+            row["event"] == "work_item_completed"
+            for row in _task_log_rows(log_queue, unique_tid)
+        ),
+    )
+
+    events = [row["event"] for row in _task_log_rows(log_queue, unique_tid)]
+    assert events == [
+        "task_initialized",
+        "work_spawning",
+        "work_started",
+        "work_item_completed",
+    ]
+    completed = _task_log_rows(log_queue, unique_tid)[-1]
+    assert (completed["activity"], completed["waiting_on"]) == ("waiting", inbox_name)
+
+    snapshots = [json.loads(body) for body in mapping_queue.peek_many(limit=100)]
+    task_process = str(task._task_pid)
+    states = [
+        (
+            row["projection"]["status"],
+            row["projection"]["event"],
+            row.get("activity"),
+            row.get("waiting_on"),
+            row["runtime_handle"]["id"],
+        )
+        for row in snapshots
+    ]
+    assert states[0][:4] == ("created", "task_initialized", "waiting", inbox_name)
+    assert states[1] == ("running", "work_started", "working", None, task_process)
+    # Live worker identity, if a drain published it before the outcome.
+    assert all(state[4] != task_process for state in states[2:-2])
+    # The release names the task process again, before the result.
+    assert states[-2] == ("running", "work_started", "working", None, task_process)
+    # One final-state append for the item.
+    assert states[-1] == (
+        "running",
+        "work_item_completed",
+        "waiting",
+        inbox_name,
+        task_process,
+    )
+
+
+@pytest.mark.parametrize(
+    "worker_reported",
+    [True, False],
+    ids=["host-worker-released", "authority-only-in-outcome"],
+)
+def test_outcome_runtime_authority_is_visible_when_the_result_is(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_reported: bool,
+) -> None:
+    """A result follows the runtime authority it was produced under [OBS.6a].
+
+    Worker identity and the outcome arrive in one drain of worker results.
+    A reported host worker is released, so the task process is the published
+    authority when the result appears ([OBS.11a]); a runner that names its
+    authority only in the outcome has that authority published first. No
+    runner available to tests supplies its handle only in the outcome, so the
+    worker-result channel, the Consumer's boundary for runner events,
+    carries those events through the real turn, drain and commit path.
+    """
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    spec = build_function_spec(unique_tid)
+    task = task_factory(spec)
+    outbox_name = spec.io.outputs["outbox"]
+    queue_type = type(mapping_queue)
+    real_write = queue_type.write
+    authority_at_result: list[str] = []
+
+    def observing_write(queue: Queue, message: str, *args: Any, **kwargs: Any) -> int:
+        if queue.name == outbox_name:
+            latest = json.loads((mapping_queue.peek_many(limit=100) or [])[-1])
+            authority_at_result.append(latest["runtime_handle"]["id"])
+        return real_write(queue, message, *args, **kwargs)
+
+    monkeypatch.setattr(queue_type, "write", observing_write)
+    worker_pid = 424242
+    handle = RunnerHandle(
+        runner="host",
+        kind="process",
+        id=str(worker_pid),
+        control={"authority": "host-pid"},
+        observations={"host_pids": [worker_pid]},
+    )
+    task._begin_work_item(None)
+    task._active_work_in_flight = True
+    if worker_reported:
+        task._publish_worker_result(
+            CONSUMER_WORKER_EVENT_LANE,
+            value=_ConsumerWorkerEvent(kind="worker_started", pid=worker_pid),
+        )
+        task._publish_worker_result(
+            CONSUMER_WORKER_EVENT_LANE,
+            value=_ConsumerWorkerEvent(kind="runtime_handle", runtime_handle=handle),
+        )
+    task._publish_worker_result(
+        CONSUMER_ACTIVE_WORKER_LANE,
+        value=_ConsumerWorkResult(
+            timestamp=None,
+            initial_transition=True,
+            live_command_streaming=False,
+            outcome=RunnerOutcome(
+                status="ok",
+                value="done",
+                error=None,
+                stdout=None,
+                stderr=None,
+                returncode=0,
+                duration=0.0,
+                runtime_handle=handle,
+            ),
+        ),
+    )
+
+    task.process_once()
+
+    assert task.taskspec.state.status == "completed"
+    assert authority_at_result == [
+        str(task._task_pid) if worker_reported else str(worker_pid)
+    ]
 
 
 def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(

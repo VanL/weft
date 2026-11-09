@@ -451,6 +451,12 @@ _Implementation mapping_: `weft/core/runtime_identity.py`,
 `Manager._commit_scheduler_checkpoint` and
 `Manager._publish_undurable_receipts` (one checkpoint per turn),
 `tests/core/test_manager_checkpoint_volume.py`,
+`weft/core/tasks/base.py::BaseTask._task_state_step`,
+`weft/core/tasks/base.py::BaseTask._task_state_barrier`,
+`weft/core/tasks/consumer.py::Consumer._begin_work_item` and
+`weft/core/tasks/consumer.py::Consumer._drain_worker_results` (owner-step
+coalescing, [OBS.6a]),
+`weft/core/manager.py::Manager._build_tid_state_payload`,
 `tests/core/test_task_state.py`, `tests/core/test_runtime_identity.py`,
 `tests/core/test_admission_recovery.py`, `tests/system/test_family_recovery.py`.
 
@@ -467,9 +473,21 @@ snapshot and Manager launch-event contract.
   owner-local state it governs actually changed (unchanged activity, an
   equal runtime handle, and a known managed PID are suppressed at their call
   sites) or when the write is itself a report (construction, restart
-  republish). The terminal transition publishes its mapping exactly once per
-  task, latched only on a successful write so a failed terminal append
-  retries on the next terminal report. Completion publication attempts precede
+  republish). A task may coalesce the edges it detects within one owner
+  step: inside a `Consumer` work-item start and inside each drain of its
+  worker results, each edge marks the snapshot stale, and the step's end
+  appends one complete snapshot, so every fact of the state after the step
+  is published once and a state superseded within the same step is not
+  appended separately. Any complete append made inside a step covers the
+  edges detected before it. A step holds no edge across an operation that
+  can block or across a write that readers must see after the snapshot: it
+  appends first. A result or stream frame follows the runtime authority it
+  was produced under, for every runner (a joined one-shot host worker is
+  released, naming the live task process again). Interactive session work
+  does not coalesce. A task's construction snapshot carries the live
+  activity the task starts with. Other task families append at each edge. The terminal transition publishes its mapping exactly once per
+  task, latched only on a successful terminal append so a failed terminal
+  append retries on the next terminal report. Completion publication attempts precede
   the terminal mapping; clearing terminal activity changes only owner-local
   hints until that completion owner publishes. Queue-wide read-before-write
   deduplication and writer-side equivalence oracles are forbidden: a curated
@@ -1480,6 +1498,7 @@ doc:
 ## Related Plans
 
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([OBS.6], [MANAGER.11]).
+- [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) publishes one Consumer snapshot per owner step under [OBS.6a].
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 

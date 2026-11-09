@@ -364,6 +364,11 @@ class BaseTask(MultiQueueWatcher, ABC):
         # succeeds.
         self._terminal_tid_state_published = False
         self._tid_state_publication_failed = False
+        # Owner-step coalescing ([OBS.6a]): inside a step, edges mark the
+        # snapshot stale and the step's end makes the one append.
+        self._task_state_step_active = False
+        self._task_state_stale = False
+        self._activity_row_pending = False
         self._display_event = "task_initialized"
         self._observation_payload: dict[str, Any] | None = None
         try:
@@ -382,11 +387,30 @@ class BaseTask(MultiQueueWatcher, ABC):
         self.enable_process_title = bool(
             getattr(self.taskspec.spec, "enable_process_title", True)
         )
+        initial_activity = self._initial_activity()
+        if initial_activity is not None:
+            # The construction snapshot and report carry the activity the task
+            # starts with, so no separate activity edge follows ([OBS.6a]).
+            self._activity, self._waiting_on = initial_activity
         if self.enable_process_title:
-            self._update_process_title("init")
+            self._update_process_title(
+                "init" if initial_activity is None else self.taskspec.state.status
+            )
         self._register_tid_state()
         self._claim_configured_runtime_endpoint()
         self._report_state_change(event="task_initialized")
+
+    def _initial_activity(self) -> tuple[str, str | None] | None:
+        """Return the live ``(activity, waiting_on)`` a task starts with.
+
+        Subclasses that start waiting on an input override this instead of
+        changing activity after construction. The default task starts with
+        no live activity.
+
+        Spec: [OBS.6a], [CC-2.2]
+        """
+
+        return None
 
     @contextmanager
     def _initialization_scope(self) -> Iterator[None]:
@@ -2020,6 +2044,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             payload["activity"] = self._activity
             if self._waiting_on is not None:
                 payload["waiting_on"] = self._waiting_on
+        carries_activity = "activity" in payload
         payload.update(extra)
         terminal = self.taskspec.state.status in TERMINAL_TASK_STATUSES
         if terminal:
@@ -2044,6 +2069,10 @@ class BaseTask(MultiQueueWatcher, ABC):
             log_context="state change event",
             payload_for_log=payload,
         )
+        if carries_activity:
+            # This row records the live activity, so a same-step activity
+            # change needs no row of its own ([CC-2.2]).
+            self._activity_row_pending = False
         self._publish_projection_edge(
             event, terminal=terminal, child_report="child_tid" in extra
         )
@@ -2062,11 +2091,9 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._display_event = event
         if not self._terminal_tid_state_published and (terminal or refresh_projection):
             # Publish completion first: control clients may terminate the
-            # wrapper once its mapping is terminal. A failed mapping append
-            # retries on the next report ([OBS.6a]).
-            published = self._register_tid_state()
-            if terminal:
-                self._terminal_tid_state_published = published
+            # wrapper once its mapping is terminal. A failed terminal append
+            # leaves the latch open, so the next report retries ([OBS.6a]).
+            self._task_state_edge()
 
     def _control_response_payload(
         self,
@@ -2415,6 +2442,12 @@ class BaseTask(MultiQueueWatcher, ABC):
         deduplication and writer-side payload oracles are forbidden
         ([OBS.6a]).
 
+        A successful append is complete current state, so it covers every
+        edge an open owner step marked before it, and a successful terminal
+        append latches terminal publication: the terminal mapping is written
+        once per task, and a failed terminal append retries on the next
+        terminal report.
+
         Returns:
             True when the append was written; False on the best-effort
             broker failure path.
@@ -2432,7 +2465,75 @@ class BaseTask(MultiQueueWatcher, ABC):
             self._tid_state_publication_failed = True
             return False
         self._tid_state_publication_failed = False
+        self._task_state_stale = False
+        if mapping["terminal"]:
+            self._terminal_tid_state_published = True
         return True
+
+    def _task_state_edge(self) -> None:
+        """Publish one owner-state edge now, or at the end of the open step.
+
+        Callers own edge detection ([OBS.6a]). Outside an owner step this is
+        the single immediate append; inside one it marks the snapshot stale
+        and the step's end appends the state after the step once.
+
+        Spec: [OBS.6a], [CC-2.2]
+        """
+
+        if self._task_state_step_active:
+            self._task_state_stale = True
+            return
+        self._register_tid_state()
+
+    def _task_state_barrier(self) -> None:
+        """Append the edges an open owner step holds, before what follows.
+
+        Call it before a write that readers must see after the snapshot
+        (a result or stream frame follows the runtime authority it was
+        produced under) and before any operation that can block, so no edge
+        waits behind either. Outside a step, or with nothing held, it does
+        nothing.
+
+        Spec: [OBS.6a]
+        """
+
+        if self._task_state_stale:
+            self._task_state_stale = False
+            self._register_tid_state()
+
+    @contextmanager
+    def _task_state_step(self) -> Iterator[None]:
+        """Publish one complete snapshot for every edge of one owner step.
+
+        Inside the step, snapshot edges and activity changes are recorded
+        instead of appended. A lifecycle report made in the step carries the
+        live activity current at the report, so a ``task_activity`` row is
+        written only for an activity change no later report in the step
+        carried. On exit, normal or exceptional, the step writes that row
+        (while non-terminal) and then one complete snapshot if any edge is
+        unpublished. Nested steps join the outermost one. A task family opts
+        in by opening steps around owner work that does not block, and calls
+        ``_task_state_barrier()`` before any write a held snapshot must
+        precede; families that never open one keep publishing at each edge.
+
+        Spec: [OBS.6a], [CC-2.2]
+        """
+
+        if self._task_state_step_active:
+            yield
+            return
+        self._task_state_step_active = True
+        try:
+            yield
+        finally:
+            self._task_state_step_active = False
+            if self._activity_row_pending:
+                self._activity_row_pending = False
+                if self.taskspec.state.status not in TERMINAL_TASK_STATUSES:
+                    self._emit_activity_event()
+            # One best-effort attempt, as at an edge; a failed terminal append
+            # keeps its latch open for the next terminal report.
+            self._task_state_barrier()
 
     def register_managed_pid(self, pid: int | None) -> None:
         """Track a subprocess PID owned by this task for cleanup/observability."""
@@ -2451,7 +2552,7 @@ class BaseTask(MultiQueueWatcher, ABC):
             existing[pid] if pid in existing else process_create_time(pid)
         )
         self._merge_runtime_handle_host_pid(pid)
-        self._register_tid_state()
+        self._task_state_edge()
 
     def register_runtime_handle(self, handle: RunnerHandle | None) -> None:
         """Persist active runtime authority and exact identity evidence [CC-3.2]."""
@@ -2496,7 +2597,7 @@ class BaseTask(MultiQueueWatcher, ABC):
         if self._runtime_handle == merged_handle:
             return
         self._runtime_handle = merged_handle
-        self._register_tid_state()
+        self._task_state_edge()
 
     def _build_tid_state_payload(self) -> dict[str, Any]:
         """Publish task-owned process evidence and immutable finite ancestry [MF-5]."""
@@ -2595,9 +2696,13 @@ class BaseTask(MultiQueueWatcher, ABC):
             # The completion owner publishes terminal evidence after output.
             # Clearing a live activity hint must not expose an earlier verdict.
             return
-        self._emit_activity_event()
         self._display_event = "task_activity"
-        self._register_tid_state()
+        if self._task_state_step_active:
+            # A later report in this owner step may carry the change ([CC-2.2]).
+            self._activity_row_pending = True
+        else:
+            self._emit_activity_event()
+        self._task_state_edge()
         self._update_process_title(self.taskspec.state.status)
 
     def _clear_activity(self) -> None:

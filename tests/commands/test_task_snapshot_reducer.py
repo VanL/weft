@@ -231,6 +231,45 @@ def test_reduce_task_event_preserves_activity_and_terminal_precedence() -> None:
     assert replacement.last_timestamp == 7
 
 
+def test_reduce_task_event_takes_waiting_on_with_the_reported_activity() -> None:
+    """A lifecycle row's activity and waiting_on come from one task state.
+
+    [CC-2.2]: a Consumer's work-start report carries the new activity in
+    place of a separate ``task_activity`` row, so the fold must not keep the
+    previous ``waiting_on`` beside it (absent means none).
+    """
+    waiting = reduce_task_event(
+        None,
+        _event(
+            event="task_initialized",
+            status="created",
+            taskspec=_taskspec(status="created", started_at=None),
+            activity="waiting",
+            waiting_on="T1.inbox",
+        ),
+        1,
+        tid_filters=None,
+    )
+    assert waiting is not None
+    assert (waiting.activity, waiting.waiting_on) == ("waiting", "T1.inbox")
+
+    working = reduce_task_event(
+        waiting,
+        _event(event="work_spawning", status="spawning", activity="working"),
+        2,
+        tid_filters=None,
+    )
+    assert working is not None
+    assert (working.activity, working.waiting_on) == ("working", None)
+
+    # A row without activity reports no live activity change.
+    reported = reduce_task_event(
+        working, _event(event="work_started"), 3, tid_filters=None
+    )
+    assert reported is not None
+    assert (reported.activity, reported.waiting_on) == ("working", None)
+
+
 def test_reduce_task_event_keeps_placeholder_for_non_taskspec_row() -> None:
     placeholder = reduce_task_event(
         None,

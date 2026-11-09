@@ -107,8 +107,15 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         self._deferred_active_control_command: str | None = None
         self._deferred_active_control_timestamp: int | None = None
         self._activate_pipeline_waiter_if_needed()
-        self._set_activity("waiting", waiting_on=self._queue_names["inbox"])
         self._emit_pipeline_started_event()
+
+    def _initial_activity(self) -> tuple[str, str | None] | None:
+        """Start waiting on the inbox, published by the construction snapshot.
+
+        Spec: [OBS.6a], [CC-2.2]
+        """
+
+        return ("waiting", self._queue_names["inbox"])
 
     def _activate_pipeline_waiter_if_needed(self) -> None:
         owner = self._pipeline_owner_config()
@@ -142,6 +149,21 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             self._in_reactor_turn = False
         if self._interactive_mode:
             self._interactive_flush_outputs()
+
+    def _drain_worker_results(self, *, max_results: int | None = None) -> int:
+        """Apply one batch of worker results as one owner step ([OBS.6a]).
+
+        Worker identity edges from one batch publish one snapshot. The step
+        appends what it holds before a stream frame or result is written
+        and before an agent session is closed, so no edge waits behind a
+        write it must precede or a blocking call. Interactive sessions do no
+        worker-lane work and never enter this step.
+
+        Spec: docs/specifications/07-System_Invariants.md [OBS.6a];
+        docs/specifications/01-Core_Components.md [CC-2.2], [CC-2.5]
+        """
+        with self._task_state_step():
+            return super()._drain_worker_results(max_results=max_results)
 
     def _build_queue_configs(self) -> dict[str, dict[str, Any]]:
         """Configure inbox handling with reserve semantics and control queue peeking.
@@ -333,9 +355,13 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
-        """Release joined one-shot host workers before publishing idle identity.
+        """Publish the outcome's runtime authority before any result is written.
 
-        Spec: docs/specifications/01-Core_Components.md [CC-3.2]
+        Joined one-shot host workers are released first, so the published
+        authority is the live task process again.
+
+        Spec: docs/specifications/01-Core_Components.md [CC-3.2];
+        docs/specifications/07-System_Invariants.md [OBS.6a]
         """
         if (
             self.taskspec.spec.runner.name == "host"
@@ -346,9 +372,14 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             # Sessions use their own teardown; outcomes retain historical handles.
             self._managed_pids.clear()
             self._runtime_handle = None
-            self._register_tid_state()
-            return
-        self.register_runtime_handle(outcome.runtime_handle)
+            self._task_state_edge()
+        else:
+            self.register_runtime_handle(outcome.runtime_handle)
+        # The result follows the runtime authority it was produced under, for
+        # every runner: a reader that sees the result before terminal proof
+        # must find that authority (for a joined host worker, the live task
+        # process again), so append before any output ([OBS.6a], [OBS.11a]).
+        self._task_state_barrier()
 
     def run_work_item(self, work_item: Any) -> Any:
         """Execute *work_item* without relying on queue plumbing."""
@@ -611,6 +642,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if stream not in {"stdout", "stderr"}:
             raise RuntimeError("Stream chunk event missing stream name")
 
+        # A frame follows the worker identity it was produced under ([OBS.6a]).
+        self._task_state_barrier()
         self._begin_streaming_session(
             mode="stream",
             metadata={
@@ -834,23 +867,32 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         )
 
     def _begin_work_item(self, timestamp: int | None) -> bool:
-        if self.taskspec.state.status == "running":
-            self._set_activity("working")
-            event = (
-                "work_item_started" if self._task_is_persistent() else "work_started"
-            )
-            self._report_state_change(event=event, message_id=timestamp)
-            self._update_process_title("running")
-            return False
+        """Start one work item as one owner step ([OBS.6a], [CC-2.2]).
 
-        self.taskspec.mark_started(pid=os.getpid())
-        self._set_activity("working")
-        self._update_process_title("spawning")
-        self._report_state_change(event="work_spawning", message_id=timestamp)
-        self.taskspec.mark_running(pid=os.getpid())
-        self._update_process_title("running")
-        self._report_state_change(event="work_started", message_id=timestamp)
-        return True
+        The start reports carry the ``working`` activity, and the step
+        appends one snapshot of the started state. A turn's step already
+        covers this; the direct ``run_work_item`` path opens its own.
+        """
+        with self._task_state_step():
+            if self.taskspec.state.status == "running":
+                self._set_activity("working")
+                event = (
+                    "work_item_started"
+                    if self._task_is_persistent()
+                    else "work_started"
+                )
+                self._report_state_change(event=event, message_id=timestamp)
+                self._update_process_title("running")
+                return False
+
+            self.taskspec.mark_started(pid=os.getpid())
+            self._set_activity("working")
+            self._update_process_title("spawning")
+            self._report_state_change(event="work_spawning", message_id=timestamp)
+            self.taskspec.mark_running(pid=os.getpid())
+            self._update_process_title("running")
+            self._report_state_change(event="work_started", message_id=timestamp)
+            return True
 
     def _register_running_worker(self, pid: int | None) -> None:
         self.register_managed_pid(pid)
@@ -1102,6 +1144,8 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             return
 
         if self._uses_agent_session():
+            # Closing the session can block; hold no snapshot edge across it.
+            self._task_state_barrier()
             self._shutdown_agent_session()
 
         self._finalize_deferred_active_control()
@@ -1259,10 +1303,22 @@ class Consumer(BaseTask, InteractiveTaskMixin):
 
         if cleanup_enabled:
             self._purge_start_tokens()
-            if not self._uses_live_command_streaming():
+            if self._writes_stream_frames() and not self._uses_live_command_streaming():
                 self._purge_stream_markers()
 
         super()._cleanup_task_resources(deadline)
+
+    def _writes_stream_frames(self) -> bool:
+        """Return whether this task writes stream frames to outbox or ctrl_out.
+
+        Only interactive and ``stream_output`` tasks do. Any other task's
+        cleanup has no stream marker of its own to purge, so it does not scan
+        observer-facing queues it may share with other producers.
+
+        Spec: docs/specifications/02-TaskSpec.md [TS-1] (``cleanup_on_exit``)
+        """
+
+        return self.taskspec.spec.interactive or self.taskspec.spec.stream_output
 
     def _task_is_persistent(self) -> bool:
         return bool(getattr(self.taskspec.spec, "persistent", False))
