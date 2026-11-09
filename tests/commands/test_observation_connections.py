@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
+import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,6 +16,7 @@ from simplebroker.ext import BrokerError
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft._exceptions import CommandExecutionError
+from weft.client import WeftClient, connect
 from weft.commands import _result_wait
 from weft.commands import events as events_cmd
 from weft.commands import result as result_cmd
@@ -21,6 +26,79 @@ from weft.core.tasks.consumer import Consumer
 from weft.core.taskspec import TaskSpec
 
 pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
+
+PG_LISTENER_THREAD_PREFIX = "simplebroker-pg-listener"
+"""SimpleBroker names the process-local LISTEN thread with this prefix."""
+
+
+def observe_runtime_parent_connections(payload: dict[str, Any]) -> dict[str, Any]:
+    """Report one runtime parent's physical connections per phase [SB-0.4], [PY-1].
+
+    Runs inside a spawned task worker. It resolves its context, submits one
+    child that finishes only after this parent's first quiet wait, and records
+    the PostgreSQL connections its own process opens and still holds.
+    """
+    opened: list[str] = []
+    live: dict[int, str] = {}
+    # Optional backend dependency: SQLite-only installs have no driver to count.
+    if importlib.util.find_spec("psycopg") is not None:
+        psycopg: Any = importlib.import_module("psycopg")
+        original_connect = psycopg.Connection.connect.__func__
+        original_close = psycopg.Connection.close
+
+        def counted_connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            connection = original_connect(cls, *args, **kwargs)
+            name = threading.current_thread().name
+            opened.append(name)
+            live[id(connection)] = name
+            return connection
+
+        def counted_close(connection: Any) -> None:
+            live.pop(id(connection), None)
+            original_close(connection)
+
+        psycopg.Connection.connect = classmethod(counted_connect)
+        psycopg.connect = psycopg.Connection.connect
+        psycopg.Connection.close = counted_close
+
+    release = Path(payload["release_file"])
+    held_at_waits: list[int] = []
+    original_wait = _result_wait.QueueChangeMonitor.wait
+
+    def wait(monitor: queue_wait.QueueChangeMonitor, timeout: float | None) -> bool:
+        held_at_waits.append(
+            sum(
+                1
+                for name in live.values()
+                if not name.startswith(PG_LISTENER_THREAD_PREFIX)
+            )
+        )
+        release.touch()
+        return original_wait(monitor, timeout)
+
+    _result_wait.QueueChangeMonitor.wait = wait  # type: ignore[method-assign,assignment]
+    with connect() as client:
+        context_connections = len(opened)
+        child = client.submit(
+            {
+                "name": "release-gated-child",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:wait_for_file",
+                },
+            },
+            payload={"kwargs": {"path": str(release), "timeout": 25.0}},
+        )
+    waiting_thread = threading.current_thread().name
+    wait_start = len(opened)
+    settled = child.result(timeout=25.0)
+    return {
+        "status": settled.status,
+        "value": settled.value,
+        "context_connections": context_connections,
+        "held_at_waits": held_at_waits,
+        "waiting_thread_connections": opened[wait_start:].count(waiting_thread),
+    }
 
 
 def test_event_follow_reuses_physical_connections(
@@ -204,6 +282,49 @@ def test_result_wait_reuses_physical_connections(
     assert repeated_connections == 0
     assert connections, "physical connection instrumentation must not be vacuous"
     assert all(connection.closed for connection in connections)
+
+
+def test_runtime_parent_opens_no_context_broker_and_validates_its_reader_once(
+    weft_harness: WeftTestHarness,
+) -> None:
+    """A waiting parent keeps no data connection and reuses one result reader.
+
+    Verifies, through a real Manager, wrapper, worker, and child:
+    - the parent's `connect()` reuses the inherited launch target and opens no
+      broker connection to resolve its context ([PY-1])
+    - every quiet result wait holds no data connection, only the listener
+    - the waiting thread validates one reader facade for the whole wait, not
+      one per observation pass ([SB-0.4])
+    - submission and the nested result stay correct on both backends
+    """
+    ctx = weft_harness.context
+    release = weft_harness.root / "release-gated-child"
+    with WeftClient(ctx) as client:
+        parent = client.submit(
+            {
+                "name": "runtime-parent",
+                "spec": {
+                    "type": "function",
+                    "function_target": (
+                        "tests.commands.test_observation_connections:"
+                        "observe_runtime_parent_connections"
+                    ),
+                },
+            },
+            payload={"release_file": str(release)},
+        )
+    settled = parent.result(timeout=25.0)
+    assert settled.status == "completed", settled
+    report = settled.value
+    assert isinstance(report, dict)
+    assert report["status"] == "completed"
+    assert report["value"] == "done"
+    assert report["held_at_waits"], "the parent must wait before its child ends"
+    if ctx.backend_name != "postgres":
+        return
+    assert report["context_connections"] == 0
+    assert report["held_at_waits"] == [0] * len(report["held_at_waits"])
+    assert report["waiting_thread_connections"] == 1, report
 
 
 @pytest.mark.parametrize("operation", ["result", "realtime"])

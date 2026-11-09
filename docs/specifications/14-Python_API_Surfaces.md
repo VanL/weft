@@ -47,7 +47,11 @@ Ordinary `WeftClient` submission uses `weft.spawn.requests`. Same-context runtim
 `build_context` retains its existing arguments and side effects: by default
 it resolves configuration and creates the metadata directories and broker;
 `create_dirs=False` and `create_database=False` disable those respective
-creation steps; resolution can still create the project root. A supplied
+creation steps; resolution can still create the project root. Inside a Weft
+task process, a context inherited from the runtime identity (no explicit
+root, fallback root, or configuration) does not open the broker to create it:
+the task's launch target already exists, and each SimpleBroker Queue still
+validates the target on first use. A supplied
 context is preserved by `WeftClient`. The context does not own a permanently
 open broker; callers close queues they obtain and use the broker context
 manager to release its resources. An explicitly entered `WeftClient` may own
@@ -94,7 +98,10 @@ lifecycle. Exact target/config behavior is covered by
 `tests/context/test_context.py`; client ownership is covered by
 `tests/core/test_client.py` and `tests/core/test_public_client_contracts.py`;
 real-backend task/session cleanup is covered by
-`tests/core/test_task_runtime_connections.py`.
+`tests/core/test_task_runtime_connections.py`. `weft/context.py::build_context`
+skips broker creation for a context inherited from the runtime identity;
+`tests/commands/test_observation_connections.py::test_runtime_parent_opens_no_context_broker_and_validates_its_reader_once`
+covers it with a real nested task on both backends.
 
 Related plan: `2026-09-14-simplebroker-8-2-configuration-plan` (retired — source 396c3b85; see `docs/plans/README.md`).
 Related plan: `2026-09-15-explicit-broker-session-lifetimes-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
@@ -613,6 +620,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
+- [Task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md) stops a runtime-inherited `build_context` from reopening the broker ([PY-1]).
 - [Deep-dive review remediation plan](../plans/2026-11-06-deep-dive-review-remediation-plan.md) aligns `cmd_task_tid(reverse=...)` and the [PY-2] verb/type inventory (`42` verbs, `SystemStopResult`, and `system stop`).
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
 - retired: `2026-11-02-tid-display-encoding-plan` (source 0ff8cfbf; see `docs/plans/README.md`) widens `client.task(tid)` to accept the encoded TID through the one canonicalization function and rewords the rejected-spellings clause of the [PY-2] `runtime_liveness` input rule to name the encoded TID; `runtime_liveness` behavior is unchanged.

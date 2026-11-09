@@ -262,7 +262,9 @@ def build_context(
             directory plus `outputs/`, `logs/`, and (when enabled)
             `autostart/` directories exist.
         create_database: When True (default) ensure the configured broker
-            target is initialized if it does not already exist.
+            target is initialized if it does not already exist. A context
+            inherited from the runtime identity of a Weft task process skips
+            this step: its launch target already exists.
         autostart: Optional override for enabling auto-start TaskSpecs. When
             ``None`` the value is taken from the configuration/environment.
 
@@ -342,7 +344,10 @@ def build_context(
         if autostart_enabled:
             autostart_dir.mkdir(parents=True, exist_ok=True)
 
-    if create_database:
+    # A runtime process inherits the target its Manager launched it from, so
+    # the broker exists. Reopening it costs a PostgreSQL connection and schema
+    # inspection per call; each SimpleBroker facade still validates on first use.
+    if create_database and not inherit_runtime:
         _ensure_database(broker_target, broker_config, database_path=database_path)
 
     return WeftContext(
