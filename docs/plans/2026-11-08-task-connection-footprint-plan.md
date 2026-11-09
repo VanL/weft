@@ -62,7 +62,7 @@ call chain. A probe workload with the same shape as
 (context, submit, sleep, wait). The run used `./bin/pytest-pg` (PostgreSQL 18,
 project-scoped target through `.weft/broker.toml`, simplebroker 8.7.2,
 simplebroker-pg 4.7.2): one leaf, two one-child roots and one depth-3 chain,
-which is 10 tasks with 5 waiting parents. Neither probe file is committed.
+which is 9 tasks with 5 waiting parents (one leaf, two two-task families, one four-task chain). Neither probe file is committed.
 To reproduce, recreate both from this description and run the probe under
 `./bin/pytest-pg`.
 
@@ -271,7 +271,7 @@ validates the target on first use.
 | A runtime-inherited `build_context()` no longer opens the broker on PostgreSQL. SQLite already skipped an existing file. | C | [WT-4.1] keep an identity you already have; [WT-2a.8] SimpleBroker validates on first use; [WT-4.2] connection count is scarce |
 | In a task process, a broker that became unreachable after launch now fails at the first queue operation (for example `submit`) instead of at `connect()`. It is the same failure, reported to the same caller. | C | [WT-4.4] no over-armoring; [ALT-WT-011] no hidden preflight |
 | The result reader keeps one facade per wait, so first-use facade validation runs once per wait | C | [SB-0.4] warm facade reuse; [WT-4.2] one owner per resource |
-| Physical opens per observation pass drop from 2 to 1, and 5 catalog statements per pass are removed | C (measured) | [WT-4.4] measure, do not bake in inefficiency |
+| Physical opens per subsequent observation pass drop from 2 to 1, and 5 catalog statements per subsequent pass are removed (the first pass still validates and opens data) | C (measured) | [WT-4.4] measure, do not bake in inefficiency |
 | The data connection is released before every wait | N | 2026-11-07 nested admission load plan |
 | Held sessions per running task: 2 for a leaf, 3 for a waiting parent | N (unchanged; see SB-F1) | [ALT-WT-001] investigate resource lifetime |
 | Queues, payloads, CLI, client API, settlement rules and deadlines | N | — |
@@ -392,4 +392,15 @@ armored against.
 
 ## Review and execution record
 
-Cross-family review: to be recorded by the coordinator.
+### Cross-family review
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+scoped-change review of plan+implementation at 4ee15456 against 08c2f87b.
+Verdict: no blocker. No production defect; the reviewer confirmed the reader
+closes before `monitor.wait()`, child-state observation stays intact, explicit
+context inputs keep broker initialization, and the test is falsifiable.
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| F1 | nit | §3 probe topology totals 9 tasks, not 10. | Accepted, fixed: §3 states 9 tasks and lists the families. |
+| F2 | nit | §8 "opens per pass drop from 2 to 1" omits the first pass, which still validates and opens data. | Accepted, fixed: the register row now says subsequent passes. |
