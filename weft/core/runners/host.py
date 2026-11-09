@@ -877,6 +877,9 @@ class HostTaskRunner:
             else:
                 process.join(timeout=0.2)
 
+            # The worker is gone, so only samples taken while it ran are
+            # reported; a work item that ended before its first sample has
+            # none ([RM-5.1]).
             if monitor is not None:
                 try:
                     observed_metrics = monitor.last_metrics()
@@ -884,11 +887,6 @@ class HostTaskRunner:
                     logger.warning("Failed to collect final host resource metrics")
                 else:
                     last_metrics = observed_metrics or last_metrics
-                if last_metrics is None:
-                    try:
-                        last_metrics = monitor.snapshot()
-                    except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-313] exception
-                        logger.warning("Failed to snapshot final host resource metrics")
 
             outcome.metrics = outcome.metrics or last_metrics
             outcome.runtime_handle = outcome.runtime_handle or runtime_handle

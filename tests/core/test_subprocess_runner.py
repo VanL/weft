@@ -906,46 +906,6 @@ def test_monitor_limit_cleanup_preserves_polled_metrics_and_primary_outcome(
     assert all(record.exc_info is None for record in caplog.records)
 
 
-def test_monitor_snapshot_and_stop_failures_do_not_replace_primary_outcome(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    calls: list[str] = []
-
-    class Monitor:
-        def start(self, _pid: int) -> None:
-            calls.append("start")
-
-        def check_limits(self) -> tuple[bool, str | None]:
-            return True, None
-
-        def last_metrics(self) -> None:
-            calls.append("last_metrics")
-
-        def snapshot(self) -> subprocess_runner.ResourceMetrics:
-            calls.append("snapshot")
-            raise RuntimeError("snapshot secret")
-
-        def stop(self) -> None:
-            calls.append("stop")
-            raise RuntimeError("stop secret")
-
-    with caplog.at_level(logging.WARNING, logger="weft.core.runners.subprocess_runner"):
-        outcome = _run_process_with_monitor(Monitor())
-
-    assert outcome.status == "ok"
-    assert outcome.stdout == f"done{os.linesep}"
-    assert outcome.metrics is None
-    assert calls[0] == "start"
-    assert "last_metrics" in calls
-    assert calls[-2:] == ["snapshot", "stop"]
-    assert [record.message for record in caplog.records] == [
-        "Subprocess resource monitor failed during final snapshot",
-        "Subprocess resource monitor failed while stopping during completion cleanup",
-    ]
-    assert "secret" not in caplog.text
-    assert all(record.exc_info is None for record in caplog.records)
-
-
 def test_monitor_cleanup_failures_do_not_replace_cancellation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

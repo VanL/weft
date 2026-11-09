@@ -325,18 +325,14 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
 
         stdout, stderr = io_session.finish_after_exit()
 
+        # The root has been reaped, so only samples taken while it ran are
+        # reported; a work item that ended before its first sample has none
+        # ([RM-5.1]).
         last_metrics = _last_monitor_metrics(
             monitor,
             last_metrics,
             phase="completion cleanup",
         )
-        if monitor is not None and last_metrics is None:
-            try:
-                last_metrics = monitor.snapshot()
-            except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-311] exception
-                logger.warning(
-                    "Subprocess resource monitor failed during final snapshot"
-                )
 
         returncode = process.returncode
         if returncode is None:
