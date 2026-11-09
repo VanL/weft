@@ -46,7 +46,11 @@ from weft._constants import (
     SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
 )
 from weft.core.deferred import get_ctypes
-from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
+from weft.core.resource_monitor import (
+    ResourceMetrics,
+    load_resource_monitor,
+    sample_delay,
+)
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.outcome import RunnerOutcome
 from weft.ext import RunnerHandle
@@ -264,7 +268,10 @@ def run_monitored_subprocess(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-036] exc
                     last_metrics,
                     phase="limit check",
                 )
-                next_monitor_at = time.monotonic() + interval
+                sampled_at = time.monotonic()
+                next_monitor_at = sampled_at + sample_delay(
+                    limits, interval=interval, elapsed=sampled_at - start_time
+                )
                 if not ok:
                     # The process may exit between the liveness poll above
                     # and the monitor's own sample. A violation reported

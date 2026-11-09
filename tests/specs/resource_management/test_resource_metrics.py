@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from pathlib import Path
 
 import psutil
 import pytest
 
+from tests.helpers.process_tree import spawn_tree
 from weft.core.resource_monitor import ResourceMetrics, ResourceMonitor
 from weft.core.taskspec import LimitsSection
 
@@ -139,54 +140,22 @@ def test_cpu_limit_does_not_fire_for_only_three_of_five_samples(
     assert [monitor.check_limits() for _ in range(5)] == [(True, None)] * 5
 
 
-def test_snapshot_aggregates_root_and_recursive_child_processes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recursive_calls: list[bool] = []
+def test_snapshot_counts_a_grandchilds_memory(tmp_path: Path) -> None:
+    """A snapshot sums the whole tree, not only the monitored root.
 
-    class FakeProcess:
-        def __init__(
-            self,
-            pid: int,
-            *,
-            memory_mb: float,
-            open_files: int,
-            connections: int,
-        ) -> None:
-            self.pid = pid
-            self._memory_mb = memory_mb
-            self._open_files = open_files
-            self._connections = connections
+    The grandchild alone holds 128 MiB; root plus child stay far below that.
+    """
 
-        def children(self, *, recursive: bool) -> list[FakeProcess]:
-            recursive_calls.append(recursive)
-            return [child, grandchild] if recursive else [child]
-
-        def cpu_times(self) -> SimpleNamespace:
-            return SimpleNamespace(user=0.0, system=0.0)
-
-        def memory_info(self) -> SimpleNamespace:
-            return SimpleNamespace(rss=self._memory_mb * 1024 * 1024)
-
-        def num_fds(self) -> int:
-            return self._open_files
-
-        def net_connections(self) -> list[object]:
-            return [object()] * self._connections
-
-    child = FakeProcess(2, memory_mb=2.0, open_files=3, connections=2)
-    grandchild = FakeProcess(3, memory_mb=4.0, open_files=5, connections=3)
-    root = FakeProcess(1, memory_mb=1.0, open_files=1, connections=1)
-    monkeypatch.setattr(psutil, "Process", lambda pid: root)
+    tree = spawn_tree(tmp_path, depth=2, fanout=1, leaf_memory_mb=128)
     monitor = ResourceMonitor()
+    try:
+        monitor.start(tree.root.pid)
+        metrics = monitor.snapshot()
+    finally:
+        monitor.stop()
+        tree.kill()
 
-    monitor.start(root.pid)
-    metrics = monitor.snapshot()
-
-    assert recursive_calls and all(recursive_calls)
-    assert metrics.memory_mb == pytest.approx(7.0)
-    assert metrics.open_files == 9
-    assert metrics.connections == 6
+    assert metrics.memory_mb >= 128
 
 
 def test_connection_limit_is_enforced_on_first_sample(

@@ -3,6 +3,7 @@
 Spec references:
 - docs/specifications/01-Core_Components.md [CC-2.2.1], [CC-2.3], [CC-2.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-2], [MF-3]
+- docs/specifications/06-Resource_Management.md [RM-5.1] (session sampling clock)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from weft._constants import (
     TERMINAL_TASK_STATUSES,
 )
 from weft.core.control_messages import ControlRequest
+from weft.core.resource_monitor import sample_delay
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.targets import decode_work_message
 from weft.core.taskspec import ReservedPolicy, TaskSpec
@@ -50,6 +52,7 @@ class InteractiveTaskMixin(ABC):
     _interactive_stderr_final_sent: bool
     _interactive_total_stdout_bytes: int
     _interactive_next_limit_check_at: float | None
+    _interactive_sampling_started_at: float
     _interactive_activity: threading.Event
     _stop_event: threading.Event
 
@@ -144,6 +147,7 @@ class InteractiveTaskMixin(ABC):
         self._interactive_stderr_final_sent = False
         self._interactive_total_stdout_bytes = 0
         self._interactive_next_limit_check_at = None
+        self._interactive_sampling_started_at = 0.0
         self._interactive_activity = threading.Event()
 
     # ------------------------------------------------------------------
@@ -183,8 +187,10 @@ class InteractiveTaskMixin(ABC):
             self._interactive_next_limit_check_at is None
             and self._interactive_session_is_monitored()
         ):
-            self._interactive_next_limit_check_at = time.monotonic() + float(
-                self.taskspec.spec.polling_interval
+            self._interactive_sampling_started_at = time.monotonic()
+            self._interactive_next_limit_check_at = (
+                self._interactive_sampling_started_at
+                + float(self.taskspec.spec.polling_interval)
             )
 
         payload = decode_work_message(message)
@@ -294,8 +300,11 @@ class InteractiveTaskMixin(ABC):
         deadline = self._interactive_next_limit_check_at
         if deadline is not None and time.monotonic() >= deadline:
             ok, violation = session.poll_limits()
-            self._interactive_next_limit_check_at = time.monotonic() + float(
-                self.taskspec.spec.polling_interval
+            sampled_at = time.monotonic()
+            self._interactive_next_limit_check_at = sampled_at + sample_delay(
+                self.taskspec.spec.limits,
+                interval=float(self.taskspec.spec.polling_interval),
+                elapsed=sampled_at - self._interactive_sampling_started_at,
             )
             if not ok and violation:
                 self.taskspec.mark_killed(reason=violation)

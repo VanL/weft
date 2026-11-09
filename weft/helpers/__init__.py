@@ -42,6 +42,7 @@ from weft._constants import (
     WEFT_SPAWN_REQUESTS_QUEUE,
     resolve_runtime_config,
 )
+from weft.core.process_tree import descendant_processes
 from weft.ext import RunnerHandle
 
 from .container_detection import (
@@ -546,7 +547,8 @@ def terminate_process_tree(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-124] excep
     Algorithm overview
     ------------------
     1. **Snapshot the tree.** ``_list_process_descendants`` walks the process
-       tree recursively via ``psutil`` and deduplicates PIDs.  The snapshot is
+       tree recursively via ``weft.core.process_tree.descendant_processes``
+       and deduplicates PIDs.  The snapshot is
        taken once; processes that spawn children after this point are not
        included, but that is an acceptable race — they will typically inherit
        the parent's fate anyway.
@@ -655,11 +657,15 @@ def kill_process_tree(root_pid: int, *, timeout: float = 0.5) -> set[int]:
 
 
 def _list_process_descendants(root: psutil.Process) -> list[psutil.Process]:
-    """Return descendant processes for ``root`` with duplicates removed."""
+    """Return descendant processes for ``root`` with duplicates removed.
+
+    Spec: docs/specifications/06-Resource_Management.md [RM-5.1] (one
+    descendant walk for metric collection and the kill path).
+    """
 
     try:
-        descendants = root.children(recursive=True)
-    except psutil.Error:
+        descendants = descendant_processes(root)
+    except (psutil.Error, OSError):
         return []
 
     unique: dict[int, psutil.Process] = {}

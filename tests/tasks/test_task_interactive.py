@@ -155,7 +155,11 @@ def test_interactive_limits_poll_only_when_due_and_reschedule_after_poll(
     db_path, _queue_factory = broker_env
     task = Consumer(
         db_path,
-        make_interactive_spec(unique_tid, polling_interval=1.0),
+        make_interactive_spec(
+            unique_tid,
+            polling_interval=1.0,
+            limits=LimitsSection(memory_mb=1024),
+        ),
     )
     session = Mock()
     session.poll_stdout.return_value = []
@@ -186,6 +190,47 @@ def test_interactive_limits_poll_only_when_due_and_reschedule_after_poll(
             task._interactive_flush_outputs()
         session.poll_limits.assert_called_once_with()
         assert task._interactive_next_limit_check_at == 21.0
+    finally:
+        task._interactive_session = None
+        task.cleanup()
+
+
+def test_interactive_sampling_without_limits_doubles_after_each_poll(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a limit the next sample waits as long as sampling has run.
+
+    Spec: [RM-5.1]
+    """
+
+    db_path, _queue_factory = broker_env
+    task = Consumer(
+        db_path,
+        make_interactive_spec(unique_tid, polling_interval=1.0),
+    )
+    session = Mock()
+    session.poll_stdout.return_value = []
+    session.poll_stderr.return_value = []
+    session.poll_limits.return_value = (True, None)
+    session.last_metrics = None
+    session.is_alive.return_value = True
+    task._interactive_session = cast(Any, session)
+
+    try:
+        task._interactive_sampling_started_at = 4.0
+        task._interactive_next_limit_check_at = 9.0
+        moments = iter((10.0, 20.0))
+        with monkeypatch.context() as time_patch:
+            time_patch.setattr(
+                "weft.core.tasks.interactive.time.monotonic",
+                lambda: next(moments),
+            )
+            task._interactive_flush_outputs()
+        session.poll_limits.assert_called_once_with()
+        # Sampled at 20.0 after 16.0 s of sampling: next sample 16.0 s later.
+        assert task._interactive_next_limit_check_at == 36.0
     finally:
         task._interactive_session = None
         task.cleanup()

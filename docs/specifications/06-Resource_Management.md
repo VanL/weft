@@ -11,6 +11,7 @@ classify become task failures visible through state, control, and
 reserved-queue behavior.
 
 _Implementation mapping_: `weft/core/resource_monitor.py`,
+`weft/core/process_tree.py`,
 `weft/core/runners/host.py`, `weft/core/runners/subprocess_runner.py`,
 `weft/core/tasks/runner.py`, `weft/core/tasks/base.py`,
 `weft/core/tasks/consumer.py`, `weft/ext.py`, `weft/_runner_plugins.py`,
@@ -140,7 +141,17 @@ _Implementation mapping_:
 `weft/ext.py::ResourceMetrics`,
 `weft/core/resource_monitor.py::BaseResourceMonitor`,
 `weft/core/resource_monitor.py::ResourceMonitor`,
-`weft/core/resource_monitor.py::load_resource_monitor`;
+`weft/core/resource_monitor.py::load_resource_monitor`,
+`weft/core/resource_monitor.py::limits_configured`,
+`weft/core/resource_monitor.py::sample_delay` (the one sampling clock, used by
+`weft/core/runners/host.py::HostTaskRunner._run_one_shot_terminal_handoff`,
+`weft/core/runners/subprocess_runner.py::run_monitored_subprocess`,
+`weft/core/runners/sessions.py::AgentSession.execute`, and
+`weft/core/tasks/interactive.py::InteractiveTaskMixin._interactive_flush_outputs`);
+`weft/core/process_tree.py::descendant_processes` (the one descendant walk,
+used by `ResourceMonitor._process_tree` and
+`weft/helpers/__init__.py::_list_process_descendants`),
+`weft/core/deferred.py::get_ctypes`;
 `weft/core/runners/host.py::HostTaskRunner.run_with_hooks`,
 `weft/core/runners/host.py::HostRunnerPlugin.stop`,
 `weft/core/runners/host.py::HostRunnerPlugin.kill`,
@@ -172,7 +183,7 @@ process and releases its started adapters and endpoints using the runtime's
 existing stop/kill hooks. The original failure remains primary. Monitor-class
 validation and constructor failures are not converted into successful
 execution without monitoring. This obligation does not broaden the
-psutil-visible process-tree enforcement boundary below.
+parent-PID process-tree enforcement boundary below.
 
 Enforcement mechanics and security boundary:
 
@@ -180,26 +191,44 @@ Enforcement mechanics and security boundary:
   `weft/_constants.py`, threaded through as `spec.polling_interval` and
   `run_monitored_subprocess`'s `monitor_interval`). Each poll takes one
   `ResourceMetrics` snapshot and calls `check_limits()`.
+- Every runner loop schedules its next poll with one clock,
+  `sample_delay` in `weft/core/resource_monitor.py`. While any limit is
+  configured (`memory_mb`, `cpu_percent`, `max_fds`, or `max_connections`
+  is set), polls are one cadence apart, so enforcement is unchanged by this
+  clock. Without a configured limit nothing is enforced and polls serve only
+  the reported metrics: the delay to the next poll equals the time already
+  monitored, never less than one cadence, so polls fall at one, two, four,
+  ... cadences. A supervising task with no limit therefore polls a number of
+  times logarithmic in its run time, and the last poll before its runtime
+  exits lies in the latter half of the run. The reported metrics are those of
+  the last poll; its `cpu_percent` is averaged over the time since the poll
+  before it, or since monitoring began. A one-shot work item that ends before
+  its first poll reports no metrics.
 - For an interactive command session, Consumer publishes the next resource
   sample through `next_wait_timeout()` and calls the session's `poll_limits()`
   only when that absolute deadline is due. Stream, control, backend, and process
   exit activity do not move the resource-sampling deadline or cause additional
-  samples. The sampling timer exists only for a session started through
-  `TaskRunner` whose TaskSpec names a `monitor_class`. The built-in Debugger's
-  owner-local session bypasses `TaskRunner` and publishes no sampling timer. A
-  session with no monitor class likewise waits on events alone.
+  samples. Each new deadline follows `sample_delay`, measured from when the
+  session's sampling began. The sampling timer exists only for a session
+  started through `TaskRunner` whose TaskSpec names a `monitor_class`. The
+  built-in Debugger's owner-local session bypasses `TaskRunner` and publishes
+  no sampling timer. A session with no monitor class likewise waits on events
+  alone.
 - A persistent agent session samples the same way, at its monitor's
   `polling_interval`: `AgentSession` holds one session-scoped next-sample
   instant, takes its first sample on its first observation pass with a live
   producer, samples on any later observation pass once that instant is due
-  and never sooner, re-arms the instant one interval after a clock reading
-  taken after each sample, and publishes the instant as a deadline of its
-  handoff wait. Sampling runs while a work item is being supervised: the
-  deadline bounds the requested wait, and the spacing between samples,
-  measured after each sample, is at least one interval. Between work items
-  no sample is taken. A new work item neither resets nor postpones the
-  instant, so an instant that fell due between items is honored on the first
-  observation pass of the next work item.
+  and never sooner, re-arms the instant `sample_delay` after a clock reading
+  taken after each sample, measured from the work item's start, and
+  publishes the instant as a deadline of its handoff wait. Sampling runs
+  while a work item is being supervised: the deadline bounds the requested
+  wait, and the spacing between samples, measured after each sample, is at
+  least one interval. Between work items no sample is taken. With a limit
+  configured, a new work item neither resets nor postpones the instant, so
+  an instant that fell due between items is honored on the first
+  observation pass of the next work item. Without one, each work item makes
+  its first observation pass a sample, so every item reports metrics taken
+  while it ran.
 - Memory and file-descriptor/connection limits are enforced on a **single
   sample**: `ResourceMonitor.check_limits` kills the runtime the first
   poll where `metrics.memory_mb` (or `open_files`/`connections`) exceeds the
@@ -210,20 +239,32 @@ Enforcement mechanics and security boundary:
   memory enforcement does not tolerate.
 - On violation, the runner escalates through `terminate_process_tree` /
   `kill_process_tree` (`weft/helpers/__init__.py`), which walk the process
-  tree via `psutil.Process(...).children(recursive=True)` starting from the
-  worker PID. In the shared one-shot command subprocess supervisor
+  tree from the worker PID with the same descendant walk as metric
+  collection (below). In the shared one-shot command subprocess supervisor
   (`run_monitored_subprocess`), a violation reported after the supervised
   process has already exited is not a confirmed limit: the supervisor re-polls
   the process before escalating, kills nothing, and the exit code decides the
   outcome. The function-runner and persistent-session paths keep their own
   precedence rules in [CC-2.5].
 - **Enforcement boundary**: both metric collection (`_process_tree` in
-  `weft/core/resource_monitor.py`) and the kill path walk the *psutil-visible
-  child tree* rooted at the worker PID. A task that detaches from that tree —
-  e.g. by calling `os.setsid()` to start a new session, or by double-forking
-  so the intermediate parent exits and the grandchild is reparented outside
-  the tracked tree — is no longer enumerated by `children(recursive=True)`
-  and is invisible to both limit checks and the kill escalation. This is
+  `weft/core/resource_monitor.py`) and the kill path walk the *parent-PID
+  descendant tree* rooted at the worker PID through one walker,
+  `descendant_processes` in `weft/core/process_tree.py`. It keeps the
+  contract of psutil's `children(recursive=True)`: a root that is no longer
+  the process it was created for raises `NoSuchProcess`, a child older than
+  the root is a reused PID and is skipped, and a process that exits during
+  the walk is skipped. It asks the kernel for one parent's children at a
+  time, so its cost follows the task's own tree rather than the host's
+  process count: macOS reads libproc `proc_listpids(PROC_PPID_ONLY)`, Linux
+  reads `/proc/<pid>/task/<tid>/children` for every thread of the parent
+  (the kernel records a child under the thread that forked it; this needs
+  `CONFIG_PROC_CHILDREN`), and other platforms, or a platform whose source
+  is unavailable, use psutil's own walk. A process that leaves that tree —
+  e.g. by double-forking so the intermediate parent exits and the grandchild
+  is reparented outside the tracked tree — is no longer enumerated and is
+  invisible to both limit checks and the kill escalation. Starting a new
+  session with `os.setsid()` alone does not change the parent PID and does
+  not leave the tree. This is
   consistent with the trust model in
   [00-Overview_and_Architecture.md](00-Overview_and_Architecture.md)
   ("Observability and Security"): Weft assumes user-level trust, not hostile
@@ -442,6 +483,7 @@ controls stay here only when they are already shipped and observable:
 - retired: `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces timer-polled subprocess pipe supervision with the platform readiness adapter (`[RM-5.2]`).
 - retired: `2026-11-02-reactor-edge-timer-floors-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces fixed timer floors on agent-session and interactive waits with their real event sources and samples persistent agent sessions at the monitor's `polling_interval` ([RM-5.1], [RM-5.2]).
 - [Linux libc pidfd binding](../plans/2026-11-05-linux-libc-pidfd-binding-plan.md) adds the libc/ctypes binding when Python omits its wrapper ([RM-5.2]).
+- [Resource monitor descendant scan](../plans/2026-11-08-resource-monitor-descendant-scan-plan.md) walks only the task's own process tree and samples on a doubling clock when no limit is configured ([RM-5.1]).
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

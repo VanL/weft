@@ -1,7 +1,10 @@
 """Resource monitoring utilities for task execution.
 
 Implements monitoring and limit checks from
-docs/specifications/06-Resource_Management.md [RM-0] – [RM-5.1].
+docs/specifications/06-Resource_Management.md [RM-0] – [RM-5.1]. The
+process tree is enumerated by ``weft.core.process_tree``, whose cost follows
+the task's own tree rather than the host's process count, and
+:func:`sample_delay` is the one sampling clock every runner loop uses.
 """
 
 from __future__ import annotations
@@ -11,16 +14,55 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from importlib import import_module
-from typing import Any
+from typing import Any, Final
 
 import psutil
 
 from weft._constants import DEFAULT_POLLING_INTERVAL
+from weft.core.process_tree import descendant_processes
 from weft.ext import ResourceMetrics
 
 logger = logging.getLogger(__name__)
 
 PsutilProcess = Any
+
+_LIMIT_FIELDS: Final[tuple[str, ...]] = (
+    "memory_mb",
+    "cpu_percent",
+    "max_fds",
+    "max_connections",
+)
+"""``LimitsSection`` fields; setting any of them makes sampling enforcement."""
+
+
+def limits_configured(limits: Any | None) -> bool:
+    """Return whether ``limits`` sets any resource limit (Spec: [RM-5.1])."""
+    return limits is not None and any(
+        getattr(limits, name, None) is not None for name in _LIMIT_FIELDS
+    )
+
+
+def sample_delay(limits: Any | None, *, interval: float, elapsed: float) -> float:
+    """Return the delay from one resource sample to the next.
+
+    A configured limit is checked on every sample, so the monitor samples
+    every ``interval``. Without one, samples serve only the reported metrics:
+    the delay equals the time already monitored, never less than
+    ``interval``, so samples fall at one, two, four, ... intervals. The last
+    sample before the runtime exits therefore lies in the latter half of the
+    run, and the number of samples grows with the logarithm of the run's
+    length instead of linearly (the doubling schedule for an unknown end).
+
+    Args:
+        limits: The task's limits section, or ``None``.
+        interval: The monitor polling interval in seconds.
+        elapsed: Seconds since this monitoring began.
+
+    Spec: [RM-5.1]
+    """
+    if limits_configured(limits):
+        return interval
+    return max(interval, elapsed)
 
 
 class BaseResourceMonitor(ABC):
@@ -112,7 +154,7 @@ class ResourceMonitor(BaseResourceMonitor):
 
         try:
             _add_process(self._process)
-            for child in self._process.children(recursive=True):
+            for child in descendant_processes(self._process):
                 _add_process(child)
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             return []
@@ -286,5 +328,7 @@ __all__ = [
     "BaseResourceMonitor",
     "ResourceMetrics",
     "ResourceMonitor",
+    "limits_configured",
     "load_resource_monitor",
+    "sample_delay",
 ]

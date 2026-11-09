@@ -29,6 +29,8 @@ from weft._constants import (
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
+    limits_configured,
+    sample_delay,
 )
 from weft.core.runner_diagnostics import diagnostic_summary, runner_diagnostics
 from weft.core.runners.agent_session_protocol import (
@@ -228,9 +230,9 @@ class AgentSession:
         self._handle = handle
         self._last_metrics: ResourceMetrics | None = None
         self._closed = False
-        # Session-scoped next limit-sample instant ([RM-5.1]); never reset per
-        # work item, so short items cannot postpone sampling. ``None`` means
-        # the session's immediate first sample is still due.
+        # Session-scoped next limit-sample instant ([RM-5.1]); with a limit
+        # configured it is never reset per work item, so short items cannot
+        # postpone enforcement. ``None`` means an immediate sample is due.
         self._next_limit_sample_at: float | None = None
 
     @property
@@ -420,6 +422,11 @@ class AgentSession:
 
         self._request_queue.put(make_execute_request(work_item))
         start_time = time.monotonic()
+        if self._monitor is not None and not limits_configured(self._monitor.limits):
+            # Without a limit nothing is enforced and sampling is metrics
+            # only: each work item samples at its start and then on the
+            # doubling schedule from that start ([RM-5.1]).
+            self._next_limit_sample_at = None
         progress = TerminalHandoffProgress()
         drain_deadline: float | None = None
         pending_transport_failure: str | None = None
@@ -533,9 +540,11 @@ class AgentSession:
 
         A limit sample is taken only when ``sample_limits`` says the
         session's next-sample instant is due, and never for a dead producer or
-        after an accepted stop. The next instant is armed one monitor
-        ``polling_interval`` after a clock reading taken after the sample, so
-        samples are never closer than one interval ([RM-5.1]).
+        after an accepted stop. The next instant is armed ``sample_delay``
+        after a clock reading taken after the sample: one monitor
+        ``polling_interval`` with a limit configured, the doubling schedule
+        from the work item's start without one, so samples are never closer
+        than one interval ([RM-5.1]).
         """
 
         observations: dict[str, TerminalHandoffEvent] = {}
@@ -573,7 +582,12 @@ class AgentSession:
             interval = float(monitor.polling_interval)
             ok, violation = self.poll_limits()
             if self._monitor is not None:
-                self._next_limit_sample_at = time.monotonic() + interval
+                sampled_at = time.monotonic()
+                self._next_limit_sample_at = sampled_at + sample_delay(
+                    monitor.limits,
+                    interval=interval,
+                    elapsed=sampled_at - start_time,
+                )
             if not ok:
                 limit_error = violation or "Resource limit exceeded"
                 observations["limit_reached"] = TerminalHandoffEvent(

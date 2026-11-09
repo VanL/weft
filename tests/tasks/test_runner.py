@@ -17,7 +17,7 @@ from io import TextIOWrapper
 from itertools import combinations
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import Mock
 
 import psutil
@@ -29,6 +29,7 @@ from tests.helpers.leaked_sender import (
     leaking_session_producer,
     wait_for_pidfile,
 )
+from tests.helpers.process_tree import kill_pids, tree_command
 from tests.helpers.typing import record_and_return
 from tests.tasks.sample_targets import wait_for_file
 from weft import helpers as helpers_module
@@ -36,7 +37,11 @@ from weft._constants import (
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
     DEFAULT_POLLING_INTERVAL,
 )
-from weft.core.resource_monitor import BaseResourceMonitor, ResourceMetrics
+from weft.core.resource_monitor import (
+    BaseResourceMonitor,
+    ResourceMetrics,
+    ResourceMonitor,
+)
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners import RunnerOutcome
 from weft.core.runners import host as host_module
@@ -213,7 +218,8 @@ def test_verified_tree_signals_the_verified_instance(
     root.pid = 123
     root.create_time.return_value = 10.0
     root.status.return_value = psutil.STATUS_RUNNING
-    root.children.return_value = []
+    # The verified root has no descendants; enumeration is not under test.
+    monkeypatch.setattr(helpers_module, "descendant_processes", lambda _root: [])
     acquired = Mock(return_value=root)
     monkeypatch.setattr(helpers_module.psutil, "Process", acquired)
     forbidden_wait = Mock(side_effect=AssertionError("must not steal owned child reap"))
@@ -1093,6 +1099,12 @@ def _agent_session_hold_then_reply_worker(
         response_sender.close()
 
 
+_CONFIGURED_LIMIT = LimitsSection(memory_mb=1024)
+"""A limit no test process reaches. Configuring any limit is what makes
+sampling enforcement on the monitor's interval ([RM-5.1]); without one,
+sampling serves metrics only and follows the doubling schedule."""
+
+
 class _RecordingLimitMonitor(BaseResourceMonitor):
     """Monitor double that records a `perf_counter` timestamp per limit check.
 
@@ -1106,8 +1118,9 @@ class _RecordingLimitMonitor(BaseResourceMonitor):
         *,
         polling_interval: float,
         violation_at: int | None = None,
+        limits: LimitsSection | None = _CONFIGURED_LIMIT,
     ) -> None:
-        super().__init__(polling_interval=polling_interval)
+        super().__init__(limits=limits, polling_interval=polling_interval)
         self.sample_times: list[float] = []
         self._violation_at = violation_at
 
@@ -1337,6 +1350,34 @@ def test_agent_session_short_items_cannot_starve_sampling() -> None:
         session.close()
 
 
+@pytest.mark.shared
+def test_agent_session_without_limits_samples_every_work_item() -> None:
+    """Without a limit each work item samples at its own start.
+
+    Nothing is enforced, so a session-wide clock would only leave short items
+    reporting an earlier item's metrics.
+
+    Spec: [RM-5.1]
+    """
+
+    monitor = _RecordingLimitMonitor(polling_interval=0.2, limits=None)
+    session = _spawn_agent_session_for_target(
+        functools.partial(_agent_session_hold_then_reply_worker, 0.02),
+        monitor=monitor,
+    )
+    try:
+        session.wait_ready(timeout=10.0)
+        statuses = [
+            session.execute(f"item-{index}", cancel_requested=None).status
+            for index in range(5)
+        ]
+
+        assert statuses == ["ok"] * 5
+        assert len(monitor.sample_times) >= 5
+    finally:
+        session.close()
+
+
 class _PostReadyFailingRequestQueue:
     """Picklable request seam that fails inside the production worker loop."""
 
@@ -1481,6 +1522,7 @@ def test_agent_session_invalidating_verdict_closes_session(verdict: str) -> None
 
     class LimitMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
+        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.stopped = False
@@ -1521,6 +1563,7 @@ def test_agent_session_monitor_metrics_failure_cannot_block_invalid_cleanup() ->
 
     class ExplodingMetricsMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
+        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.stopped = False
@@ -1674,6 +1717,7 @@ def test_agent_session_does_not_poll_limits_after_producer_exit() -> None:  # no
 
     class LateLimitMonitor:
         polling_interval = DEFAULT_POLLING_INTERVAL
+        limits = _CONFIGURED_LIMIT
 
         def __init__(self) -> None:
             self.check_calls = 0
@@ -2437,6 +2481,105 @@ def test_task_runner_enforces_memory_limit(tmp_path: Path) -> None:
     assert outcome.status == "limit"
     assert outcome.error is not None
     assert outcome.metrics is not None
+
+
+def test_task_runner_memory_limit_counts_grandchild_memory(tmp_path: Path) -> None:
+    """A memory limit fires on memory held two levels below the command root.
+
+    Root and child are bare interpreters well under the limit; only the
+    grandchild's 160 MiB can exceed it, so a monitor that measured the root
+    alone, or only its direct children, would let the work finish.
+
+    Spec: [RM-1], [RM-5.1]
+    """
+
+    argv, pid_dir = tree_command(tmp_path, depth=2, fanout=1, leaf_memory_mb=160)
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=argv[0],
+        agent=None,
+        args=argv[1:],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=30.0,
+        limits=LimitsSection(memory_mb=120),
+        monitor_class="weft.core.resource_monitor.ResourceMonitor",
+        monitor_interval=0.05,
+    )
+
+    try:
+        outcome = runner.run({})
+    finally:
+        kill_pids({int(path.name) for path in pid_dir.iterdir() if path.name.isdigit()})
+
+    assert outcome.status == "limit"
+    assert "Memory" in (outcome.error or "")
+
+
+class _SampleCountingMonitor(ResourceMonitor):
+    """The built-in monitor, recording when each limit check samples."""
+
+    sample_times: ClassVar[list[float]] = []
+
+    def check_limits(self) -> tuple[bool, str | None]:
+        type(self).sample_times.append(time.monotonic())
+        return super().check_limits()
+
+
+@pytest.mark.parametrize("target_type", ["command", "function"])
+@pytest.mark.parametrize(
+    ("limits", "min_samples", "max_samples"),
+    [
+        # Metrics only: samples at 1, 2, 4, 8, 16 and 32 intervals (0.05 s
+        # to 1.6 s); scheduling delay can only lower that count.
+        pytest.param(LimitsSection(), 3, 8, id="no-limit"),
+        # Enforcement: every interval, about forty samples in two seconds;
+        # the bound tolerates wake latency of three intervals per sample.
+        pytest.param(_CONFIGURED_LIMIT, 10, None, id="limit"),
+    ],
+)
+def test_task_runner_sampling_clock_follows_configured_limits(
+    target_type: str,
+    limits: LimitsSection,
+    min_samples: int,
+    max_samples: int | None,
+) -> None:
+    """Sampling every interval is enforcement; without a limit it doubles.
+
+    Either way the completed work item still reports its metrics.
+
+    Spec: [RM-5.1]
+    """
+
+    _SampleCountingMonitor.sample_times = []
+    command = target_type == "command"
+    runner = TaskRunner(
+        target_type=target_type,
+        tid=None,
+        function_target=None if command else "time:sleep",
+        process_target=sys.executable if command else None,
+        agent=None,
+        args=["-c", "import time; time.sleep(2.0)"] if command else [2.0],
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=30.0,
+        limits=limits,
+        monitor_class=f"{__name__}._SampleCountingMonitor",
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run({} if command else None)
+
+    samples = len(_SampleCountingMonitor.sample_times)
+    assert outcome.status == "ok"
+    assert outcome.metrics is not None
+    assert outcome.metrics.memory_mb > 0
+    assert samples >= min_samples
+    assert max_samples is None or samples <= max_samples
 
 
 def test_task_runner_enforces_cpu_limit(tmp_path: Path) -> None:

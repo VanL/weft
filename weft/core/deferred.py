@@ -1,7 +1,7 @@
 """Deferred core dependencies.
 
 Spec: docs/specifications/01-Core_Components.md [CC-2.4];
-docs/specifications/06-Resource_Management.md [RM-5.2].
+docs/specifications/06-Resource_Management.md [RM-5.1], [RM-5.2].
 """
 
 from __future__ import annotations
@@ -18,8 +18,12 @@ if TYPE_CHECKING:
 
 
 def get_ctypes() -> ModuleType:
-    """Load the optional native pidfd binding dependency (Spec: [RM-5.2])."""
-    # Optional native dependency: Python's pidfd wrapper needs no ctypes support.
+    """Load ctypes for the native libc leaves (Spec: [RM-5.1], [RM-5.2]).
+
+    Callers: the Linux pidfd binding when Python lacks ``os.pidfd_open`` and
+    the macOS libproc descendant walk in ``weft.core.process_tree``.
+    """
+    # Optional native dependency: only those platform leaves need ctypes.
     return import_module("ctypes")
 
 

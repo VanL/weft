@@ -41,7 +41,11 @@ from weft.core.agents.runtime import (
     normalize_agent_work_item,
     start_agent_runtime_session,
 )
-from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
+from weft.core.resource_monitor import (
+    ResourceMetrics,
+    load_resource_monitor,
+    sample_delay,
+)
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.agent_session_protocol import (
     make_booted_response,
@@ -579,7 +583,9 @@ class HostTaskRunner:
     ) -> RunnerOutcome:
         """Observe one worker and reduce its private terminal handoff.
 
-        Spec: [CC-3.5], [RM-5.2], [EXEC.5]-[EXEC.10].
+        Resource samples follow ``sample_delay`` ([RM-5.1]).
+
+        Spec: [CC-3.5], [RM-5.1], [RM-5.2], [EXEC.5]-[EXEC.10].
         """
 
         monitor = None
@@ -687,7 +693,11 @@ class HostTaskRunner:
                         logger.warning("Failed to collect host resource metrics")
                     else:
                         last_metrics = observed_metrics or last_metrics
-                    next_monitor_at = now + self._monitor_interval
+                    next_monitor_at = now + sample_delay(
+                        self._limits,
+                        interval=self._monitor_interval,
+                        elapsed=now - start_time,
+                    )
                     if not ok:
                         limit_error = violation or "Resource limit exceeded"
                         observations["limit_reached"] = TerminalHandoffEvent(
