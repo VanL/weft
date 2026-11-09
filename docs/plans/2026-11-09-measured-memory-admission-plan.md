@@ -267,7 +267,7 @@ Hidden couplings:
 | New refusal reason `measured_memory_exhausted` (barrier `measured_resource`, ends `fresh_memory_permits`, byte measurements) in `dispatch_refusals` | A (contract addition) | [WT-2a.15] standing refusals are published facts naming their ending; [WT-2a.9] one current contract (reader and producer ship together) |
 | Lane refusals are per lane: the internal lane may name a different gate than the public lane | C (more precise, nothing lost) | [WT-2a.15] "names the evidence" |
 | `admission_state` serve log carries `memory_*` fields and logs once when the refusing gate changes within the same state | C | [WT-4.4] "Observable with standard tools" |
-| After a launch-worker failure on SQLite with no TID ceiling, the public lane waits for the existing one-second retry or an earlier child or launch wake, as on PostgreSQL | A | [WT-4.4] "One path on all platforms"; a launch failure (for example a failed spawn under memory pressure) is evidence a fresh observation should precede the next launch |
+| After a launch-worker failure on SQLite with no TID ceiling, the existing one-second retry (or an earlier child or launch wake) now applies as on PostgreSQL: a public-launch failure delays the public lane, and an internal-launch failure delays both lanes (the internal-failure branch at `weft/core/manager.py` ~3535 is now active because `_admission_enabled` is removed) | A | [WT-4.4] "One path on all platforms"; a launch failure (for example a failed spawn under memory pressure) is evidence a fresh observation should precede the next launch |
 | Each SQLite launch decision makes one `psutil.virtual_memory()` call and, with no TID ceiling, no broker read | N | none needed (no process walk; [WT-4.3] quiet cost unchanged) |
 | Up to W startup notification interests on SQLite (was one) | C | follows from the window; same bound as PostgreSQL |
 | PostgreSQL drain-wait: unchanged for the connection gate; memory refusals never touch it | N | none needed |
@@ -623,3 +623,17 @@ Implementation evidence from the authoring agent (SQLite unless noted):
   Python files clean; repo mypy: no issues in 503 source files;
   `tests/specs`: passed; `bin/check-doc-paths`: OK;
   `bin/check-dom15-fixtures`: OK.
+
+### Cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+plan and implementation at `a946573b` against `8acaddf3`. Verdict: no blocker.
+F1 (nit): the launch-failure register row described only the public-lane
+delay; removing `_admission_enabled` also activates the internal-failure branch
+that delays both lanes. Accepted, fixed (row expanded; no runtime change). The
+reviewer found the separate memory reserve justified (the fixed 10% value
+remains an owner decision), ran all 82 pure admission cases, and a
+12,000-observation differential check against `8acaddf3` that preserved
+PostgreSQL capacity and drain-wait results across known, exhausted and unknown
+memory. Broker/process suites were not rerun by the reviewer. Throughput and
+resource effects are measured by the coordinator's sweep.
