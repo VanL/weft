@@ -21,6 +21,7 @@ import pytest
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_admission_recovery import _reserve_and_checkpoint
+from tests.helpers.manager_dispatch import observe_child_exit
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import MANAGER_CHECKPOINT_RESIDENT_FIELDS, resolve_runtime_config
@@ -142,11 +143,17 @@ def _launch_blocked(
 
 
 def _reap_all(manager: Manager, release: Path) -> None:
-    """Release every blocked task and wait, outside the reactor, for its exit."""
+    """Release every blocked task and wait, outside the reactor, for its exit.
+
+    The exit sentinel is the Manager's only exit evidence and its adapter
+    reports asynchronously ([MA-1.6a]), so each exit is also observed here;
+    otherwise a joined child may still look live to the next turn.
+    """
     release.touch()
-    for child in tuple(manager._child_processes.values()):
+    for tid, child in tuple(manager._child_processes.items()):
         child.process.join(timeout=30.0)
         assert not child.process.is_alive()
+        observe_child_exit(manager, tid)
 
 
 def test_one_turn_publishes_one_checkpoint_for_all_reaped_children(
