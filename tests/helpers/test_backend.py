@@ -294,18 +294,10 @@ def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 a
 
     arg_list = [str(arg) for arg in args]
 
-    for index, arg in enumerate(arg_list):
-        if arg.startswith("--context="):
-            return _resolve_cli_path(arg.split("=", 1)[1], cwd)
-        if arg == "--context" and index + 1 < len(arg_list):
-            return _resolve_cli_path(arg_list[index + 1], cwd)
-
-    if len(arg_list) >= 3 and arg_list[0] == "manager" and arg_list[1] == "start":
-        spec_path = _resolve_cli_path(arg_list[2], cwd)
-        spec_context = _taskspec_context_root(spec_path)
-        if spec_context is not None:
-            return spec_context
-
+    # A stored TaskSpec bound to a `weft_context` runs there even when
+    # `--context` names another root, as the product resolves the runtime root
+    # (`weft/commands/submission.py::_resolve_submission_runtime_root`); the
+    # root the run actually uses is the one to provision.
     if arg_list and arg_list[0] == "run":
         for index, arg in enumerate(arg_list[1:], start=1):
             if arg.startswith("--spec="):
@@ -320,6 +312,18 @@ def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 a
                 if spec_context is not None:
                     return spec_context
                 break
+
+    for index, arg in enumerate(arg_list):
+        if arg.startswith("--context="):
+            return _resolve_cli_path(arg.split("=", 1)[1], cwd)
+        if arg == "--context" and index + 1 < len(arg_list):
+            return _resolve_cli_path(arg_list[index + 1], cwd)
+
+    if len(arg_list) >= 3 and arg_list[0] == "manager" and arg_list[1] == "start":
+        spec_path = _resolve_cli_path(arg_list[2], cwd)
+        spec_context = _taskspec_context_root(spec_path)
+        if spec_context is not None:
+            return spec_context
 
     if arg_list and arg_list[0] == "init":
         for arg in arg_list[1:]:

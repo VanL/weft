@@ -16,16 +16,22 @@ import tempfile
 import threading
 import time
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
+from unittest import mock
 from weakref import WeakValueDictionary
 
 import psutil
 
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
-from tests.helpers.test_backend import cleanup_prepared_roots, prepare_project_root
+from tests.helpers.test_backend import (
+    cleanup_postgres_schema_for_root,
+    cleanup_prepared_roots,
+    prepare_project_root,
+)
 from weft._constants import (
     CONTROL_STOP,
     INTERNAL_SERVICE_KEYS,
@@ -135,6 +141,7 @@ class WeftTestHarness:
         self._registered_pid_create_times: dict[int, float | None] = {}
         self._registered_tids: set[str] = set()
         self._registered_manager_tids: set[str] = set()
+        self._registered_context_roots: dict[Path, dict[str, str]] = {}
         self._inline_managers: list[
             tuple[Manager, threading.Thread, threading.Event]
         ] = []
@@ -252,6 +259,31 @@ class WeftTestHarness:
     def register_manager_tid(self, tid: str) -> None:
         if tid:
             self._registered_manager_tids.add(tid)
+
+    def register_context_root(
+        self, root: Path, *, env: Mapping[str, str] | None = None
+    ) -> None:
+        """Record a context root a CLI call provisioned, for teardown to stop.
+
+        A CLI call can start a Manager, and so the context's internal
+        services, in a context other than the harness's own: a run from a
+        foreign working directory, or a TaskSpec bound to another
+        ``weft_context``. Services outlive their Manager ([MA-1] item 7), so
+        teardown stops each recorded context as ``weft system stop`` would.
+        ``env`` is the environment the CLI ran with; teardown resolves the
+        root through it, so it reads the broker target, and on PostgreSQL the
+        schema, that the CLI used. The harness's own root is not recorded.
+
+        Spec: docs/specifications/08-Testing_Strategy.md [TS-0];
+        docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
+        """
+
+        resolved = root.expanduser().resolve()
+        if resolved == Path(self.root).resolve():
+            return
+        self._registered_context_roots.setdefault(
+            resolved, dict(os.environ if env is None else env)
+        )
 
     def registered_tids(self) -> set[str]:
         return set(self._registered_tids)
@@ -768,6 +800,7 @@ class WeftTestHarness:
             # Driver closure must precede any registry or database disposal.
             # BaseTask.cleanup() may return while an active turn still owns it.
             self._stop_inline_managers()
+            self._stop_registered_contexts()
             if preserve_database:
                 self._cleanup_preserving_database()
                 self._detach_tempdir_finalizer()
@@ -786,6 +819,9 @@ class WeftTestHarness:
                 self._wait_for_database_files_releasable()
                 self._remove_database_files()
                 cleanup_prepared_roots(self.root)
+                for root, env in sorted(self._registered_context_roots.items()):
+                    cleanup_postgres_schema_for_root(root, env=env)
+                self._registered_context_roots.clear()
         finally:
             self._restore_cwd()
             self._restore_environment()
@@ -1054,12 +1090,15 @@ class WeftTestHarness:
 
         return sorted(set(candidate_tids))
 
-    def _list_active_manager_records(self) -> list[dict[str, object]]:
+    def _list_active_manager_records(
+        self, context: WeftContext | None = None
+    ) -> list[dict[str, object]]:
+        context = self.context if context is None else context
         queue = Queue(
             WEFT_SERVICES_REGISTRY_QUEUE,
-            db_path=self.context.broker_target,
+            db_path=context.broker_target,
             persistent=False,
-            config=self.context.broker_config,
+            config=context.broker_config,
         )
         latest: dict[str, tuple[dict[str, object], int]] = {}
         try:
@@ -1067,7 +1106,7 @@ class WeftTestHarness:
                 projected = project_manager_service_record(
                     payload,
                     timestamp=timestamp,
-                    service_key=manager_service_key(self.context),
+                    service_key=manager_service_key(context),
                 )
                 if projected is None:
                     continue
@@ -1402,16 +1441,119 @@ class WeftTestHarness:
                 self._terminate_pid(pid)
         self._wait_for_registered_pids_to_exit(timeout=timeout)
 
+    def _stop_registered_contexts(self) -> None:
+        """Stop each recorded second context as ``weft system stop`` stops it.
+
+        The harness's own context is stopped by its Manager and service paths;
+        a second context a CLI call provisioned has no other owner. A context
+        with no live Manager or internal-service process is skipped. Otherwise
+        its processes are named first, ``stop_system`` stops the Manager and
+        then the services by registry record, and a process that outlives the
+        stop window is terminated; every escalation, unreachable record,
+        failure and termination is recorded in the cleanup diagnostics.
+
+        Spec: docs/specifications/08-Testing_Strategy.md [TS-0];
+        docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
+        """
+
+        stop_timeout = max(6.0, min(self._manager_timeout, 10.0))
+        for root, env in sorted(self._registered_context_roots.items()):
+            try:
+                context = self._registered_context(root, env)
+                live = [] if context is None else self._live_context_processes(context)
+            except (BrokerError, OSError, WeftError) as exc:
+                self._record_cleanup_diagnostic(f"context {root} unreadable: {exc}")
+                continue
+            if context is None or not live:
+                continue
+            try:
+                result = system_cmd.stop_system(
+                    context, timeout=stop_timeout, force=True
+                )
+            except WeftError as exc:
+                self._record_cleanup_diagnostic(
+                    f"system stop of context {root} failed: {exc}"
+                )
+            else:
+                if result.escalated:
+                    self._record_cleanup_diagnostic(
+                        f"system stop of context {root} escalated "
+                        f"{list(result.escalated)}"
+                    )
+                if result.unreachable:
+                    self._record_cleanup_diagnostic(
+                        f"system stop of context {root} found unreachable "
+                        f"services {list(result.unreachable)}"
+                    )
+            deadline = time.monotonic() + stop_timeout
+            survivors = live
+            while survivors and time.monotonic() < deadline:
+                # psutil has no event-based exit API for processes that are not
+                # this process's children; polling is required, as in
+                # `_wait_for_registered_pids_to_exit`.
+                time.sleep(0.05)
+                survivors = [
+                    (pid, create_time)
+                    for pid, create_time in survivors
+                    if self._pid_matches_mapping_identity(pid, create_time)
+                ]
+            for pid, create_time in survivors:
+                self.register_pid(pid, kind="managed", create_time=create_time)
+                self._record_cleanup_diagnostic(
+                    f"terminated pid {pid} of context {root} after system stop"
+                )
+                self._terminate_pid(pid)
+
+    @staticmethod
+    def _registered_context(root: Path, env: Mapping[str, str]) -> WeftContext | None:
+        """Resolve a recorded root as its CLI call did, or ``None`` if unused.
+
+        Resolution runs under the recorded environment, so directory-name and
+        backend settings select the project config and PostgreSQL schema the
+        CLI used. A root that is gone, or a file-backed root whose database
+        was never created, holds no runtime; resolving or reading it would
+        create one.
+        """
+
+        if not root.is_dir():
+            return None
+        with mock.patch.dict(os.environ, env, clear=True):
+            context = build_context(
+                spec_context=root, create_dirs=False, create_database=False
+            )
+        if context.database_path is not None and not context.database_path.exists():
+            return None
+        return context
+
+    def _live_context_processes(
+        self, context: WeftContext
+    ) -> list[tuple[int, float | None]]:
+        """Name the live Manager and internal-service host processes of a context."""
+
+        processes = [
+            (pid, create_time)
+            for record in self._list_active_manager_records(context)
+            for pid, create_time in self._mapping_host_processes(record)
+            if not self._should_skip_pid(pid)
+            and self._pid_matches_mapping_identity(pid, create_time)
+        ]
+        for service_processes in self._live_internal_service_processes(
+            context
+        ).values():
+            processes.extend(service_processes)
+        return processes
+
     def _live_internal_service_processes(
-        self,
+        self, context: WeftContext | None = None
     ) -> dict[str, list[tuple[int, float | None]]]:
         """Name live scoped host processes of each live internal service row."""
 
+        context = self.context if context is None else context
         queue = Queue(
             WEFT_SERVICES_REGISTRY_QUEUE,
-            db_path=self.context.broker_target,
+            db_path=context.broker_target,
             persistent=False,
-            config=self.context.broker_config,
+            config=context.broker_config,
         )
         try:
             read = collect_service_owner_records(

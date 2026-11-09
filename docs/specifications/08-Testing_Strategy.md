@@ -11,7 +11,11 @@ harnesses:
 
 - `.envrc` and the in-repo `.venv` keep verification deterministic.
 - `WeftTestHarness` in `tests/helpers/weft_harness.py` owns isolated project
-  roots, live runtime tracking, and cleanup.
+  roots, live runtime tracking, and cleanup. Cleanup also stops, as
+  `weft system stop` does, every second context a `run_cli(harness=...)` call
+  provisioned (a run from a foreign directory, or a TaskSpec bound to another
+  `weft_context`), since internal services outlive their Manager ([MA-1]
+  item 7).
 - `run_cli()` in `tests/conftest.py` drives the real subprocess CLI surface.
 - `broker_env`, `queue_factory`, and `task_factory` in `tests/conftest.py`
   provide broker-backed fixtures for queue and task tests.

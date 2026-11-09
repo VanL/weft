@@ -467,7 +467,13 @@ def run_cli(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-213] exception
         cmd = [str(python_path), "-m", "weft", *map(str, args)]
 
     if prepare_root:
-        prepare_cli_root(args, cwd=cwd, env=env_vars)
+        context_root = prepare_cli_root(args, cwd=cwd, env=env_vars)
+        if harness is not None:
+            # A call may start a Manager in a second context; the harness stops
+            # it at teardown [TS-0]. A root left unprovisioned is not recorded:
+            # on PostgreSQL it resolves to the shared default schema, where a
+            # stop could reach another test's services.
+            harness.register_context_root(context_root, env=env_vars)
 
     try:
         completed = subprocess.run(
