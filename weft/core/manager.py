@@ -75,6 +75,7 @@ from weft._constants import (
     MANAGED_SERVICE_STABLE_AUDIT_INTERVAL_SECONDS,
     MANAGER_ADMISSION_RECHECK_SECONDS,
     MANAGER_ADMISSION_REFRESH_BATCH_SIZE,
+    MANAGER_CHECKPOINT_RESIDENT_FIELDS,
     MANAGER_CHILD_INBOX_SEED_ATTEMPTS,
     MANAGER_CHILD_INBOX_SEED_RETRY_DELAY_BASE_SECONDS,
     MANAGER_CHILD_LAUNCH_WORKER_LANE,
@@ -691,6 +692,11 @@ class Manager(ServiceTask):
         self._scheduler_residents: dict[str, dict[str, Any]] = {}
         self._family_scheduler = FamilyScheduler()
         self._scheduler_checkpoint_dirty = False
+        # The checkpoint's unit of work [MF-5]: "idle" outside a reactor turn
+        # (changes publish at once); "open" during a turn (changes publish
+        # once, when it ends); "failed" after a publication failed during the
+        # turn (the next turn retries).
+        self._scheduler_checkpoint_turn: Literal["idle", "open", "failed"] = "idle"
         self._scheduler_undurable: set[str] = set()
         self._skipped_custody: set[tuple[str, int]] = set()
         self._bootstrap_skipped: dict[str, str] = {}
@@ -1296,7 +1302,14 @@ class Manager(ServiceTask):
         return super()._queue_counts_as_wait_activity(config)
 
     def _build_tid_state_payload(self) -> dict[str, Any]:
-        """Checkpoint unresolved launches and finite paths [MF-5], [MANAGER.11]."""
+        """Checkpoint unresolved launches and finite paths [MF-5], [MANAGER.11].
+
+        Each resident publishes only the custody evidence the Manager records
+        (``MANAGER_CHECKPOINT_RESIDENT_FIELDS``); fields it adopted from the
+        task's own snapshot stay in that task's queue. The payload shares the
+        reactor's live values without copying them: its only consumer,
+        ``_register_tid_state``, serializes it at once on this thread.
+        """
         payload = super()._build_tid_state_payload()
         payload["role"] = "manager"
         scheduler = getattr(self, "_family_scheduler", None)
@@ -1304,17 +1317,22 @@ class Manager(ServiceTask):
             "stacks": [list(stack) for stack in scheduler.frontiers]
             if scheduler
             else [],
-            "residents": copy.deepcopy(getattr(self, "_scheduler_residents", {})),
+            "residents": {
+                tid: {
+                    field: evidence[field]
+                    for field in MANAGER_CHECKPOINT_RESIDENT_FIELDS
+                    if field in evidence
+                }
+                for tid, evidence in getattr(self, "_scheduler_residents", {}).items()
+            },
             "startup_feedback_tids": list(getattr(self, "_startup_feedback", {})),
             "source_queue": self._queue_names["inbox"],
             "reserved_queue": self._queue_names["reserved"],
         }
-        payload["dispatch_refusals"] = copy.deepcopy(
-            getattr(
-                self,
-                "_dispatch_observation",
-                {"assessment": "unavailable", "items": []},
-            )
+        payload["dispatch_refusals"] = getattr(
+            self,
+            "_dispatch_observation",
+            {"assessment": "unavailable", "items": []},
         )
         return payload
 
@@ -1757,7 +1775,43 @@ class Manager(ServiceTask):
                 for tid, evidence in self._scheduler_residents.items()
                 if evidence.get("host_processes")
             )
+        elif self._scheduler_checkpoint_turn == "open":
+            self._scheduler_checkpoint_turn = "failed"
         return written
+
+    def _commit_scheduler_checkpoint(self) -> None:
+        """Publish pending non-barrier checkpoint changes once per turn [MF-5].
+
+        A Manager reactor turn is the checkpoint's unit of work: changes made
+        during the turn publish in one complete snapshot when it ends.
+        Outside a turn (cleanup, stopping turns) they publish now. Barriers
+        publish at once: pre-launch custody and bootstrap adoption call
+        ``_publish_scheduler_checkpoint`` directly, and undurable process
+        receipts publish before the turn's ordinary dispatch.
+
+        Spec: [MF-5], [OBS.6a], [MANAGER.11]
+        """
+        if (
+            self._scheduler_checkpoint_dirty
+            and self._scheduler_checkpoint_turn == "idle"
+        ):
+            self._publish_scheduler_checkpoint()
+
+    def _publish_undurable_receipts(self) -> None:
+        """Publish undurable process receipts before a turn's dispatch [MA-1.8].
+
+        Undurable receipts hold ordinary dispatch, so they publish ahead of
+        it rather than when the turn ends. A turn whose publication already
+        failed leaves the retry to the next turn.
+
+        Spec: [MA-1.8], [MANAGER.11]
+        """
+        if (
+            self._scheduler_undurable
+            and self._scheduler_checkpoint_dirty
+            and self._scheduler_checkpoint_turn == "open"
+        ):
+            self._publish_scheduler_checkpoint()
 
     def _checkpoint_admission_launch(self, request: _ManagerChildLaunchRequest) -> None:
         """Persist reservation custody before OS process creation [MANAGER.11]."""
@@ -1789,7 +1843,12 @@ class Manager(ServiceTask):
     def _checkpoint_spawned_admission(
         self, result: _ManagerChildLaunchResult
     ) -> dict[str, Any]:
-        """Retain exact process identity before startup feedback releases [MF-5]."""
+        """Retain exact process identity before startup feedback releases [MF-5].
+
+        The receipt stays undurable, holding ordinary dispatch and startup
+        release, until the turn's checkpoint publication succeeds
+        [MANAGER.11].
+        """
         identity = result.request.runtime_identity
         assert identity is not None and result.process is not None
         evidence = self._scheduler_residents[identity.tid]
@@ -1807,7 +1866,8 @@ class Manager(ServiceTask):
             self._startup_feedback.setdefault(
                 identity.tid, record or _ManagerStartupFeedback()
             )
-        self._publish_scheduler_checkpoint()
+        self._scheduler_checkpoint_dirty = True
+        self._commit_scheduler_checkpoint()
         return {
             key: copy.deepcopy(value)
             for key, value in evidence.items()
@@ -2883,8 +2943,7 @@ class Manager(ServiceTask):
                         evidence = self._scheduler_residents.pop(tid)
                         self._scheduler_residents[tid] = evidence
             self._retire_scheduler_residents(selected)
-            if self._scheduler_checkpoint_dirty:
-                self._publish_scheduler_checkpoint()
+            self._commit_scheduler_checkpoint()
         except (BrokerError, OSError, RuntimeError, ValueError, TypeError, KeyError):
             logger.debug("Unable to reconcile scheduler evidence", exc_info=True)
         else:
@@ -3256,7 +3315,8 @@ class Manager(ServiceTask):
             self._release_startup_feedback(tid)
             changed = True
         if changed:
-            self._publish_scheduler_checkpoint()
+            self._scheduler_checkpoint_dirty = True
+            self._commit_scheduler_checkpoint()
             self._family_candidate = None
             self._clear_admission_retry()
 
@@ -6597,8 +6657,7 @@ class Manager(ServiceTask):
                 self._advance_launch_custody(
                     tid, latest[1] if latest else None, broker=broker
                 )
-            if self._scheduler_checkpoint_dirty:
-                self._publish_scheduler_checkpoint()
+            self._commit_scheduler_checkpoint()
         except (
             BrokerError,
             DatabaseError,
@@ -9370,10 +9429,20 @@ class Manager(ServiceTask):
         return timeouts
 
     def _process_reactor_turn(self) -> None:
-        """Run one Manager reactor turn."""
+        """Run one Manager reactor turn; its checkpoint commits when it ends.
+
+        Spec: [MF-5], [MA-1.8]
+        """
 
         self._drain_child_sentinel_events()
-        self._timed_manager_call("turn", self._process_manager_reactor_turn)
+        self._scheduler_checkpoint_turn = "open"
+        try:
+            self._timed_manager_call("turn", self._process_manager_reactor_turn)
+        finally:
+            failed = self._scheduler_checkpoint_turn == "failed"
+            self._scheduler_checkpoint_turn = "idle"
+            if not failed:
+                self._commit_scheduler_checkpoint()
         self._assess_dispatch_refusals()
 
     def _wait_for_reactor_activity(self, timeout: float | None) -> None:
@@ -9440,6 +9509,7 @@ class Manager(ServiceTask):
                 self._continue_shutdown_drain()
                 self._drain_worker_results()
                 return
+        self._publish_undurable_receipts()
         # Reuse the completed turn sweep only during ordinary delivery [MA-3].
         self._dispatch_cleanup_scope = True
         try:

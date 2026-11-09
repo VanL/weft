@@ -33,6 +33,8 @@ always be rolled back from the public request queue.
 
 ## Related Plans
 
+- [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes undurable process receipts before a turn's ordinary dispatch and the rest of the turn's checkpoint changes once when it ends; the [MA-1.8] dispatch barrier is unchanged ([MA-1.8], [MF-5]).
+
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
