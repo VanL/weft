@@ -618,3 +618,13 @@ row check because drains launch one child at a time, so a second service
 request waits pending; site C is redundant with B and is deleted rather
 than conditioned; the aged path must gate on host-pid death to avoid
 PINGs piling up on a dead task's `ctrl_in`.
+
+### Round 2 verification (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to F1/F2 over `9f7e0207..1fc4cabc`. Verdict: PASS, no new defect. The
+aged-row block keeps a probe key only when the helper returns a candidate, so
+the existing sweep retires a dead owner's pending probe; an in-memory run of
+the repository methods kept the probe on `9f7e0207` and removed it on
+`1fc4cabc`. Register row 4 matches the live reconciliation paths. Full pytest
+was not rerun by the reviewer. Review loop closed.
