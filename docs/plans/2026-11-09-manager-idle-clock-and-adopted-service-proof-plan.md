@@ -782,6 +782,34 @@ C2 revision (owner decision B), 2026-11-09:
   format, repo mypy (499 files), `bin/ruff_suppression_index.py --check`,
   `bin/check-doc-paths`: clean.
 
+Runtime probes on `9a408b78` (refresh design), 2026-11-09. Each probe stops
+its context in `finally`; a read-only hook logged every owner-row refresh,
+every Manager service PONG probe and service spawn request, every idle-clock
+write, and the Manager's service state every 5 s:
+
+- Clean handoff, retention 30 s and refresh interval 10 s (the hook shortened
+  both, keeping their ratio), Manager 2 idle timeout 150 s: each service
+  re-stamped its row every 10.0 s; Manager 2 sent no PONG probe, enqueued
+  no service request, never wrote its idle clock after construction, kept
+  `uncertain_attempts` at 0 and one owner TID per service (Manager 1's), had
+  no children, and exited at 150.1 s. The context stop found exactly the
+  three services Manager 1 launched.
+- Clean handoff, natural retention (300 s, refresh 100 s), Manager 2 idle
+  timeout 600 s: refreshes every 100.0 s; the same zero counts and
+  `uncertain_attempts` 0 through 596 s; Manager 2 exited at 600.4 s; the
+  stop found Manager 1's three services.
+- Autostart crash adoption, natural retention: Manager 1 launched an
+  `ensure` autostart task (`/bin/sleep 900`) and was killed with SIGKILL
+  0.5 s later; the task re-stamped its row at about 100, 200 and 300 s.
+  Manager 2 started 320 s after the kill (321 s after the launch) and saw a
+  20.1 s-old row; 40 s later the only owner was still the original, one
+  task process ran, no spawn request was queued, and Manager 2 sent no
+  PONG probe. It enqueued only a heartbeat: Manager 1's heartbeat, with no
+  work and no live Manager, had idle-exited at about 300 s, as designed.
+- A first autostart run used an invalid command (`process_target` with an
+  argument inside it); every launch failed at once and the `ensure` policy
+  relaunched it about every 0.4 s, so it tested nothing and is discarded.
+
 ## 9. Out of Scope
 
 - An adopted service that dies, and so stops refreshing, is not replaced
