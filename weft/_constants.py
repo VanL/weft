@@ -834,6 +834,27 @@ MANAGER_FAMILY_CLASSIFY_PAGE_SIZE: Final[int] = 64
 MANAGER_ADMISSION_REFRESH_BATCH_SIZE: Final[int] = 16
 """Maximum task snapshots reconciled per admission maintenance tick [MA-1.8]."""
 
+MANAGER_CHECKPOINT_RESIDENT_FIELDS: Final[tuple[str, ...]] = (
+    "context",
+    "root_tid",
+    "submitter_tid",
+    "ancestry_tids",
+    "scheduling_class",
+    "connection_owner",
+    "hostname",
+    "host_processes",
+    "launched_ns",
+    "source_queue",
+    "reserved_queue",
+    "request_id",
+)
+"""Resident evidence a Manager checkpoint publishes [MF-5], [OBS.6].
+
+Lineage, scheduling class, scoped process evidence and the exact reservation
+reference: the fields the Manager itself records. Fields adopted from a
+resident's own task snapshot stay in that task's ``weft.state.tasks.<tid>``.
+"""
+
 MANAGER_ADMISSION_PROGRESS_TIMEOUT_SECONDS: Final[float] = 30.0
 """PG drain-idle assessment budget, not a task timeout ([MA-1.8])."""
 
