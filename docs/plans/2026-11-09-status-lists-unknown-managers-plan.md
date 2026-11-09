@@ -161,6 +161,7 @@ in code (`_select_active_manager_from_snapshot` requires `live` or
 | Status JSON and plain text carry `liveness` (`live` or `unknown`) on `active` Manager rows (JSON had `null`; plain text had no line) | C | Additive observation; [CLI-1.2.1] |
 | Python `SystemStatusSnapshot.managers[i].liveness` is filled for `active` rows, so it no longer equals the `client.managers.status(tid)` snapshot field-for-field (that one keeps `liveness: None`) | C | Additive on status; manager status unchanged; [PY-2] |
 | Status service rows report `desired: true` while an unknown, unexpired Manager row is listed | C | `desired` follows the listed active Managers; [WT-2a.13] |
+| A newly retained unknown Manager's `internal_reserved` evidence now feeds status service rows (`weft/commands/system.py` ~1126): with no competing evidence, a service can change from `unknown`/`none` to `reserved`/`internal-spawn-reserved`, with queue and Manager provenance | C | [WT-4.1] "Queues carry facts; processes carry hints": the reserved row is a queue fact; read-only |
 | Status stays write-free (no PING) | N | [WT-2a.2]; [CLI-1.2.1] |
 | Selection, leadership, startup and `weft manager list/status` are unchanged | N | [MA-1] "not leadership authority" |
 
@@ -355,3 +356,17 @@ Execution (2026-11-09, branch `perf/fix-status-unknown-managers` from 08c2f87b):
 - Gates: `ruff check .` clean; `ruff format --check` on touched Python files
   clean; repo mypy command clean (499 files); `bin/check-doc-paths`,
   `bin/check-dom15-fixtures`, `tests/specs` clean.
+
+### Cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+plan and implementation at `dded29e2` against `08c2f87b`. Verdict: no blocker.
+F1 (P3): the register omitted the service-output effect of retained unknown
+Managers' `internal_reserved` evidence. Accepted, fixed (C row added; no
+runtime change). The reviewer confirmed the three-valued evidence informs
+observation while selection still requires positive proof, and ran an
+in-memory check of the actual disposition functions over 96 predicate
+combinations: non-observer behavior matched baseline; observer behavior
+matched retention, labeling and no-PING expectations. Broker-backed tests and
+the mutation suite were not rerun by the reviewer (read-only). Review loop
+closed.
