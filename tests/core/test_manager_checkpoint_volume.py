@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -23,6 +24,7 @@ from tests.core.test_admission_recovery import _reserve_and_checkpoint
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import MANAGER_CHECKPOINT_RESIDENT_FIELDS, resolve_runtime_config
+from weft.core import manager as manager_mod
 from weft.core.manager import Manager, _ManagerChildLaunchResult
 from weft.core.manager_runtime import build_manager_spec
 from weft.core.spawn_requests import submit_spawn_request
@@ -205,13 +207,34 @@ def test_checkpoint_appends_per_launch_stay_below_one_per_custody_event(
 
 
 def test_launch_turn_publishes_receipt_and_successor_recovers_from_slim_checkpoint(
-    volume_manager: Manager, weft_harness: WeftTestHarness, tmp_path: Path
+    volume_manager: Manager,
+    weft_harness: WeftTestHarness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The receipt is durable when its turn ends; recovery needs only custody fields."""
+    """The receipt is durable when its turn ends; recovery needs only custody fields.
+
+    The measured turn is the one that commits the launch result. Bootstrap and
+    pre-launch custody are barriers that publish at once ([MA-1.8], [MF-5]),
+    so they happen in an earlier, unmeasured turn: the launch worker is held
+    until the request has been selected, or a fast launch would let its
+    commit share the selecting turn and add both barrier appends to the count.
+    """
     manager = volume_manager
     context = weft_harness.context
     ready, release = tmp_path / "ready", tmp_path / "release"
+    selected = threading.Event()
+    launch_process = manager_mod.launch_task_process
+
+    def launch_after_selection(*args: Any, **kwargs: Any) -> Any:
+        assert selected.wait(timeout=30.0), "selection turn never finished"
+        return launch_process(*args, **kwargs)
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", launch_after_selection)
     tid = _submit_blocked(weft_harness, ready, release)
+    _drive(manager, lambda: tid in manager._active_child_launches)
+    assert tid not in manager._child_processes
+    selected.set()
     commit_turn_appends: int | None = None
     deadline = time.monotonic() + 60.0
     while commit_turn_appends is None:
