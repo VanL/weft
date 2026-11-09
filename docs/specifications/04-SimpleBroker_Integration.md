@@ -197,12 +197,16 @@ The bounded observation owners in `weft/commands/_result_wait.py`, `result.py`,
 until their existing close/finally boundary. A runtime task collecting
 only a final PostgreSQL result with routes known at entry retains its queue
 activity subscription while waiting and owns a data connection only for
-each observation pass. It releases that pass's lease
-before waiting and preserves any caller-owned session. The next wake
-reacquires a data connection for fresh evidence. Regression coverage lives in
+each observation pass. It keeps one reader Queue for the whole wait and
+closes that Queue's session lease after each pass, before waiting, and
+preserves any caller-owned session. The next wake reacquires a data
+connection through the same reader for fresh evidence, so SimpleBroker's
+first-use facade validation runs once per wait, not once per pass.
+Regression coverage lives in
 `tests/commands/test_observation_connections.py` and
 `tests/system/test_admission_stress.py`. See the
-[nested admission load plan](../plans/2026-11-07-nested-admission-load-plan.md)
+[nested admission load plan](../plans/2026-11-07-nested-admission-load-plan.md),
+[the task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md),
 and [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md).
 
 Task control observation in `weft/commands/tasks.py` also lends its owned log
@@ -877,6 +881,7 @@ connection-pooling designs are tracked in the companion doc:
 
 ## Related Plans
 
+- [Task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md) measures which process holds which PostgreSQL connection per task phase and keeps one result reader per wait ([SB-0.4]).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) governs the measured-admission and bounded-family implementation.

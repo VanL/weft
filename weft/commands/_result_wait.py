@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -981,10 +981,19 @@ def _iter_consuming_result(
         and not (emit_stream or include_stream_events or follow_lifecycle)
     )
     with command_resource_scope() as resources:
-        lease = resources.enter_context(command_resource_scope())
         names = _result_observation_names(
             tid, materialized, include_history=include_history
         )
+        # One reader facade serves every pass. Closing it after each pass ends
+        # its session lease, so no data connection spans a wait; the next pass
+        # reacquires through the same facade and SimpleBroker's first-use
+        # facade validation runs once per wait, not once per pass [SB-0.4].
+        reader = (
+            resources.enter_context(context.queue(names[0], persistent=True))
+            if release_while_waiting
+            else None
+        )
+        lease = resources.enter_context(command_resource_scope())
         observation = lease.enter_context(
             result_observation(
                 context, names, retain_connections=not release_while_waiting
@@ -993,9 +1002,7 @@ def _iter_consuming_result(
         while True:
             queues, monitor = observation
             with (
-                context.queue(names[0], persistent=True)
-                if release_while_waiting
-                else nullcontext(queues[names[0]])
+                closing(reader) if reader is not None else nullcontext(queues[names[0]])
             ) as connection_owner:
                 with connection_owner.get_connection() as broker:
                     materialized, fresh = _acquire_result_observation(
