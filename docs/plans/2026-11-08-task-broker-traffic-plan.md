@@ -450,3 +450,13 @@ plan+implementation at 6a3230ae against 08c2f87b. Verdict: blocker: F1, F2.
 | F1 | P2 | Non-host runtime authority could publish after the result: `_register_outcome_runtime()` deferred its handle edge inside the turn step while `_commit_work_outcome()` wrote the output first (identity and outcome in one drain, or a handle supplied only with the outcome) | Accepted, fixed: `BaseTask._task_state_barrier()` appends what a step holds; `_register_outcome_runtime` ends with it for every runner; live stream frames and agent-session close are preceded by it; [OBS.6a] says a result or stream frame follows the runtime authority it was produced under. New parametrized test `test_outcome_runtime_authority_is_visible_when_the_result_is` (RED on 6a3230ae for the authority-only-in-outcome case). Register row added |
 | F2 | P2 | The coalescing scope (the whole reactor turn) included blocking interactive work: session identity and `running` were held across `session.send()` and output drains, so the register's "milliseconds; no wait occurs" premise was false | Accepted, fixed: the reactor turn no longer opens a step; steps are `_begin_work_item` (ends before the worker lane starts) and Consumer's `_drain_worker_results` (interactive work never uses worker lanes); barrier before agent-session close. Register row corrected. New test `test_interactive_session_identity_is_published_before_first_input` (RED on 6a3230ae: snapshot still `created` at the first input) |
 | F3 | P3 | The persistent completion test checked only the newest snapshot, so duplicate appends passed; the host release means persistent completion appends release plus final state | Accepted, fixed: the test asserts the whole row sequence (start, worker identity only with worker authority, one release, exactly one final-state row); plan counts aligned (section 7). On 6a3230ae it also failed intermittently under -n 4, because the turn step merged the start row with worker identity |
+
+### Cross-family review, round 2
+
+Tier 1, Codex (codex exec -s read-only, reasoning effort high), 2026-11-08,
+round-2 verification scoped to F1 and F2 over `6a3230ae..585f293d`.
+Verdict: PASS, no new defect in the fix delta. The reviewer confirmed the
+pre-result barrier covers both the host-worker release and the generic handle
+path, that interactive setup, `send()` and output drains run outside every
+coalescing step, and, by tracing 6a3230ae, that both new tests would fail on
+the round-1 code.
