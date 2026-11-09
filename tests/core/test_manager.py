@@ -8115,6 +8115,109 @@ def test_manager_leadership_ping_probe_is_event_routed_and_cadence_owned(
     assert lower_tid not in manager._leader_probe_pending
 
 
+@pytest.mark.parametrize("peer_claims_ping", [False, True])
+def test_manager_leadership_retracts_an_unanswered_ping(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    peer_claims_ping: bool,
+) -> None:
+    """A leadership PING that ends unanswered leaves the peer's queue clean [MF-3].
+
+    Pending or claimed, the PING is deleted by exact ID. A late PONG reaches
+    this Manager's own ``ctrl_in``, where it matches no probe and is consumed;
+    the leadership result stays ``ping_unanswered`` ([MA-1]).
+    """
+
+    manager, make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    ctrl_out_name = f"T{lower_tid}.ctrl_out"
+    record = _manager_service_record(
+        manager,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=ctrl_in_name,
+        ctrl_out=ctrl_out_name,
+    )
+    peer_ctrl_in = make_queue(ctrl_in_name)
+
+    proof = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert proof.reason == "ping_pending"
+    pending = manager._leader_probe_pending[lower_tid]
+    if peer_claims_ping:
+        assert peer_ctrl_in.read_one() is not None
+
+    manager._loop_iteration += 1
+    unanswered = manager._manager_pong_dispatch_proof(
+        record,
+        now_ns=time.time_ns(),
+        consume_stored=True,
+        resolve_unanswered=True,
+    )
+
+    assert unanswered.liveness == "unknown"
+    assert unanswered.reason == "ping_unanswered"
+    assert peer_ctrl_in.peek_many(limit=10, include_claimed=True) == []
+
+    _write_manager_pong(
+        manager,
+        make_queue,
+        pending,
+        ctrl_in_name=ctrl_in_name,
+        ctrl_out_name=ctrl_out_name,
+    )
+    assert make_queue(manager._queue_names["ctrl_in"]).peek_many(limit=10) == []
+    assert lower_tid not in manager._leader_probe_pending
+    cached = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert cached.reason == "ping_unanswered"
+
+
+@pytest.mark.parametrize("abandon", ["row_changed", "peer_absent"])
+def test_manager_leadership_retracts_an_abandoned_ping(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    abandon: str,
+) -> None:
+    """A pending leadership PING dropped without a PONG is deleted [MF-3], [MA-1].
+
+    The probe is abandoned when the peer's registry row changes or when a
+    complete scan no longer observes the peer.
+    """
+
+    manager, make_queue = manager_setup
+    lower_tid = str(int(manager.tid) - 1)
+    ctrl_in_name = f"T{lower_tid}.ctrl_in"
+    record = _manager_service_record(
+        manager,
+        tid=lower_tid,
+        runtime_handle=_external_supervisor_runtime_handle(),
+        ctrl_in=ctrl_in_name,
+        ctrl_out=f"T{lower_tid}.ctrl_out",
+    )
+    peer_ctrl_in = make_queue(ctrl_in_name)
+    proof = manager._manager_pong_dispatch_proof(record, now_ns=time.time_ns())
+    assert proof.reason == "ping_pending"
+    pending = manager._leader_probe_pending[lower_tid]
+    assert pending.ping_id is not None
+
+    if abandon == "row_changed":
+        changed_timestamp = int(record["timestamp"]) + 1
+        manager._manager_pong_dispatch_proof(
+            {**record, "timestamp": changed_timestamp, "_timestamp": changed_timestamp},
+            now_ns=time.time_ns(),
+        )
+    else:
+        manager._active_dispatch_manager_records(
+            consume_stored=False,
+            resolve_unanswered=False,
+            retire_absent=True,
+        )
+        assert lower_tid not in manager._leader_probe_pending
+
+    assert (
+        peer_ctrl_in.peek_one(exact_timestamp=pending.ping_id, include_claimed=True)
+        is None
+    )
+
+
 def test_manager_leadership_stores_pong_until_owning_reducer_runs(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
 ) -> None:

@@ -4,6 +4,7 @@ Spec references:
 - docs/specifications/04-SimpleBroker_Integration.md [SB-0.4]
 - docs/specifications/05-Message_Flow_and_State.md [MF-3]
 - docs/specifications/07-System_Invariants.md [MANAGER.8]
+- docs/specifications/10-CLI_Interface.md [CLI-1.2.1] (status-command PING round)
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from simplebroker.ext import BrokerError
@@ -40,6 +41,15 @@ class MatchedPong:
     payload: dict[str, Any]
     observed_at: int
     request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class KeyedPingTarget:
+    """One target of a keyed PING round: its TID, ``ctrl_in`` and request key."""
+
+    tid: str
+    ctrl_in_name: str
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +81,17 @@ def coerce_pong_response(
     payload = decode_control_object(raw)
     if payload is None:
         return None
+    return _matched_pong_payload(payload, tid=tid, request_id=request_id)
+
+
+def _matched_pong_payload(
+    payload: dict[str, Any],
+    *,
+    tid: str,
+    request_id: str,
+) -> dict[str, Any] | None:
+    """Return a decoded reply if it is the exact PONG for ``tid``/``request_id``."""
+
     if payload.get("command") != CONTROL_PING:
         return None
     if payload.get("status") != "ok":
@@ -174,36 +195,76 @@ def _write_probe_request(
     broker: Any | None,
     ctrl_in_name: str,
     message: str,
-) -> None:
+) -> int:
     """Write one PING through a borrowed broker or the watcher-owned queue."""
 
     if broker is not None:
-        broker.write(ctrl_in_name, message)
-        return
+        return int(broker.write(ctrl_in_name, message))
     with reply_queue.get_connection() as opened:
-        opened.write(ctrl_in_name, message)
+        return int(opened.write(ctrl_in_name, message))
 
 
-def _read_matching_pong(
+def _retract_probe_requests(
     reply_queue: Any,
     *,
-    tid: str,
-    request_id: str,
-) -> MatchedPong | None:
-    """Consume ready reply rows and return the first exact PONG match."""
+    broker: Any | None,
+    requests: Mapping[str, int],
+) -> None:
+    """Delete each unanswered PING by exact ID, pending or already claimed.
 
-    while True:
+    The target's ``ctrl_in`` keeps no probe row. A target that claimed its PING
+    before the deadline may still answer after the round; each late PONG
+    lands in the requester's own ``T{tid}.ctrl_in``, one row per late-replying
+    target, and the TaskMonitor dead-TID cleanup retires that queue once the
+    requester TID is old enough ([MF-3], [MF-5]).
+    """
+
+    for ctrl_in_name, message_id in requests.items():
+        try:
+            if broker is not None:
+                broker.delete_message_ids(ctrl_in_name, [message_id])
+                continue
+            with reply_queue.get_connection() as opened:
+                opened.delete_message_ids(ctrl_in_name, [message_id])
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to retract unanswered PING", exc_info=True)
+
+
+def _read_matching_pongs(
+    reply_queue: Any,
+    pending: dict[str, KeyedPingTarget],
+    results: dict[str, ControlProbeResult],
+) -> None:
+    """Consume ready reply rows, recording each exact PONG match as it arrives.
+
+    Each row is decoded once and checked against the target its ``tid`` names.
+    A matched target leaves ``pending`` at once, and reading stops when none
+    remains, so a later read failure cannot discard proof already recorded.
+    """
+
+    while pending:
         item = reply_queue.read_one(with_timestamps=True)
         if item is None:
-            return None
+            return
         body, timestamp = item
-        payload = coerce_pong_response(str(body), tid=tid, request_id=request_id)
-        if payload is not None:
-            return MatchedPong(
-                payload=payload,
+        payload = decode_control_object(str(body))
+        target = pending.get(str(payload.get("tid"))) if payload is not None else None
+        if payload is None or target is None:
+            continue
+        matched_payload = _matched_pong_payload(
+            payload, tid=target.tid, request_id=target.request_id
+        )
+        if matched_payload is None:
+            continue
+        results[target.tid] = ControlProbeResult(
+            request_id=target.request_id,
+            matched=MatchedPong(
+                payload=matched_payload,
                 observed_at=int(timestamp),
-                request_id=request_id,
-            )
+                request_id=target.request_id,
+            ),
+        )
+        del pending[target.tid]
 
 
 def _retire_probe_reply_queue(reply_queue: Any) -> None:
@@ -252,16 +313,109 @@ def send_keyed_ping_probe(
 
     The synchronous caller mints a task-shaped requester identity, owns its
     ``T{tid}.ctrl_in`` queue, and waits through the same watcher path used by
-    long-lived tasks. The target writes its PONG directly to that queue. The
-    watcher and reply rows are retired on every exit path.
+    long-lived tasks. The target writes its PONG directly to that queue. This
+    is the one-target case of ``send_keyed_ping_round``: an unanswered PING is
+    deleted by exact ID, and the watcher and reply queue are retired on every
+    exit path.
 
     Spec: [MF-3], [MANAGER.8]
     """
 
+    target = KeyedPingTarget(
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        request_id=request_id or uuid.uuid4().hex,
+    )
+    return send_keyed_ping_round(ctx, (target,), timeout=timeout, broker=broker)[tid]
+
+
+def _write_round_requests(
+    reply_queue: Any,
+    targets: Sequence[KeyedPingTarget],
+    *,
+    broker: Any | None,
+    reply_to: str,
+) -> tuple[dict[str, tuple[str, int]], dict[str, ControlProbeResult]]:
+    """Write each target's PING; return written row IDs and failed writes."""
+
+    written: dict[str, tuple[str, int]] = {}
+    failed: dict[str, ControlProbeResult] = {}
+    for target in targets:
+        ping = encode_control_message(
+            CONTROL_PING, request_id=target.request_id, reply_to=reply_to
+        )
+        try:
+            message_id = _write_probe_request(
+                reply_queue,
+                broker=broker,
+                ctrl_in_name=target.ctrl_in_name,
+                message=ping,
+            )
+        except (BrokerError, OSError) as exc:
+            failed[target.tid] = ControlProbeResult(
+                request_id=target.request_id, error=str(exc)
+            )
+            continue
+        if isinstance(message_id, int):
+            written[target.tid] = (target.ctrl_in_name, message_id)
+    return written, failed
+
+
+def _await_round_pongs(
+    watcher: MultiQueueWatcher,
+    reply_queue: Any,
+    pending: dict[str, KeyedPingTarget],
+    results: dict[str, ControlProbeResult],
+    *,
+    timeout: float,
+) -> None:
+    """Wait once, until every pending target answered or ``timeout`` elapsed.
+
+    Matches go into ``results`` as they arrive, so a failing later wait keeps
+    them; targets still pending at the deadline time out.
+    """
+
+    deadline = time.monotonic() + timeout
+    while pending:
+        watcher.wait_for_activity(max(0.0, deadline - time.monotonic()))
+        _read_matching_pongs(reply_queue, pending, results)
+        if time.monotonic() >= deadline:
+            break
+    for target in pending.values():
+        results[target.tid] = ControlProbeResult(
+            request_id=target.request_id, timed_out=True
+        )
+
+
+def send_keyed_ping_round(
+    ctx: WeftContext,
+    targets: Sequence[KeyedPingTarget],
+    *,
+    timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
+    broker: Any | None = None,
+) -> dict[str, ControlProbeResult]:
+    """Send keyed PINGs to several targets and wait once for all PONGs.
+
+    One requester identity owns one ``T{tid}.ctrl_in`` reply queue for the
+    round; each target gets its own ``request_id``, so the round costs at most
+    one ``timeout``. A failed write leaves that target unanswered without
+    failing the others, and a later read or wait failure keeps every match
+    already recorded. Each PING still unanswered at the end is deleted by
+    exact ID, and the watcher and reply queue are retired on every exit path;
+    a reply written after that is the late-reply case of
+    ``_retract_probe_requests``.
+
+    Spec: [MF-3], [MANAGER.8], [CLI-1.2.1]
+    """
+
     probe_timeout = _validate_probe_timeout(timeout)
-    probe_request_id = request_id or uuid.uuid4().hex
+    pending = {target.tid: target for target in targets}
+    results: dict[str, ControlProbeResult] = {}
+    written: dict[str, tuple[str, int]] = {}
     watcher: MultiQueueWatcher | None = None
     reply_queue: Any | None = None
+    if not pending:
+        return results
     try:
         requester_tid = generate_spawn_request_timestamp(
             ctx.broker_target,
@@ -282,42 +436,30 @@ def send_keyed_ping_probe(
         )
         reply_queue = watcher.get_queue(reply_queue_name)
         assert reply_queue is not None  # constructor invariant
-
-        ping = encode_control_message(
-            CONTROL_PING,
-            request_id=probe_request_id,
-            reply_to=reply_queue_name,
+        written, failed = _write_round_requests(
+            reply_queue, targets, broker=broker, reply_to=reply_queue_name
         )
-        _write_probe_request(
-            reply_queue,
-            broker=broker,
-            ctrl_in_name=ctrl_in_name,
-            message=ping,
+        results.update(failed)
+        for tid in failed:
+            pending.pop(tid)
+        _await_round_pongs(
+            watcher, reply_queue, pending, results, timeout=probe_timeout
         )
-
-        deadline = time.monotonic() + probe_timeout
-        while True:
-            remaining = max(0.0, deadline - time.monotonic())
-            watcher.wait_for_activity(remaining)
-            matched = _read_matching_pong(
-                reply_queue,
-                tid=tid,
-                request_id=probe_request_id,
-            )
-            if matched is not None:
-                return ControlProbeResult(
-                    request_id=probe_request_id,
-                    matched=matched,
-                )
-            if time.monotonic() >= deadline:
-                return ControlProbeResult(
-                    request_id=probe_request_id,
-                    timed_out=True,
-                )
     except (BrokerError, OSError) as exc:
-        return ControlProbeResult(request_id=probe_request_id, error=str(exc))
+        for target in pending.values():
+            results.setdefault(
+                target.tid,
+                ControlProbeResult(request_id=target.request_id, error=str(exc)),
+            )
     finally:
+        if reply_queue is not None:
+            _retract_probe_requests(
+                reply_queue,
+                broker=broker,
+                requests=dict(written[tid] for tid in pending if tid in written),
+            )
         if watcher is not None:
             _stop_probe_watcher(watcher)
         if reply_queue is not None:
             _retire_probe_reply_queue(reply_queue)
+    return results

@@ -46,6 +46,7 @@ always be rolled back from the public request queue.
 
 - [Bootstrap Skips a Resident Without Identity](../plans/2026-11-08-bootstrap-resident-without-identity-plan.md) skips a retained row that records no runtime identity at bootstrap, as it skips a foreign one, and retries only transient failures during reconciliation ([MA-1.8]).
 - [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) keeps internal-service exits, relaunches and convergence off the idle clock, and has every managed service re-stamp its own service-owner row on its own clock ([MA-1] items 5 and 7, [MA-1.5], [MA-1.6a]).
+- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md): the status commands keep a younger unknown `active` Manager row, prove it by one bounded PING round when it answers, and otherwise label it `unknown`, without leadership authority ([MA-1], [CLI-1.2.1]).
 
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
@@ -233,6 +234,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    canonical active manager row that lacks strong runtime proof, including a
    host-PID row whose PID is not visible from the current PID namespace, it may
    send one bounded keyed PING to that manager's task-local control queue. A
+   synchronous startup or selection probe deletes its PING by exact ID when it
+   ends unanswered ([MF-3]); the running Manager's non-blocking leadership
+   probe below does the same when it gives up. A
    matched PONG from the same TID can rescue the row as positive liveness
    evidence for selection only when its manager-selection fields prove dispatch
    eligibility: manager role, `weft.spawn.requests`, matching control and
@@ -267,7 +271,15 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `ctrl_in`; the matching PONG arrives through the Manager's existing watcher
    and is stored on the pending probe before the leadership reducer runs.
    `ping_pending` remains unknown evidence until a matching PONG or the next
-   eligible ordinary leadership evaluation. The probe contributes no private
+   eligible ordinary leadership evaluation. When the probe gives up without a
+   PONG (it resolves `ping_unanswered`, or it is dropped because the peer's
+   row changed or is no longer observed), the Manager deletes its PING from
+   the peer's `ctrl_in` by exact ID, pending or claimed ([MF-3]); what
+   leadership decides from the missing PONG is unchanged. A peer that claimed
+   the PING may still answer later: that PONG reaches this Manager's own
+   `ctrl_in`, matches no pending probe and is consumed as item 5 describes;
+   if this Manager has exited, the stale service-owner disposition in [MF-5]
+   may clear its `ctrl_in`. The probe contributes no private
    deadline to `next_wait_timeout()`. Canonical ownership is lowest-live-TID among
    canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because
@@ -821,8 +833,15 @@ containerized reader, or a recorded identity without a creation time,
 is `unknown`; a handle is live if any of its recorded processes is live.
 Readers and manager leadership checks omit unknown rows older than
 `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS` without keyed PING.
-Younger unknown rows keep the bounded keyed-PING rescue described above;
-both the definite-stale and expired-unknown pruning predicates override
+Younger unknown rows keep the bounded keyed-PING rescue described above.
+The status commands (`weft status`, `weft manager list`, `weft manager
+status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
+unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
+omitting it, because a missing probe or a missing PONG is unknown evidence,
+not proof of death; like every synchronous probe, they delete an unanswered
+PING by exact ID ([MF-3]). That observation is not leadership authority;
+active-manager selection still requires live or matched-PONG proof.
+Both the definite-stale and expired-unknown pruning predicates override
 keep-newest for every manager status.
 
 Foreground startup may supersede an unconfirmed active canonical

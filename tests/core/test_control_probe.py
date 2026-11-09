@@ -24,9 +24,11 @@ from weft._exceptions import CommandUsageError
 from weft.commands.tasks import list_tasks
 from weft.context import WeftContext, build_context
 from weft.core.control_probe import (
+    KeyedPingTarget,
     coerce_pong_response,
     pong_proves_dispatch_eligible,
     send_keyed_ping_probe,
+    send_keyed_ping_round,
 )
 from weft.core.monitor.policies.runtime_control import (
     runtime_dead_task_record_probe_tids,
@@ -122,6 +124,182 @@ def test_send_keyed_ping_probe_routes_pong_to_ephemeral_ctrl_in(
     assert reply_to.startswith("T") and reply_to.endswith(".ctrl_in")
     assert reply_to not in _queue_names(ctx)
     assert f"T{tid}.ctrl_out" not in _queue_names(ctx)
+
+
+def _pong_row(tid: str, request_id: str) -> str:
+    return json.dumps(
+        {
+            "command": "PING",
+            "status": "ok",
+            "message": "PONG",
+            "tid": tid,
+            "request_id": request_id,
+            "task_status": "running",
+        }
+    )
+
+
+def _answer_round_writes(
+    ctx: WeftContext,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    answering: set[str],
+) -> None:
+    """Answer the PINGs written to ``answering`` targets at write time."""
+
+    original_write = control_probe_mod._write_probe_request
+
+    def write_and_answer(
+        reply_queue: Any,
+        *,
+        broker: Any | None,
+        ctrl_in_name: str,
+        message: str,
+    ) -> int:
+        message_id = original_write(
+            reply_queue, broker=broker, ctrl_in_name=ctrl_in_name, message=message
+        )
+        tid = ctrl_in_name.removeprefix("T").removesuffix(".ctrl_in")
+        if tid in answering:
+            with ctx.queue(ctrl_in_name, persistent=False) as ctrl_in:
+                raw = ctrl_in.read_one()
+            assert raw is not None
+            request = json.loads(str(raw))
+            with ctx.queue(request["reply_to"], persistent=False) as reply:
+                reply.write(_pong_row(tid, request["request_id"]))
+        return message_id
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", write_and_answer)
+
+
+class _ReplyReadsThenFail:
+    """Delegate to the probe's reply queue; fail every read after ``ok_reads``."""
+
+    def __init__(self, queue: Any, *, ok_reads: int) -> None:
+        self._queue = queue
+        self._reads_left = ok_reads
+        self.reads = 0
+
+    def read_one(self, **kwargs: Any) -> Any:
+        self.reads += 1
+        if self._reads_left <= 0:
+            raise BrokerError("injected reply read failure")
+        self._reads_left -= 1
+        return self._queue.read_one(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._queue, name)
+
+
+def _fail_reply_reads_after(
+    monkeypatch: pytest.MonkeyPatch, *, ok_reads: int
+) -> list[_ReplyReadsThenFail]:
+    original_get_queue = control_probe_mod.MultiQueueWatcher.get_queue
+    proxies: list[_ReplyReadsThenFail] = []
+
+    def get_queue(watcher: Any, name: str) -> Any:
+        queue = original_get_queue(watcher, name)
+        if queue is None:
+            return None
+        proxies.append(_ReplyReadsThenFail(queue, ok_reads=ok_reads))
+        return proxies[-1]
+
+    monkeypatch.setattr(control_probe_mod.MultiQueueWatcher, "get_queue", get_queue)
+    return proxies
+
+
+def test_send_keyed_ping_probe_keeps_match_when_a_later_reply_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matched PONG ends the read; a later read failure cannot discard it [MF-3]."""
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1775622400000000131"
+    _respond_to_probe_write(ctx, monkeypatch, tid=tid)
+    proxies = _fail_reply_reads_after(monkeypatch, ok_reads=1)
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=f"T{tid}.ctrl_in",
+        request_id="kept-match",
+        timeout=1.0,
+    )
+
+    assert result.error is None
+    assert result.matched is not None
+    assert result.matched.request_id == "kept-match"
+    # Baseline contract: reading stops at the match; no further read is tried.
+    assert [proxy.reads for proxy in proxies] == [1]
+
+
+def test_ping_round_keeps_earlier_match_when_a_later_reply_read_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read failure after one PONG keeps that match; only the rest error [MF-3]."""
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    answering = "1775622400000000132"
+    silent = "1775622400000000133"
+    _answer_round_writes(ctx, monkeypatch, answering={answering})
+    _fail_reply_reads_after(monkeypatch, ok_reads=1)
+
+    results = send_keyed_ping_round(
+        ctx,
+        [
+            KeyedPingTarget(tid=answering, ctrl_in_name=f"T{answering}.ctrl_in"),
+            KeyedPingTarget(tid=silent, ctrl_in_name=f"T{silent}.ctrl_in"),
+        ],
+        timeout=1.0,
+    )
+
+    assert results[answering].matched is not None
+    assert results[answering].error is None
+    assert results[silent].matched is None
+    assert results[silent].error == "injected reply read failure"
+    with ctx.queue(f"T{silent}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+
+
+def test_ping_round_keeps_earlier_match_when_a_later_wait_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait failure after one PONG keeps that match; only the rest error [MF-3]."""
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    answering = "1775622400000000134"
+    silent = "1775622400000000135"
+    _answer_round_writes(ctx, monkeypatch, answering={answering})
+    original_wait = control_probe_mod.MultiQueueWatcher.wait_for_activity
+    waits = 0
+
+    def wait_then_fail(watcher: Any, timeout: float | None) -> None:
+        nonlocal waits
+        waits += 1
+        if waits > 1:
+            raise BrokerError("injected wait failure")
+        original_wait(watcher, timeout)
+
+    monkeypatch.setattr(
+        control_probe_mod.MultiQueueWatcher, "wait_for_activity", wait_then_fail
+    )
+
+    results = send_keyed_ping_round(
+        ctx,
+        [
+            KeyedPingTarget(tid=answering, ctrl_in_name=f"T{answering}.ctrl_in"),
+            KeyedPingTarget(tid=silent, ctrl_in_name=f"T{silent}.ctrl_in"),
+        ],
+        timeout=1.0,
+    )
+
+    assert waits == 2
+    assert results[answering].matched is not None
+    assert results[silent].matched is None
+    assert results[silent].error == "injected wait failure"
 
 
 def test_send_keyed_ping_probe_timeout_retires_ephemeral_queue(tmp_path: Path) -> None:
@@ -257,10 +435,38 @@ def test_cleanup_failures_do_not_replace_matched_probe_result(
     assert stop_calls == 2
 
 
-def test_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
+def test_unclaimed_ping_is_retracted_when_the_probe_times_out(
+    tmp_path: Path,
+) -> None:
+    """A silent target's ``ctrl_in`` keeps no probe row [MF-3]."""
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    target_tid = "1775622400000000117"
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=target_tid,
+        ctrl_in_name=f"T{target_tid}.ctrl_in",
+        timeout=0.0,
+    )
+
+    assert result.timed_out
+    with ctx.queue(f"T{target_tid}.ctrl_in", persistent=False) as target:
+        assert target.peek_many(limit=10, include_claimed=True) == []
+    assert not any(name.endswith(".ctrl_in") for name in _queue_names(ctx))
+
+
+def test_claimed_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A target that claims its PING and answers late leaves one requester row.
+
+    The target's ``ctrl_in`` stays clean; the late PONG recreates only the dead
+    requester's reply queue, which the name-derived dead-TID cleanup selects
+    once the requester TID is old enough [MF-3], [MF-5].
+    """
+
     ctx = build_context(spec_context=prepare_project_root(tmp_path))
     requester_tid = "1775622400000000115"
     target_tid = "1775622400000000116"
@@ -269,6 +475,26 @@ def test_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
         "generate_spawn_request_timestamp",
         lambda *_args, **_kwargs: int(requester_tid),
     )
+    claimed: list[dict[str, Any]] = []
+    original_write = control_probe_mod._write_probe_request
+
+    def write_and_claim(
+        reply_queue: Any,
+        *,
+        broker: Any | None,
+        ctrl_in_name: str,
+        message: str,
+    ) -> int:
+        message_id = original_write(
+            reply_queue, broker=broker, ctrl_in_name=ctrl_in_name, message=message
+        )
+        with ctx.queue(ctrl_in_name, persistent=False) as target:
+            raw = target.read_one()
+        assert raw is not None
+        claimed.append(json.loads(str(raw)))
+        return message_id
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", write_and_claim)
 
     result = send_keyed_ping_probe(
         ctx,
@@ -276,28 +502,14 @@ def test_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it(
         ctrl_in_name=f"T{target_tid}.ctrl_in",
         timeout=0.0,
     )
-    target = ctx.queue(f"T{target_tid}.ctrl_in")
-    raw = target.read_one()
-    target.close()
-    assert raw is not None
-    request = json.loads(str(raw))
-    reply_to = str(request["reply_to"])
-    late = ctx.queue(reply_to)
-    late.write(
-        json.dumps(
-            {
-                "command": "PING",
-                "status": "ok",
-                "message": "PONG",
-                "tid": target_tid,
-                "request_id": request["request_id"],
-                "task_status": "running",
-            }
-        )
-    )
-    late.close()
+    reply_to = str(claimed[0]["reply_to"])
+    with ctx.queue(reply_to, persistent=False) as late:
+        late.write(_pong_row(target_tid, claimed[0]["request_id"]))
 
     assert result.timed_out
+    with ctx.queue(f"T{target_tid}.ctrl_in", persistent=False) as target:
+        assert target.peek_many(limit=10, include_claimed=True) == []
+    assert reply_to == f"T{requester_tid}.ctrl_in"
     assert reply_to in _queue_names(ctx)
     age_ns = int(TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS * 1_000_000_000)
     young = runtime_dead_task_record_probe_tids(

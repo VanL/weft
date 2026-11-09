@@ -357,6 +357,9 @@ class _ManagerPendingPongProbe:
     request_id: str
     created_turn: int
     pong: dict[str, Any] | None = None
+    ctrl_in_name: str | None = None
+    ping_id: int | None = None
+    """Row ID of the PING in the peer's ``ctrl_in``, retracted if unanswered."""
 
 
 @dataclass(slots=True)
@@ -4328,6 +4331,7 @@ class Manager(ServiceTask):
                     resolve_unanswered=resolve_unanswered,
                 )
             self._leader_probe_pending.pop(cache_key, None)
+            self._retract_leadership_ping(pending)
         if self._leader_probe_used_this_turn:
             return ManagerLeadershipProof(
                 "unknown",
@@ -4344,7 +4348,7 @@ class Manager(ServiceTask):
         )
         try:
             with self._get_connected_queue().get_connection() as broker:
-                broker.write(ctrl_in_name, ping_message)
+                ping_id = int(broker.write(ctrl_in_name, ping_message))
         except (BrokerError, OSError, RuntimeError) as exc:
             proof = ManagerLeadershipProof(
                 "unknown",
@@ -4358,6 +4362,8 @@ class Manager(ServiceTask):
             row_timestamp=row_timestamp,
             request_id=request_id,
             created_turn=self._loop_iteration,
+            ctrl_in_name=ctrl_in_name,
+            ping_id=ping_id,
         )
         return ManagerLeadershipProof(
             "unknown",
@@ -4394,6 +4400,7 @@ class Manager(ServiceTask):
                 source="control-pong",
                 reason="ping_unanswered",
             )
+            self._retract_leadership_ping(probe)
             self._complete_manager_pong_probe(probe, proof, now_ns=now_ns)
             return proof
 
@@ -4428,6 +4435,26 @@ class Manager(ServiceTask):
             source="control-pong",
             reason="pong_not_dispatch_eligible",
         )
+
+    def _retract_leadership_ping(self, probe: _ManagerPendingPongProbe) -> None:
+        """Delete an unanswered leadership PING from the peer by exact ID [MF-3].
+
+        Pending or claimed, the row leaves the peer's ``ctrl_in``. A peer that
+        claimed it may still answer: that late PONG reaches this Manager's own
+        ``ctrl_in``, where reply dispatch matches no pending probe and the
+        shared control handler acknowledges the row. What leadership decides
+        from the missing PONG is unchanged.
+        """
+
+        if probe.pong is not None or probe.ctrl_in_name is None:
+            return
+        if probe.ping_id is None:
+            return
+        try:
+            with self._get_connected_queue().get_connection() as broker:
+                broker.delete_message_ids(probe.ctrl_in_name, [probe.ping_id])
+        except (BrokerError, OSError, RuntimeError):
+            logger.debug("Failed to retract unanswered leadership PING", exc_info=True)
 
     def _complete_manager_pong_probe(
         self,
@@ -4749,6 +4776,7 @@ class Manager(ServiceTask):
             for key, probe in tuple(self._leader_probe_pending.items()):
                 if (probe.tid, probe.row_timestamp) not in observed_probe_sources:
                     self._leader_probe_pending.pop(key, None)
+                    self._retract_leadership_ping(probe)
 
         active_tids = sorted(active)
         leader_tid = canonical_owner_tid(active)

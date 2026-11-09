@@ -230,6 +230,11 @@ def _render_status_snapshot(
                     f"    requests: {manager.requests or ''}",
                     f"    outbox: {manager.outbox or ''}",
                     f"    timestamp: {manager.timestamp or 0}",
+                    *(
+                        (f"    liveness: {manager.liveness}",)
+                        if manager.liveness is not None
+                        else ()
+                    ),
                 )
             )
             lines.extend("    " + line for line in dispatch_refusal_lines(manager))
@@ -2744,9 +2749,10 @@ def manager_list_command(
             )
         typer.echo("\n".join(lines))
     else:
-        lines = ["TID        STATUS    NAME"]
+        lines = ["TID        STATUS    LIVE      NAME"]
         lines.extend(
-            f"{record.tid}  {record.status:<9} {record.name}"
+            f"{record.tid}  {record.status:<9} {(record.liveness or '-'):<9} "
+            f"{record.name}"
             for record in sorted(records, key=lambda item: item.tid)
         )
         for record in sorted(records, key=lambda item: item.tid):
@@ -2780,6 +2786,8 @@ def manager_status_command(
         f"Name: {result.name}",
         f"Status: {result.status}",
     ]
+    if result.liveness is not None:
+        lines.append(f"Liveness: {result.liveness}")
     if result.runtime_handle is not None:
         lines.append(f"Runtime: {json.dumps(result.runtime_handle, sort_keys=True)}")
     lines.extend(dispatch_refusal_lines(result))

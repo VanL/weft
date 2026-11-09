@@ -194,7 +194,8 @@ def cmd_manager_list(
 ) -> tuple[ManagerSnapshot, ...]:
     """Return manager registry snapshots, optionally with liveness proof.
 
-    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2].
+    Spec: docs/specifications/14-Python_API_Surfaces.md [PY-2];
+    docs/specifications/10-CLI_Interface.md [CLI-1.2.1], [CLI-1.3].
     """
 
     resolved = build_context(context)
@@ -208,6 +209,7 @@ def cmd_manager_list(
             resolved,
             include_stopped=all,
             canonical_only=False,
+            observe=True,
         )
     )
     return tuple(_observed_manager_snapshots(resolved, records))
@@ -343,14 +345,30 @@ def list_managers(
     *,
     include_stopped: bool = False,
 ) -> list[ManagerSnapshot]:
-    """Return manager registry rows as typed snapshots."""
+    """Return manager registry rows as typed snapshots ([CLI-1.2.1])."""
 
     return _observed_manager_snapshots(
         context,
         manager_runtime.list_manager_records(
-            context, include_stopped=include_stopped, canonical_only=False
+            context,
+            include_stopped=include_stopped,
+            canonical_only=False,
+            observe=True,
         ),
     )
+
+
+def _observed_manager_record(context: WeftContext, tid: str) -> dict[str, Any] | None:
+    """Return one Manager row through the status-command read ([CLI-1.2.1])."""
+
+    records = manager_runtime.list_manager_records(
+        context,
+        include_stopped=True,
+        canonical_only=False,
+        observe=True,
+        tid=tid,
+    )
+    return records[0] if records else None
 
 
 def manager_status(
@@ -359,7 +377,7 @@ def manager_status(
 ) -> ManagerSnapshot | None:
     """Return one manager snapshot or `None` if absent."""
 
-    record = manager_runtime.manager_record(context, tid)
+    record = _observed_manager_record(context, tid)
     if record is None:
         return None
     return _observed_manager_snapshots(context, [record])[0]
@@ -380,7 +398,7 @@ def cmd_manager_status(
     with suppress(InvalidTID):
         tid = normalize_tid(tid)
     resolved = build_context(context)
-    record = manager_runtime.manager_record(resolved, tid)
+    record = _observed_manager_record(resolved, tid)
     if record is None:
         raise ManagerNotRunning(f"Manager {tid} not found")
     return _observed_manager_snapshots(resolved, [record])[0]

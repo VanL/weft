@@ -40,6 +40,36 @@
   with `weft task stop`. There is no compatibility path for the
   mixed-version window.
 
+### Fixed
+
+- `weft status`, `weft manager list` and `weft manager status` (and
+  `client.managers.list()` / `client.managers.status(tid)`) now report the
+  same Manager rows. An active Manager whose runtime the command cannot prove
+  from its own process, such as an externally supervised (containerized)
+  Manager whose liveness provider is not loaded there, is no longer hidden:
+  the command sends one round of keyed PINGs, in parallel, to such rows only
+  (at most 0.5 s more, and only when one exists). A row that answers shows
+  `liveness: "live"` with `proof_source: "pong"`; a row that does not stays
+  listed as `liveness: "unknown"` until the 300 s unknown window expires.
+  Live and stale rows are never pinged, a
+  failed PING write leaves the row unknown without failing the command, and
+  none of these commands selects an unknown Manager as the active one.
+  `weft status` therefore sends PINGs again (it sent none since the
+  status/result remediation); it writes nothing else. Plain `manager list`
+  gains a `LIVE` column and plain `manager status` a `Liveness:` line
+  ([CLI-1.2.1], [CLI-1.3], [MA-1], [PY-2]).
+- Every keyed PING (`weft task ping`, `weft task status --ping`, Manager
+  startup and selection probes, the status commands, and the running
+  Manager's own leadership probe) now deletes its PING from the target's
+  `ctrl_in` by exact ID when no PONG arrived in time or the probe is
+  abandoned, so a silent or dead target keeps no probe rows. A target that
+  took the PING but answers late leaves one row in the requester's own reply
+  queue: a synchronous requester's queue is removed by the TaskMonitor
+  dead-TID cleanup, and a running Manager consumes the stray PONG. What each
+  caller decides from a missing PONG is unchanged. A PONG that matched before
+  a later broker read or wait failure is now kept instead of being reported as
+  an error ([MF-3]).
+
 ## [0.9.122] - 2026-11-06
 
 ### Changed

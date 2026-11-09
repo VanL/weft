@@ -239,8 +239,21 @@ The control plane is explicit:
   synchronous probe mints a TID, owns `T{tid}.ctrl_in` for the duration of the
   probe, drains it through `MultiQueueWatcher`, and deletes it on every exit
   path. The ephemeral requester registers no task record and creates no other
-  task queue. Requester death or a reply written after requester cleanup may
-  leave an orphan row; the existing name-derived dead-task sweep retires it.
+  task queue. Every synchronous probe (`weft task ping`, `task status --ping`,
+  Manager startup and selection probes, and the status-command
+  round of [CLI-1.2.1]) deletes each PING still unanswered at its end from the
+  target's `ctrl_in` by exact ID, pending or already claimed, so the target's
+  queue keeps no probe row. A target that claimed its PING before the deadline
+  may still answer after it; each such late PONG, or a reply written after
+  requester death, lands in the requester's own `T{tid}.ctrl_in`, one row per
+  late-replying target. The TaskMonitor dead-TID cleanup retires that queue once the requester
+  TID is older than `TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS`: the
+  requester has no runtime and no Monitor record, so the name-derived TID-age
+  rule selects it and deletes its stale `ctrl_in`
+  (`weft/core/monitor/task_monitor.py::TaskMonitor._run_dead_task_cleanup_slice`,
+  `weft/core/monitor/policies/dead_task.py::select_dead_task_tids_from_queue_names`
+  and `dead_task_queue_cleanup_plan`). The rule runs only while the TaskMonitor
+  service is enabled.
 - `PING` writes exactly one JSON `PONG` control response to `reply_to`, never
   to the target's `ctrl_out`. The response contains `tid`,
   `timestamp`, `task_status`, `paused`, `should_stop`, `runner`, optional
@@ -1295,8 +1308,12 @@ Bulk status/list/stats default to current nonterminal projections. Explicit
 `--log` / `include_log_history=True` unions retained raw history with current
 projections: terminal task-log proof wins, otherwise valid current projection
 wins. It implies historical inclusion; `--log --watch` is a usage error.
-Bulk acquisition performs no per-task control/output reads, active PING, implicit
-global-history replay, or Monitor reads. It reports the last successful task
+Bulk acquisition performs no per-task control/output reads, active task PING,
+implicit global-history replay, or Monitor reads. The only write a status
+command makes is the bounded keyed PING round to Manager rows whose liveness
+is still unknown ([CLI-1.2.1]). It leaves no row in a Manager's `ctrl_in`;
+each late PONG leaves one row, per late-replying Manager, in the requester's
+own reply queue, which the dead-TID cleanup named in [MF-3] retires. It reports the last successful task
 publication and can lag a durable completion or supervisor `wrapper_lost` after
 abrupt child death or failed final publication. Known-TID reads acquiring local
 completion still surface terminal evidence immediately. Event following remains
