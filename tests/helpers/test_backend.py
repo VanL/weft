@@ -268,8 +268,11 @@ def _resolve_cli_path(value: str, cwd: Path) -> Path:
     return path.resolve() if path.is_absolute() else (cwd / path).resolve()
 
 
-def _taskspec_context_root(path: Path) -> Path | None:
-    """Return the explicit ``weft_context`` embedded in a TaskSpec file."""
+def _taskspec_context_root(path: Path, *, base: Path) -> Path | None:
+    """Return the explicit ``weft_context`` of a TaskSpec file, resolved from ``base``.
+
+    A relative ``weft_context`` names a directory under ``base``.
+    """
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -286,7 +289,7 @@ def _taskspec_context_root(path: Path) -> Path | None:
     value = spec.get("weft_context")
     if not isinstance(value, str) or not value.strip():
         return None
-    return _resolve_cli_path(value, path.parent)
+    return _resolve_cli_path(value, base)
 
 
 def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 approved [TS-3.1] [RUFF-SUP-216] exception
@@ -295,20 +298,22 @@ def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 a
     arg_list = [str(arg) for arg in args]
 
     # A stored TaskSpec bound to a `weft_context` runs there even when
-    # `--context` names another root, as the product resolves the runtime root
-    # (`weft/commands/submission.py::_resolve_submission_runtime_root`); the
+    # `--context` names another root, and a relative declaration resolves
+    # against the CLI's working directory, not the spec file's: the product
+    # expands the declaration and resolves it in the CLI process
+    # (`weft/commands/submission.py::_resolve_submission_runtime_root`). The
     # root the run actually uses is the one to provision.
     if arg_list and arg_list[0] == "run":
         for index, arg in enumerate(arg_list[1:], start=1):
             if arg.startswith("--spec="):
                 spec_path = _resolve_cli_path(arg.split("=", 1)[1], cwd)
-                spec_context = _taskspec_context_root(spec_path)
+                spec_context = _taskspec_context_root(spec_path, base=cwd)
                 if spec_context is not None:
                     return spec_context
                 break
             if arg == "--spec" and index + 1 < len(arg_list):
                 spec_path = _resolve_cli_path(arg_list[index + 1], cwd)
-                spec_context = _taskspec_context_root(spec_path)
+                spec_context = _taskspec_context_root(spec_path, base=cwd)
                 if spec_context is not None:
                     return spec_context
                 break
@@ -321,7 +326,7 @@ def cli_context_root(args: Sequence[object], cwd: Path) -> Path:  # noqa: C901 a
 
     if len(arg_list) >= 3 and arg_list[0] == "manager" and arg_list[1] == "start":
         spec_path = _resolve_cli_path(arg_list[2], cwd)
-        spec_context = _taskspec_context_root(spec_path)
+        spec_context = _taskspec_context_root(spec_path, base=spec_path.parent)
         if spec_context is not None:
             return spec_context
 

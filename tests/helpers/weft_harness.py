@@ -141,7 +141,9 @@ class WeftTestHarness:
         self._registered_pid_create_times: dict[int, float | None] = {}
         self._registered_tids: set[str] = set()
         self._registered_manager_tids: set[str] = set()
-        self._registered_context_roots: dict[Path, dict[str, str]] = {}
+        self._registered_context_roots: dict[
+            tuple[Path, frozenset[tuple[str, str]]], dict[str, str]
+        ] = {}
         self._inline_managers: list[
             tuple[Manager, threading.Thread, threading.Event]
         ] = []
@@ -272,7 +274,9 @@ class WeftTestHarness:
         teardown stops each recorded context as ``weft system stop`` would.
         ``env`` is the environment the CLI ran with; teardown resolves the
         root through it, so it reads the broker target, and on PostgreSQL the
-        schema, that the CLI used. The harness's own root is not recorded.
+        schema, that the CLI used. One root is recorded once per distinct set
+        of ``WEFT_*`` and ``BROKER_*`` settings, since those select its broker
+        target. The harness's own root is not recorded.
 
         Spec: docs/specifications/08-Testing_Strategy.md [TS-0];
         docs/specifications/03-Manager_Architecture.md [MA-1] item 7, [MA-3].
@@ -281,9 +285,13 @@ class WeftTestHarness:
         resolved = root.expanduser().resolve()
         if resolved == Path(self.root).resolve():
             return
-        self._registered_context_roots.setdefault(
-            resolved, dict(os.environ if env is None else env)
+        environment = dict(os.environ if env is None else env)
+        settings = frozenset(
+            (name, value)
+            for name, value in environment.items()
+            if name.startswith(("WEFT_", "BROKER_"))
         )
+        self._registered_context_roots.setdefault((resolved, settings), environment)
 
     def registered_tids(self) -> set[str]:
         return set(self._registered_tids)
@@ -819,8 +827,11 @@ class WeftTestHarness:
                 self._wait_for_database_files_releasable()
                 self._remove_database_files()
                 cleanup_prepared_roots(self.root)
-                for root, env in sorted(self._registered_context_roots.items()):
-                    cleanup_postgres_schema_for_root(root, env=env)
+                cleaned_roots: set[Path] = set()
+                for (root, _settings), env in self._registered_context_roots.items():
+                    if root not in cleaned_roots:
+                        cleanup_postgres_schema_for_root(root, env=env)
+                        cleaned_roots.add(root)
                 self._registered_context_roots.clear()
         finally:
             self._restore_cwd()
@@ -1445,7 +1456,8 @@ class WeftTestHarness:
         """Stop each recorded second context as ``weft system stop`` stops it.
 
         The harness's own context is stopped by its Manager and service paths;
-        a second context a CLI call provisioned has no other owner. A context
+        a second context a CLI call provisioned has no other owner. Each root
+        is resolved under every configuration it was recorded with. A context
         with no live Manager or internal-service process is skipped. Otherwise
         its processes are named first, ``stop_system`` stops the Manager and
         then the services by registry record, and a process that outlives the
@@ -1457,7 +1469,7 @@ class WeftTestHarness:
         """
 
         stop_timeout = max(6.0, min(self._manager_timeout, 10.0))
-        for root, env in sorted(self._registered_context_roots.items()):
+        for (root, _settings), env in self._registered_context_roots.items():
             try:
                 context = self._registered_context(root, env)
                 live = [] if context is None else self._live_context_processes(context)
