@@ -213,10 +213,10 @@ def _retract_probe_requests(
     """Delete each unanswered PING by exact ID, pending or already claimed.
 
     The target's ``ctrl_in`` keeps no probe row. A target that claimed its PING
-    before the deadline may still answer after the round; that late PONG
-    recreates the requester's own ``T{tid}.ctrl_in`` with one row, which the
-    TaskMonitor dead-TID cleanup retires once the requester TID is old enough
-    ([MF-3], [MF-5]).
+    before the deadline may still answer after the round; each late PONG
+    lands in the requester's own ``T{tid}.ctrl_in``, one row per late-replying
+    target, and the TaskMonitor dead-TID cleanup retires that queue once the
+    requester TID is old enough ([MF-3], [MF-5]).
     """
 
     for ctrl_in_name, message_id in requests.items():

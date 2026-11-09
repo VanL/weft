@@ -223,7 +223,7 @@ Key responsibilities implemented in `weft/core/manager.py`:
    send one bounded keyed PING to that manager's task-local control queue. A
    synchronous startup or selection probe deletes its PING by exact ID when it
    ends unanswered ([MF-3]); the running Manager's non-blocking leadership
-   probe below does not. A
+   probe below does the same when it gives up. A
    matched PONG from the same TID can rescue the row as positive liveness
    evidence for selection only when its manager-selection fields prove dispatch
    eligibility: manager role, `weft.spawn.requests`, matching control and
@@ -258,7 +258,15 @@ Key responsibilities implemented in `weft/core/manager.py`:
    `ctrl_in`; the matching PONG arrives through the Manager's existing watcher
    and is stored on the pending probe before the leadership reducer runs.
    `ping_pending` remains unknown evidence until a matching PONG or the next
-   eligible ordinary leadership evaluation. The probe contributes no private
+   eligible ordinary leadership evaluation. When the probe gives up without a
+   PONG (it resolves `ping_unanswered`, or it is dropped because the peer's
+   row changed or is no longer observed), the Manager deletes its PING from
+   the peer's `ctrl_in` by exact ID, pending or claimed ([MF-3]); what
+   leadership decides from the missing PONG is unchanged. A peer that claimed
+   the PING may still answer later: that PONG reaches this Manager's own
+   `ctrl_in`, matches no pending probe and is consumed as item 5 describes;
+   if this Manager has exited, the stale service-owner disposition in [MF-5]
+   may clear its `ctrl_in`. The probe contributes no private
    deadline to `next_wait_timeout()`. Canonical ownership is lowest-live-TID among
    canonical dispatch-eligible claimants for status, selection, and
    duplicate-manager convergence. It is advisory for public dispatch because

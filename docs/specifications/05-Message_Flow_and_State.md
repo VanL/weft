@@ -244,9 +244,9 @@ The control plane is explicit:
   round of [CLI-1.2.1]) deletes each PING still unanswered at its end from the
   target's `ctrl_in` by exact ID, pending or already claimed, so the target's
   queue keeps no probe row. A target that claimed its PING before the deadline
-  may still answer after it; that late PONG, or a reply written after
-  requester death, recreates the requester's own `T{tid}.ctrl_in` with one
-  row. The TaskMonitor dead-TID cleanup retires that queue once the requester
+  may still answer after it; each such late PONG, or a reply written after
+  requester death, lands in the requester's own `T{tid}.ctrl_in`, one row per
+  late-replying target. The TaskMonitor dead-TID cleanup retires that queue once the requester
   TID is older than `TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS`: the
   requester has no runtime and no Monitor record, so the name-derived TID-age
   rule selects it and deletes its stale `ctrl_in`
@@ -1305,9 +1305,9 @@ wins. It implies historical inclusion; `--log --watch` is a usage error.
 Bulk acquisition performs no per-task control/output reads, active task PING,
 implicit global-history replay, or Monitor reads. The only write a status
 command makes is the bounded keyed PING round to Manager rows whose liveness
-is still unknown ([CLI-1.2.1]). It leaves no row in a Manager's `ctrl_in`; a
-late PONG leaves at most one row in the requester's own reply queue, which the
-dead-TID cleanup named in [MF-3] retires. It reports the last successful task
+is still unknown ([CLI-1.2.1]). It leaves no row in a Manager's `ctrl_in`;
+each late PONG leaves one row, per late-replying Manager, in the requester's
+own reply queue, which the dead-TID cleanup named in [MF-3] retires. It reports the last successful task
 publication and can lag a durable completion or supervisor `wrapper_lost` after
 abrupt child death or failed final publication. Known-TID reads acquiring local
 completion still surface terminal evidence immediately. Event following remains

@@ -20,12 +20,14 @@
   status/result remediation); it writes nothing else. Plain `manager list`
   gains a `LIVE` column and plain `manager status` a `Liveness:` line
   ([CLI-1.2.1], [CLI-1.3], [MA-1], [PY-2]).
-- Every synchronous keyed PING (`weft task ping`, `weft task status --ping`,
-  Manager startup and selection probes, and the status commands)
-  now deletes its PING from the target's `ctrl_in` by exact ID when no PONG
-  arrived in time, so a silent or dead target keeps no probe rows. A target
-  that took the PING but answers late leaves one row in the requester's own
-  reply queue, which the TaskMonitor dead-TID cleanup removes. What each
+- Every keyed PING (`weft task ping`, `weft task status --ping`, Manager
+  startup and selection probes, the status commands, and the running
+  Manager's own leadership probe) now deletes its PING from the target's
+  `ctrl_in` by exact ID when no PONG arrived in time or the probe is
+  abandoned, so a silent or dead target keeps no probe rows. A target that
+  took the PING but answers late leaves one row in the requester's own reply
+  queue: a synchronous requester's queue is removed by the TaskMonitor
+  dead-TID cleanup, and a running Manager consumes the stray PONG. What each
   caller decides from a missing PONG is unchanged. A PONG that matched before
   a later broker read or wait failure is now kept instead of being reported as
   an error ([MF-3]).

@@ -463,7 +463,7 @@ Current behavior:
   `stale` and the command does not fail. Live and stale rows are never pinged.
   Each unanswered PING is deleted from the Manager's `ctrl_in` by exact ID,
   pending or claimed, and the requester's reply queue is retired. A Manager
-  that claimed its PING before the deadline may still answer after it; that
+  that claimed its PING before the deadline may still answer after it; each
   late PONG leaves one row in the requester's own `T{tid}.ctrl_in`, which the
   TaskMonitor dead-TID cleanup retires ([MF-3]). Status writes nothing else.
   `weft manager list` and `weft manager status TID` read the same rows by the
