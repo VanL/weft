@@ -7766,6 +7766,44 @@ def test_manager_supersedes_fresh_higher_tid_active_refresh(
     )
 
 
+@pytest.mark.parametrize(
+    "history",
+    [("active", "stopped"), ("active", "active"), ("active", "stopped", "active")],
+)
+def test_registry_supersession_uses_latest_peer_record(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    history: tuple[Literal["active", "stopped"], ...],
+) -> None:
+    manager, make_queue = manager_setup
+    registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    higher_tid = str(int(manager.tid) + 1)
+    assert manager._update_manager_registry_snapshot()
+    for status in history:
+        registry.write(
+            json.dumps(
+                _manager_service_payload(
+                    manager,
+                    tid=higher_tid,
+                    status=status,
+                    runtime_handle=_host_runtime_handle(os.getpid()),
+                )
+            )
+        )
+    latest = pending_timestamps(registry)[-1]
+
+    assert manager._update_manager_registry_snapshot()
+    rows = [
+        row
+        for row in _managed_service_owner_rows(make_queue)
+        if row.get("owner_tid") == higher_tid
+    ]
+    expected: list[str] = list(history)
+    if history[-1] == "active":
+        expected.append(SERVICE_STATUS_SUPERSEDED)
+        assert rows[-1]["metadata"]["supersession_observed_timestamp"] == latest
+    assert [row["status"] for row in rows] == expected
+
+
 def test_manager_registry_refresh_preserves_expired_peer_and_malformed_rows(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,

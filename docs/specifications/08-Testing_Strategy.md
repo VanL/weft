@@ -75,6 +75,19 @@ _Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated phy
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
 contract tests.
 
+The shared slow test in `tests/system/test_admission_stress.py` preloads 600
+roots for 1,250 tasks. It includes 250 single-child families and 100 chains
+with three to five parent-child edges. It measures throughput and verifies the
+same finite workload on SQLite and PostgreSQL.
+The PostgreSQL cases use separate 300-slot servers and check native
+connection rejections, with an additional run that releases external
+session pressure after a deepest chain completes while work remains queued. See the
+[nested admission load plan](../plans/2026-11-07-nested-admission-load-plan.md).
+`test_ops_burst_admission` models a rollup with 50 or 87 enrichments that
+each await one leaf. It reports submission-to-start phases and retained-client
+result-wait CPU on both backends. See the
+[ops-shaped admission burst plan](../plans/2026-11-07-ops-shaped-admission-burst-plan.md).
+
 The point is not to maximize suite count. The point is to keep the current
 contract exercised where it matters and to make backend-sensitive drift easy to
 see.

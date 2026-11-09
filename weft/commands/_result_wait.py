@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -27,6 +27,7 @@ from weft.core import task_evidence
 from weft.core.outbox import decode_result_payload
 from weft.core.outbox import process_outbox_message as decode_outbox_message
 from weft.core.queue_wait import QueueChangeMonitor
+from weft.core.runtime_identity import get_runtime_identity
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.taskspec import TaskSpec
@@ -54,11 +55,13 @@ def result_observation(
     queue_names: Sequence[str],
     *,
     borrowed_queues: Sequence[Queue] = (),
+    retain_connections: bool = True,
     cancel_event: Any | None = None,
 ) -> Iterator[tuple[dict[str, Queue], QueueChangeMonitor]]:
-    """Register queues before reading, and dispose observers before leases.
+    """Register before reading and close observers before their queue facades.
 
     Borrowed queues remain owned by the caller's enclosing session.
+    A caller that owns its own read passes can keep only the subscription.
 
     Private paired contract with weft_django.realtime.AsyncIteratorOwner and
     commands.run._LiveRunSession:
@@ -70,13 +73,13 @@ def result_observation(
         docs/specifications/04-SimpleBroker_Integration.md [SB-0.4].
     """
     with command_resource_scope() as resources:
-        if not borrowed_queues:
+        if retain_connections and not borrowed_queues:
             resources.enter_context(context.session())
         queues = {queue.name: queue for queue in borrowed_queues}
         for name in queue_names:
             if name in queues:
                 continue
-            queue = context.queue(name, persistent=True)
+            queue = context.queue(name, persistent=retain_connections)
             resources.callback(queue.close)
             queues[name] = queue
         # A watcher mutates its facade's stop-event custody. A borrowed facade
@@ -969,125 +972,144 @@ def _iter_consuming_result(
     )
     pending_events: list[tuple[dict[str, Any], int]] = []
     include_history = follow_lifecycle
+    # A task waiting on another task can give the reader's PG slot back
+    # between observations while keeping its subscription active.
+    release_while_waiting = (
+        context.backend_name == "postgres"
+        and materialized.config is not None
+        and get_runtime_identity() is not None
+        and not (emit_stream or include_stream_events or follow_lifecycle)
+    )
     with command_resource_scope() as resources:
-        resources.enter_context(context.session())
         lease = resources.enter_context(command_resource_scope())
         names = _result_observation_names(
             tid, materialized, include_history=include_history
         )
-        observation = lease.enter_context(result_observation(context, names))
+        observation = lease.enter_context(
+            result_observation(
+                context, names, retain_connections=not release_while_waiting
+            )
+        )
         while True:
             queues, monitor = observation
-            connection_owner = queues[names[0]]
-            with connection_owner.get_connection() as broker:
-                materialized, fresh = _acquire_result_observation(
-                    context,
-                    tid,
-                    materialized,
+            with (
+                context.queue(names[0], persistent=True)
+                if release_while_waiting
+                else nullcontext(queues[names[0]])
+            ) as connection_owner:
+                with connection_owner.get_connection() as broker:
+                    materialized, fresh = _acquire_result_observation(
+                        context,
+                        tid,
+                        materialized,
+                        connection_owner,
+                        broker,
+                        now=time.monotonic(),
+                        include_history=include_history,
+                    )
+                pending_events.extend(fresh)
+                include_history = follow_lifecycle
+                wanted = _result_observation_names(
+                    tid, materialized, include_history=include_history
+                )
+                if wanted != names:
+                    replacement = resources.enter_context(command_resource_scope())
+                    observation = replacement.enter_context(
+                        result_observation(
+                            context,
+                            wanted,
+                            retain_connections=not release_while_waiting,
+                        )
+                    )
+                    lease.close()
+                    lease, names = replacement, wanted
+                    queues, monitor = observation
+                    # Read the newly registered local route before classification.
+                    continue
+                with connection_owner.get_connection() as broker:
+                    materialized = _classify_result_observation(
+                        context,
+                        tid,
+                        materialized,
+                        connection_owner,
+                        broker,
+                        now=time.monotonic(),
+                    )
+                if pending_events:
+                    yield from _lifecycle_events(tid, pending_events)
+                    pending_events.clear()
+                    # The caller may publish while we yield. Reacquire the bounded
+                    # suffix and local evidence on resume before deciding a verdict.
+                    continue
+                if materialized.config is None:
+                    for result in _wait_unconfigured_result(
+                        tid,
+                        materialized,
+                        collected,
+                        monitor,
+                        deadline=deadline,
+                        timeout=timeout,
+                    ):
+                        yield result
+                        return
+                    continue
+                with connection_owner.get_connection() as broker:
+                    rows = _result_window(broker, materialized, collected)
+                    selected = collected.select_claims(
+                        rows, materialized, now=time.monotonic()
+                    )
+                    drain_ctrl_out_stream_messages(
+                        broker, materialized.ctrl_out_name, tid=tid
+                    )
+                yielded = False
+                for event in _drain_result_rows(
                     connection_owner,
-                    broker,
-                    now=time.monotonic(),
-                    include_history=include_history,
-                )
-            pending_events.extend(fresh)
-            include_history = follow_lifecycle
-            wanted = _result_observation_names(
-                tid, materialized, include_history=include_history
-            )
-            if wanted != names:
-                replacement = resources.enter_context(command_resource_scope())
-                observation = replacement.enter_context(
-                    result_observation(context, wanted)
-                )
-                lease.close()
-                lease, names = replacement, wanted
-                queues, monitor = observation
-                # Read the newly registered local route before classification.
-                continue
-            with connection_owner.get_connection() as broker:
-                materialized = _classify_result_observation(
-                    context,
-                    tid,
-                    materialized,
-                    connection_owner,
-                    broker,
-                    now=time.monotonic(),
-                )
-            if pending_events:
-                yield from _lifecycle_events(tid, pending_events)
-                pending_events.clear()
-                # The caller may publish while we yield. Reacquire the bounded
-                # suffix and local evidence on resume before deciding a verdict.
-                continue
-            if materialized.config is None:
-                for result in _wait_unconfigured_result(
-                    tid,
-                    materialized,
-                    collected,
-                    monitor,
-                    deadline=deadline,
-                    timeout=timeout,
+                    materialized.outbox_name,
+                    selected,
+                    collected=collected,
+                    emit_stream=emit_stream,
+                    include_stream_events=include_stream_events,
+                    tid=tid,
+                    show_stderr=show_stderr,
+                    window_rows=rows,
                 ):
-                    yield result
-                    return
-                continue
-            with connection_owner.get_connection() as broker:
-                rows = _result_window(broker, materialized, collected)
-                selected = collected.select_claims(
-                    rows, materialized, now=time.monotonic()
-                )
-                drain_ctrl_out_stream_messages(
-                    broker, materialized.ctrl_out_name, tid=tid
-                )
-            yielded = False
-            for event in _drain_result_rows(
-                connection_owner,
-                materialized.outbox_name,
-                selected,
-                collected=collected,
-                emit_stream=emit_stream,
-                include_stream_events=include_stream_events,
-                tid=tid,
-                show_stderr=show_stderr,
-                window_rows=rows,
-            ):
-                yielded = True
-                yield event
-            if yielded:
-                continue
-            decision = collected.settle(materialized, now=time.monotonic())
-            if decision.action == "result":
-                value = aggregate_public_outputs(collected.values)
-                stdout, stderr = task_evidence.split_stdio(value)
-                yield TaskResult(
-                    tid,
-                    decision.status or "completed",
-                    value,
-                    stdout,
-                    stderr,
-                    decision.error
-                    or (
-                        f"no outbox queue for task {tid}"
-                        if decision.status == "missing"
-                        else None
-                    ),
-                    reconciliation=decision.reconciliation,
-                    outputs_root=str(context.outputs_dir.resolve()),
-                    command_stdout=collected.command_stdout,
-                    return_code=collected.failure_code
-                    or task_evidence.command_failure_return_code(
-                        materialized.terminal_evidence,
+                    yielded = True
+                    yield event
+                if yielded:
+                    continue
+                decision = collected.settle(materialized, now=time.monotonic())
+                if decision.action == "result":
+                    value = aggregate_public_outputs(collected.values)
+                    stdout, stderr = task_evidence.split_stdio(value)
+                    yield TaskResult(
+                        tid,
+                        decision.status or "completed",
+                        value,
+                        stdout,
+                        stderr,
+                        decision.error
+                        or (
+                            f"no outbox queue for task {tid}"
+                            if decision.status == "missing"
+                            else None
+                        ),
+                        reconciliation=decision.reconciliation,
+                        outputs_root=str(context.outputs_dir.resolve()),
                         command_stdout=collected.command_stdout,
-                    ),
+                        return_code=collected.failure_code
+                        or task_evidence.command_failure_return_code(
+                            materialized.terminal_evidence,
+                            command_stdout=collected.command_stdout,
+                        ),
+                    )
+                    return
+                if decision.action == "timeout":
+                    raise CommandTimeoutError(
+                        f"Timed out after {timeout} seconds waiting for task {tid}"
+                    )
+                wait = (
+                    None
+                    if decision.wait_until is None
+                    else max(0.0, decision.wait_until - time.monotonic())
                 )
-                return
-            if decision.action == "timeout":
-                raise CommandTimeoutError(
-                    f"Timed out after {timeout} seconds waiting for task {tid}"
-                )
-            wait = (
-                None
-                if decision.wait_until is None
-                else max(0.0, decision.wait_until - time.monotonic())
-            )
             monitor.wait(wait)

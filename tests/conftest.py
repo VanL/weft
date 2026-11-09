@@ -118,6 +118,7 @@ _SHARED_MODULES = frozenset(
         "tests/core/test_client_submission_facade.py",
         "tests/core/test_connection_admission.py",
         "tests/core/test_family_scheduling.py",
+        "tests/core/test_family_scheduling_model.py",
         "tests/core/test_family_source_reconciliation.py",
         "tests/core/test_family_dispatch_scaling.py",
         "tests/core/test_manager_family_maintenance.py",

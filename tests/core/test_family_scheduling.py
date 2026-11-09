@@ -288,54 +288,25 @@ def test_sibling_churn_bounds_history_and_preserves_fifo_then_lifo() -> None:
     assert_pending_storage_bounded(scheduler)
 
 
-def test_reclamation_keeps_only_current_bucket_owners_after_late_recovery() -> None:
-    """Re-added IDs can be globally live but belong to a newly recovered parent."""
+def test_readded_requests_keep_current_parent_after_recovery_and_contraction() -> None:
     scheduler = FamilyScheduler()
     scheduler.recover("100", "100", ())
-    for request_id in (200, 201, 202):
-        scheduler.add_pending(pending(request_id, "100", ("100", "150")))
-    scheduler.add_pending(pending(999, "100", ("100",)))
-    scheduler.remove_pending(200)
-    scheduler.remove_pending(201)
-    original = scheduler._parents["100"]
-    assert len(heap_ids(original)) == 2 * original.count
+    children = [pending(i, "100", ("100", "150")) for i in (200, 201, 202)]
+    sibling = pending(999, "100", ("100",))
+    for request in (*children, sibling):
+        scheduler.add_pending(request)
+    assert scheduler.remove_pending(201) == children[1]
 
     scheduler.recover("150", "100", ("100",))
-    for request_id in (200, 201):
-        scheduler.add_pending(pending(request_id, "100", ("100", "150")))
-    scheduler.remove_pending(202)
-    assert original.count == 1
-    assert heap_ids(original) == [999]
-    assert set(heap_ids(scheduler._parents["150"])) == {200, 201}
-    assert selected(scheduler).request_id == 201
+    scheduler.add_pending(children[1])
+    assert scheduler.remove_pending(202) == children[2]
+    assert selected(scheduler) == children[1]
     assert_pending_storage_bounded(scheduler)
 
-    old_handle = scheduler._request_indexes[200]
     scheduler.retire("150")
-    assert old_handle.owner() is scheduler._parents["100"]
-    assert selected(scheduler).request_id == 999
-    assert_pending_storage_bounded(scheduler)
-
-
-def test_candidate_discards_readded_id_owned_by_another_bucket() -> None:
-    """Stale-root pruning needs ownership even below the compaction threshold."""
-    scheduler = FamilyScheduler()
-    scheduler.recover("100", "100", ())
-    for request_id in (110, 120, 200, 201, 202):
-        scheduler.add_pending(pending(request_id, "100", ("100", "150")))
-    scheduler.remove_pending(201)
-    original = scheduler._parents["100"]
-    scheduler.recover("150", "100", ("100",))
-    scheduler.add_pending(pending(201, "100", ("100", "150")))
-    scheduler.remove_pending(202)
-    assert len(heap_ids(original)) <= 2 * original.count
-    assert heap_ids(original)[0] == 201
-
-    # The bucket primitive is inspected because another live branch owns 201;
-    # global selection alone could choose that other branch and mask this bug.
-    candidate = original.candidate(scheduler._pending, scheduler._request_indexes)
-    assert candidate is not None and candidate.request_id == 200
-    assert 201 not in heap_ids(original)
+    assert selected(scheduler) == sibling
+    assert scheduler.remove_pending(999) == sibling
+    assert selected(scheduler) == children[1]
     assert_pending_storage_bounded(scheduler)
 
 

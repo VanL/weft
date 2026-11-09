@@ -1223,10 +1223,18 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
     harness = WeftTestHarness()
     try:
         harness._registered_manager_tids.add("1775630560447778816")
+        updated_handle = _host_runtime_handle(424242)
+        updated_handle["observations"]["host_processes"] = [
+            {"pid": 424242, "create_time": 123.0}
+        ]
         monkeypatch_payloads: list[dict[str, object]] = [
             {
                 "full": "1775630560739303424",
                 "runtime_handle": _host_runtime_handle(424242, 424243),
+            },
+            {
+                "full": "1775630560739303424",
+                "runtime_handle": updated_handle,
             },
             {
                 "full": "1775630560447778816",
@@ -1248,6 +1256,7 @@ def test_collect_pid_mappings_registers_discovered_task_tids() -> None:
             "1775630560999999999",
         }
         assert 424242 in harness._registered_pids
+        assert harness._registered_pid_create_times[424242] == 123.0
         assert 424243 in harness._registered_pids
     finally:
         harness._closed = True

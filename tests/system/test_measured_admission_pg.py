@@ -318,7 +318,7 @@ def _read_denial(
 
 def test_startup_pressure_waits_without_hot_loop_and_reopens_on_fresh_usage(
     monkeypatch: pytest.MonkeyPatch,
-    isolated_postgres_server: None,
+    isolated_postgres_server: str,
 ) -> None:
     """Real U crosses H with two unfinished startups, then reopens on fresh U."""
     public_limit = 72
@@ -499,7 +499,7 @@ def test_real_global_pressure_pauses_then_drains_nested_fifo_backlog(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     count: int,
-    isolated_postgres_server: None,
+    isolated_postgres_server: str,
     record_property: Callable[[str, Any], None],
 ) -> None:
     """Global used includes external owners and unlabeled clients; queued tasks do not.
@@ -734,7 +734,7 @@ def test_native_postgres_ceiling_denies_real_pressure_and_resumes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     configured_ceiling: int | None,
-    isolated_postgres_server: None,
+    isolated_postgres_server: str,
 ) -> None:
     """Unset/zero uses native metadata; real external usage closes the same gate.
 

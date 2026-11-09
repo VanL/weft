@@ -193,10 +193,17 @@ Implementation: `weft/client/_client.py::WeftClient` and
 Related plan: [Burst result observation](../plans/2026-10-09-burst-result-observation-plan.md).
 
 The bounded observation owners in `weft/commands/_result_wait.py`, `result.py`,
-`events.py`, `run.py`, and `tasks.py` retain persistent queue leases until their
-existing close/finally boundary. Regression coverage lives in
-`tests/commands/test_observation_connections.py`; the repair evidence is recorded
-in [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md).
+`events.py`, `run.py`, and `tasks.py` normally retain persistent queue leases
+until their existing close/finally boundary. A runtime task collecting
+only a final PostgreSQL result with routes known at entry retains its queue
+activity subscription while waiting and owns a data connection only for
+each observation pass. It releases that pass's lease
+before waiting and preserves any caller-owned session. The next wake
+reacquires a data connection for fresh evidence. Regression coverage lives in
+`tests/commands/test_observation_connections.py` and
+`tests/system/test_admission_stress.py`. See the
+[nested admission load plan](../plans/2026-11-07-nested-admission-load-plan.md)
+and [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md).
 
 Task control observation in `weft/commands/tasks.py` also lends its owned log
 queue connection through `_task_history.py`, `system.py`, and manager/evidence

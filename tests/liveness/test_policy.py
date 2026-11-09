@@ -7,7 +7,11 @@ Spec references:
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from weft.liveness.policy import (
     MappingHistoryDecision,
@@ -162,3 +166,50 @@ def test_mapping_row_liveness_keeps_unknown_and_releases_terminal_without_live_p
         )
         is True
     )
+
+
+@settings(max_examples=500)
+@pytest.mark.property
+@given(
+    st.lists(
+        st.tuples(
+            st.integers(0, 2),
+            st.sampled_from(("live", "stale", "unknown", "not_attempted")),
+            st.integers(0, 8),
+        ),
+        min_size=1,
+        max_size=40,
+    )
+)
+def test_unknown_retirement_matches_elapsed_probe_model(
+    trace: list[tuple[int, Literal["live", "stale", "unknown", "not_attempted"], int]],
+) -> None:
+    """[LIVENESS.R4] Only intervals after attempted unknowns charge the clock."""
+    state = None
+    previous_generation = None
+    previous_outcome = None
+    elapsed = 0
+    now = 0
+    for generation, outcome, delta in trace:
+        now += delta
+        if generation != previous_generation or outcome in ("live", "stale"):
+            elapsed = 0
+            previous_outcome = None
+        if previous_outcome == "unknown":
+            elapsed += delta
+        state, retire = reduce_unknown_deadline(
+            state,
+            generation=str(generation),
+            outcome=outcome,
+            now_monotonic=now,
+            timeout_seconds=5,
+        )
+        assert retire == (outcome == "stale" or outcome == "unknown" and elapsed >= 5)
+        if retire:
+            # The owner removes a retired generation and starts the next one fresh.
+            state = None
+            elapsed = 0
+            previous_outcome = None
+        else:
+            previous_outcome = outcome
+        previous_generation = generation

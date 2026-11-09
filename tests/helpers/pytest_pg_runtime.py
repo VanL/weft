@@ -32,12 +32,13 @@ def load_pytest_pg_module() -> ModuleType:
 
 
 @pytest.fixture
-def isolated_postgres_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def isolated_postgres_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Own physical capacity while all normal pytest workers remain concurrent.
 
     Per-schema isolation cannot bound unrelated workers' server-wide sessions.
     Backend configuration is local to this pytest worker and unwinds after all
     test-owned harnesses, tasks, observers and pressure processes have closed.
+    Yield the container name so tests can inspect server-side evidence.
     """
     runtime = load_pytest_pg_module()
     name, dsn = runtime._start_postgres_container()
@@ -53,7 +54,7 @@ def isolated_postgres_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             else:
                 monkeypatch.delenv(key, raising=False)
         runtime._initialize_broker_schema(env=env)
-        yield
+        yield name
     except BaseException:
         runtime._print_container_logs(name)
         raise

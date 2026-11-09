@@ -2577,9 +2577,9 @@ class Manager(ServiceTask):
         return "open"
 
     def _admission_backend_name(self) -> str:
-        """Return the active broker backend used for admission observation."""
+        """Read the runtime's bound backend for admission [MA-1.8], [SB-0.4]."""
 
-        return str(self._get_connected_queue().backend_name)
+        return self._manager_context().backend_name
 
     def _observe_admission_usage(self) -> int | None:
         """Measure global actual PG pressure or SQLite live/unknown TIDs [MA-1.8]."""
@@ -4273,7 +4273,7 @@ class Manager(ServiceTask):
             if force_full or not self._manager_registry_initialized
             else previous_last_seen_ts
         )
-        fresh_higher_active: list[tuple[dict[str, Any], int]] = []
+        fresh_tids: set[str] = set()
         try:
             entries = iter_queue_json_entries(queue, since_timestamp=since_timestamp)
             saw_entry = False
@@ -4307,25 +4307,30 @@ class Manager(ServiceTask):
                     since_timestamp is not None
                     and previous_last_seen_ts is not None
                     and timestamp > previous_last_seen_ts
-                    and self._manager_record_should_be_superseded(
-                        projected,
-                        observed_timestamp=timestamp,
-                    )
                 ):
-                    fresh_higher_active.append((projected, timestamp))
+                    fresh_tids.add(tid)
             self._manager_registry_initialized = True
             if force_full and not saw_entry:
                 self._manager_registry_snapshot.clear()
-            for record, timestamp in fresh_higher_active:
-                self._publish_superseded_manager_record(
-                    queue,
-                    record=record,
-                    observed_timestamp=timestamp,
-                )
+            self._supersede_latest_manager_records(queue, fresh_tids)
             return True
         except (BrokerError, OSError, RuntimeError):
             logger.debug("Failed to refresh manager registry view", exc_info=True)
             return False
+
+    def _supersede_latest_manager_records(
+        self, queue: Queue, fresh_tids: set[str]
+    ) -> None:
+        """Use one latest observation per peer after reducing the registry batch."""
+        for tid in sorted(fresh_tids):
+            record = self._manager_registry_snapshot[tid]
+            timestamp = int(record["_timestamp"])
+            if self._manager_record_should_be_superseded(
+                record, observed_timestamp=timestamp
+            ):
+                self._publish_superseded_manager_record(
+                    queue, record=record, observed_timestamp=timestamp
+                )
 
     def _manager_record_should_be_superseded(
         self,

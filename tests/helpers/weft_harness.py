@@ -1471,6 +1471,7 @@ class WeftTestHarness:
             queue.close()
 
     def _collect_pid_mappings(self) -> None:
+        processes: dict[int, float | None] = {}
         for data in self._load_tid_state_payloads():
             full_tid = data.get("full")
             if isinstance(full_tid, str) and full_tid:
@@ -1478,12 +1479,16 @@ class WeftTestHarness:
                     self.register_manager_tid(full_tid)
                 elif (
                     full_tid not in self._registered_manager_tids
+                    and full_tid not in self._registered_tids
                     and not self._mapping_has_safe_owner(data)
                 ):
                     self.register_tid(full_tid)
 
-            for pid, create_time in self._mapping_host_processes(data):
-                self.register_pid(pid, kind="managed", create_time=create_time)
+            processes.update(self._mapping_host_processes(data))
+
+        # Keep historical descendants and the last observed identity for each PID.
+        for pid, create_time in processes.items():
+            self.register_pid(pid, kind="managed", create_time=create_time)
 
     def _terminate_registered_pids(self) -> None:
         for pid in list(self._registered_managed_pids):

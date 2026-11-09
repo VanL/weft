@@ -415,10 +415,7 @@ class FamilyScheduler:
             self._held_pending[request.request_id] = request
             return
         self._pending[request.request_id] = request
-        parent = self._parent(request.root_tid, request.ancestry_tids)
-        index = self._parents.setdefault(parent, _PendingIndex())
-        index.add(request.request_id)
-        self._request_indexes[request.request_id] = index
+        self._index_pending_parent(request)
         self._family_pending.setdefault(request.root_tid, _FamilyPending()).add(
             request.request_id
         )
@@ -426,6 +423,12 @@ class FamilyScheduler:
         self._family_counts[request.root_tid] = count + 1
         if count == 0:
             self._offer_root(request.root_tid)
+
+    def _index_pending_parent(self, request: PendingRequest) -> None:
+        parent = self._parent(request.root_tid, request.ancestry_tids)
+        index = self._parents.setdefault(parent, _PendingIndex())
+        index.add(request.request_id)
+        self._request_indexes[request.request_id] = index
 
     def remove_pending(self, request_id: int) -> PendingRequest | None:
         """Forget exact reserved/absent work and bound bucket-local history [MA-1.8]."""
@@ -590,7 +593,7 @@ class FamilyScheduler:
             self.finish_recovery()
 
     def finish_recovery(self) -> None:
-        """Rebuild pointers, counts and the ring once after an unordered sweep."""
+        """Rebuild the frontier and pending parent ownership after adoption."""
         residents = self._residents
         self._up = {
             tid: next(
@@ -608,3 +611,10 @@ class FamilyScheduler:
         for tid, children in self._live_children.items():
             if not children:
                 self._start_stack(tid)
+
+        # A newly observed ancestor can split a bucket that was indexed under
+        # a more distant live parent. Rebuild this derived index from lineage.
+        self._parents.clear()
+        self._request_indexes.clear()
+        for request in self._pending.values():
+            self._index_pending_parent(request)
