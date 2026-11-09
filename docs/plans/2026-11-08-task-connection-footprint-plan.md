@@ -385,6 +385,7 @@ processes can coexist. There is no rollout order and no one-way door.
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
 | [SB-0.4] | First-use facade validation runs once per wait | With SimpleBroker 8.8.0, every pass after a release revalidates the PostgreSQL target | 8.8.0 keeps admission on the process session and the reader's per-pass close ends that session; owner chose to keep releasing the connection (2026-11-09, interim) | Applied on `perf/integration`: [SB-0.4] now states per-pass revalidation and the reason; register D row added |
+| [PY-1] | "each SimpleBroker Queue still validates the target on first use" | With SimpleBroker 8.8.0, validation happens once per process session, on that session's first use, and again for a new session | Same SimpleBroker 8.8.0 change ([SB-API-11]); the promoted sentence described 8.7.2 per-Queue validation | Applied on `perf/integration`: the [PY-1] `build_context` paragraph now states session-scoped validation |
 
 ## Fresh-eyes review (author)
 

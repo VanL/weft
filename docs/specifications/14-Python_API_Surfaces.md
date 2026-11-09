@@ -50,8 +50,12 @@ it resolves configuration and creates the metadata directories and broker;
 creation steps; resolution can still create the project root. Inside a Weft
 task process, a context inherited from the runtime identity (no explicit
 root, fallback root, or configuration) does not open the broker to create it:
-the task's launch target already exists, and each SimpleBroker Queue still
-validates the target on first use. A supplied
+the task's launch target already exists, and SimpleBroker still validates
+a PostgreSQL project target once per process session, on that session's
+first use; a new session (for example, after the last lease is released)
+validates again ([SB-0.4]; see the
+[task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md)).
+A supplied
 context is preserved by `WeftClient`. The context does not own a permanently
 open broker; callers close queues they obtain and use the broker context
 manager to release its resources. An explicitly entered `WeftClient` may own
@@ -624,7 +628,7 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 
 ## Related Plans
 
-- [Task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md) stops a runtime-inherited `build_context` from reopening the broker ([PY-1]).
+- [Task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md) stops a runtime-inherited `build_context` from reopening the broker, and records that SimpleBroker 8.8.0 validates a PostgreSQL project target once per process session rather than once per Queue ([PY-1], [SB-0.4]).
 - [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md) has project status and the manager list/status surfaces populate `ManagerSnapshot.liveness` (`live` or `unknown`) and a PONG `proof_source` on `active` rows ([PY-2], [CLI-1.2.1]).
 - [Deep-dive review remediation plan](../plans/2026-11-06-deep-dive-review-remediation-plan.md) aligns `cmd_task_tid(reverse=...)` and the [PY-2] verb/type inventory (`42` verbs, `SystemStopResult`, and `system stop`).
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `client.system.stop`, mirroring `weft system stop` ([IP-1], [PY-2]).
