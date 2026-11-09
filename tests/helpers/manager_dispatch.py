@@ -11,8 +11,10 @@ from dataclasses import dataclass, field
 from functools import partial
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import psutil
 import pytest
 
 import weft.core.manager as manager_mod
@@ -181,4 +183,27 @@ def dispatch_witness_body(ready: Path, release: Path) -> str:
                 }
             },
         }
+    )
+
+
+PINNED_HOST_MEMORY_BYTES = 64 * 2**30
+"""Total host memory reported while a test controls the memory gate [MA-1.8]."""
+
+
+def pin_host_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    used: int = 0,
+    total: int = PINNED_HOST_MEMORY_BYTES,
+) -> None:
+    """Control the host memory every Manager observation reads [MA-1.8].
+
+    Host memory is an external dependency shared with every other process on
+    the machine. The patch replaces psutil's reading only, so the Manager's
+    own observation, memory gate, startup window and refusal stay real.
+    """
+    monkeypatch.setattr(
+        psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=total, available=total - used),
     )

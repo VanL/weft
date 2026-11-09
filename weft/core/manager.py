@@ -41,6 +41,7 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import psutil
 from pydantic import ValidationError
 
 import weft.core.deferred
@@ -102,7 +103,6 @@ from weft._constants import (
     MANAGER_STALE_INTERNAL_RESERVED_CLEANUP_QUEUE_LIMIT,
     MANAGER_STALLED_CONTROL_LOG_INTERVAL_SECONDS,
     MANAGER_STALLED_CONTROL_RETRY_SECONDS,
-    MANAGER_STARTUP_FAST_PATH_WINDOW,
     QUEUE_CTRL_IN_SUFFIX,
     QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INTERNAL_RESERVED_SUFFIX,
@@ -173,7 +173,9 @@ from .admission import (
     AdmissionController,
     AdmissionDecision,
     AdmissionLane,
+    HostMemory,
     _startup_window_allows_launch,
+    _startup_window_full,
 )
 from .control_messages import (
     ControlRequest,
@@ -673,9 +675,10 @@ class Manager(ServiceTask):
         self._dispatch_first_seen: dict[tuple[Any, ...], int] = {}
         self._dispatch_published_semantics: tuple[Any, ...] | None = None
         self._dispatch_source_witnesses: dict[str, int | None] = {}
-        self._dispatch_admission_blocked: set[str] = set()
-        self._dispatch_admission_reason = "admission_usage_unavailable"
-        self._dispatch_admission_measurements: dict[str, Any] | None = None
+        # Lane -> (reason, measurements) of the gate refusing it [MA-1.8].
+        self._dispatch_admission_refusals: dict[
+            str, tuple[str, dict[str, Any] | None]
+        ] = {}
         self._dispatch_classification_request: int | None = None
         self._dispatch_classification_failed = False
         self._startup_blocked = False
@@ -719,7 +722,11 @@ class Manager(ServiceTask):
         self._admission_blocked_lanes: set[AdmissionLane] = set()
         self._admission_blocked_queues: set[str] = set()
         self._admission_retry_after_ns = 0
-        self._admission_last_decision_state: tuple[str, str | None] = ("open", None)
+        self._admission_last_decision_state: tuple[str, str | None, str] = (
+            "open",
+            None,
+            "capacity_available",
+        )
         self._admission_probe_memo: dict[str, tuple[str, bool, float]] = {}
         self._child_launch_started_ns: dict[str, int] = {}
         self._child_launch_started_this_turn = False
@@ -1405,11 +1412,9 @@ class Manager(ServiceTask):
                 reasons.append("checkpoint_uncommitted")
             if self._active_child_launches or self._startup_dispatch_blocked():
                 reasons.append("startup_feedback_pending")
-        if (
-            lane in self._admission_blocked_lanes
-            and lane in self._dispatch_admission_blocked
-        ):
-            reasons.append(self._dispatch_admission_reason)
+        refusal = self._dispatch_admission_refusals.get(lane)
+        if lane in self._admission_blocked_lanes and refusal is not None:
+            reasons.append(refusal[0])
         return reasons
 
     def _dispatch_lane_refusals(
@@ -1451,6 +1456,7 @@ class Manager(ServiceTask):
             )
             if witness is None and (witnessed or not indexed):
                 continue
+            admission_refusal = self._dispatch_admission_refusals.get(lane)
             for reason in reasons:
                 item = refusal_item(
                     reason,
@@ -1460,9 +1466,8 @@ class Manager(ServiceTask):
                     known_pending_count=indexed,
                     count_basis="manager_indexed",
                     oldest_request=witness,
-                    measurements=copy.deepcopy(self._dispatch_admission_measurements)
-                    if reason
-                    in {"admission_usage_unavailable", "measured_capacity_exhausted"}
+                    measurements=copy.deepcopy(admission_refusal[1])
+                    if admission_refusal is not None and reason == admission_refusal[0]
                     else None,
                 )
                 candidates[(item["barrier"], lane, queue_name)] = item
@@ -2211,15 +2216,16 @@ class Manager(ServiceTask):
         self._resume_startup_dispatch()
 
     def _startup_dispatch_blocked(self) -> bool:
-        """Readiness only; a free slot never supplies resource authority [MA-1.8]."""
+        """Readiness only; a free slot never supplies resource authority [MA-1.8].
+
+        W bounds every backend: each has the memory gate, so none serializes
+        startup by rule. The measured decision applies the narrower window.
+        """
         if not self._startup_feedback:
             return False
-        limit = (
-            MANAGER_STARTUP_FAST_PATH_WINDOW
-            if self._admission_backend_name() == "postgres"
-            else 1
+        return self._startup_blocked or _startup_window_full(
+            len(self._startup_feedback)
         )
-        return self._startup_blocked or len(self._startup_feedback) >= limit
 
     def _resume_startup_dispatch(self) -> None:
         """Make known work eligible for a fresh check and wake the next turn."""
@@ -2634,14 +2640,6 @@ class Manager(ServiceTask):
             members[tid] = target.escalate
         return members
 
-    def _admission_enabled(self) -> bool:
-        """Return whether backend-specific admission is enabled."""
-
-        return (
-            self._admission_max_connections > 0
-            or self._admission_backend_name() == "postgres"
-        )
-
     def _admission_lane_for_queue(self, queue_name: str) -> AdmissionLane | None:
         """Map one Manager spawn source to its admission lane."""
 
@@ -2671,6 +2669,21 @@ class Manager(ServiceTask):
         """Read the runtime's bound backend for admission [MA-1.8], [SB-0.4]."""
 
         return self._manager_context().backend_name
+
+    def _observe_admission_memory(self) -> HostMemory | None:
+        """Measure host memory pressure with one call and no process walk [MA-1.8].
+
+        Usage is total minus available, so every program's memory counts. On
+        macOS available memory includes reclaimable file cache. A failed read
+        is an unknown observation, which defers dispatch.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
+        """
+        try:
+            memory = psutil.virtual_memory()
+        except (OSError, RuntimeError):
+            return None
+        return HostMemory(total=memory.total, available=memory.available)
 
     def _observe_admission_usage(self) -> int | None:
         """Measure global actual PG pressure or SQLite live/unknown TIDs [MA-1.8]."""
@@ -3429,18 +3442,20 @@ class Manager(ServiceTask):
             if self._startup_blocked
             else 0
         )
-        unavailable = decision.capacity is None
-        self._dispatch_admission_blocked = set(decision.blocked_lanes)
-        self._dispatch_admission_reason = (
-            "admission_usage_unavailable"
+        unavailable = any(gate is None for gate in decision.gates)
+        self._dispatch_admission_refusals = {
+            blocked: decision.refusal(blocked) for blocked in decision.blocked_lanes
+        }
+        # Internal is never refused without public, so public names the cause.
+        reason = (
+            "usage_unavailable"
             if unavailable
-            else "measured_capacity_exhausted"
-        )
-        self._dispatch_admission_measurements = (
-            dict(decision.capacity) if decision.capacity is not None else None
+            else decision.refusal("public")[0]
+            if blocked_lanes
+            else "capacity_available"
         )
         state = self._admission_state(blocked_lanes, unavailable=unavailable)
-        self._admission_last_decision_state = (state, decision.wait_phase)
+        self._admission_last_decision_state = (state, decision.wait_phase, reason)
         if self._admission_last_decision_state == previous_state and not unavailable:
             return
 
@@ -3448,15 +3463,9 @@ class Manager(ServiceTask):
             "backend": backend,
             "state": state,
             "lane": lane,
+            "reason": reason,
         }
         fields = dict(identity)
-        fields["reason"] = (
-            "usage_unavailable"
-            if decision.capacity is None
-            else "measured_capacity_exhausted"
-            if blocked_lanes
-            else "capacity_available"
-        )
         if decision.wait_phase is not None:
             identity["wait_phase"] = decision.wait_phase
             fields.update(
@@ -3470,6 +3479,13 @@ class Manager(ServiceTask):
                 reserve=decision.capacity["reserve"],
                 public_limit=decision.capacity["public_limit"],
                 internal_limit=decision.capacity["internal_limit"],
+            )
+        if decision.memory is not None:
+            fields.update(
+                memory_used=decision.memory["used"],
+                memory_reserve=decision.memory["reserve"],
+                memory_public_limit=decision.memory["public_limit"],
+                memory_total=decision.memory["internal_limit"],
             )
         if backend == "postgres":
             fields.update(self._admission_observation)
@@ -3510,7 +3526,7 @@ class Manager(ServiceTask):
     def _schedule_admission_retry_for_source(self, source_queue: str | None) -> None:
         """Backstop a restored launch request with one bounded lane retry."""
 
-        if not self._admission_enabled() or source_queue is None:
+        if source_queue is None:
             return
         lane = self._admission_lane_for_queue(source_queue)
         if lane is None:
@@ -3546,6 +3562,10 @@ class Manager(ServiceTask):
     def _admission_allows_queue(self, queue_name: str) -> bool:
         """Evaluate one spawn lane before broker reservation.
 
+        Each fresh observation reads host memory on every backend, and the
+        backend gate's usage only where that gate exists; every gate must
+        allow the lane, and the smallest gate window bounds startup overlap.
+
         Spec:
         - docs/specifications/03-Manager_Architecture.md [MA-1.8]
         - docs/specifications/05-Message_Flow_and_State.md [MF-6]
@@ -3553,7 +3573,7 @@ class Manager(ServiceTask):
         """
 
         lane = self._admission_lane_for_queue(queue_name)
-        if lane is None or not self._admission_enabled():
+        if lane is None:
             return True
         if lane in self._admission_blocked_lanes:
             self._admission_blocked_queues.add(queue_name)
@@ -3563,18 +3583,23 @@ class Manager(ServiceTask):
             return False
 
         backend = self._admission_backend_name()
-        used = self._observe_admission_usage()
+        used = (
+            self._observe_admission_usage()
+            if self._admission_controller.backend_gate_exists(backend)
+            else None
+        )
         decision = self._admission_controller.evaluate(
-            used=used, backend=backend, now=time.monotonic()
+            used=used,
+            memory=self._observe_admission_memory(),
+            backend=backend,
+            now=time.monotonic(),
         )
         self._record_admission_decision(lane=lane, backend=backend, decision=decision)
         if lane in decision.blocked_lanes:
             self._admission_blocked_queues.add(queue_name)
             return False
         if lane == "public" and not _startup_window_allows_launch(
-            unfinished=len(self._startup_feedback),
-            backend=backend,
-            capacity=decision.capacity,
+            unfinished=len(self._startup_feedback), gates=decision.gates
         ):
             self._startup_blocked = True
             self._admission_blocked_queues.add(queue_name)

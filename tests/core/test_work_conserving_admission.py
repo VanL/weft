@@ -8,13 +8,17 @@ import pytest
 
 from simplebroker.ext import BrokerError
 from tests.core.test_manager import make_manager_spec
+from tests.helpers.manager_dispatch import PINNED_HOST_MEMORY_BYTES, pin_host_memory
 from tests.helpers.typing import BrokerEnv
 from weft._constants import load_config, resolve_runtime_config
-from weft.core.admission import AdmissionController
+from weft.core.admission import AdmissionController, HostMemory
 from weft.core.family_scheduling import PendingRequest
 from weft.core.manager import Manager
 
 pytestmark = pytest.mark.shared
+
+# The memory gate stays open, so these decisions isolate the connection gate.
+AMPLE_MEMORY = HostMemory(total=2**34, available=2**33)
 
 
 @pytest.fixture
@@ -143,27 +147,38 @@ def test_explicit_capacity_never_reads_native_ceiling(
         assert manager._observe_admission_usage() is not None
 
 
-def test_sqlite_zero_disables_resource_gate(
+def test_sqlite_zero_disables_only_the_tid_gate(
     manager: Manager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No TID ceiling means no TID observation; host memory still gates [MA-1.8]."""
     monkeypatch.setattr(manager, "_admission_backend_name", lambda: "sqlite")
 
     def unexpected_observation() -> None:
-        pytest.fail("disabled SQLite gate observed usage")
+        pytest.fail("disabled SQLite TID gate observed usage")
 
     monkeypatch.setattr(manager, "_observe_admission_usage", unexpected_observation)
-    assert manager._admission_allows_queue(manager._queue_names["inbox"])
+    source = manager._queue_names["inbox"]
+    pin_host_memory(monkeypatch, used=0)
+    assert manager._admission_allows_queue(source)
+    # At the 10% reserve, the same Manager refuses the public lane.
+    pin_host_memory(monkeypatch, used=PINNED_HOST_MEMORY_BYTES * 9 // 10)
+    assert not manager._admission_allows_queue(source)
+    assert manager._admission_blocked_lanes == {"public"}
 
 
 def test_native_capacity_update_preserves_drain_wait_history() -> None:
     controller = AdmissionController(300, 0.1, False)
-    controller.evaluate(used=300, backend="postgres", now=100.0)
-    controller.evaluate(used=290, backend="postgres", now=110.0)
+    controller.evaluate(used=300, memory=AMPLE_MEMORY, backend="postgres", now=100.0)
+    controller.evaluate(used=290, memory=AMPLE_MEMORY, backend="postgres", now=110.0)
     controller.set_max_connections(100)
-    unknown = controller.evaluate(used=None, backend="postgres", now=135.0)
+    unknown = controller.evaluate(
+        used=None, memory=AMPLE_MEMORY, backend="postgres", now=135.0
+    )
     assert unknown.elapsed_seconds == 35.0
     assert unknown.idle_seconds == 25.0
-    decision = controller.evaluate(used=290, backend="postgres", now=140.0)
+    decision = controller.evaluate(
+        used=290, memory=AMPLE_MEMORY, backend="postgres", now=140.0
+    )
     assert decision.capacity is not None and decision.capacity["internal_limit"] == 100
     assert decision.elapsed_seconds == 40.0
     assert decision.idle_seconds == 30.0

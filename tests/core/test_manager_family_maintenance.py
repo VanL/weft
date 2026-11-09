@@ -7,6 +7,7 @@ classification, checkpoint publication, reservation decisions, and retries.
 from __future__ import annotations
 
 import json
+import math
 import multiprocessing
 import multiprocessing.synchronize
 import threading
@@ -27,7 +28,9 @@ from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_manager import make_manager_spec
 from tests.helpers.manager_dispatch import (
+    PINNED_HOST_MEMORY_BYTES,
     SettledLaunches,
+    pin_host_memory,
     retire_dispatch_workers,
     settled_launches,
 )
@@ -112,10 +115,16 @@ def startup_pg_manager(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[Manager, WeftTestHarness]]:
-    """Isolate physical PG capacity before constructing its broker or Manager."""
+    """Isolate physical PG capacity before constructing its broker or Manager.
+
+    An indirect parameter sets ``WEFT_ADMISSION_MAX_CONNECTIONS`` (default 300):
+    zero means native capacity on PostgreSQL (300 on the isolated server) and
+    no live/unknown-TID gate on SQLite.
+    """
     # This fixture isolates user-work dispatch: the standing heartbeat (and
     # every other internal service) is not supervised here [MA-1] item 7.
     monkeypatch.setattr(Manager, "_service_supervision_allowed", lambda self: False)
+    ceiling = getattr(request, "param", 300)
     if active_test_backend() == "postgres":
         request.getfixturevalue("isolated_postgres_server")
     with WeftTestHarness() as harness:
@@ -127,7 +136,7 @@ def startup_pg_manager(
             make_manager_spec(tid, idle_timeout=0.0),
             config=load_config(
                 {
-                    "WEFT_ADMISSION_MAX_CONNECTIONS": 300,
+                    "WEFT_ADMISSION_MAX_CONNECTIONS": ceiling,
                     "WEFT_ADMISSION_RESERVE_FRACTION": 0.1,
                     "WEFT_TASK_MONITOR_ENABLED": False,
                     "WEFT_LIVENESS_MONITOR_ENABLED": False,
@@ -509,15 +518,20 @@ def _check_missing_publication_settles_only_one_startup(
         assert reserved.peek_one(exact_timestamp=int(other_tid)) is not None
 
 
+@pytest.mark.parametrize("startup_pg_manager", [300, 0], indirect=True)
 def test_startup_window_overlaps_but_bounds_unobserved_processes(
     startup_pg_manager: tuple[Manager, WeftTestHarness],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A receipt wakes the next launch; later feedback frees only its own slot.
 
+    Every backend has the memory gate, so with ample host memory and low
+    backend usage the whole window W overlaps, with or without a backend
+    ceiling; a disabled SQLite TID gate does not serialize startup [MA-1.8].
     Fence before Consumer construction so neither attributed broker connections
     nor task-state publication can settle startup before the intended release.
     """
+    pin_host_memory(monkeypatch)
     now_ns = time.time_ns()
     monkeypatch.setattr(
         manager_mod,
@@ -530,9 +544,7 @@ def test_startup_window_overlaps_but_bounds_unobserved_processes(
         ),
     )
     manager, harness = startup_pg_manager
-    window = (
-        MANAGER_STARTUP_FAST_PATH_WINDOW if active_test_backend() == "postgres" else 1
-    )
+    window = MANAGER_STARTUP_FAST_PATH_WINDOW
     manager._refresh_scheduler_evidence()
     source = manager._queue(manager._queue_names["inbox"])
     reserved = manager._queue(manager._queue_names["reserved"])
@@ -702,6 +714,7 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
     is counted, not replaced. Periodic maintenance and the absence fallback are
     held, so only the released publication can settle.
     """
+    pin_host_memory(monkeypatch)
     now_ns = time.time_ns()
     monkeypatch.setattr(
         manager_mod,
@@ -714,9 +727,7 @@ def test_settlement_and_admitted_launch_share_one_waiter_rebuild(
         ),
     )
     manager, harness = startup_pg_manager
-    window = (
-        MANAGER_STARTUP_FAST_PATH_WINDOW if active_test_backend() == "postgres" else 1
-    )
+    window = MANAGER_STARTUP_FAST_PATH_WINDOW
     manager._refresh_scheduler_evidence()
     source = manager._queue(manager._queue_names["inbox"])
     body = json.dumps(
@@ -2241,7 +2252,91 @@ def test_resource_refusal_continuity_coalesces_real_retry_turns(
     manager._expire_admission_retry_if_due()
     assert manager._admission_allows_queue(manager._queue_names["internal_inbox"])
     assert "public" in manager._admission_blocked_lanes
-    assert manager._dispatch_admission_reason == "measured_capacity_exhausted"
+    assert manager._dispatch_admission_refusals["public"][0] == (
+        "measured_capacity_exhausted"
+    )
+    assert "internal" not in manager._dispatch_admission_refusals
+
+
+def test_memory_at_reserve_refuses_public_launch_and_keeps_work_queued(
+    manager: Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host memory at its reserve is a published public refusal [MA-1.8].
+
+    No backend ceiling is configured: on SQLite memory is the only gate, and
+    on PostgreSQL the native connection gate stays open. Accepted work stays
+    queued while refused, the internal lane keeps its reserve, and the request
+    launches once a fresh observation shows room. No task memory is charged.
+    """
+    reserve = math.ceil(PINNED_HOST_MEMORY_BYTES * 0.1)
+    limit = PINNED_HOST_MEMORY_BYTES - reserve
+    pin_host_memory(monkeypatch, used=limit)
+    manager._refresh_scheduler_evidence()
+    source = manager._queue(manager._queue_names["inbox"])
+    reserved = manager._queue(manager._queue_names["reserved"])
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:provide_payload",
+            }
+        }
+    )
+    request_id = int(source.write(body))
+    # A refusal is published once it outlasts one due maintenance pass.
+    for _ in range(2):
+        manager._admission_refresh_after = 0
+        manager._admission_retry_after_ns = 1
+        manager.process_once()
+    resource = [
+        item
+        for item in manager._dispatch_observation["items"]
+        if item["barrier"] == "measured_resource"
+    ]
+    assert len(resource) == 1
+    item = resource[0]
+    assert (item["reason"], item["lane"], item["ends_when"]) == (
+        "measured_memory_exhausted",
+        "public",
+        "fresh_memory_permits",
+    )
+    assert item["oldest_request"] == request_id
+    assert item["measurements"] == {
+        "used": limit,
+        "reserve": reserve,
+        "public_limit": limit,
+        "internal_limit": PINNED_HOST_MEMORY_BYTES,
+        "public_allowed": False,
+        "internal_allowed": True,
+    }
+    published = read_task_state_snapshot(manager._manager_context(), manager.tid)
+    assert published is not None
+    assert [
+        refusal["reason"] for refusal in published[1]["dispatch_refusals"]["items"]
+    ] == ["measured_memory_exhausted"]
+    assert source.peek_one(exact_timestamp=request_id) is not None
+    assert reserved.peek_one() is None
+    assert not manager._active_child_launches and not manager._child_processes
+    # The same observation leaves the internal lane its reserve.
+    assert manager._admission_allows_queue(manager._queue_names["internal_inbox"])
+
+    pin_host_memory(monkeypatch, used=limit - 1)
+    manager._admission_retry_after_ns = 1
+    manager._expire_admission_retry_if_due()
+    drive_until(
+        lambda: (
+            not source.has_pending()
+            and not manager._active_child_launches
+            and not manager._child_processes
+        ),
+        bool,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=30,
+    )
+    assert json.loads(manager._queue(f"T{request_id}.outbox").read_one() or "null") == {
+        "data": "payload"
+    }
 
 
 def test_classification_refusal_names_failed_request_while_indexed_work_proceeds(

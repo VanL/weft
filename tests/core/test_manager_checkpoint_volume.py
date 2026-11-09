@@ -327,7 +327,7 @@ def test_undurable_receipt_publishes_before_the_turn_dispatches(
         )
     assert tid in manager._scheduler_undurable
     assert manager._scheduler_checkpoint_dirty
-    # Isolate the custody gate from SQLite's serialized startup window.
+    # Isolate the custody gate from the startup window.
     manager._release_startup_feedback(tid)
     waiting = str(
         submit_spawn_request(

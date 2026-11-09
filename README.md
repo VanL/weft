@@ -716,7 +716,12 @@ state are not a substitute for listener headroom.
 Managers delay new work before reservation when measured capacity is exhausted.
 On PostgreSQL, unset or `0` `WEFT_ADMISSION_MAX_CONNECTIONS` uses the backend
 `max_connections`; a positive value sets an explicit ceiling. On SQLite, unset
-or `0` disables the resource gate and positive values count live/unknown TIDs. `WEFT_ADMISSION_RESERVE_FRACTION` defaults to `0.1`.
+or `0` disables the live/unknown-TID gate and positive values count live/unknown TIDs. `WEFT_ADMISSION_RESERVE_FRACTION` defaults to `0.1`.
+On every backend, Managers also measure host memory (total minus available,
+including other programs' use) and hold new ordinary launches while it is at or
+above 90% of total; this 10% memory reserve is fixed and does not follow
+`WEFT_ADMISSION_RESERVE_FRACTION`. No task is charged memory in advance, and
+its `memory_mb` limit is not counted.
 The effective reserve is the larger of the rounded-up fraction and four slots
 of internal operating room for Manager, TaskMonitor, LivenessMonitor, and
 Heartbeat (three with LivenessMonitor disabled). These are no dedicated permits.
@@ -821,9 +826,11 @@ queued; it is not a request wait time. Fresh capacity opening all lanes ends
 an episode, as does a best-effort existing activity scan proving all configured
 spawn sources empty. Unobserved idle gaps retain history, so a later burst can inherit
 that age. Empty-source reset is silent; an `open` log requires observed capacity.
-SQLite retains its live-TID capacity model. Family classification and launch
-custody remain active when its resource gate is disabled; that mode provides no
-implicit process-count bound.
+SQLite retains its live-TID capacity model under a positive ceiling. Family
+classification, launch custody and the memory gate remain active when its TID
+gate is disabled; that mode provides no implicit process-count bound. Startup
+overlap follows the smallest window among the gates that exist, so SQLite
+starts up to six tasks at a time like PostgreSQL.
 
 ### Task IDs (TIDs)
 
@@ -1604,12 +1611,13 @@ Environment variables:
 - `WEFT_MANAGER_LIFETIME_TIMEOUT` - Manager idle timeout (default: 600s)
 - `WEFT_ADMISSION_MAX_CONNECTIONS` - PostgreSQL: unset or `0` uses the current
   backend maximum; positive values override it. SQLite: unset or `0` disables
-  resource admission; positive values count actual live/unknown TIDs
+  the live/unknown-TID gate; positive values count actual live/unknown TIDs.
+  The host memory gate applies on every backend
 - `WEFT_ADMISSION_RESERVE_FRACTION` - Fraction withheld from public work;
   defaults to `0.1` and must be finite with `0 <= value < 1`; the effective
   reserve is never below four slots for Manager, TaskMonitor,
   LivenessMonitor, and Heartbeat while LivenessMonitor is enabled (three when
-  disabled)
+  disabled). It does not apply to the host memory gate's fixed 10% reserve
 - `WEFT_LIVENESS_MONITOR_ENABLED` - Supervise the internal LivenessMonitor
   (default: true)
 - `WEFT_MANAGER_REUSE_ENABLED` - Keep manager running (default: true)

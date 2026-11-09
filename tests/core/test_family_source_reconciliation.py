@@ -10,12 +10,16 @@ import pytest
 import tests.core.test_admission_recovery as recovery_fixtures
 import tests.core.test_child_spawn_validation as validation_fixtures
 from tests.helpers.weft_harness import WeftTestHarness
+from weft.core.admission import HostMemory
 from weft.core.manager import Manager
 from weft.core.manager_runtime import build_manager_spec
 from weft.core.spawn_requests import submit_spawn_request
 from weft.core.taskspec import ReservedPolicy
 
 pytestmark = pytest.mark.shared
+
+# The memory gate stays open, so these decisions isolate the connection gate.
+_AMPLE_MEMORY = HostMemory(total=2**34, available=2**33)
 recovery_manager = recovery_fixtures.recovery_manager
 validating_manager = validation_fixtures.validating_manager
 
@@ -136,7 +140,7 @@ def test_measured_denial_does_not_mistake_nonempty_primary_for_idle_gap(
     accepted = _accept(weft_harness)
     manager._classify_family_requests()
     first = manager._admission_controller.evaluate(
-        used=None, backend="postgres", now=100.0
+        used=None, memory=_AMPLE_MEMORY, backend="postgres", now=100.0
     )
     assert first.wait_phase == "waiting"
     candidate = manager._peek_family_candidate()
@@ -145,6 +149,6 @@ def test_measured_denial_does_not_mistake_nonempty_primary_for_idle_gap(
     assert not manager._has_pending_messages()
     assert manager._queue(manager._queue_names["inbox"]).has_pending()
     later = manager._admission_controller.evaluate(
-        used=None, backend="postgres", now=140.0
+        used=None, memory=_AMPLE_MEMORY, backend="postgres", now=140.0
     )
     assert later.wait_phase == "stalled" and later.elapsed_seconds == 40.0

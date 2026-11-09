@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from weft._constants import load_config
-from weft.core.admission import AdmissionController
+from weft.core.admission import AdmissionController, HostMemory
 
 
 @pytest.mark.parametrize("backend", ["postgres", "sqlite"])
@@ -24,7 +24,10 @@ def test_launch_uses_measured_capacity_without_task_budget(
 ) -> None:
     """The final unreserved slot permits a launch; only actual usage counts."""
     decision = AdmissionController(300, 0.1, False).evaluate(
-        used=used, backend=backend, now=0.0
+        used=used,
+        memory=HostMemory(total=2**34, available=2**33),
+        backend=backend,
+        now=0.0,
     )
     assert decision.blocked_lanes == blocked
 

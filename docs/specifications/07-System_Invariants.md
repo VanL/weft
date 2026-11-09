@@ -1232,26 +1232,32 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`
   or bounded periodic discovery.
 ### Connection admission [MANAGER.18]
 
-Ordinary admission uses one coherent SimpleBroker observed-usage population. Available capacity is the configured applicable ceiling minus the configured operating reserve minus observed usage. A positive available value permits consideration of one eligible launch; it is not a claim that the task will consume one connection. There is no per-task connection budget, lifetime deficit, or ordinary child admission class. Usage includes external and unattributed pressure. Failed or unknown observation defers dispatch without rejecting accepted work. Admission and launch are not globally atomic. Internal runtime requests retain their documented reserve eligibility; their measured use participates in the same population. SQLite retains its live/unknown TID accounting and local-launch union. On SQLite, a disabled resource gate does not disable family classification or launch custody.
+Ordinary admission measures one coherent SimpleBroker observed-usage population (the backend gate) and host memory (the memory gate, below). For the backend gate, available capacity is the configured applicable ceiling minus the configured operating reserve minus observed usage. A positive available value permits consideration of one eligible launch; it is not a claim that the task will consume one connection. There is no per-task connection budget, lifetime deficit, or ordinary child admission class. Usage includes external and unattributed pressure. Failed or unknown observation defers dispatch without rejecting accepted work. Admission and launch are not globally atomic. Internal runtime requests retain their documented reserve eligibility; their measured use participates in the same population. Under a positive ceiling, SQLite retains its live/unknown TID accounting and local-launch union. On SQLite, a disabled TID gate does not disable family classification, launch custody or the memory gate.
 
-On PostgreSQL, unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` means automatic backend capacity, not disabled admission. On each fresh admission observation the Manager reads `max_connections` through SimpleBroker's public `get_connection_stats()` on its existing Queue, then reads the coherent total/by-owner usage through public `get_connection_usage()` outside an encompassing caller transaction. The ordinary gate is `available = max(0, C - R - U)` with that backend maximum C and the existing global reserve R. A positive configured ceiling overrides automatic capacity. Failure to obtain either capacity or usage defers launches as an unknown observation and preserves accepted work, custody and existing drain-wait clocks. Updating the effective ceiling does not reset those clocks. There is no family count in this calculation. On SQLite, unset or zero retains the existing disabled resource mode; positive ceilings retain actual live/unknown-TID accounting. A disabled SQLite gate supplies no implicit process-count bound.
+On PostgreSQL, unset or zero `WEFT_ADMISSION_MAX_CONNECTIONS` means automatic backend capacity, not disabled admission. On each fresh admission observation the Manager reads `max_connections` through SimpleBroker's public `get_connection_stats()` on its existing Queue, then reads the coherent total/by-owner usage through public `get_connection_usage()` outside an encompassing caller transaction. The ordinary gate is `available = max(0, C - R - U)` with that backend maximum C and the existing global reserve R. A positive configured ceiling overrides automatic capacity. Failure to obtain either capacity or usage defers launches as an unknown observation and preserves accepted work, custody and existing drain-wait clocks. Updating the effective ceiling does not reset those clocks. There is no family count in this calculation. On SQLite, unset or zero disables the live/unknown-TID gate; positive ceilings retain actual live/unknown-TID accounting. A disabled TID gate supplies no implicit process-count bound; the memory gate still applies.
+
+Every backend also gates launches on measured host memory. On each fresh admission observation the Manager reads total host memory T and available memory A with one `psutil.virtual_memory()` call; it walks no processes. Memory usage is `U_m = T - A`, so it includes every other program's memory, as connection usage includes unattributed connections. The memory reserve is `R_m = ceil(T*0.1)`, the public limit is `L_m = T - R_m`, and the internal limit is T: an ordinary launch requires `U_m < L_m`, and internal runtime work requires `U_m < T`. The memory reserve is fixed: `WEFT_ADMISSION_RESERVE_FRACTION` is the backend gate's operating reserve, which operators raise to leave connections to other clients of a shared database server, and it does not apply to host memory. No task is charged memory: a task's `memory_mb` limit, including its default, never enters `U_m` or `L_m`, and queued work costs nothing. A failed memory observation is unknown and defers dispatch on both lanes, preserving accepted work and custody. A launch requires every gate that exists to allow its lane: the memory gate on every backend, and the backend gate on PostgreSQL or under a positive SQLite ceiling. The memory gate has no setting of its own. On macOS available memory includes reclaimable file cache, so `U_m` excludes cache the kernel can evict; memory compression and swap are not measured separately. Like the backend gate, the memory gate is a sampled soft guard.
 
 Ordinary launch selection is work-conserving family scheduling over dynamically observed ancestry. There is no configured frontier count or family concurrency cap. Active branches receive round-robin turns and offer newest eligible tip children first. Active branches rotate in ring order from a cursor, and a new path joins the rotation last: it is inserted immediately before the path the cursor names next, so it is visited after every path already waiting; a path keeps its place when it extends to a child or contracts to its parent; a path that becomes a prefix of a sibling's path leaves the rotation; each selection asks branches in rotation order starting after the branch that supplied the previous selection; a recovery rebuild orders paths in resident adoption order and restarts the cursor at the first of them; no other order among branches is promised. If none has an eligible tip child, the oldest independent pending family enters FIFO by original root ID; otherwise an active family may offer its oldest unassigned sibling subtree, choosing families round-robin. A live finite tip and its ancestors retain lineage, not a capacity permit. A child extends its matching ancestry path; a sibling starts another path when selected and when measured admission and existing launch custody allow it. Positive process exit contracts a path without dropping known descendants. Logical family membership remains while pending or resident descendants exist; late-discovered work rejoins at the original root FIFO position or extends a matching live tip. Queued requests incur no process or prospective connection charge. Multiple Managers retain exact-ID work stealing and measure the same applicable cross-process resource population.
 
-Every ordinary PostgreSQL launch requires a fresh coherent usage observation
-and the existing measured admission decision. Let L=max(0,C-R), H=floor(4L/5),
-and W=6. If H>=W, a Manager may have up to
-N(U)=min(W, max(1, floor(W(L-U)/(L-H)))) unfinished ordinary startups at
-observed usage U: the whole window W while U<=H, then fewer in proportion to
-measured headroom L-U, down to one startup as U approaches L. Otherwise it
-waits until no ordinary startup is unfinished before authorizing one launch.
-A window wider than one never leaves an unfinished startup less measured
-headroom, (L-U)/N(U), than the (L-H)/W share each of W startups has at H; the
-shape uses no constant beyond H and W. Unknown usage denies dispatch. Window occupancy
+Every ordinary launch requires a fresh observation of every gate that exists
+and the existing measured admission decision. Let W=6. For one gate with public
+limit L, observed usage U and H=floor(4L/5) (L=max(0,C-R) for the backend gate,
+L=L_m for the memory gate), the gate permits
+N(U)=min(W, max(1, floor(W(L-U)/(L-H)))) unfinished ordinary startups if H>=W:
+the whole window W while U<=H, then fewer in proportion to measured headroom
+L-U, down to one startup as U approaches L. A gate whose H<W permits one. A
+Manager may have up to the smallest N(U) among the gates that exist unfinished
+ordinary startups, and otherwise waits until fewer are unfinished before
+authorizing a launch. The memory gate exists on every backend, so no backend
+serializes startup by rule. A window wider than one never leaves an unfinished
+startup less measured headroom on any gate, (L-U)/N(U), than the (L-H)/W share
+each of W startups has at H; the shape uses no constant beyond H and W. Unknown
+usage on any gate denies dispatch. Window occupancy
 counts selected launch-worker requests and processes awaiting startup feedback
 once per TID, starting before process creation; it does not count queued work
-or running tasks whose startup feedback has settled. SQLite retains serialized
-startup. The window bounds unobserved launch exposure, not connection consumption;
+or running tasks whose startup feedback has settled. The window bounds
+unobserved launch exposure, not resource consumption;
 it adds no per-task resource charge, family cap, or global admission atomicity.
 The window is local to one Manager incarnation. Surviving tasks adopted after
 restart remain subject to existing resident/custody recovery and fresh measured
@@ -1277,9 +1283,10 @@ Family ordering and resource admission answer different questions. The scheduler
 PostgreSQL drain-wait history survives lane retry-cache clearing. Only a
 strict new episode-low usage value or confirmed child reap refreshes drain
 progress. Retry expiry, failed or successful process launch and observation
-success alone cannot do so. An episode starts at first observed lane denial,
-also on an unavailable observation, never on launch-failure restoration alone.
-It ends when a fresh observation opens all configured lanes or an existing pending-work
+success alone cannot do so. An episode starts at the backend gate's first
+observed lane denial, also on an unavailable backend observation, never on
+launch-failure restoration or a memory refusal alone.
+It ends when a fresh backend observation opens all lanes or an existing pending-work
 scan successfully proves all configured spawn sources empty and the post-probe stop
 flag is unset. This best-effort reset retains history across unobserved idle
 gaps. No extra probes or cached emptiness state are introduced. Unknown
@@ -1299,7 +1306,9 @@ _Implementation mapping_: `weft/core/manager.py`, `weft/core/admission.py`,
 `tests/core/test_manager_family_maintenance.py`, `tests/system/test_measured_admission_pg.py`.
 
 For [MANAGER.18], `weft/core/admission.py::_startup_window_allows_launch`
-owns the bounded overlap predicate. `Manager._startup_dispatch_blocked` and
+owns the bounded overlap predicate over every existing gate,
+`weft/core/admission.py::_memory_capacity` owns the memory gate, and
+`weft/core/manager.py::Manager._observe_admission_memory` reads host memory. `Manager._startup_dispatch_blocked` and
 `Manager._resume_startup_dispatch` in `weft/core/manager.py` own negative
 readiness and next-turn reactivation, separately from resource drain-wait policy.
 
@@ -1512,6 +1521,7 @@ doc:
 - [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md) removes Manager round trips that no contract needs from the launch receipt, reap and dispatch handler: no usage read for an undurable receipt before the missing-publication fallback is due, one terminal-proof read for a clean reap's failsafe check, no second acknowledgement of an acknowledged reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).
 
 - [Startup window narrows with measured headroom](../plans/2026-11-08-startup-window-settlement-plan.md) revises the [MANAGER.18] startup window above H to narrow in proportion to measured headroom.
+- [Measured memory admission and startup-window parity](../plans/2026-11-09-measured-memory-admission-plan.md) adds the host memory gate on every backend and takes the startup window as the smallest window among the gates that exist, so SQLite no longer serializes startup ([MANAGER.18]).
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.
 
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).

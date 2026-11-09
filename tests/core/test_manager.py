@@ -39,7 +39,7 @@ import weft.core.tasks.base as base_task_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.broker_reads import count_queue_calls
-from tests.helpers.manager_dispatch import observe_child_exit
+from tests.helpers.manager_dispatch import observe_child_exit, pin_host_memory
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.test_backend import active_test_backend
 from tests.helpers.typing import BrokerEnv, record_and_return
@@ -96,6 +96,7 @@ from weft._constants import (
     load_config,
 )
 from weft.context import WeftContext, build_context
+from weft.core.admission import HostMemory
 from weft.core.control_messages import encode_control_message
 from weft.core.heartbeat import upsert_heartbeat
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
@@ -2821,14 +2822,15 @@ def test_sqlite_admission_does_not_swallow_base_exception(
 
 @pytest.mark.skipif(
     active_test_backend() == "postgres",
-    reason="zero selects native PostgreSQL capacity; only SQLite disables admission",
+    reason="zero selects native PostgreSQL capacity; only SQLite disables its TID gate",
 )
-def test_sqlite_disabled_admission_dispatches_without_observing_backend(
+def test_sqlite_disabled_tid_gate_dispatches_without_observing_backend(
     broker_env: BrokerEnv,
     unique_tid: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SQLite zero capacity retains the explicitly disabled resource mode."""
+    """SQLite zero capacity disables the TID gate; ample memory admits [MA-1.8]."""
+    pin_host_memory(monkeypatch)
     db_path, make_queue = broker_env
     manager = Manager(
         db_path,
@@ -2851,7 +2853,7 @@ def test_sqlite_disabled_admission_dispatches_without_observing_backend(
         manager,
         "_observe_admission_usage",
         lambda: (_ for _ in ()).throw(
-            AssertionError("disabled admission observed backend usage")
+            AssertionError("disabled TID gate observed backend usage")
         ),
     )
     monkeypatch.setattr(
@@ -3168,7 +3170,10 @@ def test_pg_admission_idle_reset_requires_all_successful_unstopped_source_probes
         # Stopping is one-way. Inspect the real policy's next decision rather
         # than restarting a stopped Manager merely to expose its history.
         decision = manager._admission_controller.evaluate(
-            used=None, backend="postgres", now=evidence["now"]
+            used=None,
+            memory=HostMemory(total=2**34, available=2**33),
+            backend="postgres",
+            now=evidence["now"],
         )
         assert decision.wait_phase == "stalled"
         assert decision.elapsed_seconds == 40.0

@@ -47,8 +47,11 @@ current rule's W startups has at its threshold.
 1. **Approve the narrowing window (implemented on this branch).** Accept
    N(U) above H in place of the drop to one. Rejecting it means reverting this
    branch; nothing else depends on it.
-2. **SQLite's serialized startup (proposed, not implemented).** See
-   "Direction 3". The startup window's stated purpose, bounding unobserved
+2. **SQLite's serialized startup (proposed, not implemented).** Superseded
+   on 2026-11-09 by owner direction, implemented in
+   [`2026-11-09-measured-memory-admission-plan.md`](./2026-11-09-measured-memory-admission-plan.md):
+   a measured host memory gate on every backend and a window that is the
+   smallest among the gates that exist. See "Direction 3". The startup window's stated purpose, bounding unobserved
    launch exposure, does not apply on SQLite, so the rule needs either a
    stated reason or a change. The owner should choose after a measured SQLite
    run.

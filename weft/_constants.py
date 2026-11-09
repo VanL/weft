@@ -819,14 +819,22 @@ MANAGER_PUBLIC_SPAWN_DRAIN_MAX_MESSAGES: Final[int] = 128
 ADMISSION_SERVICE_RESERVE_SLOTS: Final[int] = 3
 """Base modeled room for Manager, TaskMonitor, and Heartbeat."""
 
+ADMISSION_MEMORY_RESERVE_FRACTION: Final[float] = 0.1
+"""Fraction of total host memory withheld from public launches [MA-1.8].
+
+Fixed, not `WEFT_ADMISSION_RESERVE_FRACTION`: that setting is the backend
+gate's operating reserve, which operators raise to leave connections to other
+clients of a shared database server, and says nothing about this host's memory.
+"""
+
 MANAGER_ADMISSION_RECHECK_SECONDS: Final[float] = 1.0
 """Delay before rechecking a blocked Manager admission source."""
 
 MANAGER_STARTUP_FAST_PATH_FRACTION: Final[float] = 0.8
-"""Keep the whole PostgreSQL startup window up to 80% of usable capacity [MA-1.8]."""
+"""Keep each gate's whole startup window up to 80% of its usable limit [MA-1.8]."""
 
 MANAGER_STARTUP_FAST_PATH_WINDOW: Final[int] = 6
-"""Maximum unfinished ordinary startups in one Manager's fast path [MA-1.8]."""
+"""Maximum unfinished ordinary startups in one Manager, on every backend [MA-1.8]."""
 
 MANAGER_FAMILY_CLASSIFY_PAGE_SIZE: Final[int] = 64
 """Bound source discovery and repair work per reactor turn [MF-6]."""
@@ -1888,7 +1896,7 @@ WEFT_ADMISSION_MAX_CONNECTIONS: Final[str] = "WEFT_ADMISSION_MAX_CONNECTIONS"
 """Config key for backend-specific admission capacity [MA-1.8]."""
 
 WEFT_ADMISSION_MAX_CONNECTIONS_DEFAULT: Final[int] = 0
-"""Use native PostgreSQL capacity; disable the resource gate on SQLite [MA-1.8]."""
+"""Use native PostgreSQL capacity; disable the live/unknown-TID gate on SQLite [MA-1.8]."""
 
 WEFT_FAMILY_PENDING_PREFIX: Final[str] = "weft.state.labels."
 """Runtime consume-on-dispatch family index namespace [OBS.6b]."""
@@ -1900,7 +1908,7 @@ WEFT_ADMISSION_RESERVE_FRACTION: Final[str] = "WEFT_ADMISSION_RESERVE_FRACTION"
 """Config key for the public-lane admission reserve fraction."""
 
 WEFT_ADMISSION_RESERVE_FRACTION_DEFAULT: Final[float] = 0.1
-"""Default fraction of the admission maximum reserved from public work."""
+"""Default fraction of the backend gate's maximum reserved from public work."""
 
 WEFT_MANAGER_RUNTIME_HANDLE_JSON_ENV: Final[str] = "WEFT_MANAGER_RUNTIME_HANDLE_JSON"
 """Optional JSON RunnerHandle for externally supervised manager processes."""
@@ -3155,6 +3163,7 @@ DISPATCH_REFUSAL_DESCRIPTORS: Final[dict[str, tuple[str, str]]] = {
     "launch_receipt_missing": ("launch_receipt", "matching_started_evidence"),
     "admission_usage_unavailable": ("measured_resource", "fresh_usage_available"),
     "measured_capacity_exhausted": ("measured_resource", "fresh_capacity_permits"),
+    "measured_memory_exhausted": ("measured_resource", "fresh_memory_permits"),
     "startup_feedback_pending": ("startup_window", "startup_window_available"),
     "classification_unavailable": ("classification", "classification_succeeded"),
 }

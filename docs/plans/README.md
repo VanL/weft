@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 58 plan files in this directory.
+There are currently 59 plan files in this directory.
 
 ## Curation Policy
 
@@ -30,6 +30,7 @@ There are currently 58 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-09-measured-memory-admission-plan.md`](./2026-11-09-measured-memory-admission-plan.md) | Measured Memory Admission and Startup-Window Parity | `draft` | none |
 | [`2026-11-08-resource-monitor-descendant-scan-plan.md`](./2026-11-08-resource-monitor-descendant-scan-plan.md) | Resource Monitor Descendant Scan and Quiet Unlimited Sampling | `promoted` | none |
 | [`2026-11-08-manager-checkpoint-volume-plan.md`](./2026-11-08-manager-checkpoint-volume-plan.md) | Manager Checkpoint Volume | `promoted` | none |
 | [`2026-11-08-manager-event-driven-reaping-plan.md`](./2026-11-08-manager-event-driven-reaping-plan.md) | Manager Event-Driven Child Reaping | `draft` | none |
