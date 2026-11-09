@@ -254,3 +254,17 @@ exposure. Work happened in the author's isolated worktree because the
 harness refused git operations in a second worktree; `perf/fix-drain-spin`
 is unchanged. Cross-family review of all three slices together: to be
 recorded by the coordinator.
+
+### Cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to the three commits `b78506f1..74a5bcb0` (base `perf/fix-drain-spin`,
+already reviewed PASS). Verdict: no blocker, no in-scope findings; both D rows
+consistently serve [WT-2a.13] (unknown identity grants no signal authority).
+Reviewer answer to the §8 question, recorded as an owner option, not a
+blocker: prefer `weft/helpers::terminate_verified_process_tree(..., kill=False)`
+at the two forced-reap sites (`_terminate_children`), preserving the deadline
+split, because it keeps the verified `psutil` instance across check and use
+and does not steal the wrapper's reap; the SIGTERM-only rung keeps its current
+check. The remaining check-to-use race and reap interference predate this
+change. Process tests and mutation controls were inspected, not rerun.
