@@ -81,6 +81,17 @@ def coerce_pong_response(
     payload = decode_control_object(raw)
     if payload is None:
         return None
+    return _matched_pong_payload(payload, tid=tid, request_id=request_id)
+
+
+def _matched_pong_payload(
+    payload: dict[str, Any],
+    *,
+    tid: str,
+    request_id: str,
+) -> dict[str, Any] | None:
+    """Return a decoded reply if it is the exact PONG for ``tid``/``request_id``."""
+
     if payload.get("command") != CONTROL_PING:
         return None
     if payload.get("status") != "ok":
@@ -199,10 +210,13 @@ def _retract_probe_requests(
     broker: Any | None,
     requests: Mapping[str, int],
 ) -> None:
-    """Delete unanswered PING rows by exact ID so a silent target keeps none.
+    """Delete each unanswered PING by exact ID, pending or already claimed.
 
-    A target that already claimed its row may still answer late; that reply
-    lands on the retired requester queue, which the dead-task sweep owns [MF-3].
+    The target's ``ctrl_in`` keeps no probe row. A target that claimed its PING
+    before the deadline may still answer after the round; that late PONG
+    recreates the requester's own ``T{tid}.ctrl_in`` with one row, which the
+    TaskMonitor dead-TID cleanup retires once the requester TID is old enough
+    ([MF-3], [MF-5]).
     """
 
     for ctrl_in_name, message_id in requests.items():
@@ -218,29 +232,39 @@ def _retract_probe_requests(
 
 def _read_matching_pongs(
     reply_queue: Any,
-    pending: Mapping[str, KeyedPingTarget],
-) -> dict[str, MatchedPong]:
-    """Consume ready reply rows and return exact PONG matches by target TID."""
+    pending: dict[str, KeyedPingTarget],
+    results: dict[str, ControlProbeResult],
+) -> None:
+    """Consume ready reply rows, recording each exact PONG match as it arrives.
 
-    matched: dict[str, MatchedPong] = {}
-    while True:
+    Each row is decoded once and checked against the target its ``tid`` names.
+    A matched target leaves ``pending`` at once, and reading stops when none
+    remains, so a later read failure cannot discard proof already recorded.
+    """
+
+    while pending:
         item = reply_queue.read_one(with_timestamps=True)
         if item is None:
-            return matched
+            return
         body, timestamp = item
-        for target in pending.values():
-            if target.tid in matched:
-                continue
-            payload = coerce_pong_response(
-                str(body), tid=target.tid, request_id=target.request_id
-            )
-            if payload is not None:
-                matched[target.tid] = MatchedPong(
-                    payload=payload,
-                    observed_at=int(timestamp),
-                    request_id=target.request_id,
-                )
-                break
+        payload = decode_control_object(str(body))
+        target = pending.get(str(payload.get("tid"))) if payload is not None else None
+        if payload is None or target is None:
+            continue
+        matched_payload = _matched_pong_payload(
+            payload, tid=target.tid, request_id=target.request_id
+        )
+        if matched_payload is None:
+            continue
+        results[target.tid] = ControlProbeResult(
+            request_id=target.request_id,
+            matched=MatchedPong(
+                payload=matched_payload,
+                observed_at=int(timestamp),
+                request_id=target.request_id,
+            ),
+        )
+        del pending[target.tid]
 
 
 def _retire_probe_reply_queue(reply_queue: Any) -> None:
@@ -289,8 +313,10 @@ def send_keyed_ping_probe(
 
     The synchronous caller mints a task-shaped requester identity, owns its
     ``T{tid}.ctrl_in`` queue, and waits through the same watcher path used by
-    long-lived tasks. The target writes its PONG directly to that queue. The
-    watcher and reply rows are retired on every exit path.
+    long-lived tasks. The target writes its PONG directly to that queue. This
+    is the one-target case of ``send_keyed_ping_round``: an unanswered PING is
+    deleted by exact ID, and the watcher and reply queue are retired on every
+    exit path.
 
     Spec: [MF-3], [MANAGER.8]
     """
@@ -339,30 +365,26 @@ def _await_round_pongs(
     watcher: MultiQueueWatcher,
     reply_queue: Any,
     pending: dict[str, KeyedPingTarget],
+    results: dict[str, ControlProbeResult],
     *,
     timeout: float,
-) -> dict[str, ControlProbeResult]:
+) -> None:
     """Wait once, until every pending target answered or ``timeout`` elapsed.
 
-    Matched targets are removed from ``pending``; the rest time out.
+    Matches go into ``results`` as they arrive, so a failing later wait keeps
+    them; targets still pending at the deadline time out.
     """
 
-    results: dict[str, ControlProbeResult] = {}
     deadline = time.monotonic() + timeout
     while pending:
         watcher.wait_for_activity(max(0.0, deadline - time.monotonic()))
-        for tid, matched in _read_matching_pongs(reply_queue, pending).items():
-            results[tid] = ControlProbeResult(
-                request_id=matched.request_id, matched=matched
-            )
-            pending.pop(tid)
+        _read_matching_pongs(reply_queue, pending, results)
         if time.monotonic() >= deadline:
             break
     for target in pending.values():
         results[target.tid] = ControlProbeResult(
             request_id=target.request_id, timed_out=True
         )
-    return results
 
 
 def send_keyed_ping_round(
@@ -371,16 +393,17 @@ def send_keyed_ping_round(
     *,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     broker: Any | None = None,
-    retract_unanswered: bool = False,
 ) -> dict[str, ControlProbeResult]:
     """Send keyed PINGs to several targets and wait once for all PONGs.
 
     One requester identity owns one ``T{tid}.ctrl_in`` reply queue for the
     round; each target gets its own ``request_id``, so the round costs at most
     one ``timeout``. A failed write leaves that target unanswered without
-    failing the others. With ``retract_unanswered`` each PING still unanswered
-    at the deadline is deleted by exact ID. The watcher and reply rows are
-    retired on every exit path.
+    failing the others, and a later read or wait failure keeps every match
+    already recorded. Each PING still unanswered at the end is deleted by
+    exact ID, and the watcher and reply queue are retired on every exit path;
+    a reply written after that is the late-reply case of
+    ``_retract_probe_requests``.
 
     Spec: [MF-3], [MANAGER.8], [CLI-1.2.1]
     """
@@ -419,8 +442,8 @@ def send_keyed_ping_round(
         results.update(failed)
         for tid in failed:
             pending.pop(tid)
-        results.update(
-            _await_round_pongs(watcher, reply_queue, pending, timeout=probe_timeout)
+        _await_round_pongs(
+            watcher, reply_queue, pending, results, timeout=probe_timeout
         )
     except (BrokerError, OSError) as exc:
         for target in pending.values():
@@ -429,7 +452,7 @@ def send_keyed_ping_round(
                 ControlProbeResult(request_id=target.request_id, error=str(exc)),
             )
     finally:
-        if retract_unanswered and reply_queue is not None:
+        if reply_queue is not None:
             _retract_probe_requests(
                 reply_queue,
                 broker=broker,

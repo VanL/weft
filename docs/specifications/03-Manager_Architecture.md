@@ -221,6 +221,9 @@ Key responsibilities implemented in `weft/core/manager.py`:
    canonical active manager row that lacks strong runtime proof, including a
    host-PID row whose PID is not visible from the current PID namespace, it may
    send one bounded keyed PING to that manager's task-local control queue. A
+   synchronous startup or selection probe deletes its PING by exact ID when it
+   ends unanswered ([MF-3]); the running Manager's non-blocking leadership
+   probe below does not. A
    matched PONG from the same TID can rescue the row as positive liveness
    evidence for selection only when its manager-selection fields prove dispatch
    eligibility: manager role, `weft.spawn.requests`, matching control and
@@ -742,9 +745,9 @@ The status commands (`weft status`, `weft manager list`, `weft manager
 status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
 unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
 omitting it, because a missing probe or a missing PONG is unknown evidence,
-not proof of death; their unanswered PINGs are retracted by exact ID. That
-observation is not leadership authority; active-manager selection still
-requires live or matched-PONG proof.
+not proof of death; like every synchronous probe, they delete an unanswered
+PING by exact ID ([MF-3]). That observation is not leadership authority;
+active-manager selection still requires live or matched-PONG proof.
 Both the definite-stale and expired-unknown pruning predicates override
 keep-newest for every manager status.
 

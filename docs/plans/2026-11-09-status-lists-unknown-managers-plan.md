@@ -20,7 +20,7 @@ manager selection and leadership do not change.
 
 Revision 2 (owner, 2026-11-09) widens and changes this: `weft manager list`
 and `weft manager status` use the same rows as status, and all three send one
-bounded PING round to rows still `unknown`, leaving no residue. See
+bounded PING round to rows still `unknown`. See
 "Revision 2" below; it supersedes "still write nothing".
 
 ## Source documents
@@ -169,7 +169,11 @@ in code (`_select_active_manager_from_snapshot` requires `live` or
 | A newly retained unknown Manager's `internal_reserved` evidence now feeds status service rows (`weft/commands/system.py` ~1126): with no competing evidence, a service can change from `unknown`/`none` to `reserved`/`internal-spawn-reserved`, with queue and Manager provenance | C | [WT-4.1] "Queues carry facts; processes carry hints": the reserved row is a queue fact; read-only |
 | (rev. 2) `weft status`, `weft manager list`, `weft manager status` and their client equivalents send one parallel keyed-PING round to the listed `active` rows still `unknown` after the passive reduction; added latency is at most one Manager probe bound (`min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS)` = 0.5 s) and only when such a row exists. Status is no longer write-free (slice 1 / `b6d850c1`: no PING): per call it mints one requester TID and writes one PING per unknown row | A | Owner, 2026-11-09: "I don't mind having a tiny bit more latency on it if the latency only affects the status commands and weft manager list". A probe adds positive evidence only and is never proof of death ([WT-2a.13]); a PING requester holds a TID and owns its reply `ctrl_in` ([WT-2a.12]) |
 | (rev. 2) An answering unknown row reports `liveness: "live"`, `proof_source: "pong"` | C | Additive positive evidence |
-| (rev. 2) An unanswered PING is deleted by exact ID and the requester queue is retired, so the round leaves no residue (single `send_keyed_ping_probe` callers keep their existing late-PONG/dead-requester sweep contract, [MF-3]) | N | Zero residue; the dead-TID sweep excludes Manager queues, so a PING left in a dead Manager's `ctrl_in` would otherwise persist |
+| (rev. 2, revised in rev. 3) An unanswered PING is deleted from the target's `ctrl_in` by exact ID, pending or claimed, and the requester queue is retired. A target that claimed its PING before the deadline may answer after it: that late PONG leaves one row in the dead requester's own `T{tid}.ctrl_in`, which the TaskMonitor dead-TID cleanup retires once the requester TID is older than `TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS` (`weft/core/monitor/task_monitor.py:3596` `TaskMonitor._run_dead_task_cleanup_slice`; `weft/core/monitor/policies/dead_task.py:143` `select_dead_task_tids_from_queue_names`, `:101` `dead_task_queue_cleanup_plan`). The rule runs only while the TaskMonitor service is enabled | A | Owner, 2026-11-09: "Named cleanup owns it." The dead-TID cleanup excludes Manager queues, so a PING left in a dead Manager's `ctrl_in` would persist; the requester queue is an ordinary dead task queue ([MF-3], [MF-5]) |
+| (rev. 3) Every `send_keyed_ping_probe` caller (`weft task ping`, `task status --ping`, Manager startup and selection probes in `manager_runtime`) deletes its unanswered PING by exact ID, as the status round does; what each caller decides from a missing PONG is unchanged | A | Owner, 2026-11-09: "Yes, all callers." One probe rule; queues carry facts, and an unanswered request is not one |
+| (rev. 3) A PONG matched before a later reply-read or wait failure is kept, and reading stops once every target has answered. For one target this is the baseline (`0de2fd60`) behavior, which `2f446e5c` had broken; for the round it is new | N | Positive evidence is never discarded ([WT-2a.13]) |
+| (rev. 3) Replies are decoded once and matched by their `tid` (was: every pending target tried per row) | N | Linear in replies; no behavior change |
+| (rev. 3) `--diagnostic` no longer probes unexpired unknown **draining** canonical Managers (`0de2fd60` probed active and draining rows; the round probes active rows only), so such a row now reports `unknown` with its runtime authority as source where a dispatch-eligible PONG made it `live`/`pong` before | D | Owner, 2026-11-09: one probe rule for the status commands and `--diagnostic`; [WT-4] 4.4 "Shared function, shared code". A draining Manager is in a one-way drain with no dispatch authority ([ALT-WT-007]), so the diagnostic's canonical and dispatch answers are unchanged, and `weft task ping TID` still proves a draining Manager live on request |
 | (rev. 2) `weft manager list` / `manager status` keep an unexpired unknown row whose PING went unanswered, labelled `unknown` (they omitted it before) | C | [WT-2a.13]: a failed probe is unknown, not death |
 | (rev. 2) A failed PING write leaves the row `unknown`; the command does not fail (manager list omitted the row before) | C | [WT-2a.13]; owner, 2026-11-09 |
 | (rev. 2) Plain `manager list` gains a `LIVE` column; plain `manager status` gains a `Liveness:` line; their JSON gains `liveness` / `proof_source` | C | Additive; same facts as status |
@@ -178,7 +182,7 @@ in code (`_select_active_manager_from_snapshot` requires `live` or
 | Selection, leadership, startup, stop, harness internals and `weft run` Manager reuse are unchanged; a PONG proved by a status command does not make a row selectable | N | [MA-1] "not leadership authority" |
 | Status service rows are not pinged: they use the service-owner reduction, whose self-refreshed owner row is the only service liveness proof | N | Owner, 2026-11-09 service-refresh decision (other track) |
 
-No `D` rows.
+One `D` row (rev. 3, `--diagnostic` draining coverage), with its theory basis.
 
 ## Spec baseline
 
@@ -301,7 +305,7 @@ Implementation:
 
 Tests (RED on `0de2fd60`, then GREEN):
 
-- `tests/commands/test_manager_commands.py::test_status_commands_ping_only_unknown_managers_and_leave_no_residue`:
+- `tests/commands/test_manager_commands.py::test_status_commands_ping_only_unknown_managers_and_leave_target_queues_clean`:
   live, answering-unknown, silent-unknown, stale and expired rows; for status,
   manager list and client list the answering row is `live`/`pong`, the silent
   row `unknown`, only those two are pinged, the silent `ctrl_in` keeps no row
@@ -318,10 +322,10 @@ Tests (RED on `0de2fd60`, then GREEN):
   is still pinged and proved, no command fails. RED: manager list omitted the
   refused row.
 - Updated: `tests/commands/test_status.py::test_system_status_lists_silent_unknown_manager_after_one_ping_round`
-  (slice-1 test; now asserts one PING to the unknown row only and zero residue
+  (slice-1 test; now asserts one PING to the unknown row only and a clean target queue
   instead of no write) and
   `test_system_status_and_task_status_stay_passive_and_agree_when_only_active_manager_is_unproven`
-  (bulk status pings the unknown Manager once with no residue; point task
+  (bulk status pings the unknown Manager once and leaves its queue clean; point task
   status stays passive).
 - Reverted: slice 1's `liveness` exception in
   `tests/core/test_client.py::test_system_and_manager_namespaces_expose_shared_runtime_state`;
@@ -329,13 +333,13 @@ Tests (RED on `0de2fd60`, then GREEN):
 
 Revision 2 spec delta (strategy B, atomic with the code):
 
-Replacement (`docs/specifications/10-CLI_Interface.md`):
+Revision 2 text, superseded by revision 3 (`docs/specifications/10-CLI_Interface.md`):
 ```text
 no per-task control/outbox peeks or active task PING (Manager rows follow the
 bounded PING round below) and may lag local completion or
 ```
 
-Replacement (`docs/specifications/10-CLI_Interface.md`):
+Revision 2 text, superseded by revision 3 (`docs/specifications/10-CLI_Interface.md`):
 ```text
 - lists each Manager's latest registry row. An `active` row is listed when its
   runtime liveness is `live`, or `unknown` and younger than
@@ -359,6 +363,158 @@ Replacement (`docs/specifications/10-CLI_Interface.md`):
   no `liveness`
 ```
 
+Revision 2 text, superseded by revision 3 (`docs/specifications/10-CLI_Interface.md`):
+```text
+`weft manager list` and `weft manager status TID` (and
+`client.managers.list()` / `client.managers.status(tid)`) report Manager rows
+exactly as project status does ([CLI-1.2.1]): the same passive reduction, the
+same single PING round for rows still `unknown`, the same `liveness` and
+`proof_source` fields. Plain `manager list` shows a `LIVE` column and plain
+`manager status` a `Liveness:` line when the row has one.
+`weft manager list --diagnostic` keeps the default manager-list semantics behind
+an explicit operator flag: it reads the latest known manager service-owner rows
+without stale pruning, classifies each row as live/stale/unknown/non-live,
+reports the proof source (`host-pid`, `external-supervisor`, `pong`, or registry
+metadata), and marks the selected canonical live owner. Its probing is the
+status-command rule: one PING round for active canonical rows still `unknown`
+and unexpired; a matched PONG reports `live` with source `pong`, and
+`dispatch_eligible` additionally requires the PONG to prove dispatch
+eligibility. It is a diagnostic view of `weft.state.services`, not a fallback
+process table.
+```
+
+Revision 2 text, superseded by revision 3 (`docs/specifications/03-Manager_Architecture.md`):
+```text
+Younger unknown rows keep the bounded keyed-PING rescue described above.
+The status commands (`weft status`, `weft manager list`, `weft manager
+status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
+unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
+omitting it, because a missing probe or a missing PONG is unknown evidence,
+not proof of death; their unanswered PINGs are retracted by exact ID. That
+observation is not leadership authority; active-manager selection still
+requires live or matched-PONG proof.
+```
+
+Revision 2 text, superseded by revision 3 (`docs/specifications/14-Python_API_Surfaces.md`):
+```text
+  `canonical: bool | None = None`; diagnostic mode populates them. Project
+  status, `client.managers.list()` and `client.managers.status(tid)` populate
+  `liveness` (`live` or `unknown`) on `active` rows and `proof_source: "pong"`
+  when a PONG proved the row; for one registry state their snapshots are
+  equal ([CLI-1.2.1]).
+```
+
+Revision 2 text, superseded by revision 3 (`docs/specifications/05-Message_Flow_and_State.md`):
+```text
+Bulk acquisition performs no per-task control/output reads, active task PING,
+implicit global-history replay, or Monitor reads. The only write a status
+command makes is the bounded keyed PING round to Manager rows whose liveness
+is still unknown ([CLI-1.2.1]); it leaves no residue.
+```
+
+Revision 2 text, superseded by revision 3 (`docs/specifications/07-System_Invariants.md`):
+```text
+  This reconciliation writes nothing; the only write a status command makes
+  is the bounded keyed PING round to Manager rows still `unknown`, which
+  leaves no residue and selects no Manager ([CLI-1.2.1]). (Plans:
+  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`,
+  `docs/plans/2026-11-09-status-lists-unknown-managers-plan.md`)
+```
+
+## Revision 3 (cross-family review of `2f446e5c`, owner decisions 2026-11-09)
+
+Review findings and dispositions:
+
+- **F1 (P2, accepted): late reply after retraction.** A Manager can claim a
+  PING before the deadline and PONG after the round deleted the PING and the
+  reply queue; the reply write recreates the requester queue. Owner: "Named
+  cleanup owns it." The target's queue stays clean: the round deletes each
+  unanswered PING by exact ID, pending or claimed (`delete_message_ids` deletes
+  both). The one late row lands in the dead requester's own `T{tid}.ctrl_in`.
+  The existing rule that retires it, confirmed in code: TaskMonitor's dead-TID
+  cleanup slice, `weft/core/monitor/task_monitor.py:3596` `TaskMonitor._run_dead_task_cleanup_slice` (selection in `_select_dead_task_cleanup_slice`, `:3502`; deletion in `_delete_dead_task_control_queues`, `:2527`), with `weft/core/monitor/policies/dead_task.py:143` `select_dead_task_tids_from_queue_names` and `:101` `dead_task_queue_cleanup_plan`. The requester TID has no runtime and no
+  Monitor record, so once it is older than
+  `TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS` the name-derived TID-age rule
+  selects it, and `standard_dead_task_stale_queue_names` (`dead_task.py:82`)
+  makes its `ctrl_in` stale at once. The exclusion of Manager, global and
+  service queues does not apply: the requester TID is not a Manager. Caveat:
+  the rule runs only while the TaskMonitor service is enabled
+  (`TASK_MONITOR_ENABLED`, default on). Every "zero residue" statement is
+  replaced with this one in the register, specs and docstrings.
+- **F2 (P2, accepted): later read failure discarded matched proof.**
+  `_read_matching_pongs` records each match into the caller's results as it
+  arrives and stops reading once no target is pending; `_await_round_pongs`
+  writes into the caller's results too, so a later read or wait failure keeps
+  every earlier match. Single-target probes are back to the baseline behavior.
+- **F3 (P3, accepted): quadratic matching.** Each reply is decoded once
+  (`decode_control_object`), its `tid` selects the pending target, and
+  `_matched_pong_payload` validates the request key and envelope.
+  `coerce_pong_response` is that decode plus the same validation.
+- **F4 (P3, accepted as D):** see the `--diagnostic` draining row in the
+  register.
+
+Owner decision, 2026-11-09: "Yes, all callers." Every `send_keyed_ping_probe`
+caller now deletes its unanswered PING by exact ID, through the same round
+(the `retract_unanswered` switch is gone). What each caller decides from the
+result is unchanged.
+
+Tests (RED first on `2f446e5c` where a behavior changed):
+
+- `tests/core/test_control_probe.py::test_send_keyed_ping_probe_keeps_match_when_a_later_reply_read_fails`
+  (single target, baseline contract). RED: `error='injected reply read failure'`, no match.
+- `test_ping_round_keeps_earlier_match_when_a_later_reply_read_fails`. RED: the
+  answering target lost its match.
+- `test_ping_round_keeps_earlier_match_when_a_later_wait_fails`. RED: the
+  answering target was missing from the results (`KeyError`).
+- `test_unclaimed_ping_is_retracted_when_the_probe_times_out` (replaces the
+  unclaimed half of the old late-PONG test). RED: the PING stayed in the
+  target's `ctrl_in`.
+- `test_claimed_late_pong_stays_with_dead_requester_until_existing_sweep_selects_it`:
+  the target claims its PING before the deadline and answers after it; the
+  target's `ctrl_in` keeps no row, the requester queue holds the late PONG, and
+  the dead-TID selection picks the requester TID only once it is old enough.
+- `tests/tasks/test_task_monitor.py::test_dead_tid_cleanup_retires_the_requester_queue_of_a_late_status_pong`:
+  the same delayed responder against the status round, then the TaskMonitor
+  dead-TID cleanup slice driven directly at the required age (no sleeps); the
+  requester queue is gone afterwards.
+- `tests/commands/test_task_commands.py::test_task_ping_against_a_silent_target_leaves_its_ctrl_in_clean`.
+  RED: the PING stayed in the target's `ctrl_in`.
+
+Revision 3 spec delta (strategy B, atomic with the code):
+
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+- lists each Manager's latest registry row. An `active` row is listed when its
+  runtime liveness is `live`, or `unknown` and younger than
+  `MANAGER_EXTERNAL_SUPERVISOR_STALE_AFTER_SECONDS`, and carries `liveness`
+  (`live` or `unknown`) in JSON and plain text; a definitively stale row and
+  an older unknown row are omitted. A row is `unknown` when this process
+  cannot prove the Manager's runtime, for example an external-supervisor row
+  whose liveness provider is not loaded here. After that passive reduction,
+  status sends one round of keyed PINGs, in parallel, to the listed `active`
+  rows that are still `unknown`, and waits once for the Manager probe bound
+  (`min(CONTROL_SURFACE_WAIT_TIMEOUT, MANAGER_COMPETING_STARTUP_GRACE_SECONDS)`).
+  A matched PONG makes the row `live` with `proof_source: "pong"`. No PONG,
+  or a PING write that fails, leaves the row `unknown` and listed; it is never
+  `stale` and the command does not fail. Live and stale rows are never pinged.
+  Each unanswered PING is deleted from the Manager's `ctrl_in` by exact ID,
+  pending or claimed, and the requester's reply queue is retired. A Manager
+  that claimed its PING before the deadline may still answer after it; that
+  late PONG leaves one row in the requester's own `T{tid}.ctrl_in`, which the
+  TaskMonitor dead-TID cleanup retires ([MF-3]). Status writes nothing else.
+  `weft manager list` and `weft manager status TID` read the same rows by the
+  same rule, so for one registry state the three commands report the same
+  Manager rows field for field. Status never selects an unknown or
+  PONG-proved row as the active Manager ([MA-1]). Other Manager rows carry
+  no `liveness`
+```
+
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+no per-task control/outbox peeks or active task PING (Manager rows follow the
+bounded PING round below) and may lag local completion or
+```
+
 Replacement (`docs/specifications/10-CLI_Interface.md`):
 ```text
 `weft manager list` and `weft manager status TID` (and
@@ -379,6 +535,24 @@ eligibility. It is a diagnostic view of `weft.state.services`, not a fallback
 process table.
 ```
 
+Replacement (`docs/specifications/10-CLI_Interface.md`):
+```text
+A synchronous keyed PING owns an ephemeral reply queue whose lifetime is
+bounded by the dead-task cleanup age. A PING still unanswered at the end of
+the probe is deleted from the target's `ctrl_in` by exact ID, so `weft task
+ping` against a silent target leaves that queue clean; a late PONG lands only
+in the requester's own reply queue, which the dead-TID cleanup retires
+([MF-3]). `--timeout` must be finite and satisfy
+```
+
+Replacement (`docs/specifications/03-Manager_Architecture.md`):
+```text
+   send one bounded keyed PING to that manager's task-local control queue. A
+   synchronous startup or selection probe deletes its PING by exact ID when it
+   ends unanswered ([MF-3]); the running Manager's non-blocking leadership
+   probe below does not. A
+```
+
 Replacement (`docs/specifications/03-Manager_Architecture.md`):
 ```text
 Younger unknown rows keep the bounded keyed-PING rescue described above.
@@ -386,9 +560,9 @@ The status commands (`weft status`, `weft manager list`, `weft manager
 status`; [CLI-1.2.1]) apply it as one parallel round to the rows still
 unknown and keep an unanswered row labelled `liveness: "unknown"` instead of
 omitting it, because a missing probe or a missing PONG is unknown evidence,
-not proof of death; their unanswered PINGs are retracted by exact ID. That
-observation is not leadership authority; active-manager selection still
-requires live or matched-PONG proof.
+not proof of death; like every synchronous probe, they delete an unanswered
+PING by exact ID ([MF-3]). That observation is not leadership authority;
+active-manager selection still requires live or matched-PONG proof.
 ```
 
 Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
@@ -402,17 +576,40 @@ Replacement (`docs/specifications/14-Python_API_Surfaces.md`):
 
 Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 ```text
+  task queue. Every synchronous probe (`weft task ping`, `task status --ping`,
+  Manager startup and selection probes, and the status-command
+  round of [CLI-1.2.1]) deletes each PING still unanswered at its end from the
+  target's `ctrl_in` by exact ID, pending or already claimed, so the target's
+  queue keeps no probe row. A target that claimed its PING before the deadline
+  may still answer after it; that late PONG, or a reply written after
+  requester death, recreates the requester's own `T{tid}.ctrl_in` with one
+  row. The TaskMonitor dead-TID cleanup retires that queue once the requester
+  TID is older than `TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS`: the
+  requester has no runtime and no Monitor record, so the name-derived TID-age
+  rule selects it and deletes its stale `ctrl_in`
+  (`weft/core/monitor/task_monitor.py::TaskMonitor._run_dead_task_cleanup_slice`,
+  `weft/core/monitor/policies/dead_task.py::select_dead_task_tids_from_queue_names`
+  and `dead_task_queue_cleanup_plan`). The rule runs only while the TaskMonitor
+  service is enabled.
+```
+
+Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
+```text
 Bulk acquisition performs no per-task control/output reads, active task PING,
 implicit global-history replay, or Monitor reads. The only write a status
 command makes is the bounded keyed PING round to Manager rows whose liveness
-is still unknown ([CLI-1.2.1]); it leaves no residue.
+is still unknown ([CLI-1.2.1]). It leaves no row in a Manager's `ctrl_in`; a
+late PONG leaves at most one row in the requester's own reply queue, which the
+dead-TID cleanup named in [MF-3] retires.
 ```
 
 Replacement (`docs/specifications/07-System_Invariants.md`):
 ```text
   This reconciliation writes nothing; the only write a status command makes
   is the bounded keyed PING round to Manager rows still `unknown`, which
-  leaves no residue and selects no Manager ([CLI-1.2.1]). (Plans:
+  leaves no row in a Manager's `ctrl_in`, at most one late-PONG row in its own
+  requester queue for the dead-TID cleanup ([MF-3]), and selects no Manager
+  ([CLI-1.2.1]). (Plans:
   `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`,
   `docs/plans/2026-11-09-status-lists-unknown-managers-plan.md`)
 ```
@@ -496,6 +693,17 @@ worktree and owns the cross-family review; it is recorded below.
 
 Both slice-1 questions were answered on 2026-11-09 ("weft manager list and
 weft manager status should be consistent with weft status"); see Revision 2.
+
+Open (revision 3): the running Manager's own leadership probes are not
+`send_keyed_ping_probe` calls. They are non-blocking reactor probes
+(`weft/core/manager.py::Manager._manager_pong_dispatch_proof`, PING written
+at the `encode_control_message(CONTROL_PING, ...)` site near line 4118 and
+resolved as `ping_unanswered` in `_advance_manager_pong_probe`), and an
+unanswered one still stays in the peer Manager's `ctrl_in`. "Yes, all callers"
+was applied to every `send_keyed_ping_probe` caller (status commands, `weft
+task ping`, `task status --ping`, Manager startup and selection probes in
+`weft/core/manager_runtime.py`). Should the reactor probe also keep its PING
+row ID and delete it when it resolves `ping_unanswered`? Not done here.
 
 ## Review and execution record
 
@@ -583,6 +791,35 @@ closed.
   system-contract, CLI status/rendering/manager/system/run and
   `tests/commands/test_run.py` files plus `tests/cli/test_cli_long_session.py`:
   547 passed in 380.33 s.
+- Gates: `ruff check .`, `ruff format --check` on touched Python files, repo
+  mypy command (499 files), `bin/check-doc-paths`, `bin/check-dom15-fixtures`,
+  `tests/specs`: clean.
+
+### Revision 3 execution (2026-11-09, on `2f446e5c`)
+
+- RED on `2f446e5c` (source swapped back to HEAD, tests kept):
+  `test_send_keyed_ping_probe_keeps_match_when_a_later_reply_read_fails`
+  (`error='injected reply read failure'`, no match),
+  `test_ping_round_keeps_earlier_match_when_a_later_reply_read_fails` (match
+  lost), `test_ping_round_keeps_earlier_match_when_a_later_wait_fails`
+  (`KeyError`: the answering target missing),
+  `test_unclaimed_ping_is_retracted_when_the_probe_times_out` and
+  `test_task_ping_against_a_silent_target_leaves_its_ctrl_in_clean` (the PING
+  stayed in the target's `ctrl_in`). All GREEN after the change.
+- Mutation sensitivity for F1 and F2, 5/5 killed: keep reading after every
+  target answered (single-target read count); matches not recorded as they
+  arrive; round results merged only after the wait loop; unanswered PING not
+  retracted; the named dead-TID rule no longer treating `ctrl_in` as stale.
+- SQLite (`-n 4`): `tests/core/test_control_probe.py`, `test_status.py`,
+  `test_manager_commands.py`, `tests/core/test_client.py`,
+  `test_task_commands.py`, `test_task_evidence.py`,
+  `test_system_public_contract.py`, the CLI status/rendering/manager/system/
+  run/serve files, `tests/commands/test_run.py`,
+  `tests/test_harness_registration.py`, the Manager and task runtime
+  connection files and `tests/tasks/test_task_monitor.py`: 1,113 outcomes,
+  0 failed. Long-session with `-m ""`: passed.
+- PostgreSQL (`./bin/pytest-pg`, the same files plus
+  `tests/cli/test_cli_long_session.py`): 968 passed, 1 skipped in 380.54 s.
 - Gates: `ruff check .`, `ruff format --check` on touched Python files, repo
   mypy command (499 files), `bin/check-doc-paths`, `bin/check-dom15-fixtures`,
   `tests/specs`: clean.

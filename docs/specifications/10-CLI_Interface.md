@@ -461,8 +461,11 @@ Current behavior:
   A matched PONG makes the row `live` with `proof_source: "pong"`. No PONG,
   or a PING write that fails, leaves the row `unknown` and listed; it is never
   `stale` and the command does not fail. Live and stale rows are never pinged.
-  Each unanswered PING is deleted by exact ID and the requester's reply queue
-  is retired, so the round leaves no residue; status writes nothing else.
+  Each unanswered PING is deleted from the Manager's `ctrl_in` by exact ID,
+  pending or claimed, and the requester's reply queue is retired. A Manager
+  that claimed its PING before the deadline may still answer after it; that
+  late PONG leaves one row in the requester's own `T{tid}.ctrl_in`, which the
+  TaskMonitor dead-TID cleanup retires ([MF-3]). Status writes nothing else.
   `weft manager list` and `weft manager status TID` read the same rows by the
   same rule, so for one registry state the three commands report the same
   Manager rows field for field. Status never selects an unknown or
@@ -687,7 +690,11 @@ _Implementation mapping_: `weft/commands/tasks.py`,
 `weft/commands/manager.py`.
 
 A synchronous keyed PING owns an ephemeral reply queue whose lifetime is
-bounded by the dead-task cleanup age. `--timeout` must be finite and satisfy
+bounded by the dead-task cleanup age. A PING still unanswered at the end of
+the probe is deleted from the target's `ctrl_in` by exact ID, so `weft task
+ping` against a silent target leaves that queue clean; a late PONG lands only
+in the requester's own reply queue, which the dead-TID cleanup retires
+([MF-3]). `--timeout` must be finite and satisfy
 `0 <= timeout <= CONTROL_PING_MAX_TIMEOUT_SECONDS`. A value outside that
 inclusive range is rejected with `CommandUsageError` before any queue is
 created; it is not clamped and is distinct from a probe that times out.
@@ -1176,7 +1183,7 @@ flags, and future queue or control ergonomics live in the companion doc:
 
 ## Related Plans
 
-- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md) keeps an unexpired `active` Manager row whose runtime liveness is `unknown` in `weft status`, `weft manager list` and `weft manager status`, proves it `live` by one bounded keyed PING round when it answers, and otherwise keeps it labelled `unknown` with no residue ([CLI-1.2.1], [CLI-1.3], [MA-1], [PY-2]).
+- [Status Lists Unproven Managers as Unknown](../plans/2026-11-09-status-lists-unknown-managers-plan.md) keeps an unexpired `active` Manager row whose runtime liveness is `unknown` in `weft status`, `weft manager list` and `weft manager status`, proves it `live` by one bounded keyed PING round when it answers, and otherwise keeps it labelled `unknown`; every synchronous probe retracts its unanswered PING by exact ID ([CLI-1.2.1], [CLI-1.3], [MA-1], [MF-3], [PY-2]).
 - [Manager Published Dispatch Refusals](../plans/2026-11-05-manager-published-refusals-plan.md) publishes scoped standing dispatch observations in complete Manager task-state snapshots and exposes them through ordinary status ([MA-1.8], [MF-5], [OBS.6], [CLI-1.2.1], [CLI-1.3]).
 
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) adds `weft system stop`, the one command that stops the manager and the context's internal services.

@@ -463,7 +463,7 @@ def test_system_status_lists_silent_unknown_manager_after_one_ping_round(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Status keeps an unproven active Manager as `unknown` and leaves no residue.
+    """Status keeps an unproven active Manager as `unknown`; its queue stays clean.
 
     A missing liveness probe is unknown evidence, not proof of death
     ([WT-2a.13]); status PINGs only the unknown row, once, and retracts the

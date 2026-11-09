@@ -740,7 +740,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
   `status="running"` (`classification: "superseded_manager_draining"`).
   This reconciliation writes nothing; the only write a status command makes
   is the bounded keyed PING round to Manager rows still `unknown`, which
-  leaves no residue and selects no Manager ([CLI-1.2.1]). (Plans:
+  leaves no row in a Manager's `ctrl_in`, at most one late-PONG row in its own
+  requester queue for the dead-TID cleanup ([MF-3]), and selects no Manager
+  ([CLI-1.2.1]). (Plans:
   `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`,
   `docs/plans/2026-11-09-status-lists-unknown-managers-plan.md`)
 - **OBS.16**: explicit runtime-state pruning is limited to supported

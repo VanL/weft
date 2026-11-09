@@ -12,14 +12,23 @@
   the command sends one round of keyed PINGs, in parallel, to such rows only
   (at most 0.5 s more, and only when one exists). A row that answers shows
   `liveness: "live"` with `proof_source: "pong"`; a row that does not stays
-  listed as `liveness: "unknown"` until the 300 s unknown window expires, and
-  its unanswered PING is deleted. Live and stale rows are never pinged, a
+  listed as `liveness: "unknown"` until the 300 s unknown window expires.
+  Live and stale rows are never pinged, a
   failed PING write leaves the row unknown without failing the command, and
   none of these commands selects an unknown Manager as the active one.
   `weft status` therefore sends PINGs again (it sent none since the
   status/result remediation); it writes nothing else. Plain `manager list`
   gains a `LIVE` column and plain `manager status` a `Liveness:` line
   ([CLI-1.2.1], [CLI-1.3], [MA-1], [PY-2]).
+- Every synchronous keyed PING (`weft task ping`, `weft task status --ping`,
+  Manager startup and selection probes, and the status commands)
+  now deletes its PING from the target's `ctrl_in` by exact ID when no PONG
+  arrived in time, so a silent or dead target keeps no probe rows. A target
+  that took the PING but answers late leaves one row in the requester's own
+  reply queue, which the TaskMonitor dead-TID cleanup removes. What each
+  caller decides from a missing PONG is unchanged. A PONG that matched before
+  a later broker read or wait failure is now kept instead of being reported as
+  an error ([MF-3]).
 
 ## [0.9.122] - 2026-11-06
 

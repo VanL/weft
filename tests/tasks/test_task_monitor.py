@@ -27,12 +27,14 @@ from typing import Any, Literal, cast
 
 import pytest
 
+import weft.core.control_probe as control_probe_mod
 import weft.core.monitor.task_monitor as task_monitor_mod
 import weft.core.tasks.base as base_task_mod
 import weft.core.tasks.service as service_task_mod
 from simplebroker import Queue
 from simplebroker.ext import BrokerConnection, BrokerError
 from tests.helpers.typing import BrokerEnv, TaskFactory
+from tests.helpers.weft_harness import WeftTestHarness
 from tests.tasks.test_heartbeat import make_heartbeat_taskspec
 from weft._constants import (
     CONTROL_PING,
@@ -6615,6 +6617,103 @@ def test_task_monitor_dead_task_cleanup_deletes_standard_control_queues(
     assert cleanup.dead_tid_outbox_queues_deleted == 0
     assert cleanup.dead_tid_reserved_queues_deleted == 0
     assert cleanup.dead_tid_rows_estimated_deleted == 2
+
+
+def test_dead_tid_cleanup_retires_the_requester_queue_of_a_late_status_pong(
+    broker_env: BrokerEnv,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PING claimed before the deadline and answered after it [MF-3], [MF-5].
+
+    The probe deletes the claimed PING, so the target's ``ctrl_in`` stays clean.
+    The late PONG recreates only the dead requester's ``T{tid}.ctrl_in``; the
+    TaskMonitor dead-TID cleanup retires it once the requester TID is old
+    enough ([CLI-1.2.1]). Driven directly, without sleeping.
+    """
+
+    db_path, _make_queue = broker_env
+    context = weft_harness.context
+    target_tid = "1778084345905438901"
+    claimed: list[dict[str, Any]] = []
+    original_write = control_probe_mod._write_probe_request
+
+    def write_and_claim(
+        reply_queue: Any,
+        *,
+        broker: Any | None,
+        ctrl_in_name: str,
+        message: str,
+    ) -> int:
+        message_id = original_write(
+            reply_queue, broker=broker, ctrl_in_name=ctrl_in_name, message=message
+        )
+        with context.queue(ctrl_in_name, persistent=False) as target_queue:
+            raw = target_queue.read_one()
+        assert raw is not None
+        claimed.append(json.loads(str(raw)))
+        return message_id
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", write_and_claim)
+
+    results = control_probe_mod.send_keyed_ping_round(
+        context,
+        [
+            control_probe_mod.KeyedPingTarget(
+                tid=target_tid, ctrl_in_name=f"T{target_tid}.ctrl_in"
+            )
+        ],
+        timeout=0.0,
+    )
+    reply_to = str(claimed[0]["reply_to"])
+    requester_tid = reply_to.removeprefix("T").removesuffix(".ctrl_in")
+    with context.queue(reply_to, persistent=False) as late:
+        late.write(
+            json.dumps(
+                {
+                    "command": "PING",
+                    "status": "ok",
+                    "message": "PONG",
+                    "tid": target_tid,
+                    "request_id": claimed[0]["request_id"],
+                    "task_status": "running",
+                }
+            )
+        )
+
+    assert results[target_tid].timed_out
+    with context.queue(f"T{target_tid}.ctrl_in", persistent=False) as target:
+        assert target.peek_many(limit=10, include_claimed=True) == []
+    with context.queue(reply_to, persistent=False) as residue:
+        assert residue.stats().total == 1
+
+    task = TaskMonitor(
+        db_path,
+        make_task_monitor_taskspec(str(int(requester_tid) + 1_000_000)),
+        config=load_config(
+            {
+                "WEFT_TASK_MONITOR_ENABLED": "1",
+                "WEFT_TASK_MONITOR_INTERVAL_SECONDS": "60",
+                "WEFT_TASK_MONITOR_MODE": "delete",
+                "WEFT_TASK_MONITOR_LOG_SINK": "none",
+            }
+        ),
+    )
+    try:
+        with _maintenance_for(task) as worker:
+            store = worker._ensure_monitor_store()
+            assert store is not None
+            cleanup = worker._run_dead_task_cleanup_slice(
+                store,
+                now_ns=int(requester_tid)
+                + int((TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS + 1.0) * 1e9),
+            )
+    finally:
+        task.stop()
+
+    with context.queue(reply_to, persistent=False) as residue:
+        assert residue.stats().total == 0
+    assert cleanup.dead_tid_control_queues_deleted >= 1
 
 
 def test_task_monitor_terminal_mapping_holds_completion_but_allows_control_cleanup(

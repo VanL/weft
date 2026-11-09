@@ -2079,7 +2079,7 @@ def _ctrl_in_queue_names(context: WeftContext) -> set[str]:
         return {name for name in broker.list_queues() if name.endswith(".ctrl_in")}
 
 
-def test_status_commands_ping_only_unknown_managers_and_leave_no_residue(
+def test_status_commands_ping_only_unknown_managers_and_leave_target_queues_clean(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

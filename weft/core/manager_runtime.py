@@ -924,8 +924,9 @@ def _ping_unknown_manager_records(
 ) -> dict[str, MatchedPong]:
     """Send one parallel keyed PING round to Manager rows still ``unknown``.
 
-    Each unanswered PING is retracted by exact ID, so a silent or dead Manager
-    keeps no residue; a failed write leaves its row unknown ([CLI-1.2.1]).
+    A failed write or a missing PONG leaves the row unknown. Each unanswered
+    PING is deleted by exact ID, so the Manager's ``ctrl_in`` keeps no probe
+    row; a late PONG is the round's requester-queue case ([CLI-1.2.1]).
     """
 
     results = send_keyed_ping_round(
@@ -938,7 +939,6 @@ def _ping_unknown_manager_records(
             for record in records
         ],
         timeout=_manager_probe_timeout(),
-        retract_unanswered=True,
     )
     return {
         tid: result.matched

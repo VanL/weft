@@ -1089,6 +1089,26 @@ def test_task_ping_reports_timeout(
     }
 
 
+def test_task_ping_against_a_silent_target_leaves_its_ctrl_in_clean(
+    tmp_path: Path,
+) -> None:
+    """`weft task ping` retracts its unanswered PING by exact ID [MF-3], [CLI-1.3]."""
+
+    root = prepare_project_root(tmp_path)
+    ctx = build_context(spec_context=root)
+    tid = str(time.time_ns())
+    _write_observation(ctx, tid)
+
+    payload = task_cmd.task_ping(tid, timeout=0.0, context=ctx)
+
+    assert payload["timed_out"] is True
+    assert payload["pong"] is None
+    with ctx.queue(f"T{tid}.ctrl_in", persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+    with ctx.broker() as broker:
+        assert not any(name.endswith(".ctrl_in") for name in broker.list_queues())
+
+
 def test_control_convergence_machine_covers_all_transitions() -> None:
     cases: tuple[
         tuple[
