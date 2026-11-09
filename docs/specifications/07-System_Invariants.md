@@ -1259,6 +1259,10 @@ admission, not reconstruction into the new Manager's local startup window.
 Startup settles independently for each TID when its wrapper becomes observable
 in `weft.state.tasks.<tid>` or attributed broker usage, or through existing
 failure/reap handling or the bounded missing-publication fallback below.
+Attributed usage is read for an unfinished startup only when a reading can
+settle it. Until its launch receipt is durable, attributed usage cannot
+settle a startup (snapshot handoff, the missing-publication fallback,
+failure or reap still can), so the receipt turn reads no connection usage.
 A negative startup-readiness decision suppresses ordinary source readiness until
 startup membership or launch-worker evidence changes, or the existing admission
 recheck deadline arrives. A due recheck can reopen the window with a fresh usage
@@ -1504,6 +1508,7 @@ doc:
 
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([OBS.6], [MANAGER.11]).
 - [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) publishes one Consumer snapshot per owner step under [OBS.6a].
+- [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md) removes Manager round trips that no contract needs from the launch receipt, reap and dispatch handler: no usage read before a receipt is durable, one terminal-proof read per reap, no second acknowledgement of an acknowledged reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).
 
 - [Startup window narrows with measured headroom](../plans/2026-11-08-startup-window-settlement-plan.md) revises the [MANAGER.18] startup window above H to narrow in proportion to measured headroom.
 - [Operator consumption ends pending launch custody](../plans/2026-11-05-operator-consumption-of-launch-custody-plan.md): ordinary pending visibility, explicit operator read/delete, and no-receipt hold retirement.

@@ -287,6 +287,8 @@ class ManagedChild:
     terminal_proof_missing_since_ns: int = 0
     terminal_retry_after_ns: int = 0
     sentinel_observed_ns: int = 0
+    terminal_proof_observed: bool = False
+    """The reap's proof read found task-owned terminal proof [MA-1.6a]."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,8 +985,13 @@ class Manager(ServiceTask):
         state: Mapping[str, Any] | None = None,
         force: bool = False,
         log_fields: Mapping[str, Any] | None = None,
+        deferred_fields: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
-        """Emit an operational-log event on state change or interval expiry."""
+        """Emit an operational-log event on state change or interval expiry.
+
+        ``deferred_fields`` is evaluated only when the event is emitted, so a
+        suppressed event costs none of the reads it would report.
+        """
 
         if not self._manager_log_allows(required_level):
             return
@@ -1013,6 +1020,8 @@ class Manager(ServiceTask):
             return
         self._serve_log_last_state[log_key] = state_key
         self._serve_log_last_emit_ns[log_key] = now_ns
+        if deferred_fields is not None:
+            fields.update(deferred_fields())
         self._emit_serve_log(
             event,
             component=component,
@@ -1084,20 +1093,17 @@ class Manager(ServiceTask):
         ]
 
     def _emit_manager_loop_summary(self, *, force: bool = False) -> None:
+        """Offer the per-turn summary; pending flags are read only to emit it.
+
+        The flags are broker reads, so they are not part of the rate limiter's
+        change detection: an unchanged summary is suppressed without reading
+        them, and each emitted summary reports them fresh [WT-4.3].
+        """
         if not self._manager_log_allows("info"):
             return
         fields = {
             "child_count": len(self._child_processes),
             "children": self._child_summaries_for_log(),
-            "pending_public": self._queue_pending_for_log(
-                self._queue_names.get("inbox")
-            ),
-            "pending_internal": self._queue_pending_for_log(
-                self._queue_names.get("internal_inbox")
-            ),
-            "pending_control": self._queue_pending_for_log(
-                self._queue_names.get("ctrl_in")
-            ),
             "draining": self._draining,
             "should_stop": self.should_stop,
         }
@@ -1109,6 +1115,17 @@ class Manager(ServiceTask):
             state=fields,
             force=force,
             log_fields=fields,
+            deferred_fields=lambda: {
+                "pending_public": self._queue_pending_for_log(
+                    self._queue_names.get("inbox")
+                ),
+                "pending_internal": self._queue_pending_for_log(
+                    self._queue_names.get("internal_inbox")
+                ),
+                "pending_control": self._queue_pending_for_log(
+                    self._queue_names.get("ctrl_in")
+                ),
+            },
         )
 
     @property
@@ -2811,7 +2828,14 @@ class Manager(ServiceTask):
         broker: Any,
         observe_usage: Callable[[], ConnectionUsage] | None = None,
     ) -> None:
-        """Startup release and durable handoff are separate transitions [MA-1.8]."""
+        """Startup release and durable handoff are separate transitions [MA-1.8].
+
+        Attributed connection usage is observed only when a positive reading
+        could release startup: the receipt is durable, or the
+        missing-publication fallback is due.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.8]
+        """
         evidence = self._scheduler_residents.get(tid)
         if evidence is None:
             return
@@ -2839,12 +2863,20 @@ class Manager(ServiceTask):
         ) or tid in self._active_child_launches:
             return
         elapsed = (time.time_ns() - evidence.get("launched_ns", time.time_ns())) / 1e9
+        fallback_due = elapsed >= MANAGER_ADMISSION_RECHECK_SECONDS
         ready = handoff
-        if not ready and self._admission_backend_name() == "postgres":
+        # Attributed usage settles startup only for a durable receipt. Until
+        # then only handoff or the due fallback can, so a reading would change
+        # nothing; the receipt turn therefore reads no usage [MA-1.8].
+        if (
+            not ready
+            and (tid not in self._scheduler_undurable or fallback_due)
+            and self._admission_backend_name() == "postgres"
+        ):
             ready = (observe_usage or self._read_postgres_connection_usage)()[
                 "by_owner"
             ].get(evidence["connection_owner"], 0) > 0
-        if not ready and elapsed >= MANAGER_ADMISSION_RECHECK_SECONDS:
+        if not ready and fallback_due:
             latest = read_task_state_snapshot(
                 self._manager_context(), tid, broker=broker
             )
@@ -5073,14 +5105,23 @@ class Manager(ServiceTask):
         tid: str,
         child: ManagedChild,
     ) -> bool:
-        """Return whether a cleanly exited child gets more time for proof writes."""
+        """Return whether a cleanly exited child gets more time for proof writes.
+
+        Task-owned proof found here is remembered on the child, so the
+        failsafe step reuses this read instead of scanning ctrl_out again.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        """
 
         exitcode = child.process.exitcode
         if child.launched_ns <= 0:
             return False
         if exitcode not in (None, 0):
             return False
-        if self._child_terminal_proof_visible(tid, child) is not False:
+        proof = self._child_terminal_proof_visible(tid, child)
+        if proof is True:
+            child.terminal_proof_observed = True
+        if proof is not False:
             return False
         now_ns = time.time_ns()
         if child.terminal_proof_missing_since_ns <= 0:
@@ -5098,8 +5139,13 @@ class Manager(ServiceTask):
     ) -> bool:
         """Commit the local failsafe before retiring exited-child custody.
 
+        Task-owned proof already observed by this reap needs no failsafe and
+        no second ctrl_out read.
+
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
         """
+        if child.terminal_proof_observed:
+            return True
         return self._commit_wrapper_lost_envelope(
             tid,
             ctrl_out_name=child.ctrl_out_queue or f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}",
@@ -5197,6 +5243,7 @@ class Manager(ServiceTask):
                     )
                     continue
                 child_exited = True
+                custody_recorded = tid in self._scheduler_residents
                 try:
                     # Dead children must never stall the manager control loop.
                     # Treat dead-child cleanup as a local reap only; descendant
@@ -5220,8 +5267,16 @@ class Manager(ServiceTask):
                     self._child_processes.pop(tid, None)
                     self._child_sentinel_adapter.remove(tid)
                     self._record_reaped_admission(tid)
+                # Only _ack_launch_custody drops a custody record's reservation
+                # (after confirming absence), and only retirement pops the
+                # record. Acknowledge only what the record still holds [MA-1.6a].
+                resident = self._scheduler_residents.get(tid)
+                reservation_held = not custody_recorded or (
+                    resident is not None and resident.get("reserved_queue") is not None
+                )
                 if (
-                    child.reserved_queue is not None
+                    reservation_held
+                    and child.reserved_queue is not None
                     and child.message_timestamp is not None
                 ):
                     try:
@@ -6527,7 +6582,10 @@ class Manager(ServiceTask):
             reserved_queue=reserved_queue,
             message_timestamp=timestamp,
         )
-        if not self._control_allows_child_launch():
+        # The control queue is read once, after broker-free validation and
+        # immediately before launch, which covers everything since the
+        # reservation. A drain already known here needs no read [MA-3].
+        if self._draining or self.should_stop:
             self._release_unlaunched_spawn_request(
                 source_queue=source_queue,
                 reserved_queue=reserved_queue,

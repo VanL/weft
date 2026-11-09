@@ -11,7 +11,7 @@ import multiprocessing
 import multiprocessing.synchronize
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -1105,6 +1105,128 @@ def test_positive_startup_snapshot_wakes_admission_without_maintenance_tick(
         assert not manager._startup_feedback
     finally:
         receipt_gate.set()
+        before_publish.set()
+        release.set()
+        for process in processes:
+            process.join(timeout=30.0)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=30.0)
+
+
+def test_undurable_launch_receipt_reads_no_connection_usage(
+    manager: Manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A receipt that cannot settle startup costs no usage observation [MA-1.8].
+
+    Until its receipt is durable, a startup settles only on snapshot handoff
+    or the missing-publication fallback, so the turn that handles the receipt
+    reads no PostgreSQL connection usage. Once the receipt is durable, a
+    reconciliation without a snapshot observes attributed usage as before, and
+    the child's snapshot still settles startup by handoff.
+    """
+    if active_test_backend() != "postgres":
+        pytest.skip("attributed connection usage is read only on PostgreSQL")
+    # Freeze the Manager's wall clock so the missing-publication fallback never
+    # becomes due while the child is held [MA-1.8]. Monotonic deadlines stay real.
+    now_ns = time.time_ns()
+    monkeypatch.setattr(
+        manager_mod,
+        "time",
+        SimpleNamespace(
+            time_ns=lambda: now_ns,
+            monotonic=time.monotonic,
+            perf_counter=time.perf_counter,
+            sleep=time.sleep,
+        ),
+    )
+    manager._refresh_scheduler_evidence()
+    manager._admission_refresh_after = time.monotonic() + 60.0
+    source = manager._queue(manager._queue_names["inbox"])
+    payload = json.loads(request_body())
+    request_id = int(source.write(json.dumps(payload)))
+    reserved = manager._queue_names["reserved"]
+    assert source.move_one(reserved, exact_timestamp=request_id) is not None
+    spec = manager._build_child_spec(payload, request_id)
+    assert spec is not None
+    tid = str(request_id)
+    spawn = multiprocessing.get_context("spawn")
+    before_publish, ready, release = spawn.Event(), spawn.Event(), spawn.Event()
+    processes: list[BaseProcess] = []
+
+    def launch(
+        _task_cls: type[Any], _target: Any, child_spec: TaskSpec, **kwargs: Any
+    ) -> BaseProcess:
+        # The child holds before it installs its identity, connects or publishes.
+        process = spawn.Process(
+            target=_publish_waiting_task,
+            args=(
+                child_spec.model_dump(mode="json"),
+                kwargs["runtime_identity"].to_dict(),
+                ready,
+                release,
+                before_publish,
+            ),
+        )
+        processes.append(process)
+        process.start()
+        return process
+
+    usage_reads: list[Mapping[str, Any]] = []
+    read_usage = manager._read_postgres_connection_usage
+
+    def counting_usage() -> Any:
+        usage = read_usage()
+        usage_reads.append(usage)
+        return usage
+
+    monkeypatch.setattr(manager_mod, "launch_task_process", launch)
+    monkeypatch.setattr(manager, "_read_postgres_connection_usage", counting_usage)
+    try:
+        assert manager._launch_child_task(
+            spec,
+            None,
+            source_queue=source.name,
+            reserved_queue=reserved,
+            message_timestamp=request_id,
+        )
+        drive_until(
+            lambda: tid in manager._child_processes,
+            bool,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+        # The receipt turn published the receipt and read no usage.
+        assert usage_reads == []
+        assert tid not in manager._scheduler_undurable
+        assert tid in manager._startup_feedback
+
+        # A durable receipt without a snapshot observes attributed usage.
+        manager._reconcile_launch_now(tid)
+        assert len(usage_reads) == 1
+        assert (
+            usage_reads[0]["by_owner"].get(
+                manager._scheduler_residents[tid]["connection_owner"], 0
+            )
+            == 0
+        )
+        assert tid in manager._startup_feedback
+        assert manager._queue(reserved).peek_one(exact_timestamp=request_id) is not None
+
+        before_publish.set()
+        assert ready.wait(timeout=30.0)
+        drive_until(
+            lambda: tid in manager._startup_feedback,
+            lambda pending: not pending,
+            step=manager.process_once,
+            wait=manager.wait_for_activity,
+            timeout=30.0,
+        )
+        assert manager._queue(reserved).peek_one(exact_timestamp=request_id) is None
+        assert "reserved_queue" not in manager._scheduler_residents[tid]
+    finally:
         before_publish.set()
         release.set()
         for process in processes:

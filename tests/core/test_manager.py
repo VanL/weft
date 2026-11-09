@@ -1903,6 +1903,57 @@ def test_manager_operational_log_emits_metadata_and_honors_level(
     assert isinstance(event["timestamp_ns"], int)
 
 
+def test_suppressed_loop_summary_reads_no_queues(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rate-limited loop summary reads its pending flags only to emit them.
+
+    Every turn offers the summary; the operational log suppresses an unchanged
+    one until its interval. Suppression must not cost broker reads, and an
+    emitted summary still reports the pending flags it read [WT-4.3].
+    """
+    db_path, _make_queue = broker_env
+    config = load_config(
+        {
+            "WEFT_TASK_MONITOR_ENABLED": "0",
+            "WEFT_LIVENESS_MONITOR_ENABLED": "0",
+            "WEFT_MANAGER_SERVE_LOG_ACTIVE": True,
+            "WEFT_MANAGER_SERVE_LOG_LEVEL": "info",
+            "WEFT_MANAGER_SERVE_LOG_INTERVAL_SECONDS": 3600,
+        }
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    capsys.readouterr()
+    reads: list[str] = []
+    real_has_pending = Queue.has_pending
+
+    def counting_has_pending(queue: Queue, *args: Any, **kwargs: Any) -> bool:
+        reads.append(queue.name)
+        return real_has_pending(queue, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(Queue, "has_pending", counting_has_pending)
+        manager._emit_manager_loop_summary(force=True)
+        emitted_reads = len(reads)
+        manager._emit_manager_loop_summary()
+        suppressed_reads = len(reads) - emitted_reads
+        monkeypatch.undo()
+        events = serve_log_events(capsys)
+    finally:
+        monkeypatch.undo()
+        manager.cleanup()
+
+    summaries = [event for event in events if event["event"] == "manager_loop_summary"]
+    assert len(summaries) == 1
+    for field in ("pending_public", "pending_internal", "pending_control"):
+        assert isinstance(summaries[0][field], bool)
+    assert emitted_reads == 3
+    assert suppressed_reads == 0
+
+
 @pytest.mark.parametrize("level", ["trace", "off"])
 def test_manager_turn_timings_are_opt_in_and_correlatable(
     broker_env: BrokerEnv,
@@ -10071,6 +10122,84 @@ def test_manager_stop_mid_handler_requeues_reserved_work_unlaunched(
     assert not any(event.get("event") == "task_spawned" for event in events)
 
 
+def _reserve_spawn_request(
+    manager: Manager, make_queue: Callable[[str], Queue]
+) -> tuple[str, int, QueueMessageContext]:
+    """Reserve one real spawn request exactly as delivery does [MF-6]."""
+    inbox = make_queue(manager._queue_names["inbox"])
+    reserved_name = manager._queue_names["reserved"]
+    body = json.dumps(
+        {
+            "spec": {
+                "type": "function",
+                "function_target": "tests.tasks.sample_targets:echo_payload",
+            }
+        }
+    )
+    timestamp = inbox.write(body)
+    assert inbox.move_one(reserved_name, exact_timestamp=timestamp) is not None
+    context = QueueMessageContext(
+        queue_name=inbox.name,
+        queue=inbox,
+        mode=QueueMode.RESERVE,
+        timestamp=timestamp,
+        reserved_queue_name=reserved_name,
+    )
+    return body, timestamp, context
+
+
+def test_spawn_handler_checks_control_once_before_launch(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One control read guards a reserved request's launch [MA-3].
+
+    The check runs after validation, immediately before the launch, so it
+    covers everything that happened since the reservation.
+    """
+    manager, make_queue = manager_setup
+    body, timestamp, context = _reserve_spawn_request(manager, make_queue)
+    counts = count_queue_calls(
+        monkeypatch, context.queue, manager._queue_names["ctrl_in"]
+    )
+    manager._handle_work_message(body, timestamp, context)
+    control_reads = counts["reads"]
+    monkeypatch.undo()
+
+    tid = str(timestamp)
+    assert control_reads == 1
+    assert tid in manager._active_child_launches
+    drive_until(
+        lambda: (
+            tid in manager._active_child_launches or tid in manager._child_processes
+        ),
+        lambda present: not present,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=30.0,
+    )
+
+
+def test_stop_pending_at_reservation_releases_request_unlaunched(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+) -> None:
+    """A STOP that lands after reservation still prevents the launch [MA-3]."""
+    manager, make_queue = manager_setup
+    body, timestamp, context = _reserve_spawn_request(manager, make_queue)
+    make_queue(manager._queue_names["ctrl_in"]).write(
+        encode_control_message(CONTROL_STOP)
+    )
+
+    manager._handle_work_message(body, timestamp, context)
+
+    assert manager._active_child_launches == {}
+    assert manager._child_processes == {}
+    reserved = make_queue(manager._queue_names["reserved"])
+    assert reserved.peek_one(exact_timestamp=timestamp) is None
+    assert context.queue.peek_one(exact_timestamp=timestamp) is not None
+    assert manager._draining or manager.should_stop
+
+
 @pytest.mark.parametrize("active_records", [None, {}])
 def test_manager_public_dispatch_steals_work_when_registry_ownership_is_unproved(
     broker_env: BrokerEnv,
@@ -11443,6 +11572,60 @@ def test_manager_reaps_exited_child_on_its_sentinel_turn(
     assert terminal["type"] == TERMINAL_ENVELOPE_TYPE
     assert terminal["source"] == "task"
     assert terminal["status"] == "completed"
+
+
+def test_handed_off_child_reap_reads_proof_once_and_acknowledges_nothing_again(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reaping a cleanly exited, handed-off child costs one proof read, no ack.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8].
+    The task's snapshot handoff already acknowledged its reservation with
+    confirmed absence, so the reap acknowledges nothing again; the one
+    ctrl_out read that finds task-owned proof also settles the failsafe
+    decision, and no ``wrapper_lost`` envelope is written.
+    """
+
+    manager, make_queue = manager_setup
+    tid, release = _launch_waiting_child(manager, make_queue, tmp_path)
+    reserved_name = manager._queue_names["reserved"]
+    drive_until(
+        lambda: manager._scheduler_residents.get(tid, {}),
+        lambda resident: "reserved_queue" not in resident,
+        step=manager.process_once,
+        wait=manager.wait_for_activity,
+        timeout=30.0,
+    )
+    reserved = make_queue(reserved_name)
+    assert reserved.peek_one(exact_timestamp=int(tid)) is None
+    adapter = manager._child_sentinel_adapter
+    while adapter.wait(0):
+        manager.process_once()
+    assert tid in manager._child_processes
+
+    release.touch()
+    assert adapter.wait(30.0)
+    ctrl_out_name = f"T{tid}.ctrl_out"
+    ctrl_out_calls = count_queue_calls(monkeypatch, reserved, ctrl_out_name)
+    reserved_calls = count_queue_calls(monkeypatch, reserved, reserved_name)
+    manager.process_once()
+    monkeypatch.undo()
+
+    assert tid not in manager._child_processes
+    assert tid not in manager._scheduler_residents
+    assert ctrl_out_calls["reads"] == 1
+    assert reserved_calls["deletes"] == 0
+    assert reserved.peek_one(exact_timestamp=int(tid)) is None
+    envelopes = [
+        json.loads(str(body))
+        for body in make_queue(ctrl_out_name).peek_generator()
+        if json.loads(str(body)).get("type") == TERMINAL_ENVELOPE_TYPE
+    ]
+    assert [(row["source"], row["status"]) for row in envelopes] == [
+        ("task", "completed")
+    ]
 
 
 def test_cleanup_children_reaps_os_dead_child_without_mapping_scan(
