@@ -6601,6 +6601,9 @@ def test_service_cycle_does_not_reset_manager_idle_clock(
         manager._last_activity_ns = idle_since
 
         launches[0].kill()
+        # The fake has no sentinel, so record the exit the sentinel adapter
+        # would report; it is the Manager's only exit evidence [MA-1.6a].
+        manager._child_processes[first_tid].sentinel_observed_ns = time.time_ns()
         drive_manager_until(
             manager,
             lambda: len(heartbeat_tids()) == 1 and heartbeat_tids() != [first_tid],
