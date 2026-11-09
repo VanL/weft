@@ -142,6 +142,7 @@ from weft.core.endpoints import (
     latest_tid_state_entries_for_endpoint_resolution,
 )
 from weft.core.manager_runtime import manager_registry_record_liveness
+from weft.core.process_exit import ProcessExitSource, open_process_exit_source
 from weft.core.task_evidence import parse_task_observation
 from weft.core.task_state import (
     latest_task_state_rows,
@@ -286,6 +287,8 @@ class ManagedChild:
     terminal_proof_missing_since_ns: int = 0
     terminal_retry_after_ns: int = 0
     sentinel_observed_ns: int = 0
+    survivor_hold_pid: int = 0
+    """Live managed process a stopping drain holds this exited wrapper for."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,7 +429,14 @@ class _ManagerChildSentinelAdapter:
     Manager reactor remains the sole owner of Process objects, registry
     mutation, liveness checks, and reaping.
 
-    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+    A TID's input is its child's process sentinel, or a process-exit source
+    handed over by ``watch_exit`` for a managed process the stopping drain
+    holds that child for. The adapter owns such a source: replacement,
+    removal or close retires it, and the observer thread closes a retired
+    source only between waits, so no wait ever holds a closed descriptor or
+    handle.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
     """
 
     def __init__(self, notify_activity: Callable[[], None]) -> None:
@@ -436,6 +446,8 @@ class _ManagerChildSentinelAdapter:
         self._notify_activity = notify_activity
         self._lock = threading.Lock()
         self._membership: dict[str, int] = {}
+        self._owned_sources: dict[str, ProcessExitSource] = {}
+        self._retired_sources: list[ProcessExitSource] = []
         self._suppressed: set[tuple[str, int]] = set()
         self._wake_token_pending = False
         self._stopping = False
@@ -493,7 +505,26 @@ class _ManagerChildSentinelAdapter:
                 return
             if previous is not None:
                 self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
             self._membership[tid] = sentinel
+            self._wake_observer_locked()
+
+    def watch_exit(self, tid: str, source: ProcessExitSource) -> None:
+        """Make an owned process-exit source this TID's input, replacing the last.
+
+        The adapter takes ownership of ``source`` and closes it once it is
+        replaced or removed, or when the adapter closes.
+        """
+        with self._lock:
+            if self._stopping or self._closed:
+                source.close()
+                return
+            previous = self._membership.get(tid)
+            if previous is not None:
+                self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
+            self._owned_sources[tid] = source
+            self._membership[tid] = source.fileno()
             self._wake_observer_locked()
 
     def remove(self, tid: str) -> None:
@@ -503,9 +534,21 @@ class _ManagerChildSentinelAdapter:
             if previous is None:
                 return
             self._suppressed.discard((tid, previous))
+            self._retire_owned_source_locked(tid)
             if self._stopping or self._closed:
                 return
             self._wake_observer_locked()
+
+    def _retire_owned_source_locked(self, tid: str) -> None:
+        source = self._owned_sources.pop(tid, None)
+        if source is not None:
+            self._retired_sources.append(source)
+
+    def _close_retired_sources(self) -> None:
+        with self._lock:
+            retired, self._retired_sources = self._retired_sources, []
+        for source in retired:
+            source.close()
 
     def drain(
         self,
@@ -546,8 +589,13 @@ class _ManagerChildSentinelAdapter:
             if self._closed:
                 return
             self._closed = True
+            owned = list(self._owned_sources.values())
+            self._owned_sources.clear()
         self._recv_conn.close()
         self._send_conn.close()
+        for source in owned:
+            source.close()
+        self._close_retired_sources()
         for result in self.drain():
             if isinstance(result, _ManagerChildSentinelFailure):
                 raise result.error
@@ -570,6 +618,8 @@ class _ManagerChildSentinelAdapter:
     def _observe(self) -> None:
         try:
             while True:
+                # Between waits: no wait holds a retired source.
+                self._close_retired_sources()
                 with self._lock:
                     if self._stopping:
                         return
@@ -5076,7 +5126,11 @@ class Manager(ServiceTask):
     ) -> bool:
         """Reap exited wrappers without abandoning shutdown-owned descendants.
 
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a]
+        ``retain_managed_survivors`` (the stopping drain) holds an exited
+        wrapper while a managed process it names is live; see
+        ``_hold_for_managed_survivor``.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
         """
 
         autostart_child_exited = False
@@ -5085,10 +5139,11 @@ class Manager(ServiceTask):
             if deadline is not None and self._remaining_deadline(deadline) <= 0:
                 break
             if self._child_has_exited(child):
-                if retain_managed_survivors and any(
-                    pid_is_live(pid) for pid in self._managed_pids_for_child(tid)
+                if retain_managed_survivors and self._hold_for_managed_survivor(
+                    tid, child
                 ):
                     continue
+                child.survivor_hold_pid = 0
                 if child.terminal_retry_after_ns > time.time_ns():
                     continue
                 # Consume this retry before proof grace can publish its own deadline.
@@ -5180,6 +5235,49 @@ class Manager(ServiceTask):
             self._invalidate_leadership_work_cache()
             self._clear_admission_retry()
         return child_exited
+
+    def _hold_for_managed_survivor(self, tid: str, child: ManagedChild) -> bool:
+        """Hold an exited wrapper while a managed process it names is live.
+
+        The stopping drain keeps custody of the wrapper until every managed
+        process in its task snapshot has exited. The hold waits on one live
+        survivor's kernel exit source, handed to the child-sentinel adapter as
+        this TID's input, so that survivor's exit wakes the reactor; the next
+        evaluation then holds for another live survivor or releases the
+        wrapper. A held wrapper publishes no child deadline. If no exit source
+        can be opened, the hold is logged and bounded by the drain window: no
+        polling deadline replaces the missing sentinel ([WT-4.3],
+        [ALT-WT-002]).
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
+        """
+
+        live = sorted(
+            pid for pid in self._managed_pids_for_child(tid) if pid_is_live(pid)
+        )
+        if child.survivor_hold_pid in live:
+            return True
+        for pid in live:
+            try:
+                source = open_process_exit_source(pid)
+            except (OSError, RuntimeError):
+                logger.warning(
+                    "Manager %s cannot watch managed process %s of exited child "
+                    "%s; the drain window bounds the hold",
+                    self.tid,
+                    pid,
+                    tid,
+                    exc_info=True,
+                )
+                child.survivor_hold_pid = pid
+                return True
+            if source is None:
+                # It exited after the liveness check.
+                continue
+            self._child_sentinel_adapter.watch_exit(tid, source)
+            child.survivor_hold_pid = pid
+            return True
+        return False
 
     def _terminate_children(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-009] exception
         self,
@@ -9339,7 +9437,13 @@ class Manager(ServiceTask):
         ]
 
     def _manager_child_timeouts(self, *, now_ns: int) -> list[float]:
-        """Return child sentinel and post-exit deadlines."""
+        """Return child sentinel and post-exit deadlines.
+
+        A wrapper the stopping drain holds for a live survivor publishes none:
+        the survivor's exit source wakes the drain.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
+        """
 
         timeouts: list[float] = []
         sentinel_recheck_ns = int(MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1_000_000_000)
@@ -9347,6 +9451,10 @@ class Manager(ServiceTask):
             MANAGER_CHILD_TERMINAL_PROOF_GRACE_SECONDS * 1_000_000_000
         )
         for child in self._child_processes.values():
+            if child.survivor_hold_pid > 0:
+                # The held wrapper's exit is settled; its survivor's exit
+                # source, not a clock, wakes the drain [MA-3].
+                continue
             if child.terminal_retry_after_ns > 0:
                 timeouts.append(
                     self._timeout_until_ns(child.terminal_retry_after_ns, now_ns=now_ns)

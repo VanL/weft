@@ -100,6 +100,7 @@ from weft.core.heartbeat import upsert_heartbeat
 from weft.core.manager import DispatchOwnership, ManagedChild, Manager
 from weft.core.manager_services import ManagedServiceSpec
 from weft.core.monitor.task_monitor import TaskMonitor
+from weft.core.process_exit import open_process_exit_source
 from weft.core.service_convergence import (
     build_manager_service_payload,
     build_service_owner_payload,
@@ -4148,6 +4149,54 @@ def test_manager_child_sentinel_adapter_coalesces_level_triggered_exit() -> None
             process.kill()
         process.join(timeout=2.0)
         adapter.close(timeout=1.0)
+
+
+def test_manager_child_sentinel_adapter_closes_owned_exit_sources_off_wait() -> None:
+    """The adapter owns a handed-over exit source until it retires it [MA-1.6a].
+
+    Replacing or removing a watched source closes it on the observer thread,
+    between waits, so no wait holds a closed descriptor or handle; closing the
+    adapter releases a source still in use. Each source is a real kernel exit
+    source for this (live) test process, so none fires during the test.
+    """
+
+    class OwnedSource:
+        def __init__(self) -> None:
+            source = open_process_exit_source(os.getpid())
+            assert source is not None
+            self.source = source
+            self.closed = threading.Event()
+            self.closer: threading.Thread | None = None
+
+        def fileno(self) -> int:
+            return self.source.fileno()
+
+        def close(self) -> None:
+            self.closer = threading.current_thread()
+            self.source.close()
+            self.closed.set()
+
+    adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
+    first, second, third = OwnedSource(), OwnedSource(), OwnedSource()
+    try:
+        adapter.watch_exit("held", first)
+        adapter.watch_exit("held", second)
+        assert first.closed.wait(10.0), "replaced source never closed"
+        assert first.closer is adapter._thread
+        assert not second.closed.is_set()
+
+        adapter.remove("held")
+        assert second.closed.wait(10.0), "removed source never closed"
+        assert second.closer is adapter._thread
+
+        adapter.watch_exit("other", third)
+        adapter.close(timeout=10.0)
+        assert third.closed.is_set()
+    finally:
+        adapter.close(timeout=10.0)
+        for owned in (first, second, third):
+            if not owned.closed.is_set():
+                owned.source.close()
 
 
 def test_manager_child_sentinel_adapter_chunks_large_windows_waits(
@@ -11348,15 +11397,18 @@ def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
     )
     manager._child_processes["child"] = child
     managed_pid_live = [True]
+    # The hold watches the managed process's exit, so it must be a real
+    # process; only its reported liveness is scripted.
+    managed_pid = os.getpid()
     monkeypatch.setattr(
         manager,
         "_managed_pids_for_child",
-        lambda tid: {515151} if tid == "child" else set(),
+        lambda tid: {managed_pid} if tid == "child" else set(),
     )
     monkeypatch.setattr(
         manager_mod,
         "pid_is_live",
-        lambda pid: pid == 515151 and managed_pid_live[0],
+        lambda pid: pid == managed_pid and managed_pid_live[0],
     )
 
     assert manager._cleanup_children(retain_managed_survivors=True) is False
@@ -11365,6 +11417,104 @@ def test_shutdown_cleanup_retains_exited_wrapper_until_managed_pids_exit(
     managed_pid_live[0] = False
     assert manager._cleanup_children(retain_managed_survivors=True) is True
     assert manager._child_processes == {}
+
+
+class _ShiftedClock:
+    """The real ``time`` module with an adjustable wall-clock offset."""
+
+    def __init__(self) -> None:
+        self.offset_ns = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def time_ns(self) -> int:
+        return time.time_ns() + self.offset_ns
+
+
+def test_stopping_drain_survivor_hold_publishes_no_due_clock_and_wakes_on_exit(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held wrapper's survivor wakes the drain; nothing spins meanwhile.
+
+    The stopping drain holds an exited wrapper while a managed process its
+    task snapshot names is live. Long after the wrapper's own sentinel fired,
+    that hold must publish no due child clock (a zero wait timeout is a busy
+    spin), and the survivor's exit must wake the reactor through the
+    child-sentinel adapter rather than a polling deadline ([WT-4.3],
+    [ALT-WT-002]). The Manager's wall clock is shifted, not slept.
+
+    Spec: [MA-1.6a], [MA-3]
+    """
+
+    manager, make_queue = manager_setup
+    clock = _ShiftedClock()
+    monkeypatch.setattr(manager_mod, "time", clock)
+    tid = str(time.time_ns())
+    survivor = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    wrapper = multiprocessing.get_context("spawn").Process(target=os._exit, args=(0,))
+    try:
+        created = process_create_time(survivor.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid, pid=survivor.pid, created=created))
+        )
+        # The task published its terminal proof; only its descendant remains.
+        make_queue(f"T{tid}.ctrl_out").write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "task",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            )
+        )
+        wrapper.start()
+        child = ManagedChild(
+            wrapper,
+            f"T{tid}.ctrl_in",
+            ctrl_out_queue=f"T{tid}.ctrl_out",
+            launched_ns=time.time_ns(),
+        )
+        manager._child_processes[tid] = child
+        manager._register_child_sentinel(tid, child)
+        manager._begin_shutdown_drain(
+            message_id=None,
+            reason="test",
+            event=None,
+            completion_event="manager_stop_drained",
+        )
+
+        assert manager._child_sentinel_adapter.wait(15.0), "wrapper exit not observed"
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert manager._child_processes == {tid: child}
+
+        clock.offset_ns = int(10 * MANAGER_PID_LIVENESS_RECHECK_INTERVAL * 1e9)
+        wait_timeout = manager.next_wait_timeout()
+        assert wait_timeout is not None and wait_timeout > 0, wait_timeout
+        clock.offset_ns = 0
+
+        assert survivor.stdin is not None
+        survivor.stdin.close()
+        assert manager._child_sentinel_adapter.wait(15.0), "survivor exit not observed"
+        survivor.wait(timeout=15.0)
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+
+        assert manager._child_processes == {}
+        assert manager.should_stop is True
+    finally:
+        if survivor.poll() is None:
+            survivor.kill()
+            survivor.wait(timeout=15.0)
+        wrapper.join(timeout=15.0)
+        _remove_drain_snapshots(make_queue, (tid,))
 
 
 def test_cleanup_children_waits_for_terminal_proof_after_clean_exit(

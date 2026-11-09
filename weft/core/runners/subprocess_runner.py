@@ -22,13 +22,11 @@ from __future__ import annotations
 import codecs
 import collections
 import contextlib
-import errno
 import io
 import locale
 import logging
 import math
 import os
-import select
 import selectors
 import subprocess
 import sys
@@ -45,7 +43,7 @@ from weft._constants import (
     SUBPROCESS_STREAM_TURN_READ_BYTES,
     SUBPROCESS_TERMINATION_WAIT_TIMEOUT,
 )
-from weft.core.deferred import get_ctypes
+from weft.core.process_exit import ProcessExitSource, open_process_exit_source
 from weft.core.resource_monitor import ResourceMetrics, load_resource_monitor
 from weft.core.runner_diagnostics import runner_diagnostics
 from weft.core.runners.outcome import RunnerOutcome
@@ -707,115 +705,6 @@ def _deliver_frozen(streams: Sequence[_OutputStreamState]) -> None:
         logger.warning("Subprocess stream capture ended before stdout/stderr EOF")
 
 
-class _ExitSource(Protocol):
-    def fileno(self) -> int: ...
-
-    def close(self) -> None: ...
-
-
-class _DescriptorExitSource:
-    """An owned child-exit descriptor (a Linux pidfd)."""
-
-    def __init__(self, descriptor: int) -> None:
-        self._descriptor = descriptor
-
-    def fileno(self) -> int:
-        return self._descriptor
-
-    def close(self) -> None:
-        os.close(self._descriptor)
-
-
-def _linux_pidfd_opener() -> Callable[[int], int]:
-    """Select Python's pidfd wrapper or bind libc before classifying syscall errors.
-
-    Dependency/loader acquisition must stay outside the syscall-only error
-    handler in `_open_child_exit_source`. The ctypes function retains its CDLL
-    owner; each acquisition binds locally without shared mutable FFI state.
-
-    Spec: docs/specifications/06-Resource_Management.md [RM-5.2].
-    """
-    python_opener = getattr(os, "pidfd_open", None)
-    if python_opener is not None:
-        return cast("Callable[[int], int]", python_opener)
-
-    try:
-        ctypes = get_ctypes()
-        libc = ctypes.CDLL(None, use_errno=True)
-        native = libc.pidfd_open
-    except (ImportError, AttributeError) as exc:
-        raise RuntimeError(
-            "Subprocess supervision cannot open pidfds: Python lacks os.pidfd_open "
-            "and ctypes or libc's pidfd_open binding is unavailable "
-            f"(Python {sys.version.split()[0]} at {sys.executable}): {exc}"
-        ) from exc
-
-    native.argtypes = [ctypes.c_int, ctypes.c_uint]
-    native.restype = ctypes.c_int
-
-    def open_native(pid: int) -> int:
-        descriptor = cast("int", native(pid, 0))
-        if descriptor == -1:
-            code = ctypes.get_errno()
-            raise OSError(code, os.strerror(code))
-        return descriptor
-
-    return open_native
-
-
-def _open_child_exit_source(pid: int) -> _ExitSource | None:
-    """Open a selectable kernel object that becomes readable when ``pid`` exits.
-
-    Linux uses a pidfd through Python or libc; macOS and BSD use a kqueue
-    holding a one-shot process-exit filter, whose own descriptor joins the
-    selector. Neither reaps the child or touches ``Popen._waitpid_lock``. ``None`` means the
-    child is already gone, which the caller treats as an immediate wake.
-
-    Spec: [RM-5.2]
-    """
-    if sys.platform == "linux":
-        pidfd_open = _linux_pidfd_opener()
-        try:
-            return _DescriptorExitSource(pidfd_open(pid))
-        except ProcessLookupError:
-            return None
-        except OSError as exc:
-            if exc.errno not in (
-                errno.ENOSYS,
-                errno.EPERM,
-                errno.EACCES,
-            ):
-                raise
-            raise RuntimeError(
-                "Subprocess supervision requires Linux 5.3+ with pidfd_open "
-                "supported by the kernel and permitted by the container/security policy: "
-                f"{exc}"
-            ) from exc
-    if sys.platform == "win32":
-        raise NotImplementedError("the Windows leaf waits on the process handle")
-    kq = select.kqueue()
-    try:
-        kq.control(
-            [
-                select.kevent(
-                    pid,
-                    filter=select.KQ_FILTER_PROC,
-                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                    fflags=select.KQ_NOTE_EXIT,
-                )
-            ],
-            0,
-            0,
-        )
-    except ProcessLookupError:
-        kq.close()
-        return None
-    except BaseException:
-        kq.close()
-        raise
-    return kq
-
-
 class _PosixSelectorProcessIO:
     """POSIX platform readiness adapter for one supervised subprocess [RM-5.2].
 
@@ -848,7 +737,7 @@ class _PosixSelectorProcessIO:
         self._stderr = _OutputStreamState(process.stderr, on_stderr_chunk)
         self._stdin: _StdinStreamState | None = None
         self._selector: selectors.BaseSelector | None = None
-        self._exit_source: _ExitSource | None = None
+        self._exit_source: ProcessExitSource | None = None
         self._exit_ready = False
         try:
             self._selector = selector_factory()
@@ -869,7 +758,7 @@ class _PosixSelectorProcessIO:
 
     def _watch_child_exit(self, pid: int) -> None:
         assert self._selector is not None
-        source = _open_child_exit_source(pid)
+        source = open_process_exit_source(pid)
         if source is None:
             self._exit_ready = True
             return

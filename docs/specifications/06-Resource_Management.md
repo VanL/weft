@@ -346,8 +346,9 @@ boundary; both route observations through `weft/core/terminal_handoff.py`.
 (`_open_process_io`: `_PosixSelectorProcessIO` and
 `_WindowsOverlappedProcessIO`), and supervised process construction
 (`open_supervised_process`).
-`weft/core/runners/subprocess_runner.py::_open_child_exit_source` owns Linux
-pidfd binding selection and the kernel exit source;
+`weft/core/process_exit.py::open_process_exit_source` owns Linux pidfd
+binding selection and the kernel exit source the POSIX readiness adapter
+registers (the Manager's drain uses the same source, [MA-1.6a]);
 `weft/core/deferred.py::get_ctypes` loads the optional ctypes dependency for
 the libc binding.
 
@@ -438,6 +439,7 @@ controls stay here only when they are already shipped and observable:
 
 ## Related Plans
 
+- [Stopping-Drain Survivor Exit Sentinel](../plans/2026-11-08-drain-survivor-exit-sentinel-plan.md) moves the kernel process-exit source out of the subprocess runner into `weft/core/process_exit.py`, shared with the Manager's stopping drain, and adds its Windows leaf ([RM-5.2], [MA-1.6a]).
 - retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 - retired: `2026-10-29-pr48-reactor-and-test-hygiene-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces timer-polled subprocess pipe supervision with the platform readiness adapter (`[RM-5.2]`).
 - retired: `2026-11-02-reactor-edge-timer-floors-plan` (source 0ff8cfbf; see `docs/plans/README.md`) replaces fixed timer floors on agent-session and interactive waits with their real event sources and samples persistent agent sessions at the monitor's `polling_interval` ([RM-5.1], [RM-5.2]).
