@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Require SimpleBroker 8.8.0 and `simplebroker-pg` 4.8.0. PostgreSQL writes
+  no longer hold the high-water row lock across client round trips, backend
+  lookups and project-target validation happen once per process or session,
+  activity notifications use per-queue channels, quiet waiting processes
+  release their pooled data connection (lost-notification recovery is now
+  bounded by about 60 seconds instead of about 2), and watchers apply retry
+  limits per failure streak and log each retry at WARNING. Upgrade waiting
+  Weft processes together with writers: a 4.7.x waiter does not hear 4.8.0
+  writes and falls back to its idle re-poll until upgraded.
+
 ## [0.9.122] - 2026-11-06
 
 ### Changed
