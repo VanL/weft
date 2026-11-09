@@ -425,4 +425,15 @@ Evidence (base `08c2f87b`):
 
 ### Cross-family review
 
-(coordinator fills the cross-family review here)
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-08,
+scoped-change review of the plan and implementation together at f5c78324
+against baseline 08c2f87b (perf/admission-base). Verdict: `no blocker`.
+
+| ID | Severity | Finding | Disposition |
+|---|---|---|---|
+| F1 | P3 | The [MA-1.6a] sentence forbade all process-status probes, but explicit termination still calls `is_alive()` (stop/kill escalation, drain-timeout turns), which this change intentionally preserves. | Accepted, fixed in spec: the sentence now scopes the rule to ordinary exit detection and reaping and states that explicit termination keeps its own checks. |
+
+The reviewer found no functional regression, judged the D row a
+theory-consistent fail-stop tradeoff that warrants no fallback detector, and
+confirmed both new tests are falsifiable. Benchmark results are recorded by the
+coordinator's program summary.

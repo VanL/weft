@@ -376,9 +376,11 @@ Key responsibilities implemented in `weft/core/manager.py`:
    are hints, not the clock that drives service supervision. Child-process exit
    reaches the Manager reactor as a local event from one Manager-owned sentinel
    adapter; post-exit terminal-proof grace remains a published timer. The
-   sentinel is the Manager's only exit evidence: a child whose sentinel has not
-   fired is live, and no reactor turn, cleanup pass or service convergence pass
-   probes its process status. After the sentinel fires, the Manager confirms
+   sentinel is the Manager's only exit evidence for ordinary exit detection and
+   reaping: a child whose sentinel has not fired is live, and no reactor turn,
+   cleanup pass or service convergence pass probes its process status to detect
+   exit. Explicit termination (stop/kill escalation and drain timeouts) keeps
+   its own process checks. After the sentinel fires, the Manager confirms
    exit from the local process view and, when that view lags (another waiter
    consumed the exit status), from host PID liveness on the published
    PID-liveness recheck.
