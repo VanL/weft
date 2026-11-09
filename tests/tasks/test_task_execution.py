@@ -5094,6 +5094,38 @@ def test_large_output_survives_cleanup_on_exit(
     assert output_path.read_bytes() == b"x" * (2 * 1024 * 1024)
 
 
+def test_non_streaming_cleanup_leaves_other_producers_stream_markers(
+    broker_env: BrokerEnv, unique_tid: str
+) -> None:
+    """``cleanup_on_exit`` removes task-owned scratch only [TS-1], [MF-2].
+
+    A task that writes no stream frames shares its configured outbox with
+    another producer; that producer's empty final stream marker is not this
+    task's artifact and must survive this task's cleanup.
+    """
+    db_path, make_queue = broker_env
+    spec = make_function_taskspec(
+        unique_tid,
+        "tests.tasks.sample_targets:echo_payload",
+        cleanup_on_exit=True,
+    )
+    outbox = make_queue(spec.io.outputs["outbox"])
+    foreign_marker = json.dumps(
+        {"type": "stream", "stream": "stdout", "chunk": 0, "final": True, "data": ""}
+    )
+    outbox.write(foreign_marker)
+    task = Consumer(db_path, spec)
+    make_queue(spec.io.inputs["inbox"]).write(json.dumps({"args": ["payload"]}))
+
+    _drive_consumer_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+    )
+    task.cleanup()
+
+    assert outbox.peek_many(limit=10) == [foreign_marker, "payload"]
+
+
 def test_stream_output_writes_chunks(
     tmp_path: Path, broker_env: BrokerEnv, unique_tid: str
 ) -> None:

@@ -35,6 +35,7 @@ See also:
 
 ## Related Plans
 
+- [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) coalesces a Consumer's snapshot edges per owner step and carries live activity on same-step lifecycle rows ([CC-2.2]).
 - retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([CC-2.3]).
 - retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([CC-2.4]).
 - [Measured admission and bounded family scheduling](../plans/2026-10-14-measured-admission-family-scheduling.md) specifies reactor-owned notification-only startup interests while delivery routes remain fixed.
@@ -311,7 +312,15 @@ Task-state publication to the task's own `weft.state.tasks.<tid>` is the
 shared [OBS.6]/[OBS.6a] publication path.
 Call sites decide whether their owner-local activity, runtime handle, PID, or
 diagnostic state changed; registration itself performs one append attempt and
-does not inspect global mapping history.
+does not inspect global mapping history. Inside an owner step that coalesces
+publication ([OBS.6a]) an edge marks the snapshot stale and the step's end
+makes the one append. A lifecycle row in `weft.log.tasks` carries the live
+`activity` and `waiting_on` current at the report, taken from one state. A
+separate `task_activity` row records an activity change that no lifecycle row
+of the same step carries; outside a coalescing step every activity change
+writes its row. A reader folding the log takes `activity` and `waiting_on`
+together from any row that carries `activity`, an absent `waiting_on` meaning
+none.
 
 ### 2.2.1 Reactor Ownership and Lifecycle [CC-2.2.1]
 

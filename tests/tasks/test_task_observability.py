@@ -486,6 +486,136 @@ def test_terminal_state_report_publishes_terminal_tid_state_when_activity_empty(
     assert task_mappings[-1]["terminal"] is True
 
 
+def _task_log_rows(log_queue: Queue, tid: str) -> list[dict[str, Any]]:
+    rows = [json.loads(body) for body in log_queue.peek_many(limit=1000) or []]
+    return [row for row in rows if row.get("tid") == tid]
+
+
+def _worker_identity_published(mapping_queue: Queue, task_pid: int) -> bool:
+    rows = [json.loads(body) for body in mapping_queue.peek_many(limit=100) or []]
+    return any(
+        isinstance(row.get("runtime_handle"), dict)
+        and row["runtime_handle"].get("id") != str(task_pid)
+        for row in rows
+    )
+
+
+def test_one_shot_lifecycle_publishes_one_snapshot_per_owner_step(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+    tmp_path: Any,
+) -> None:
+    """Each owner step appends the state after the step once [OBS.6a], [CC-2.2].
+
+    Construction and the work-start step each write one snapshot that already
+    carries the live activity; lifecycle rows carry that activity instead of
+    separate ``task_activity`` rows. A live worker's identity is published
+    while it runs, and the terminal snapshot closes the lifecycle.
+    """
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    release = tmp_path / "release"
+    spec = build_function_spec(
+        unique_tid, function_target="tests.tasks.sample_targets:wait_for_file"
+    )
+    inbox_name = spec.io.inputs["inbox"]
+    task = task_factory(spec)
+    make_queue(inbox_name).write(json.dumps({"args": [str(release)]}))
+
+    drive_task_until(
+        task,
+        lambda: _worker_identity_published(mapping_queue, task._task_pid),
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
+    release.touch()
+    drive_task_until(
+        task,
+        lambda: task.taskspec.state.status == "completed",
+        timeout=20.0 if os.name == "nt" else 10.0,
+    )
+
+    snapshots = [json.loads(body) for body in mapping_queue.peek_many(limit=100)]
+    states = [
+        (
+            row["projection"]["status"],
+            row["projection"]["event"],
+            row.get("activity"),
+            row.get("waiting_on"),
+        )
+        for row in snapshots
+    ]
+    assert states[0] == ("created", "task_initialized", "waiting", inbox_name)
+    assert states[1] == ("running", "work_started", "working", None)
+    assert all(status != "spawning" for status, *_rest in states)
+    # Before its result becomes visible, the task names its own live process
+    # as runtime authority again, not the joined worker ([OBS.11a]).
+    released = snapshots[-2]
+    assert released["projection"]["status"] == "running"
+    assert released["runtime_handle"]["id"] == str(task._task_pid)
+    assert snapshots[-1]["terminal"] is True
+    assert states[-1][0] == "completed"
+    # Construction, work start, live worker identity (one or two drains of
+    # worker events), runtime release, terminal: at most six appends, not nine.
+    assert len(snapshots) <= 6
+
+    rows = _task_log_rows(log_queue, unique_tid)
+    assert [row["event"] for row in rows] == [
+        "task_initialized",
+        "work_spawning",
+        "work_started",
+        "work_completed",
+    ]
+    assert (rows[0]["activity"], rows[0]["waiting_on"]) == ("waiting", inbox_name)
+    for row in rows[1:3]:
+        assert row["activity"] == "working"
+        assert "waiting_on" not in row
+
+
+def test_persistent_work_item_completion_is_one_owner_step(
+    broker_env: BrokerEnv,
+    task_factory: TaskFactory,
+    unique_tid: str,
+) -> None:
+    """Returning to ``waiting`` rides on the completion report [OBS.6a], [CC-2.2]."""
+    _db_path, make_queue = broker_env
+    mapping_queue = make_queue(task_state_queue_name(unique_tid))
+    log_queue = make_queue(WEFT_GLOBAL_LOG_QUEUE)
+    spec = build_function_spec(unique_tid)
+    spec = TaskSpec.model_validate(
+        {
+            **spec.model_dump(mode="json"),
+            "spec": {**spec.spec.model_dump(mode="json"), "persistent": True},
+        }
+    )
+    inbox_name = spec.io.inputs["inbox"]
+    task = task_factory(spec)
+    make_queue(inbox_name).write(json.dumps({"args": ["payload"]}))
+
+    drive_task_until(
+        task,
+        lambda: any(
+            row["event"] == "work_item_completed"
+            for row in _task_log_rows(log_queue, unique_tid)
+        ),
+    )
+
+    events = [row["event"] for row in _task_log_rows(log_queue, unique_tid)]
+    assert events == [
+        "task_initialized",
+        "work_spawning",
+        "work_started",
+        "work_item_completed",
+    ]
+    completed = _task_log_rows(log_queue, unique_tid)[-1]
+    assert (completed["activity"], completed["waiting_on"]) == ("waiting", inbox_name)
+    latest = json.loads(mapping_queue.peek_many(limit=100)[-1])
+    assert latest["projection"]["status"] == "running"
+    assert latest["projection"]["event"] == "work_item_completed"
+    assert (latest["activity"], latest["waiting_on"]) == ("waiting", inbox_name)
+
+
 def test_terminal_mapping_scan_failure_does_not_block_terminal_evidence(
     broker_env: BrokerEnv,
     task_factory: TaskFactory,

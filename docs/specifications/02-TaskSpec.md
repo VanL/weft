@@ -304,7 +304,7 @@ _Per-field implementation status_:
 - `spec.weft_context`: Implemented. Resolved by Manager at spawn time via `resolve_taskspec_payload()`.
 - `spec.interactive`: Implemented. `InteractiveTaskMixin` in `weft/core/tasks/interactive.py`.
 - `spec.stream_output`: Implemented. One-shot command producers stream incrementally via `weft/core/runners/subprocess_runner.py`, `weft/core/runners/host.py`, and `weft/core/tasks/consumer.py`; non-command results still use the consumer chunking path.
-- `spec.cleanup_on_exit`: Implemented. `Consumer._cleanup_task_resources()` purges start tokens and stream markers; spills are caller-owned result files under [MF-2.1]. Standard task-local control queues are cleared by `BaseTask._cleanup_standard_control_queues_on_exit()` whenever task cleanup runs.
+- `spec.cleanup_on_exit`: Implemented. `Consumer._cleanup_task_resources()` purges start tokens from its reserved queue and, for an interactive or `stream_output` task (the Consumers that write stream frames), empty final stream markers from outbox and `ctrl_out`; spills are caller-owned result files under [MF-2.1]. Standard task-local control queues are cleared by `BaseTask._cleanup_standard_control_queues_on_exit()` whenever task cleanup runs.
 - `spec.reserved_policy_on_stop`, `spec.reserved_policy_on_error`: Implemented. `BaseTask._apply_reserved_policy()`, `Consumer._apply_reserved_policy_on_error()`.
 - `spec.polling_interval`, `spec.reporting_interval`: Implemented. `BaseTask._maybe_emit_poll_report()`.
 - `spec.monitor_class`: Implemented. Loaded dynamically in `HostTaskRunner` and `Consumer`.
@@ -682,6 +682,8 @@ predicate live in `weft/core/taskspec/model.py`; `validate_taskspec()` and
 its internal spawn-request `requeue` policy.
 
 ## Related Plans
+
+- [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) limits the cleanup stream-marker scan to Consumers that write stream frames.
 
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 

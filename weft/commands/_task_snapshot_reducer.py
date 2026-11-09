@@ -186,7 +186,10 @@ def reduce_task_event(
     *,
     tid_filters: AbstractSet[str] | None,
 ) -> FoldedTaskRecord | None:
-    """Apply one already-read event without I/O or shared mutation."""
+    """Apply one already-read event without I/O or shared mutation.
+
+    Spec: [MF-5]; [CC-2.2] (a row's ``activity`` and ``waiting_on`` fold together)
+    """
 
     tid = payload.get("tid", "")
     try:
@@ -257,11 +260,11 @@ def reduce_task_event(
     activity = None if terminal else record.activity
     waiting_on = None if terminal else record.waiting_on
     incoming_activity = _normalized_text(payload.get("activity"))
-    incoming_waiting_on = _normalized_text(payload.get("waiting_on"))
     if not terminal and incoming_activity is not None:
+        # A lifecycle row's activity and waiting_on come from one task
+        # state; an absent waiting_on means none ([CC-2.2]).
         activity = incoming_activity
-    if not terminal and incoming_waiting_on is not None:
-        waiting_on = incoming_waiting_on
+        waiting_on = _normalized_text(payload.get("waiting_on"))
 
     return FoldedTaskRecord(
         tid=tid,
