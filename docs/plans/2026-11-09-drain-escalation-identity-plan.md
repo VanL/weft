@@ -337,3 +337,14 @@ split, because it keeps the verified `psutil` instance across check and use
 and does not steal the wrapper's reap; the SIGTERM-only rung keeps its current
 check. The remaining check-to-use race and reap interference predate this
 change. Process tests and mutation controls were inspected, not rerun.
+
+### Slice 4 cross-family review (coordinator)
+
+Tier 1, Codex (`codex exec -s read-only`, reasoning effort high), 2026-11-09,
+scoped to `e9262232..0538cca6` (owner decision: forced reaps use
+`terminate_verified_process_tree`). Verdict: no blocker, no in-scope findings.
+The reviewer confirmed the shared verified helper with recorded creation times
+and the existing budget split, that both D rows serve [WT-2a.13], and the
+suppression totals (191 groups, 320 directives, 110 C901; `RUFF-SUP-214` has no
+remaining source directive). Process tests and mutation controls were
+inspected, not rerun. Review loop closed.
