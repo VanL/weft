@@ -30,7 +30,7 @@ There are currently 52 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
-| [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain SIGTERM Rung and Forced Reap Verify Child Launch Identity | `draft` | none |
+| [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain and Cleanup Signals Verify Process Identity | `draft` | none |
 | [`2026-11-08-drain-survivor-exit-sentinel-plan.md`](./2026-11-08-drain-survivor-exit-sentinel-plan.md) | Stopping-Drain Survivor Exit Sentinel | `draft` | none |
 | [`2026-11-07-ops-shaped-admission-burst-plan.md`](./2026-11-07-ops-shaped-admission-burst-plan.md) | Measure Admission on an Ops-Shaped Burst | `completed` | none |
 | [`2026-11-07-nested-admission-load-plan.md`](./2026-11-07-nested-admission-load-plan.md) | Stress Admission with Nested Work | `completed` | none |

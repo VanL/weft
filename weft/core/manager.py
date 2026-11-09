@@ -5306,8 +5306,10 @@ class Manager(ServiceTask):
             }
 
         children: dict[str, ManagedChild] = in_scope()
-        managed_pids: dict[str, set[int]] = {
-            tid: self._managed_pids_for_child(tid) for tid in children
+        # Each managed PID keeps the creation time recorded for it, so it can
+        # be re-verified right before the signal after the graceful wait.
+        managed: dict[str, dict[int, float | None]] = {
+            tid: self._managed_processes_for_child(tid) for tid in children
         }
 
         observer_failure: BaseException | None = None
@@ -5324,9 +5326,7 @@ class Manager(ServiceTask):
         self._cleanup_children(deadline=deadline)
         children.update(in_scope())
         for tid in in_scope():
-            managed_pids.setdefault(tid, set()).update(
-                self._managed_pids_for_child(tid)
-            )
+            managed.setdefault(tid, {}).update(self._managed_processes_for_child(tid))
 
         if not children:
             if observer_failure is not None:
@@ -5351,9 +5351,7 @@ class Manager(ServiceTask):
             )
         children.update(in_scope())
         for tid in children:
-            managed_pids.setdefault(tid, set()).update(
-                self._managed_pids_for_child(tid)
-            )
+            managed.setdefault(tid, {}).update(self._managed_processes_for_child(tid))
 
         survivors: list[dict[str, Any]] = []
         for tid, child in list(children.items()):
@@ -5400,13 +5398,17 @@ class Manager(ServiceTask):
                             kill_issued = True
                         except OSError:  # pragma: no cover - defensive
                             pass
-                managed_pids.setdefault(tid, set()).update(
-                    self._managed_pids_for_child(tid)
+                managed.setdefault(tid, {}).update(
+                    self._managed_processes_for_child(tid)
                 )
-                for pid in managed_pids[tid]:
+                for pid, created in managed[tid].items():
                     remaining = self._remaining_deadline(deadline)
                     if remaining <= 0:
                         break
+                    # Collected before the graceful wait: the process may have
+                    # exited and its PID been reused since [MA-3], [LIVENESS.R5].
+                    if inspect_host_process(pid, created).evidence != "live":
+                        continue
                     terminate_process_tree(
                         pid,
                         timeout=remaining / 2.0,
@@ -5420,14 +5422,17 @@ class Manager(ServiceTask):
                     # The launched process is provably gone; only the view lags.
                     still_alive = False
                 surviving_managed_pids = sorted(
-                    pid for pid in managed_pids.get(tid, set()) if pid_is_live(pid)
+                    pid
+                    for pid, created in managed.get(tid, {}).items()
+                    if pid_is_live(pid)
+                    and inspect_host_process(pid, created).evidence != "stale"
                 )
                 if still_alive or surviving_managed_pids:
                     survivors.append(
                         {
                             "tid": tid,
                             "pid": child.process.pid,
-                            "managed_pids": sorted(managed_pids.get(tid, set())),
+                            "managed_pids": sorted(managed.get(tid, {})),
                             "surviving_managed_pids": surviving_managed_pids,
                             "kill_issued": kill_issued,
                         }
@@ -8733,14 +8738,21 @@ class Manager(ServiceTask):
         }
         return durable_sources | {source for source in tracked_sources if source}
 
-    def _managed_pids_for_child(self, tid: str) -> set[int]:
+    def _managed_processes_for_child(self, tid: str) -> dict[int, float | None]:
+        """Map the child's live managed PIDs to their recorded creation times.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 4, [MA-3]
+        """
         handle = self._latest_tid_runtime_handle(tid)
         if handle is None:
-            return set()
+            return {}
         # Create-time-gated so a recycled PID held by a stale mapping is never
         # force-reaped ([MA-1] item 4); falls back to liveness when no create_time
         # was recorded. Mirrors the liveness path's resolution.
-        return {pid for pid, _create_time in live_host_processes_from_handle(handle)}
+        return dict(live_host_processes_from_handle(handle))
+
+    def _managed_pids_for_child(self, tid: str) -> set[int]:
+        return set(self._managed_processes_for_child(tid))
 
     def _enqueue_autostart_request(
         self, payload: dict[str, Any], inbox_message: Any
