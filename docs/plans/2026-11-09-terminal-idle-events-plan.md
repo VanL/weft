@@ -182,7 +182,16 @@ not verify when those ctrl_out rows are finally deleted.
 
 Self fresh-eyes review: done by the author after drafting (producer table
 re-derived from the `mark_*` call list; every cited path and symbol resolved).
-Cross-family review: to be filled by the coordinator.
+Cross-family review (Tier 1): Codex, `codex exec -s read-only`, reasoning
+effort high, 2026-11-09, range `08c2f87b..3cb67a38`. No in-scope findings;
+disposition: accept. The reviewer verified the six additions against their
+producers and the map's readers (each is published with the mapped terminal
+status), that the eight existing entries are unchanged, and that the
+difference register covers the traced behavior changes with no D rows. It
+ran the four new pure collation cases read-only, plus both mutation controls
+(drained entries removed: both positive cases fail; dual-use names added:
+both negative cases fail). It did not rerun the broker integration suites or
+the leaked-database counts.
 
 Execution evidence (2026-11-09):
 
