@@ -5463,7 +5463,7 @@ class Manager(ServiceTask):
             (
                 tid,
                 child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}",
-                partial(self._child_stop_escalation_pids, child),
+                partial(self._child_stop_escalation_pids, tid, child),
             )
             for tid, child in children.items()
         ]
@@ -5503,10 +5503,35 @@ class Manager(ServiceTask):
             for tid, _queue in pending:
                 self._drain_progress[tid] = _StopProgress(attempted_at=stamp)
 
-    @staticmethod
-    def _child_stop_escalation_pids(child: ManagedChild) -> tuple[int, ...]:
+    def _child_stop_escalation_pids(
+        self, tid: str, child: ManagedChild
+    ) -> tuple[int, ...]:
+        """Re-verify a tracked child's launch identity before signalling it.
+
+        The rung signals by PID, and an exited, reaped wrapper's PID may
+        already name another process. The child's PID qualifies only while
+        its ``(pid, create_time)`` matches the identity recorded when this
+        Manager launched it (its scheduler evidence); an unknown creation
+        time is not verified identity, and the drain window's forced reap
+        still covers a live child.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-3];
+        docs/specifications/07-System_Invariants.md [LIVENESS.R5]
+        """
+
         pid = child.process.pid
-        return (pid,) if isinstance(pid, int) and pid > 0 else ()
+        evidence = self._scheduler_residents.get(tid)
+        if not isinstance(pid, int) or pid <= 0 or evidence is None:
+            return ()
+        launched = self._admission_host_processes(evidence).get(pid)
+        created = None if launched is None else launched["create_time"]
+        if created is None:
+            return ()
+        return (
+            (pid,)
+            if pid_is_live(pid) and pid_matches_create_time(pid, float(created))
+            else ()
+        )
 
     @staticmethod
     def _drain_target_live_pids(target: _ManagerDrainStopTarget) -> tuple[int, ...]:

@@ -9625,6 +9625,115 @@ def test_collect_drain_stop_targets_names_snapshot_only_task(
         _remove_drain_snapshots(make_queue, (tid,))
 
 
+@pytest.mark.parametrize("reused", [True, False], ids=["reused-pid", "same-process"])
+def test_drain_sigterm_rung_signals_a_child_pid_only_while_its_identity_matches(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    reused: bool,
+) -> None:
+    """The child SIGTERM rung re-verifies the launch identity first [MA-3].
+
+    The rung signals a tracked child by PID. Once a wrapper has exited and been
+    reaped, that PID may name another process, so host SIGTERM applies only
+    while the PID's ``(pid, create_time)`` still matches the identity the
+    Manager recorded when it launched the child (LIVENESS.R5). A live process
+    recorded with an older creation time stands in for the reused PID; the
+    same-process case shows the rung still signals the child it launched.
+    """
+
+    manager, _make_queue = manager_setup
+    tid = str(time.time_ns())
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        created = process_create_time(process.pid)
+        assert created is not None
+        manager._scheduler_residents[tid] = {
+            "host_processes": [
+                {
+                    "pid": process.pid,
+                    "create_time": created - 5.0 if reused else created,
+                }
+            ]
+        }
+        child = ManagedChild(
+            process=cast(BaseProcess, SimpleNamespace(pid=process.pid)),
+            ctrl_queue=f"T{tid}.ctrl_in",
+        )
+        escalation_ns = int(
+            (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS + 1.0) * 1_000_000_000
+        )
+        manager._drain_progress[tid] = manager_mod._StopProgress(
+            attempted_at=time.monotonic_ns() - escalation_ns
+        )
+
+        manager._signal_children_to_stop({tid: child})
+
+        assert manager._drain_progress[tid].term_attempted is True
+        if reused:
+            assert process.poll() is None, "signalled a process it never launched"
+        else:
+            process.wait(timeout=15.0)
+    finally:
+        manager._scheduler_residents.pop(tid, None)
+        manager._drain_progress.pop(tid, None)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=15.0)
+
+
+def test_drain_sigterm_rung_reaches_a_child_this_manager_launched(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """A real launch records the identity the child SIGTERM rung verifies [MA-3].
+
+    The rung signals a tracked child only when its launch-time
+    ``(pid, create_time)`` still matches, so a launch commit that stopped
+    recording that identity would silently disable the rung. A child launched
+    through the Manager's own path must still receive SIGTERM and exit.
+    """
+
+    db_path, make_queue = broker_env
+    manager = Manager(
+        db_path,
+        make_manager_spec(unique_tid, idle_timeout=0.0),
+        config=load_config(
+            {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+        ),
+    )
+    try:
+        make_queue(manager._queue_names["inbox"]).write(
+            json.dumps(
+                {
+                    "name": "escalation-target",
+                    "spec": {
+                        "type": "command",
+                        "process_target": sys.executable,
+                        "args": ["-c", "import time; time.sleep(60)"],
+                    },
+                }
+            )
+        )
+        drive_manager_until(
+            manager, lambda: bool(manager._user_work_children()), timeout=30.0
+        )
+        tid, child = next(iter(manager._user_work_children().items()))
+        escalation_ns = int(
+            (manager_mod.MANAGER_CHILD_STOP_ESCALATION_SECONDS + 1.0) * 1_000_000_000
+        )
+        manager._drain_progress[tid] = manager_mod._StopProgress(
+            attempted_at=time.monotonic_ns() - escalation_ns
+        )
+
+        manager._signal_children_to_stop({tid: child})
+
+        assert manager._drain_progress[tid].term_attempted is True
+        child.process.join(timeout=30.0)
+        assert not _process_running(child.process.pid)
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 def test_first_stop_rung_is_one_broadcast_over_pending_targets(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
