@@ -266,5 +266,21 @@ throwaway merge, `tests/core/test_manager.py`,
 
 ## Review and execution record
 
-Author family: Claude. Cross-family review: to be recorded by the
-coordinator.
+Author family: Claude. Implementation commit: `487c0671` on
+`perf/fix-drain-spin`.
+
+Cross-family review (Tier 1), 2026-11-08:
+
+- Reviewer: Codex, invoked as `codex exec -s read-only`, reasoning effort
+  high, over the plan, the spec delta and the implementation diff.
+- Verdict: PASS, no findings ("no blocker").
+- Reviewer evidence: confirmed the causal premise against baseline code; 20
+  tests passed, 1 skipped; touched-file lint passed; 100 macOS
+  exit-to-release probes passed; in-memory comparisons showed all three
+  expired child-clock cases (PID-liveness recheck, proof grace, publication
+  retry) return `0.0` on baseline and publish no deadline while held on the
+  candidate. Consulted program theory, agent-context guidance and runbooks,
+  lessons, and specs 03/06/07.
+- Not rerun by the reviewer (read-only constraint): the broker-backed drain
+  test and the reported PostgreSQL and Track C merge results.
+- Dispositions: none required.
