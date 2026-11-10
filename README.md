@@ -73,15 +73,10 @@ uv add 'weft[all]'
 Installing `weft[pg]` adds the `simplebroker-pg` backend plugin. Backend
 selection still happens at runtime through project config or environment
 variables; the extra only makes the Postgres backend available.
-Weft requires SimpleBroker 8.6.0 or newer; the Postgres extra requires the
-paired `simplebroker-pg` 4.6.0 or newer. Broker message IDs stay integers in
+Weft requires SimpleBroker 8.8.1 or newer; the Postgres extra requires the
+paired `simplebroker-pg` 4.8.1 or newer. Broker message IDs stay integers in
 Python and relational storage, while external JSON and owned exact-ID fields
 inside Monitor table JSON render them as 19-digit strings.
-
-Moving an existing SQLite or PostgreSQL target from SimpleBroker 7 to 8 is a
-cold cutover: stop v7 clients and sidecar transactions, back up the whole
-target, install the package pair, then migrate and restart with v8 only.
-Rollback requires restoring the pre-migration target before reinstalling v7.
 
 Runner extras work the same way: `weft[docker]` adds the Docker runner plugin
 plus the Docker SDK dependency, `weft[macos-sandbox]` adds the macOS sandbox
@@ -785,22 +780,6 @@ descendants take priority over independent parent backlogs. Waiting parents
 still hold resources: ordering cannot guarantee progress if they consume all
 capacity before submitting children. There is no prospective path reservation
 or child-count declaration.
-
-For this change, remove the retired frontier setting before installing new code.
-Drain or quiesce and stop all old-code Managers, workers and clients that can
-initiate launches; start fresh processes after installation. Queued requests and
-checkpoint wire formats stay unchanged. Mixed in-memory code versions are not
-supported. See the [current implementation plan](docs/plans/2026-10-15-work-conserving-family-scheduling.md).
-
-Upgrade from 0.9.110 at a coordinated quiescence point: stop old producers and
-Managers, inventory exact source/reserved IDs, resolve launched or ambiguous
-child reservations through existing launch evidence, and migrate positively
-unlaunched child-source rows into the primary source without rewriting TIDs.
-Normalize their old submission envelopes using the migration adapter described
-in the [implementation plan](docs/plans/2026-10-14-measured-admission-family-scheduling.md).
-Verify no old producer or child-source/reserved row remains before starting the
-new scheduler. Rollback also requires quiescence and preservation of accepted
-requests, results, and reservation evidence; never bulk-replay ambiguous work.
 
 Denied requests stay unreserved and retry after one second; child or launch
 progress may wake the Manager sooner. Controls, cleanup, reaping, classification
