@@ -225,14 +225,14 @@ producer-exit level signals cannot starve outcome, seal, or drain expiry.
 
 ### Repository Static-Analysis Gate [TS-3]
 
-The mypy gate includes all Python modules under `tests/`, including fixtures,
-helpers, and development benchmark scripts, alongside the existing production
-and repository-tool scopes. Test functions and fixtures declare complete
-parameter and return types under the repository's existing strict definition
-checks. Deliberately invalid inputs remain runtime validation tests; any
-necessary typing escape is local to the invalid value and explains the boundary
-under test. Directory-wide test exclusions and test-wide disabling of definition
-or body checking are not permitted.
+The mypy gate includes all Python modules under `tests/` and `benchmarks/`,
+including fixtures, helpers, and development benchmark scripts, alongside the
+existing production and repository-tool scopes. Test functions and fixtures
+declare complete parameter and return types under the repository's existing
+strict definition checks. Deliberately invalid inputs remain runtime validation
+tests; any necessary typing escape is local to the invalid value and explains
+the boundary under test. Directory-wide test exclusions and test-wide disabling
+of definition or body checking are not permitted.
 
 Related plan: `2026-09-11-test-typing-and-correctness-audit` (retired — source 396c3b85; see `docs/plans/README.md`).
 
@@ -245,8 +245,8 @@ Python file discovery; configuration includes tracked extensionless Python
 tools explicitly and must not parse Bash tools as Python.
 
 Owner: `pyproject.toml` owns rule selection and discovery; the root CI lint
-job enforces it. Boundary: `weft/`, `tests/`, `integrations/`, `extensions/`,
-and Python tools under `bin/`. Verification:
+job enforces it. Boundary: `weft/`, `tests/`, `benchmarks/`, `integrations/`,
+`extensions/`, and Python tools under `bin/`. Verification:
 `tests/specs/test_ruff_policy.py` invokes the real repo-managed Ruff binary,
 compares effective discovery and the complete enabled-rule set with reviewed
 inventories, proves every behavior-affecting policy setting fires, and proves

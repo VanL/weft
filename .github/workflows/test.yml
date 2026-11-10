@@ -216,11 +216,11 @@ jobs:
 
     - name: Check formatting with ruff
       run: |
-        ruff format --check weft tests integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
+        ruff format --check weft tests benchmarks integrations/weft_django extensions/weft_docker extensions/weft_macos_sandbox extensions/weft_microsandbox
 
     - name: Type check with mypy
       run: |
-        mypy weft tests bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
+        mypy weft tests benchmarks bin integrations/weft_django/weft_django extensions/weft_docker/weft_docker extensions/weft_macos_sandbox/weft_macos_sandbox extensions/weft_microsandbox/weft_microsandbox --config-file pyproject.toml
 
   test-postgres:
     name: test-postgres (${{ matrix.test_slice }})

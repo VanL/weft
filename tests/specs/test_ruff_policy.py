@@ -49,12 +49,12 @@ MCCABE_MAX_COMPLEXITY = 10
 RUFF_CHECK = "ruff check ."
 SUPPRESSION_CHECK = "python bin/ruff_suppression_index.py --check"
 FORMATTER_CHECK = (
-    "ruff format --check weft tests integrations/weft_django "
+    "ruff format --check weft tests benchmarks integrations/weft_django "
     "extensions/weft_docker extensions/weft_macos_sandbox "
     "extensions/weft_microsandbox"
 )
 MYPY_CHECK = (
-    "mypy weft tests bin integrations/weft_django/weft_django "
+    "mypy weft tests benchmarks bin integrations/weft_django/weft_django "
     "extensions/weft_docker/weft_docker "
     "extensions/weft_macos_sandbox/weft_macos_sandbox "
     "extensions/weft_microsandbox/weft_microsandbox "

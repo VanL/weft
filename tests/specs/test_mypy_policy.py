@@ -69,4 +69,5 @@ def test_local_mypy_wrapper_checks_tests_and_preserves_failure(tmp_path: Path) -
     arguments = result.stdout.splitlines()
     assert arguments[:2] == ["-m", "mypy"]
     assert str(tmp_path / "tests") in arguments
+    assert str(tmp_path / "benchmarks") in arguments
     assert f"--config-file={tmp_path / 'pyproject.toml'}" in arguments

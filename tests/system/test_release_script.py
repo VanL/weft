@@ -1000,11 +1000,14 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates(
     for command in (ruff_check_command, ruff_format_command):
         assert "weft" in command
         assert "tests" in command
+        assert "benchmarks" in command
         for target in extensions:
             assert target.package_dir.relative_to(_REPO_ROOT).as_posix() in command
-    # [TS-3]: mypy covers tests/ and bin/ as well as every first-party package.
+    # [TS-3]: mypy covers tests/, benchmarks/ and bin/ as well as every
+    # first-party package.
     assert "weft" in mypy_command
     assert "tests" in mypy_command
+    assert "benchmarks" in mypy_command
     assert "bin" in mypy_command
     for target in extensions:
         relative = target.package_dir.relative_to(_REPO_ROOT)
