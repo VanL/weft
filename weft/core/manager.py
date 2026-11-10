@@ -1305,8 +1305,14 @@ class Manager(ServiceTask):
         """Launch worker activity is owned work; retained custody is maintenance.
 
         A built-in service launch or request is supervision, not owned work.
+        A public spawn request is owned work while a transient barrier
+        (``_public_dispatch_transiently_held``) keeps the turn from
+        dispatching it: the dispatch wake predicate answers whether a turn
+        can act now, a different question ([WT-4.1]). Work held for its own
+        reasons keeps the wake predicate's answer.
 
-        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.5]
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+        [MA-1.5]
         """
         if any(
             not self._child_is_supervision_only(request)
@@ -1318,6 +1324,12 @@ class Manager(ServiceTask):
             try:
                 queue = self._queue(queue_name)
                 if not self._queue_has_pending(queue):
+                    if (
+                        queue_name == self._queue_names["inbox"]
+                        and self._public_dispatch_transiently_held()
+                        and super()._queue_has_pending(queue)
+                    ):
+                        return True
                     continue
                 if queue_name != internal_inbox:
                     return True
@@ -6365,6 +6377,24 @@ class Manager(ServiceTask):
             return True
         return not self._stalled_control_retry_active(timestamp)
 
+    def _public_dispatch_transiently_held(self) -> bool:
+        """Return whether public dispatch waits only on a barrier that clears itself.
+
+        Bootstrap incomplete, a full startup window, or an undurable launch
+        receipt: maintenance, settlement or the next checkpoint publication
+        ends each. The wake predicate keeps such a turn from waking for
+        classified public work; the idle verdict still counts that work as
+        owned ([MA-1] item 5).
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+        [MA-1.8]
+        """
+        return (
+            not self._admission_bootstrapped
+            or self._startup_dispatch_blocked()
+            or bool(self._scheduler_undurable)
+        )
+
     def _queue_has_pending(self, queue: Queue) -> bool:
         """Retained launch custody does not create actionable reactor work [MF-6]."""
         name = getattr(queue, "name", None)
@@ -6375,11 +6405,7 @@ class Manager(ServiceTask):
         }:
             return False
         if name == self._queue_names.get("inbox"):
-            if (
-                not self._admission_bootstrapped
-                or self._startup_dispatch_blocked()
-                or self._scheduler_undurable
-            ):
+            if self._public_dispatch_transiently_held():
                 return (
                     self._family_classification_pending
                     or self._unclassified_source_row_pending()

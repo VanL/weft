@@ -13,6 +13,7 @@ import multiprocessing
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +22,16 @@ import pytest
 from simplebroker import Queue
 from simplebroker.ext import BrokerError
 from tests.core.test_admission_recovery import _reserve_and_checkpoint
+from tests.core.test_manager import _kill_detached_service, _start_service_stand_in
 from tests.helpers.manager_dispatch import observe_child_exit
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.weft_harness import WeftTestHarness
-from weft._constants import MANAGER_CHECKPOINT_RESIDENT_FIELDS, resolve_runtime_config
+from weft._constants import (
+    INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+    INTERNAL_SERVICE_KEY_HEARTBEAT,
+    MANAGER_CHECKPOINT_RESIDENT_FIELDS,
+    resolve_runtime_config,
+)
 from weft.core import manager as manager_mod
 from weft.core.manager import Manager, _ManagerChildLaunchResult
 from weft.core.manager_runtime import build_manager_spec
@@ -387,3 +394,102 @@ def test_undurable_receipt_publishes_before_the_turn_dispatches(
         "residents"
     ]
     assert residents[tid]["host_processes"]
+
+
+def test_undurable_service_receipt_holds_dispatch_not_the_idle_manager(
+    volume_manager: Manager,
+    weft_harness: WeftTestHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public request waiting behind an undurable receipt is still work.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1] item 5,
+    [MA-1.5], [MA-1.8]. A launched internal service is supervision, so it
+    leaves the idle clock running; its receipt append failed, so the receipt
+    is undurable and holds public dispatch for the turn. The waiting public
+    request is owned work all the same: the Manager must not idle-exit, and
+    once the receipt is durable it dispatches the request. Named mutation:
+    answering the idle verdict's owned-work question with the dispatch wake
+    predicate, which reports the held request as no work.
+    """
+    manager = volume_manager
+    ctx = weft_harness.context
+    manager._refresh_scheduler_evidence()
+    state_name = task_state_queue_name(manager.tid)
+    original_write = Queue.write
+
+    def fail_checkpoint(self: Queue, *args: Any, **kwargs: Any) -> Any:
+        if self.name == state_name:
+            raise BrokerError("injected checkpoint write failure")
+        return original_write(self, *args, **kwargs)
+
+    # A reserved request relabelled as the heartbeat: a supervision-only
+    # launch with real custody evidence.
+    service_request = replace(
+        _reserve_and_checkpoint(manager, weft_harness),
+        internal_role=INTERNAL_RUNTIME_TASK_CLASS_HEARTBEAT,
+        service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
+    )
+    service_tid = service_request.child_spec.tid
+    assert service_tid is not None
+    service = _start_service_stand_in()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(Queue, "write", fail_checkpoint)
+            manager._commit_child_launch_success(
+                _ManagerChildLaunchResult(
+                    service_request, service, launched_ns=time.time_ns()
+                )
+            )
+        assert service_tid in manager._scheduler_undurable
+        assert not manager._user_work_children()
+        # Isolate the receipt barrier from the startup window.
+        manager._release_startup_feedback(service_tid)
+        waiting = str(
+            submit_spawn_request(
+                ctx.broker_target,
+                taskspec={
+                    "name": "idle-held-waiting",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "tests.tasks.sample_targets:echo_payload",
+                    },
+                },
+                work_payload="waiting",
+                config=ctx.config,
+                inherited_weft_context=str(ctx.root),
+            )
+        )
+        weft_harness.register_tid(waiting)
+        # The idle clock has run out; the request's own write must count only
+        # as owned work here, not as fresh activity.
+        manager._idle_timeout = 0.05
+        manager._last_activity_ns = time.time_ns() - 1_000_000_000
+        monkeypatch.setattr(
+            manager, "_update_idle_activity_from_broker", lambda *, force=False: None
+        )
+        manager._admission_refresh_after = time.monotonic() + 60.0
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Queue, "write", fail_checkpoint)
+            manager.process_once()
+        assert service_tid in manager._scheduler_undurable
+        assert waiting not in manager._active_child_launches
+        assert not manager.should_stop, "the Manager idle-exited with work pending"
+
+        # With the receipt durable, the held request is actionable again, so
+        # the reactor wakes for it and a later turn dispatches it.
+        manager.process_once()
+        assert service_tid not in manager._scheduler_undurable
+        assert not manager.should_stop
+        _drive(
+            manager,
+            lambda: (
+                waiting in manager._active_child_launches
+                or waiting in manager._child_processes
+            ),
+            timeout=10.0,
+        )
+        assert not manager.should_stop
+    finally:
+        _kill_detached_service(service)
