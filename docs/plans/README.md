@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 66 plan files in this directory.
+There are currently 67 plan files in this directory.
 
 ## Curation Policy
 
@@ -30,6 +30,7 @@ There are currently 66 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-09-reaped-wrapper-exit-proof-plan.md`](./2026-11-09-reaped-wrapper-exit-proof-plan.md) | Reaped Wrapper Exit Proof Retires Its Resident | `completed` | none |
 | [`2026-11-09-measured-memory-admission-plan.md`](./2026-11-09-measured-memory-admission-plan.md) | Measured Memory Admission and Startup-Window Parity | `completed` | none |
 | [`2026-11-09-drain-escalation-identity-plan.md`](./2026-11-09-drain-escalation-identity-plan.md) | Drain and Cleanup Signals Verify Process Identity | `completed` | none |
 | [`2026-11-09-typed-terminal-record-plan.md`](./2026-11-09-typed-terminal-record-plan.md) | The Monitor Trusts the Typed Terminal Record | `completed` | none |

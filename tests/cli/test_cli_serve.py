@@ -140,8 +140,9 @@ def _recorded_process_live(record: dict[str, Any]) -> bool:
     A PID alone is not an identity: Windows reuses PIDs quickly, so an exited
     owner's row can name a PID a later process now holds (seen on Windows CI,
     2026-11-09). Rows that record ``(pid, create_time)`` are checked by that
-    exact identity, as the product's liveness analysis does; a row with no
-    recorded create time falls back to the PID.
+    exact identity, as the product's liveness analysis does; an identity with
+    no recorded create time, or a row with no recorded processes, falls back
+    to the PID.
     """
 
     handle = record.get("runtime_handle")
@@ -156,7 +157,9 @@ def _recorded_process_live(record: dict[str, Any]) -> bool:
     ]
     if identities:
         return any(
-            inspect_host_process(pid, create_time).evidence == "live"
+            pid_is_live(pid)
+            if create_time is None
+            else inspect_host_process(pid, create_time).evidence == "live"
             for pid, create_time in identities
         )
     pid = _host_pid_from_record(record)

@@ -115,6 +115,12 @@ about 196 s.
 
 ### Fixed
 
+- On Windows the Manager now releases a reaped task's admission slot on the
+  turn that reaps it. It used the wrapper's host PID to decide, and Windows
+  keeps an exited process listed while the Manager's own process handle is
+  open, so the slot was held until a later refresh. The reap's known exit
+  code is now the wrapper's exit proof; the task's other recorded processes
+  are still checked on the host ([MA-1.6a], [MA-1.8]).
 - `weft status`, `weft manager list` and `weft manager status` (and
   `client.managers.list()` / `client.managers.status(tid)`) now report the
   same Manager rows. An active Manager whose runtime the command cannot prove

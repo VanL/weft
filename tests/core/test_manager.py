@@ -12090,10 +12090,12 @@ def test_reaped_wrapper_exit_proof_retires_resident_the_host_still_lists(
         return True
 
     real_inspect = liveness_analysis_mod.inspect_host_process
+    inspected: list[int] = []
 
     def host_with_open_handles(
         pid: int, create_time: float | None
     ) -> HostProcessObservation:
+        inspected.append(pid)
         if pid == wrapper_pid and handle_open():
             return HostProcessObservation("live", "identity_match")
         return real_inspect(pid, create_time)
@@ -12104,6 +12106,11 @@ def test_reaped_wrapper_exit_proof_retires_resident_the_host_still_lists(
     release.touch()
     assert adapter.wait(30.0)
     _await_os_exit_status(wrapper)
+    # Positive control: the ordinary host check consults the double and reads
+    # the exited wrapper as live, so only the reap's exit proof can retire the
+    # resident.
+    assert manager._scheduler_evidence_live(tid, manager._scheduler_residents[tid])
+    assert wrapper_pid in inspected
     manager.process_once()
 
     assert tid not in manager._child_processes

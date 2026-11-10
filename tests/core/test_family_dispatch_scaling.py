@@ -209,7 +209,7 @@ def test_completion_to_next_real_launch_does_not_scan_sibling_backlog(
                     patch.setattr(
                         broker_type, name, _counted_call(original, name, counts)
                     )
-            manager._record_reaped_admission(str(leaf_id))
+            manager._record_reaped_admission(str(leaf_id), exited_pid=None)
             drive_until(
                 lambda: str(final) in manager._child_processes,
                 bool,
