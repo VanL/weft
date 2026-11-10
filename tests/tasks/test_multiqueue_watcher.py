@@ -309,6 +309,10 @@ def test_notification_publication_during_wait_is_found_on_the_hinted_return(
         observation.close()
 
 
+_HINT_FREE_RETURNS_REQUIRED = 5
+"""Strategy returns before the deadline: more than the two allowed reads."""
+
+
 def test_hint_free_persistent_return_reads_no_observation(
     broker_env: BrokerEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,7 +340,13 @@ def test_hint_free_persistent_return_reads_no_observation(
         nonlocal strategy_calls
         del timeout
         strategy_calls += 1
-        threading.Event().wait(timeout=0.01)
+        # The first passes return at once, so the hint-free returns this test
+        # needs never depend on timer resolution: macOS CI runners stretched
+        # each 10 ms wait to about 75 ms and fit only four passes in the wait
+        # (runs 42151616280, 42790027897). Later passes pace the loop to the
+        # deadline.
+        if strategy_calls > _HINT_FREE_RETURNS_REQUIRED:
+            threading.Event().wait(timeout=0.01)
 
     monkeypatch.setattr(watcher, "_has_pending_observation", counted_observation)
     _stub_hint_free_strategy(monkeypatch, watcher, one_pass)
@@ -346,7 +356,7 @@ def test_hint_free_persistent_return_reads_no_observation(
         watcher.stop(join=False)
         observation.close()
 
-    assert strategy_calls >= 5, strategy_calls
+    assert strategy_calls >= _HINT_FREE_RETURNS_REQUIRED, strategy_calls
     assert observation_calls <= 2, (observation_calls, strategy_calls)
 
 
