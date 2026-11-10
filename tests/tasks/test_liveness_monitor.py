@@ -190,7 +190,7 @@ def test_reconcile_discovers_task_state_namespace(workdir: Path) -> None:
     message_id = queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
     )
     try:
         monitor._reconcile_mapping_rows(full=True)
@@ -212,7 +212,7 @@ def test_full_reconcile_keeps_newest_row_and_exact_deletes_superseded(
     newest_id = queue.write(json.dumps(_mapping(target_tid)))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 1), workdir),
         mapping_min_age_seconds=0.0,
     )
     try:
@@ -240,7 +240,7 @@ def test_full_reconcile_does_not_skip_rows_while_retiring_paginated_history(
     ]
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 1), workdir),
         mapping_min_age_seconds=0.0,
     )
     try:
@@ -272,7 +272,7 @@ def test_unknown_timeout_deletes_only_exact_mapping_after_completed_probe(
     now = [10.0]
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 1), workdir),
         monotonic_clock=lambda: now[0],
         unknown_timeout_seconds=5.0,
         mapping_min_age_seconds=0.0,
@@ -326,7 +326,7 @@ def test_not_attempted_probe_pauses_unknown_deadline(workdir: Path) -> None:
     now = [10.0]
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 1), workdir),
         monotonic_clock=lambda: now[0],
         unknown_timeout_seconds=5.0,
         mapping_min_age_seconds=0.0,
@@ -375,7 +375,7 @@ def test_restart_resets_unknown_deadline(workdir: Path) -> None:
     now = [10.0]
     first = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 1), workdir),
         monotonic_clock=lambda: now[0],
         unknown_timeout_seconds=5.0,
         mapping_min_age_seconds=0.0,
@@ -402,7 +402,7 @@ def test_restart_resets_unknown_deadline(workdir: Path) -> None:
     now[0] = 20.0
     replacement = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(target_tid) + 2), workdir),
         monotonic_clock=lambda: now[0],
         unknown_timeout_seconds=5.0,
         mapping_min_age_seconds=0.0,
@@ -715,7 +715,7 @@ def test_lane_saturation_pauses_existing_unknown_deadline(workdir: Path) -> None
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
         monotonic_clock=lambda: 12.0,
     )
     try:
@@ -757,7 +757,7 @@ def test_late_probe_result_requires_current_token_and_generation(
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
     )
     try:
         monitor._reconcile_mapping_rows(full=True)
@@ -815,7 +815,7 @@ def test_full_reconcile_preserves_unchanged_deadline_and_in_flight_probe(
     queue.write(json.dumps(_mapping(tid)))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
     )
     try:
         monitor._reconcile_mapping_rows(full=True)
@@ -852,7 +852,7 @@ def test_same_generation_mapping_appends_dispatch_only_newest_row(
     queue.write(json.dumps(payload))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
     )
     try:
         monitor._reconcile_mapping_rows(full=True)
@@ -888,7 +888,7 @@ def test_mapping_update_keeps_probe_lane_owned_until_old_result_finishes(
     queue.write(json.dumps(payload))
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(tid) + 1), workdir),
         monotonic_clock=lambda: 10.0,
     )
     try:
@@ -1588,12 +1588,13 @@ def test_liveness_counting_rule_for_rows_and_in_flight_probes(
 
     del label
     context = build_context(spec_context=workdir)
+    monitor_tid = str(time.time_ns())
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(monitor_tid, workdir),
         mapping_min_age_seconds=0.0,
     )
-    tid = str(time.time_ns())
+    tid = str(int(monitor_tid) + 1)
     payload = {**_mapping(tid), **extra}
     try:
         monitor._latest_rows.clear()
@@ -1656,7 +1657,7 @@ def test_liveness_idle_exits_only_without_a_counting_row(
     )
     queues.append(service_queue)
     if user_row != "none":
-        user_tid = str(time.time_ns())
+        user_tid = str(int(service_tid) + 1)
         user_queue = context.queue(task_state_queue_name(user_tid), persistent=False)
         user_queue.write(
             json.dumps({**_mapping(user_tid), "terminal": user_row == "terminal"})
@@ -1666,7 +1667,7 @@ def test_liveness_idle_exits_only_without_a_counting_row(
     now = [10.0]
     monitor = LivenessMonitor(
         context.broker_target,
-        _taskspec(str(time.time_ns()), workdir),
+        _taskspec(str(int(service_tid) + 2), workdir),
         monotonic_clock=lambda: now[0],
         mapping_min_age_seconds=0.0,
     )

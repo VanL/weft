@@ -656,7 +656,7 @@ def test_heartbeat_restart_rebuilds_table_from_queue(workdir: Path) -> None:
         first.stop(join=False)
         first.cleanup()
 
-    second_tid = str(time.time_ns())
+    second_tid = str(int(first_tid) + 1)
     second = HeartbeatTask(
         context.broker_target, make_heartbeat_taskspec(second_tid, workdir)
     )
@@ -904,17 +904,18 @@ def test_resident_heartbeat_reads_no_registrations_while_quiet(
         pytest.skip("native waiter returns keep their check (plan 13 owner decision 1)")
     del thread_exception_guard
     context = build_context(spec_context=workdir)
+    base_tid = time.time_ns()
     for index in range(rows):
         upsert_heartbeat(
             context,
-            registrant_tid=str(time.time_ns()),
+            registrant_tid=str(base_tid + index),
             heartbeat_id=f"quiet-{index}",
             interval_seconds=3600,
             lease_seconds=7200,
             destination_queue=f"quiet.dest.{index}",
             message="tick",
         )
-    tid = str(time.time_ns())
+    tid = str(base_tid + rows)
     task = HeartbeatTask(context.broker_target, make_heartbeat_taskspec(tid, workdir))
     counts = count_queue_calls(
         monkeypatch,
@@ -949,7 +950,7 @@ def test_resident_heartbeat_reads_no_registrations_while_quiet(
 
         upsert_heartbeat(
             context,
-            registrant_tid=str(time.time_ns()),
+            registrant_tid=str(base_tid + rows + 1),
             heartbeat_id="quiet-wake",
             interval_seconds=3600,
             lease_seconds=7200,

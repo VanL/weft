@@ -497,7 +497,7 @@ def test_liveness_sweeps_reuse_task_connection_and_observe_new_commits(
     tid = str(time.time_ns())
     monitor = LivenessMonitor(
         ctx.broker_target,
-        _taskspec(str(time.time_ns()), ctx.root),
+        _taskspec(str(int(tid) + 1), ctx.root),
         config=ctx.config,
         mapping_min_age_seconds=0.0,
     )
@@ -527,13 +527,14 @@ def test_manager_admission_helpers_reuse_connection(
     counted_connections: tuple[WeftContext, list[Any]],
 ) -> None:
     ctx, connections = counted_connections
+    manager_tid = str(time.time_ns())
     manager = Manager(
         ctx.broker_target,
-        make_manager_spec(str(time.time_ns()), weft_context=str(ctx.root)),
+        make_manager_spec(manager_tid, weft_context=str(ctx.root)),
         config=ctx.config,
     )
     try:
-        tid = str(time.time_ns())
+        tid = str(int(manager_tid) + 1)
         with manager._get_connected_queue().get_connection() as broker:
             broker.write(task_state_queue_name(tid), json.dumps(_mapping(tid)))
         initial_connections = len(connections)
@@ -634,17 +635,18 @@ def test_manager_child_seed_and_stale_cleanup_do_not_cache_dynamic_queues(
     counted_connections: tuple[WeftContext, list[Any]],
 ) -> None:
     ctx, connections = counted_connections
+    manager_tid = str(time.time_ns())
     manager = Manager(
         ctx.broker_target,
-        make_manager_spec(str(time.time_ns()), weft_context=str(ctx.root)),
+        make_manager_spec(manager_tid, weft_context=str(ctx.root)),
         config=ctx.config,
     )
     try:
         manager._get_connected_queue().has_pending()
         cached_names = set(manager._queue_cache)
         initial_connections = len(connections)
-        for _ in range(3):
-            child_tid = str(time.time_ns())
+        for index in range(3):
+            child_tid = str(int(manager_tid) + 1 + index)
             child = _taskspec(child_tid, ctx.root)
             inbox_name = f"T{child_tid}.inbox"
             assert manager._seed_child_inbox(
@@ -799,12 +801,13 @@ def test_manager_probe_advancement_and_state_helpers_reuse_connection(
     counted_connections: tuple[WeftContext, list[Any]],
 ) -> None:
     ctx, connections = counted_connections
+    manager_tid = str(time.time_ns())
     manager = Manager(
         ctx.broker_target,
-        make_manager_spec(str(time.time_ns()), weft_context=str(ctx.root)),
+        make_manager_spec(manager_tid, weft_context=str(ctx.root)),
         config=ctx.config,
     )
-    tid = str(time.time_ns())
+    tid = str(int(manager_tid) + 1)
     try:
         with manager._get_connected_queue().get_connection() as broker:
             broker.write(task_state_queue_name(tid), json.dumps(_mapping(tid)))

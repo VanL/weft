@@ -11019,7 +11019,7 @@ def test_task_monitor_jsonl_lifecycle_deletes_terminal_family_despite_clock_lag(
 
     task = TaskMonitor(
         db_path,
-        make_task_monitor_taskspec(str(time.time_ns())),
+        make_task_monitor_taskspec(str(int(tid) + 1)),
         config=config,
     )
     try:
@@ -11740,7 +11740,7 @@ def test_task_monitor_orphan_path_exports_summary_before_deleting_rows(
 
     task = TaskMonitor(
         db_path,
-        make_task_monitor_taskspec(str(time.time_ns())),
+        make_task_monitor_taskspec(str(int(tid) + 1)),
         config=config,
     )
     try:
@@ -13657,7 +13657,7 @@ def test_persistent_consumer_resurrects_after_ambiguous_family_cleanup(
     )
     monitor = TaskMonitor(
         db_path,
-        _task_monitor_taskspec_for_context(str(time.time_ns()), str(tmp_path)),
+        _task_monitor_taskspec_for_context(str(int(tid) + 1), str(tmp_path)),
         config=config,
     )
     try:

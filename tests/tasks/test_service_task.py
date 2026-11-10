@@ -1084,7 +1084,7 @@ def test_service_live_manager_keeps_an_idle_service(
         json.dumps(
             build_manager_service_payload(
                 context=task._task_context(),
-                tid=str(time.time_ns()),
+                tid=str(int(unique_tid) + 1),
                 name="manager",
                 status=cast(Any, manager_status),
                 queues={},
