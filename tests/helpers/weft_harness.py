@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import traceback
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from types import TracebackType
@@ -1524,12 +1525,18 @@ class WeftTestHarness:
         backend settings select the project config and PostgreSQL schema the
         CLI used. A root that is gone, or a file-backed root whose database
         was never created, holds no runtime; resolving or reading it would
-        create one.
+        create one. An invalid setting in that environment was already
+        reported by the CLI call that applied it; re-resolving here ignores it
+        the same way without repeating the configuration warning in the test
+        process.
         """
 
         if not root.is_dir():
             return None
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"ignoring invalid ", category=UserWarning
+            )
             context = build_context(
                 spec_context=root, create_dirs=False, create_database=False
             )
