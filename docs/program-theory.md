@@ -10,20 +10,28 @@ exact current behavior.
 Verification: Five measures, each named for what it measures. Owner
 endorsement: the owner can defend each sentence of [WT-2a], [WT-4], [WT-5],
 and [WT-6] as their own, confirmed at adoption and at each [REV-WT-*]
-record; endorsement is not a demonstration of possession. Two-factor fit
-test: at each class-5 change, and once per release across that release's
-changes, the author writes an account of how the change does or does not fit
-this theory, and then an agent of another family writes its own from this
-document and the diff alone, without seeing the author's; both use the
-[WT-7] structure, and the divergence between them is the finding, classified
-as document deficiency, change deficiency, or agent reasoning, with this
-document changed only for a document deficiency. Transfer log: a review proposal of a [WT-6] alternative that does not
+record; endorsement is not a demonstration of possession. Theory fit check and
+two-factor fit test: for ordinary effective class-5 plans (`Class: 5` or any
+`Class: N+P` per `[DOM-15]`) dated `>= 2026-11-10`
+(forward-only; earlier plans are not retroactively gated), the author writes
+the five-part [WT-7] `Theory Fit` account (`Verdict`, `Rests on`, `Refuses`,
+`Predicts`, `Fits worst`), the mandatory cross-family reviewer audits that
+account against this document's cited entries and the completed diff in the
+same review pass, and `tests/specs/test_plan_metadata.py` rejects `completed`
+status unless all five parts are non-placeholder and an explicit
+`Final Completion Review Verdict: APPROVE` (with no trailing `REVISE` or
+`BLOCKED`) is recorded. At each `[REV-WT-*]` revision to this document, and once per release
+across that release's changes, the blind two-factor fit test runs: an agent of
+another family writes a second [WT-7] account from this document and the
+boundary diff alone without seeing the author's, and their divergence is
+classified as document deficiency, change deficiency, or agent reasoning, with
+this document changed only for a document deficiency. Transfer log: a review proposal of a [WT-6] alternative that does not
 cite the entry's recorded reopening condition is logged against that entry
-(see [WT-7]). Theory-versus-code audit table: at each release or class-5
-completion, the table that maps each [WT-2a] invariant and [WT-4] principle
-to its contract and its evidence in the tree as aligned, drifted (naming
-the plan that closes it), or theory revision; unchanged rows carry forward
-by reference and touched claims are re-audited. The table measures
+(see [WT-7]). Theory-versus-code audit table: at each `[REV-WT-*]` theory
+revision or release, the table that maps each [WT-2a] invariant and [WT-4]
+principle to its contract and its evidence in the tree as aligned, drifted
+(naming the plan that closes it), or theory revision; unchanged rows carry
+forward by reference and touched claims are re-audited. The table measures
 document-versus-tree agreement, not possession.
 Behaviour probe: each [WT-4.3] row and each behavioural [WT-2a] invariant
 names one black-box probe against a running system (for example: CPU
@@ -34,9 +42,11 @@ not aligned.
 Required action: Read this document before you make a product-scope or
 design decision. Obey it, or propose a theory revision as a class-5 change.
 Governing process: Theory revisions are class-5 plans with one cross-family
-review round (a second only after a block or a scope change), the two-factor
-fit test and the theory-versus-code audit refresh at each release or
-class-5 completion ([WT-7]), and the Replacement-sync gate in
+review round (a second only after a block or a scope change), the blind
+two-factor fit test and the theory-versus-code audit refresh at each
+`[REV-WT-*]` theory revision or release (with the cross-family audited [WT-7]
+`Theory Fit` check mechanically gated on effective class-5 plans dated
+`>= 2026-11-10`, forward-only), and the Replacement-sync gate in
 `bin/check-doc-paths` for promoted plans. SimpleBroker uses `[DOM-16]` in its
 operating-model specification for the same purpose.
 
@@ -604,9 +614,11 @@ alternative. An agent must not propose the alternative again unless the
   clock is a timer, not a message. Each service keeps its own clock through
   `next_wait_timeout()`. The heartbeat is an emitter for consumers that want
   one.
-- Current consequence: TaskMonitor's only clock is its cycle deadline
-  through `next_wait_timeout()`; it registers nothing. The heartbeat service
-  is a standing internal service of the canonical Manager ([MA-1] item 7)
+- Current consequence: TaskMonitor keeps its own monotonic deadlines through
+  `next_wait_timeout()` (its cycle deadline plus the inherited ServiceTask
+  owner-row refresh and idle-exit deadlines) and registers no heartbeat
+  message. The heartbeat
+  service is a standing internal service of the canonical Manager ([MA-1] item 7)
   that idles with no timer when nothing is due; it is the only reader and
   deleter of `weft.state.heartbeats`, and the Manager neither reads nor
   deletes that queue (this supersedes the `da5fa0f6` gate).
@@ -1029,29 +1041,37 @@ alternative. An agent must not propose the alternative again unless the
 
 ## Tensions and falsifiers [WT-7]
 
-- **Two-factor fit test:** At each class-5 change, and once per release
-  across that release's changes, two accounts are written of how the change
-  does or does not fit this theory, over one fixed change boundary and one
-  theory version. The author writes the first. An agent of another family
-  writes the second in a fresh context whose only inputs are this document
-  and the diff of that boundary, excluding plan files, review logs, and the
-  author's account. Both use one structure: a verdict (fits, does not fit,
-  or fits with strain); the sections the change rests on; what it refuses
-  and the entry that refuses it; what it predicts that could prove it wrong;
-  and the sentence that fits worst. An account that names no refusal, no
-  falsifiable prediction, and no tension is a failed account; it is recorded
-  as failed and supports no conclusion. Where two valid accounts agree, the
+- **Theory fit check and blind two-factor fit test:** All fit accounts use one
+  five-part structure: a verdict (fits, does not fit, or fits with strain); the
+  sections the change rests on; what it refuses and the entry that refuses it;
+  what it predicts that could prove it wrong; and the sentence that fits worst.
+  An account that names no refusal, no falsifiable prediction, and no tension is
+  a failed account; it is recorded as failed and supports no conclusion.
+  For ordinary effective class-5 plans (`Class: 5` or any `Class: N+P` per
+  `[DOM-15]`) dated `>= 2026-11-10` (forward-only; earlier plans
+  are never retroactively gated or backfilled), the author writes that five-part
+  `Theory Fit` account in the plan, the mandatory cross-family plan/code
+  reviewer audits it against this document's cited entries and the completed
+  diff in the same review pass (catching ID-only miscitations without claiming
+  blind derivation), and `tests/specs/test_plan_metadata.py` enforces
+  non-placeholder completion plus an explicit
+  `Final Completion Review Verdict: APPROVE` (with no subsequent `REVISE` or
+  `BLOCKED`) when the plan's status is `completed`.
+  At each `[REV-WT-*]` revision to this document, and once per release across
+  that release's changes, the blind two-factor fit test runs over one fixed
+  change boundary and one theory version: the author writes the first account,
+  and an agent of another family writes the second in a fresh context whose only
+  inputs are this document and the diff of that boundary, excluding plan files,
+  review logs, and the author's account. Where two valid accounts agree, the
   theory transfers what the author intended. Where they diverge, the author
-  proposes a classification for each divergence: a document deficiency, a
-  change deficiency, or agent reasoning; this document changes only for a
-  document deficiency. A divergence the author attributes to the other
-  agent's reasoning is recorded as contested, not resolved. Both accounts
-  and the classifications go in the plan's review log. The test does not
-  gate closure; the owner reads the comparison, and any contested item, when
-  they choose.
-  Refresh the `[WT-0]` **theory-versus-code audit table** at the same
-  trigger, carrying unchanged rows forward by reference and re-auditing
-  touched claims.
+  proposes a classification for each divergence: a document deficiency, a change
+  deficiency, or agent reasoning; this document changes only for a document
+  deficiency. A divergence the author attributes to the other agent's reasoning
+  is recorded as contested, not resolved. Both accounts and the classifications
+  go in the plan's review log; the owner reads the comparison and any contested
+  item when they choose. Refresh the `[WT-0]` **theory-versus-code audit table**
+  at each `[REV-WT-*]` theory revision and at each release, carrying unchanged
+  rows forward by reference and re-auditing touched claims.
 - **Contention failures test possession of the theory:** Wanting fewer workers,
   serialization, or another reduction in contention to make tests pass is an
   immediate stop condition. State the behavior the theory predicted and locate
@@ -1328,6 +1348,44 @@ evidence of why the theory evolved rather than a competing model.
     test: One from the author and one from an other-family model, where they
     each describe how the change does or does not fit with the theory";
     "Yes, we adopt it, and the fix")
+
+### [REV-WT-007] Forward-only mechanical [WT-7] plan gate and two-tier fit cadence
+
+- Current account: Effective class-5 plans (`Class: 5` or any `Class: N+P` per
+  `[DOM-15]`) dated `>= 2026-11-10` (forward-only; plans dated `< 2026-11-10`
+  are exempt) carry the author's five-part `[WT-7]` `Theory Fit` account audited
+  by the mandatory cross-family reviewer against the cited theory text and
+  completed diff in the same review pass, and `tests/specs/test_plan_metadata.py`
+  mechanically blocks `Status: completed` unless all five parts are
+  non-placeholder and an explicit `Final Completion Review Verdict: APPROVE`
+  (with no trailing `REVISE` or `BLOCKED`) is recorded. Like
+  `bin/check-doc-paths` in `Governing process`, this plan-corpus completeness
+  check enforces standing `[WT-0]` record integrity (detecting omitted fit
+  accounts at completion, while semantic correctness remains the cross-family
+  reviewer's job) rather than pinning dependency versions, CI step order, or
+  release-script internals (`[ALT-WT-018]`). Because an audited single pass sees
+  the author's framing and checks citation/scope fidelity rather than blind
+  transfer, the blind two-factor fit test (fresh-context other-family account
+  from this document and the boundary diff alone) and the `[WT-0]`
+  theory-versus-code audit table refresh remain mandatory at each `[REV-WT-*]`
+  revision to `docs/program-theory.md` and once per release. `[ALT-WT-004]` also
+  states accurately that `TaskMonitor` keeps its own monotonic deadlines through
+  `next_wait_timeout()` (its cycle deadline plus its inherited `ServiceTask`
+  owner-row refresh and idle-exit deadlines) while registering no heartbeat
+  message.
+- Supersedes: Requiring a separate blind second-factor CLI invocation and full
+  audit-table refresh on every routine class-5 plan with no mechanical
+  plan-completion check, and `[ALT-WT-004]`'s wording that `TaskMonitor`'s cycle
+  deadline was its only `next_wait_timeout()` deadline.
+- Pressure: The 2026-11-10 deep-dive review at `dbbf5526` (`v0.9.124`) found
+  both that Nov 7–9 class-5 plans left `"Other-family blind account: not yet
+  run"` at completion because nothing checked completion mechanically, and that
+  an unaudited fit section can cite `[WT-*]` IDs whose text says something else.
+- Evidence:
+  - contemporaneous: `docs/plans/2026-11-10-program-theory-fit-cadence-and-gate-plan.md`
+  - owner-recalled: owner session 2026-11-10 ("Maybe just have a doc checker on
+    the plans that ensure it is present and filled in?"; "Option 2A, but only
+    going forward")
 
 ## Sources
 

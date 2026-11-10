@@ -675,6 +675,17 @@ and disposition table:
 - which files and docs the reviewer read — including
   **`## Proposed Spec Delta`** when the plan changes intended behavior
 - the review findings and the author's disposition for each finding
+- for effective Class-5 plans (`Class: 5` or any `Class: N+P` per `[DOM-15]`)
+  dated `>= 2026-11-10` (forward-only per `docs/program-theory.md` `[WT-7]` and
+  `[REV-WT-007]`): a non-placeholder five-part `[WT-7]` `Theory Fit` account
+  (`Verdict`, `Rests on`, `Refuses`, `Predicts`, `Fits worst`) audited against
+  `docs/program-theory.md` in the cross-family review pass, plus an explicit
+  `Final Completion Review Verdict: APPROVE` line (with `Reviewer family:`
+  metadata and no trailing `REVISE` / `BLOCKED` / `FAIL` verdict) recorded
+  before flipping `Status:` to `completed` (enforced by
+  `tests/specs/test_plan_metadata.py`). Plans that revise
+  `docs/program-theory.md` (`[REV-WT-*]`) and release sweeps additionally run
+  the blind two-factor fit test and `[WT-0]` audit-table refresh.
 
 Recommended prompt:
 

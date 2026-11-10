@@ -287,14 +287,14 @@ aphorisms or implementation-only mechanics; if either is thin, probe it
 explicitly before marking the account `Active`.
 
 When crystallizing or revising theory for a repository that already has
-shipping code or specs—and again at each release or Class-5 completion alongside
-the `[WT-7]` possession check—the product owner (or authoring agent for
-owner confirmation) produces or refreshes a **theory-versus-code (and
-theory-versus-spec) audit table** in the plan or `docs/lessons.md`: map each
-theory claim and identity invariant against current specs and code (carrying
-forward unchanged rows by reference on subsequent refreshes), marking each row
-as aligned, drifted (to be morphed via a plan), or evidence that the theory
-itself needs revision (`[WT-0]`).
+shipping code or specs—and again at each `[REV-WT-*]` theory revision and at
+each release alongside the blind two-factor `[WT-7]` fit test—the product owner
+(or authoring agent for owner confirmation) produces or refreshes a
+**theory-versus-code (and theory-versus-spec) audit table** in the plan or
+`docs/lessons.md`: map each theory claim and identity invariant against current
+specs and code (carrying forward unchanged rows by reference on subsequent
+refreshes), marking each row as aligned, drifted (to be morphed via a plan), or
+evidence that the theory itself needs revision (`[WT-0]`, `[REV-WT-007]`).
 
 Revise the draft until they confirm.
 
