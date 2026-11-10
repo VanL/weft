@@ -601,6 +601,37 @@ def test_harness_queue_cleanup_does_not_resolve_lazy_objects(
 
 
 @pytest.mark.sqlite_only
+def test_harness_queue_cleanup_skips_queue_still_under_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Queue another thread is still constructing has no bound target yet.
+
+    Windows CI (Python 3.14) saw the heap scan reach a Queue that a second
+    harness's in-process Manager was building, before ``Queue.__init__`` bound
+    its target; reading ``db_target`` raised and failed the harness teardown.
+    The scan must skip it and still close this harness's queues.
+    """
+
+    unbound = Queue.__new__(Queue)
+    with WeftTestHarness() as harness:
+        queue = Queue(
+            "cleanup.unbound.neighbor",
+            db_path=harness.context.broker_target,
+            persistent=True,
+            config=harness.context.broker_config,
+        )
+        queue.write("open")
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(harness_mod.gc, "get_objects", lambda: [unbound, queue])
+                harness._close_live_database_queues()
+            assert queue.conn is not None
+            assert len(queue.conn._connection_registry) == 0
+        finally:
+            queue.close()
+
+
+@pytest.mark.sqlite_only
 def test_harness_queue_cleanup_reports_failure_and_continues(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

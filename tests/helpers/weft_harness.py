@@ -1799,7 +1799,14 @@ class WeftTestHarness:
         return os.path.normcase(os.path.realpath(os.fspath(path)))
 
     def _queue_targets_database(self, queue: Queue, database_path: str) -> bool:
-        target = queue.db_target
+        try:
+            target = queue.db_target
+        except AttributeError:
+            # Another thread (for example a second harness's in-process
+            # Manager) can still be inside Queue.__init__ when the heap scan
+            # lists the object. Its target is not bound yet and it has opened
+            # no connection, so this harness has nothing of it to close.
+            return False
         target_path = getattr(target, "target_path", None)
         if target_path is None:
             target_path = getattr(target, "target", target)
