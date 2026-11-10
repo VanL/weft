@@ -5557,7 +5557,7 @@ def test_manager_never_reads_or_deletes_heartbeat_registrations(
     for index in range(rows):
         upsert_heartbeat(
             context,
-            registrant_tid=str(time.time_ns()),
+            registrant_tid=str(int(unique_tid) + 1),
             heartbeat_id=f"probe-{index}",
             interval_seconds=60,
             lease_seconds=3600,
@@ -6804,7 +6804,7 @@ def test_adopted_service_keeps_live_proof_by_refreshing_its_owner_row(
 
     db_path, make_queue = broker_env
     idle_timeout = 60.0
-    owner_tid = str(time.time_ns())
+    owner_tid = str(int(unique_tid) + 1)
     _write_managed_service_owner(
         make_queue,
         service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -6897,7 +6897,7 @@ def test_adopted_autostart_service_after_launcher_crash_is_live_not_duplicated(
         duration=0.0,
     )
     source = str(manifest_path.resolve())
-    owner_tid = str(time.time_ns())
+    owner_tid = str(int(unique_tid) + 1)
     _write_managed_service_owner(
         make_queue,
         service_key=source,
@@ -6973,7 +6973,7 @@ def test_owner_row_without_host_proof_is_live_only_while_its_task_refreshes_it(
     """
 
     db_path, make_queue = broker_env
-    owner_tid = str(time.time_ns())
+    owner_tid = str(int(unique_tid) + 1)
     _write_managed_service_owner(
         make_queue,
         service_key=INTERNAL_SERVICE_KEY_HEARTBEAT,
@@ -11931,6 +11931,20 @@ def _launch_waiting_child(
     return tid, release
 
 
+def _await_os_exit_status(process: BaseProcess) -> None:
+    """Block until the OS reports a child's exit after its sentinel fired.
+
+    Linux can make a child's sentinel ready (its files are closed) before the
+    child is waitable, so for a short window ``exitcode`` is still ``None`` and
+    its PID still looks live. [MA-1.6a] confirms that exit on the published
+    PID-liveness recheck instead. A test whose claim starts once the exit is
+    visible closes that window first with a blocking join.
+    """
+
+    process.join(timeout=30.0)
+    assert process.exitcode is not None
+
+
 def test_manager_turns_do_not_probe_a_live_child(
     manager_setup: tuple[Manager, Callable[[str], Queue]],
     monkeypatch: pytest.MonkeyPatch,
@@ -12018,6 +12032,7 @@ def test_manager_reaps_exited_child_on_its_sentinel_turn(
 
     release.touch()
     assert adapter.wait(30.0)
+    _await_os_exit_status(manager._child_processes[tid].process)
     opened: list[str] = []
     real_broker = WeftContext.broker
 
@@ -12071,6 +12086,7 @@ def test_handed_off_child_reap_reads_proof_once_and_acknowledges_nothing_again(
 
     release.touch()
     assert adapter.wait(30.0)
+    _await_os_exit_status(manager._child_processes[tid].process)
     ctrl_out_name = f"T{tid}.ctrl_out"
     ctrl_out_calls = count_queue_calls(monkeypatch, reserved, ctrl_out_name)
     reserved_calls = count_queue_calls(monkeypatch, reserved, reserved_name)
@@ -12251,6 +12267,7 @@ def test_stopping_drain_survivor_hold_publishes_no_due_clock_and_wakes_on_exit(
         )
 
         assert manager._child_sentinel_adapter.wait(15.0), "wrapper exit not observed"
+        _await_os_exit_status(wrapper)
         manager._drain_child_sentinel_events()
         manager._continue_shutdown_drain()
         assert manager._child_processes == {tid: child}
@@ -13733,7 +13750,7 @@ def test_manager_autostart_spoofed_public_metadata_does_not_claim_manifest(
     spec = make_manager_spec(unique_tid, idle_timeout=1.5)
     manager = Manager(db_path, spec, config=config)
     source = str(manifest_path.resolve())
-    spoof_tid = str(time.time_ns())
+    spoof_tid = str(int(unique_tid) + 1)
     make_queue(WEFT_GLOBAL_LOG_QUEUE).write(
         json.dumps(
             {
