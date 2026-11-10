@@ -7,9 +7,9 @@ from typing import Any, Final
 
 from weft.client import connect
 
-WORKLOAD_TARGET: Final[str] = "tests.helpers.admission_workload:admission_work"
-OPS_ROLLUP_TARGET: Final[str] = "tests.helpers.admission_workload:ops_rollup"
-OPS_ENRICHMENT_TARGET: Final[str] = "tests.helpers.admission_workload:ops_enrichment"
+WORKLOAD_TARGET: Final[str] = "benchmarks.admission_workload:admission_work"
+OPS_ROLLUP_TARGET: Final[str] = "benchmarks.admission_workload:ops_rollup"
+OPS_ENRICHMENT_TARGET: Final[str] = "benchmarks.admission_workload:ops_enrichment"
 OPS_BURST_OUTBOX: Final[str] = "test.admission.ops_burst.results"
 OPS_BURST_TIMEOUT_SECONDS: Final[float] = 600.0
 OPS_ROLLUP_INDEX: Final[int] = -1

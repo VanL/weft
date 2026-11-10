@@ -211,8 +211,8 @@ the cost, its cause, and the SimpleBroker follow-up that removes it are
 recorded in [the task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md)
 (owner decision, 2026-11-09).
 Regression coverage lives in
-`tests/commands/test_observation_connections.py` and
-`tests/system/test_admission_stress.py`. See the
+`tests/commands/test_observation_connections.py` and the explicitly run
+benchmark `benchmarks/test_admission_stress.py`. See the
 [nested admission load plan](../plans/2026-11-07-nested-admission-load-plan.md),
 [the task connection footprint plan](../plans/2026-11-08-task-connection-footprint-plan.md),
 and [the dependency suite repair plan](../plans/2026-09-09-updated-dependency-suite-repairs-plan.md).

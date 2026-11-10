@@ -31,6 +31,9 @@ harnesses:
 - The benchmark scripts in `tests/long_session_surface_benchmark.py` and
   `tests/multiqueue_polling_benchmark.py` are dev-only measurement tools, not
   part of the canonical test contract.
+- Long benchmarks live in `benchmarks/`, which pytest does not collect by
+  default (`testpaths = ["tests"]`); run one explicitly with
+  `pytest benchmarks/<file> -m ""` or `bin/pytest-pg benchmarks/<file>`.
 
 Test infrastructure must preserve production behavior for the subject under
 test, including process-title activation. Harness-only inline managers may
@@ -79,8 +82,8 @@ _Implementation mapping_: `tests/helpers/pytest_pg_runtime.py` owns isolated phy
 the shared timing engine; `tests/system/test_reactor_driver.py` owns its direct
 contract tests.
 
-The shared slow test in `tests/system/test_admission_stress.py` preloads 600
-roots for 1,250 tasks. It includes 250 single-child families and 100 chains
+The shared slow benchmark in `benchmarks/test_admission_stress.py` preloads
+600 roots for 1,250 tasks. It includes 250 single-child families and 100 chains
 with three to five parent-child edges. It measures throughput and verifies the
 same finite workload on SQLite and PostgreSQL.
 The PostgreSQL cases use separate 300-slot servers and check native

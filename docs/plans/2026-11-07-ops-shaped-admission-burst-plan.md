@@ -49,7 +49,8 @@ lets launches and results proceed at natural timing through real Weft APIs.
 
 ## Implementation
 
-1. Add two function targets in `tests/helpers/admission_workload.py`. One
+1. Add two function targets in `tests/helpers/admission_workload.py` (moved
+   on 2026-11-09 to `benchmarks/admission_workload.py`). One
    rollup submits 50 or 87 enrichment tasks at a nominal 50 ms spacing and
    returns their TIDs immediately after the last submission. Each enrichment
    models 2.65 s of preparation before it submits one leaf, then waits for
@@ -61,7 +62,8 @@ lets launches and results proceed at natural timing through real Weft APIs.
    index, leaf TID, and process CPU time and elapsed time around
    `child.result`. Leaves use the default per-task outbox. Total launched
    tasks including the rollup and leaves are 101 or 175.
-2. Extend `tests/system/test_admission_stress.py` with one shared slow test
+2. Extend `tests/system/test_admission_stress.py` (moved on 2026-11-09 to
+   `benchmarks/test_admission_stress.py`) with one shared slow test
    parameterized by these two sizes. Start a real Manager, register the outbox
    monitor, then submit the rollup through `weft.client.connect`. Use the
    existing SQLite harness and isolated PostgreSQL server fixture. The
@@ -111,8 +113,8 @@ note on baseline `b6d850c1` plus the nested admission mapping.
 
 ```bash
 . ./.envrc
-.venv/bin/python -m pytest -m slow tests/system/test_admission_stress.py -k ops_burst
-PYTEST_ADDOPTS=-rP ./bin/pytest-pg tests/system/test_admission_stress.py::test_ops_burst_admission
+.venv/bin/python -m pytest -m slow benchmarks/test_admission_stress.py -k ops_burst
+PYTEST_ADDOPTS=-rP ./bin/pytest-pg benchmarks/test_admission_stress.py::test_ops_burst_admission
 .venv/bin/python -m pytest tests/specs/test_plan_metadata.py tests/specs/test_test_audit_policy.py
 bin/check-doc-paths
 git diff --check

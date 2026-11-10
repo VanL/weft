@@ -29,7 +29,9 @@ of one workload, not a universal progress or peak-rate guarantee.
 ## Test plan
 
 1. Add one shared slow test in `tests/system/test_admission_stress.py` and a
-   spawn-importable workload in `tests/helpers/admission_workload.py`.
+   spawn-importable workload in `tests/helpers/admission_workload.py`. (Both
+   moved on 2026-11-09 to `benchmarks/test_admission_stress.py` and
+   `benchmarks/admission_workload.py`, outside default collection.)
    Use the canonical exact-ID spawn writer to preload all roots on one broker
    lease, then launch a real Manager. Each parent calls `client.submit`
    under its actual runtime identity before doing timed work, then calls
@@ -218,8 +220,8 @@ restores the helper loop without changing test-owned data or runtime cleanup.
 
 ```bash
 . ./.envrc
-WEFT_ADMISSION_MAX_CONNECTIONS=0 PYTEST_ADDOPTS=-rP .venv/bin/python -m pytest -m slow tests/system/test_admission_stress.py
-env -u WEFT_ADMISSION_RESERVE_FRACTION PYTEST_ADDOPTS=-rP ./bin/pytest-pg tests/system/test_admission_stress.py
+WEFT_ADMISSION_MAX_CONNECTIONS=0 PYTEST_ADDOPTS=-rP .venv/bin/python -m pytest -m slow benchmarks/test_admission_stress.py
+env -u WEFT_ADMISSION_RESERVE_FRACTION PYTEST_ADDOPTS=-rP ./bin/pytest-pg benchmarks/test_admission_stress.py
 .venv/bin/python -m pytest tests/specs/test_plan_metadata.py tests/specs/test_test_audit_policy.py
 .venv/bin/python -m pytest tests/core/test_admission.py tests/core/test_manager_family_maintenance.py tests/core/test_admission_recovery.py
 bin/check-doc-paths

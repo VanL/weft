@@ -22,8 +22,7 @@ from typing import Any, Final
 
 import pytest
 
-from simplebroker import Queue
-from tests.helpers.admission_workload import (
+from benchmarks.admission_workload import (
     OPS_BURST_OUTBOX,
     OPS_BURST_TIMEOUT_SECONDS,
     OPS_ENRICHMENT_TARGET,
@@ -32,6 +31,7 @@ from tests.helpers.admission_workload import (
     WORKLOAD_TARGET,
     ops_burst_taskspec,
 )
+from simplebroker import Queue
 from tests.helpers.test_backend import active_test_backend, postgres_test_dsn
 from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
