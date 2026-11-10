@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.124] - 2026-11-10
+
+### Changed
+
+- CI uses uv 0.13.6 and `actions/download-artifact` 8.0.2, including its
+  improved HTTP 429 retry handling, and the platform matrix now exercises
+  Python 3.15 alongside Python 3.12 through 3.14.
+- Dependency floors now match the versions proven in the development
+  environment: pydantic 2.14.3, SimpleBroker 8.8.1,
+  `simplebroker-pg` 4.8.1, Typer 0.29.0, Hypothesis 6.170.15, Ruff 0.17.4,
+  OpenAI 3.49.0, and microsandbox 0.7.14. The lockfile is refreshed to the
+  same dependency set; requirements remain lower bounds rather than pins.
+
 ## [0.9.123] - 2026-11-09
 
 ### Upgrade notes
