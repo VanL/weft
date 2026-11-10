@@ -184,6 +184,9 @@ def _leaking_function_target(pidfile: str) -> NoReturn:
     assert result_sender is not None
     multiprocessing.current_process().daemon = False
     _leak_sender_to_grandchild(result_sender, pidfile)
+    # The exit instant, so the caller can time the handoff without the two
+    # interpreter start-ups before it.
+    Path(f"{pidfile}.exited").write_text(repr(time.time()), encoding="utf-8")
     os._exit(7)
 
 
@@ -279,8 +282,14 @@ def test_host_one_shot_terminal_handoff_wakes_on_producer_sentinel_and_expires_d
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """HostTaskRunner.run_with_hooks wakes on process.sentinel and expires drain_deadline when a descendant holds the pipe open [CC-3.5]."""
-    monkeypatch.setattr(host_runner_mod, "ACTIVE_CONTROL_POLL_INTERVAL", 5.0)
+    """HostTaskRunner.run_with_hooks wakes on process.sentinel and expires drain_deadline when a descendant holds the pipe open [CC-3.5].
+
+    The bound runs from the worker's exit, not from the call: the worker and
+    its grandchild are spawned interpreters, and on a loaded Windows runner
+    their start-up alone took over three seconds (CI run 42790027897). A
+    runner that missed the sentinel would wait for the 30 s control poll.
+    """
+    monkeypatch.setattr(host_runner_mod, "ACTIVE_CONTROL_POLL_INTERVAL", 30.0)
     pidfile = tmp_path / "descendant.pid"
     runner = HostTaskRunner(
         target_type="function",
@@ -301,12 +310,12 @@ def test_host_one_shot_terminal_handoff_wakes_on_producer_sentinel_and_expires_d
     )
     descendant_pid: int | None = None
     try:
-        started = time.monotonic()
         outcome = runner.run_with_hooks(None, cancel_requested=None)
-        elapsed = time.monotonic() - started
+        returned_at = time.time()
         descendant_pid = wait_for_pidfile(pidfile, timeout=1.0)
+        exited_at = float(Path(f"{pidfile}.exited").read_text(encoding="utf-8"))
 
-        assert elapsed < 2.0
+        assert returned_at - exited_at < 2.0
         assert outcome.status == "error"
         assert outcome.returncode == 7
         assert (
