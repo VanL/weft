@@ -201,6 +201,7 @@ class ResourceMonitor(BaseResourceMonitor):
         current_cpu_times = self._snapshot_cpu_times(processes)
 
         memory_mb = 0.0
+        measured_processes = 0
         open_files = 0
         connections = 0
         for process in processes:
@@ -208,9 +209,15 @@ class ResourceMonitor(BaseResourceMonitor):
                 memory_mb += process.memory_info().rss / (1024 * 1024)
             except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
                 continue
+            measured_processes += 1
 
             open_files += self._open_file_count(process)
             connections += self._connection_count(process)
+
+        if measured_processes == 0:
+            raise RuntimeError(
+                "Resource monitor process tree disappeared during sample"
+            )
 
         cpu_percent = 0.0
         if self._last_cpu_sample_at is not None:

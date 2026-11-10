@@ -87,6 +87,25 @@ def test_check_limits_fails_open_when_the_process_disappears(
     assert monitor.check_limits() == (True, None)
 
 
+def test_raced_empty_snapshot_does_not_replace_last_live_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process exit during collection preserves the last valid sample."""
+
+    class ExitedProcess:
+        def memory_info(self) -> object:
+            raise psutil.NoSuchProcess(pid=123, name="exited")
+
+    previous = ResourceMetrics(memory_mb=12.5)
+    monitor = ResourceMonitor(limits=LimitsSection(memory_mb=100))
+    monitor._last_metrics = previous
+    monkeypatch.setattr(monitor, "_process_tree", lambda: [ExitedProcess()])
+
+    assert monitor.check_limits() == (True, None)
+    assert monitor.last_metrics() is previous
+    assert monitor.history == []
+
+
 def test_check_limits_propagates_unexpected_metric_collection_defects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
