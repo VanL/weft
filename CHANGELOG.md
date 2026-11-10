@@ -1,6 +1,69 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.123] - 2026-11-09
+
+### Upgrade notes
+
+- Run `weft system stop` in each context before or while upgrading to this
+  release. Services and autostart tasks still running from the previous
+  release never re-stamp their owner rows (see the service-owner refresh
+  entry under Changed); 300 s after their last row a Manager on the new
+  release sees no live owner and starts a duplicate (or, if it already
+  adopted them, waits on them as uncertain). Stopping the context lets the
+  next Manager launch them under the new code. In a context with no active
+  Manager, stop any still-running autostart task with `weft task stop`.
+  There is no compatibility path for the mixed-version window.
+- The TaskMonitor store schema moves from version 6 to 7 on first start.
+  Version 6 recognized a terminal record by its event name and missed
+  service and Manager exit records (`service_idle_exit`,
+  `manager_idle_shutdown`, drained and childless supersede and yield
+  records), so those families never retired. The migration marks a family
+  terminal when it was never summarized or disposed and its latest stored
+  record states a terminal status; it runs once, inside the schema
+  transaction, and a rerun changes nothing ([MF-3], [OBS.13.4]). A 0.9.122
+  TaskMonitor refuses a version 7 store as newer: to roll back, set the
+  `schema_version` row of `weft_monitor_meta` to `{"version": 6}` (version 7
+  data is valid version 6 data).
+
+### Performance
+
+Measured on the 1,250-task nested admission workload (16 cores, 128 GB):
+PostgreSQL from 458 s to 260 s; SQLite from 492 s (serialized startup) to
+about 196 s.
+
+- Host resource monitoring walks only the task's own process tree
+  (`weft/core/process_tree.py`: macOS libproc `PROC_PPID_ONLY`, Linux
+  `/proc/<pid>/task/*/children`, psutil fallback) instead of every host
+  process on each sample, which starved the wrapper's GIL under load.
+- The Manager publishes at most one complete scheduler checkpoint per reactor
+  turn (plus required barriers) and checkpoints only the resident fields
+  recovery reads, cutting checkpoint bytes by about 69%.
+- The Manager reaps a child only after its exit sentinel fires and records the
+  reap on its existing broker connection; it registers queue interest at
+  selection instead of rebuilding its wait set each turn, and its dispatch
+  path makes fewer broker round trips.
+- Tasks coalesce their task-state snapshots per owner step, task workers no
+  longer open a broker connection, and a result reader keeps one handle per
+  wait. Writes per task fell from 24.7 to 17.0 and SQL statements per task
+  from 316 to 213.
+- The startup window narrows in proportion to measured headroom instead of
+  dropping straight to one: each measured gate with public limit L, usage U
+  and threshold H allows `min(W, max(1, floor(W(L-U)/(L-H))))` unfinished
+  startups (W = 6, H = 80% of L), and the smallest over all gates applies
+  ([MA-1.8]).
+- Admission now also measures host memory on every backend
+  (`psutil.virtual_memory()`): public launches stop once used memory (total
+  minus available) reaches 90% of total, a fixed 10% reserve
+  (`ADMISSION_MEMORY_RESERVE_FRACTION`, independent of
+  `WEFT_ADMISSION_RESERVE_FRACTION`). SQLite uses the same startup window as
+  PostgreSQL instead of serialized startup. A launch refused by the memory
+  gate is recorded in the Manager's dispatch refusals as
+  `measured_memory_exhausted` (the backend gate's
+  `measured_capacity_exhausted` is named first when both refuse) ([MA-1.8]).
+- On PostgreSQL, a task waiting for another task's final result releases its
+  reader connection between observation passes; with SimpleBroker 8.8.0's
+  session-scoped admission, each pass after a release revalidates the target
+  (one short inspection connection) ([SB-0.4]).
 
 ### Changed
 
@@ -30,15 +93,25 @@
 - Such a task declares `weft.state.services` as a fixed support route, so it
   can no longer use that queue as its outbox or another queue role;
   construction rejects that topology ([QUEUE.7]).
-- Upgrade step: run `weft system stop` in each context before or while
-  upgrading to this release. Services and autostart tasks still running from
-  the previous release never re-stamp their owner rows; 300 s after their
-  last row a Manager on the new release sees no live owner and starts a
-  duplicate (or, if it already adopted them, waits on them as uncertain).
-  Stopping the context lets the next Manager launch them under the new code.
-  In a context with no active Manager, stop any still-running autostart task
-  with `weft task stop`. There is no compatibility path for the
-  mixed-version window.
+- TaskMonitor collation, lifetime reports, retention, `weft events --follow`
+  and terminal evidence decide terminality from the task's own typed terminal
+  record (`type == "terminal"` with a terminal status) through one shared
+  function; the `TERMINAL_TASK_EVENTS` name map is removed. Childless Manager
+  supersession and yield families now retire, `work_limit_violation` records
+  as `killed`, and a Manager STOP family stays open until its drained record.
+  Untyped rows with a terminal status (not written by Weft) are no longer
+  terminal, and task status no longer infers a terminal status from the
+  event name for a nonterminal row with `completed_at`, so its
+  `stale_status_payload` diagnostic is gone ([MF-3], [OBS.13.4]).
+- The Manager drain's SIGTERM step and forced reaps signal a child or managed
+  process only while its recorded `(pid, create_time)` still matches, using
+  `terminate_verified_process_tree` for forced kills ([MA-3]).
+- `weft manager list --diagnostic` no longer pings unexpired unknown draining
+  Managers.
+- Long admission stress benchmarks live in `benchmarks/`, which default
+  pytest runs, `bin/pytest-pg` without targets, the release prechecks and CI
+  do not collect; run one explicitly with `pytest benchmarks/<file> -m ""`
+  or `bin/pytest-pg benchmarks/<file>`. mypy and ruff check `benchmarks/`.
 
 ### Fixed
 
@@ -69,6 +142,19 @@
   caller decides from a missing PONG is unchanged. A PONG that matched before
   a later broker read or wait failure is now kept instead of being reported as
   an error ([MF-3]).
+- The Manager no longer idle-exits while a public spawn request is pending
+  behind a transient dispatch barrier (bootstrap in progress, a full startup
+  window, or an undurable launch receipt) ([MA-1] item 5).
+- The Manager's stopping drain no longer busy-spins while an exited task still
+  has live managed processes; it waits on the survivor's exit source.
+- A scheduler checkpoint resident without recorded identity is skipped with a
+  warning instead of wedging bootstrap, and other malformed retained rows stop
+  the Manager instead of retrying silently forever ([MA-1.8]).
+- `service_idle_exit`, `manager_idle_shutdown` and other Manager drain
+  terminal events now retire their TaskMonitor families, so `ctrl_out` and
+  collation rows no longer accumulate and the TaskMonitor can retire.
+- Short tasks no longer log a spurious "Failed to snapshot final host resource
+  metrics" warning.
 
 ## [0.9.122] - 2026-11-06
 
