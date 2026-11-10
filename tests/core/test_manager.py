@@ -37,6 +37,7 @@ import weft.core.manager as manager_mod
 import weft.core.manager_runtime as manager_runtime_mod
 import weft.core.service_convergence as service_convergence_mod
 import weft.core.tasks.base as base_task_mod
+import weft.liveness.analysis as liveness_analysis_mod
 from simplebroker import BrokerTarget, Queue
 from simplebroker.ext import BrokerError, DatabaseError
 from tests.helpers.broker_reads import count_queue_calls
@@ -12051,6 +12052,62 @@ def test_manager_reaps_exited_child_on_its_sentinel_turn(
     assert terminal["type"] == TERMINAL_ENVELOPE_TYPE
     assert terminal["source"] == "task"
     assert terminal["status"] == "completed"
+
+
+def test_reaped_wrapper_exit_proof_retires_resident_the_host_still_lists(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The reap turn retires a resident on the wrapper's local exit proof.
+
+    Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8].
+    Windows keeps an exited process in the host process table, and host-PID
+    liveness reads it as live, while any handle to it is open (psutil's
+    Windows backend checks the process table, not only the exit code). The
+    Manager's own ``Process`` object holds the reaped wrapper's handle during
+    the reap, so asking the host left the resident held after the reap turn
+    (Windows CI, 2026-11-09). The reap's known exit code is the wrapper's exit
+    proof; only the task's other recorded processes are asked of the host.
+    The double applies the Windows rule on every platform: the wrapper's PID
+    reads live while the Manager's ``Process`` object for it is open.
+    """
+
+    manager, make_queue = manager_setup
+    tid, release = _launch_waiting_child(manager, make_queue, tmp_path)
+    wrapper = manager._child_processes[tid].process
+    wrapper_pid = wrapper.pid
+    adapter = manager._child_sentinel_adapter
+    while adapter.wait(0):
+        manager.process_once()
+    assert tid in manager._scheduler_residents
+
+    def handle_open() -> bool:
+        try:
+            _ = wrapper.pid
+        except ValueError:  # "process object is closed"
+            return False
+        return True
+
+    real_inspect = liveness_analysis_mod.inspect_host_process
+
+    def host_with_open_handles(
+        pid: int, create_time: float | None
+    ) -> HostProcessObservation:
+        if pid == wrapper_pid and handle_open():
+            return HostProcessObservation("live", "identity_match")
+        return real_inspect(pid, create_time)
+
+    monkeypatch.setattr(
+        liveness_analysis_mod, "inspect_host_process", host_with_open_handles
+    )
+    release.touch()
+    assert adapter.wait(30.0)
+    _await_os_exit_status(wrapper)
+    manager.process_once()
+
+    assert tid not in manager._child_processes
+    assert tid not in manager._scheduler_residents
 
 
 def test_handed_off_child_reap_reads_proof_once_and_acknowledges_nothing_again(

@@ -343,7 +343,7 @@ def test_failed_evidence_read_leaves_custody_and_dispatch_unchanged(
         if entry == "reconcile":
             manager._refresh_scheduler_evidence()
         else:
-            manager._record_reaped_admission(str(spec.tid))
+            manager._record_reaped_admission(str(spec.tid), exited_pid=None)
 
     assert manager._queue(reserved).peek_one(exact_timestamp=internal_id) is not None
     assert source.peek_one(exact_timestamp=ordinary_id) is not None

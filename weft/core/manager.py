@@ -2878,11 +2878,32 @@ class Manager(ServiceTask):
             )
             self._family_candidate = None
 
-    def _scheduler_evidence_live(self, tid: str, evidence: Mapping[str, Any]) -> bool:
-        """Unknown identity remains resident; only scoped staleness permits pop."""
+    def _scheduler_evidence_live(
+        self,
+        tid: str,
+        evidence: Mapping[str, Any],
+        *,
+        exited_pid: int | None = None,
+    ) -> bool:
+        """Unknown identity remains resident; only scoped staleness permits pop.
+
+        ``exited_pid`` is a wrapper this Manager reaped with a known exit
+        code: that local process view is the exit proof for its recorded
+        identity, so only the task's other recorded processes are asked of
+        the host. Host-PID liveness cannot see that exit while the Manager's
+        own ``Process`` object still holds the wrapper's handle, because an
+        exited process stays in the Windows process table until every handle
+        to it closes.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-1.8]
+        """
         processes = evidence.get("host_processes")
         if not processes or evidence.get("hostname") != socket.gethostname():
             return True
+        if exited_pid is not None:
+            processes = [item for item in processes if item["pid"] != exited_pid]
+            if not processes:
+                return False
         handle = RunnerHandle(
             runner="host",
             kind="process",
@@ -3035,8 +3056,13 @@ class Manager(ServiceTask):
             processes[item["pid"]] = {"pid": item["pid"], "create_time": create_time}
         return processes
 
-    def _record_reaped_admission(self, tid: str) -> None:
-        """Refresh one exited wrapper's evidence; a failed read changes nothing [MA-1.8]."""
+    def _record_reaped_admission(self, tid: str, *, exited_pid: int | None) -> None:
+        """Refresh one exited wrapper's evidence; a failed read changes nothing [MA-1.8].
+
+        ``exited_pid`` is the reaped wrapper's PID when the reap holds its exit
+        code; retirement takes that as the wrapper's exit proof
+        (``_scheduler_evidence_live``).
+        """
         if tid not in self._scheduler_residents:
             return
         try:
@@ -3052,7 +3078,9 @@ class Manager(ServiceTask):
                 "Unable to refresh reaped task admission evidence", exc_info=True
             )
             return
-        self._retire_scheduler_residents((tid,))
+        self._retire_scheduler_residents(
+            (tid,), exited_pids=None if exited_pid is None else {tid: exited_pid}
+        )
 
     def _refresh_scheduler_evidence(self) -> None:
         """Bootstrap once, then reconcile a bounded round-robin batch [MF-5]."""
@@ -3423,8 +3451,16 @@ class Manager(ServiceTask):
         except (ValueError, TypeError, KeyError):
             return None
 
-    def _retire_scheduler_residents(self, tids: Iterable[str] | None = None) -> None:
-        """Release consumed no-receipt custody or positively exited processes [MF-5]."""
+    def _retire_scheduler_residents(
+        self,
+        tids: Iterable[str] | None = None,
+        *,
+        exited_pids: Mapping[str, int] | None = None,
+    ) -> None:
+        """Release consumed no-receipt custody or positively exited processes [MF-5].
+
+        ``exited_pids`` maps a TID to the wrapper PID its reap proved exited.
+        """
         changed = False
         for tid in tuple(self._scheduler_residents if tids is None else tids):
             evidence = self._scheduler_residents.get(tid)
@@ -3436,7 +3472,11 @@ class Manager(ServiceTask):
                 or tid in self._child_processes
                 or (
                     evidence.get("host_processes")
-                    and self._scheduler_evidence_live(tid, evidence)
+                    and self._scheduler_evidence_live(
+                        tid,
+                        evidence,
+                        exited_pid=(exited_pids or {}).get(tid),
+                    )
                 )
                 or (
                     not evidence.get("host_processes")
@@ -5429,7 +5469,14 @@ class Manager(ServiceTask):
                 finally:
                     self._child_processes.pop(tid, None)
                     self._child_sentinel_adapter.remove(tid)
-                    self._record_reaped_admission(tid)
+                    self._record_reaped_admission(
+                        tid,
+                        exited_pid=(
+                            child.process.pid
+                            if child.process.exitcode is not None
+                            else None
+                        ),
+                    )
                 # Only _ack_launch_custody drops a custody record's reservation
                 # (after confirming absence), and only retirement pops the
                 # record. Acknowledge only what the record still holds [MA-1.6a].
