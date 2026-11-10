@@ -42,6 +42,7 @@ from weft.helpers import (
     iter_queue_json_entries,
     pid_is_live,
 )
+from weft.liveness.host import inspect_host_process
 
 pytestmark = [pytest.mark.shared]
 
@@ -116,8 +117,7 @@ def _active_canonical_manager_records(context: WeftContext) -> list[dict[str, An
         if authority == "external-supervisor":
             records.append(record)
             continue
-        pid = _host_pid_from_record(record)
-        if isinstance(pid, int) and pid_is_live(pid):
+        if _recorded_process_live(record):
             records.append(record)
     records.sort(key=lambda item: (int(item["tid"]), int(item["timestamp"])))
     return records
@@ -132,6 +132,35 @@ def _runtime_authority_from_record(record: dict[str, Any]) -> str | None:
         return None
     authority = control.get("authority")
     return authority if isinstance(authority, str) else None
+
+
+def _recorded_process_live(record: dict[str, Any]) -> bool:
+    """Return whether the row's recorded host process is still that process.
+
+    A PID alone is not an identity: Windows reuses PIDs quickly, so an exited
+    owner's row can name a PID a later process now holds (seen on Windows CI,
+    2026-11-09). Rows that record ``(pid, create_time)`` are checked by that
+    exact identity, as the product's liveness analysis does; a row with no
+    recorded create time falls back to the PID.
+    """
+
+    handle = record.get("runtime_handle")
+    observations = handle.get("observations") if isinstance(handle, dict) else None
+    processes = (
+        observations.get("host_processes") if isinstance(observations, dict) else None
+    )
+    identities = [
+        (item["pid"], item.get("create_time"))
+        for item in processes or ()
+        if isinstance(item, dict) and isinstance(item.get("pid"), int)
+    ]
+    if identities:
+        return any(
+            inspect_host_process(pid, create_time).evidence == "live"
+            for pid, create_time in identities
+        )
+    pid = _host_pid_from_record(record)
+    return isinstance(pid, int) and pid_is_live(pid)
 
 
 def _host_pid_from_record(record: dict[str, Any]) -> int | None:
@@ -287,8 +316,7 @@ def _live_service_records(
             ctrl_in_name=ctrl_in,
             timeout=1.0,
         )
-        pid = record.get("pid")
-        if probe.matched is not None or (isinstance(pid, int) and pid_is_live(pid)):
+        if probe.matched is not None or _recorded_process_live(record):
             live_records.append(record)
     return live_records
 
