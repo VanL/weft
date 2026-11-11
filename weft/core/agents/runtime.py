@@ -140,6 +140,7 @@ class AgentRuntimeAdapter(Protocol):
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> AgentExecutionResult:
         """Execute a normalized agent work item."""
 
@@ -229,6 +230,7 @@ def execute_agent_target(
     *,
     tid: str | None = None,
     bundle_root: str | None = None,
+    spec_context: str | None = None,
 ) -> AgentExecutionResult:
     """Execute agent work against the registered runtime backend.
 
@@ -242,20 +244,17 @@ def execute_agent_target(
         bundle_root=bundle_root,
     )
     runtime = get_agent_runtime(agent.runtime)
-    if _callable_supports_bundle_root(runtime.execute):
-        return runtime.execute(
-            agent=agent,
-            work_item=normalized,
-            tools=tools,
-            tid=tid,
-            bundle_root=bundle_root,
-        )
-    return runtime.execute(
-        agent=agent,
-        work_item=normalized,
-        tools=tools,
-        tid=tid,
-    )
+    kwargs: dict[str, Any] = {
+        "agent": agent,
+        "work_item": normalized,
+        "tools": tools,
+        "tid": tid,
+    }
+    if _callable_supports_keyword(runtime.execute, "bundle_root"):
+        kwargs["bundle_root"] = bundle_root
+    if _callable_supports_keyword(runtime.execute, "spec_context"):
+        kwargs["spec_context"] = spec_context
+    return runtime.execute(**kwargs)
 
 
 def start_agent_runtime_session(
@@ -263,6 +262,7 @@ def start_agent_runtime_session(
     *,
     tid: str | None = None,
     bundle_root: str | None = None,
+    spec_context: str | None = None,
 ) -> AgentRuntimeSession:
     """Start a long-lived runtime session for a persistent agent task.
 
@@ -274,22 +274,19 @@ def start_agent_runtime_session(
         raise RuntimeError(  # noqa: TRY004 approved [TS-3.1] [RUFF-SUP-268] exception
             f"Runtime does not support persistent sessions: {agent.runtime}"
         )
-    if _callable_supports_bundle_root(start_session):
-        return cast(
-            AgentRuntimeSession,
-            start_session(agent=agent, tid=tid, bundle_root=bundle_root),
-        )
-    return cast(
-        AgentRuntimeSession,
-        start_session(agent=agent, tid=tid),
-    )
+    kwargs: dict[str, Any] = {"agent": agent, "tid": tid}
+    if _callable_supports_keyword(start_session, "bundle_root"):
+        kwargs["bundle_root"] = bundle_root
+    if _callable_supports_keyword(start_session, "spec_context"):
+        kwargs["spec_context"] = spec_context
+    return cast(AgentRuntimeSession, start_session(**kwargs))
 
 
-def _callable_supports_bundle_root(callback: object) -> bool:
+def _callable_supports_keyword(callback: object, keyword: str) -> bool:
     if not callable(callback):
         return False
     parameters = inspect.signature(callback).parameters
-    return "bundle_root" in parameters
+    return keyword in parameters
 
 
 def content_to_prompt_text(

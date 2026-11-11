@@ -403,3 +403,57 @@ def test_validate_agent_tool_profile_rejects_unsupported_explicit_mcp(
         match="does not support explicit MCP server descriptors",
     ):
         validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
+
+
+def test_validate_agent_tool_profile_accepts_claude_workspace_access_none(
+    tmp_path: Path,
+) -> None:
+    taskspec = create_valid_provider_cli_agent_taskspec(
+        provider="claude_code",
+        executable=str(write_provider_cli_wrapper(tmp_path, "claude_code")),
+    )
+    payload = taskspec.model_dump(mode="python")
+    payload["spec"]["agent"]["runtime_config"]["tool_profile_ref"] = (
+        "tests.fixtures.runtime_profiles_fixture:claude_none_workspace_tool_profile"
+    )
+
+    validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
+
+
+def test_validate_agent_runtime_preflight_uses_taskspec_weft_context_over_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context-a"
+    other_cwd = tmp_path / "cwd-b"
+    (context_root / ".weft").mkdir(parents=True)
+    other_cwd.mkdir(parents=True)
+    wrapper = write_provider_cli_wrapper(context_root / "bin", "codex")
+    (context_root / ".weft" / "agents.json").write_text(
+        json.dumps(
+            {
+                "provider_cli": {
+                    "providers": {
+                        "codex": {
+                            "executable": f"./bin/{wrapper.name}",
+                        }
+                    }
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(other_cwd)
+    monkeypatch.setenv("PATH", str(other_cwd))
+
+    taskspec = create_valid_provider_cli_agent_taskspec(
+        provider="codex",
+        executable=str(wrapper),
+    )
+    payload = taskspec.model_dump(mode="python")
+    payload["spec"]["weft_context"] = str(context_root)
+    payload["spec"]["agent"]["runtime_config"].pop("executable", None)
+
+    validate_taskspec_agent_runtime(payload, load_runtime=True, preflight=True)

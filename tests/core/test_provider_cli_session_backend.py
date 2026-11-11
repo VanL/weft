@@ -89,7 +89,7 @@ def test_provider_cli_session_continues_across_turns(
     assert second_payload["turn_index"] == 2
     assert second_payload["remembered"] == "phase2-token"
     assert second.metadata["session"]["turn_index"] == 2
-    if provider_name == "agy":
+    if provider_name in {"agy", "codex"}:
         assert (
             first.metadata["session"]["provider_session_id"]
             == second.metadata["session"]["provider_session_id"]
@@ -100,9 +100,74 @@ def test_provider_cli_session_continues_across_turns(
         )
     if provider_name == "codex":
         assert second_payload["cwd"] == str(tmp_path)
-        assert "color" not in second_payload["options"]
-        assert "sandbox" not in second_payload["options"]
-        assert "profile" not in second_payload["options"]
+        assert second_payload["options"]["color"] == "never"
+        assert second_payload["options"]["sandbox"] == "read-only"
+        assert second_payload["options"]["skip_git_repo_check"] is True
+
+
+def test_codex_concurrent_sessions_sharing_codex_home_preserve_isolation_and_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "shared-codex-home"
+    codex_home.mkdir()
+    work_a = tmp_path / "work-a"
+    work_b = tmp_path / "work-b"
+    work_a.mkdir()
+    work_b.mkdir()
+    executable = str(write_provider_cli_wrapper(tmp_path / "bin", "codex"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    agent_a = make_agent_section(
+        executable=executable,
+        provider_name="codex",
+        model="fixture-model",
+        options={"profile": "alpha-profile", "color": "never"},
+    )
+    agent_b = make_agent_section(
+        executable=executable,
+        provider_name="codex",
+        model="fixture-model",
+        options={"profile": "beta-profile", "color": "always"},
+    )
+
+    monkeypatch.chdir(work_a)
+    session_a = start_agent_runtime_session(agent_a, tid="101")
+    monkeypatch.chdir(work_b)
+    session_b = start_agent_runtime_session(agent_b, tid="102")
+    try:
+        first_a = session_a.execute(
+            normalize_agent_work_item(agent_a, {"task": "remember:alpha-secret"})
+        )
+        first_b = session_b.execute(
+            normalize_agent_work_item(agent_b, {"task": "remember:beta-secret"})
+        )
+        second_a = session_a.execute(
+            normalize_agent_work_item(agent_a, {"task": "recall"})
+        )
+        second_b = session_b.execute(
+            normalize_agent_work_item(agent_b, {"task": "recall"})
+        )
+    finally:
+        session_a.close()
+        session_b.close()
+
+    assert (
+        first_a.metadata["session"]["provider_session_id"]
+        != first_b.metadata["session"]["provider_session_id"]
+    )
+    payload_a2 = json.loads(second_a.aggregate_public_output())
+    payload_b2 = json.loads(second_b.aggregate_public_output())
+    assert payload_a2["remembered"] == "alpha-secret"
+    assert payload_b2["remembered"] == "beta-secret"
+    assert payload_a2["cwd"] == str(work_a)
+    assert payload_b2["cwd"] == str(work_b)
+    assert payload_a2["options"]["profile"] == "alpha-profile"
+    assert payload_b2["options"]["profile"] == "beta-profile"
+    assert payload_a2["options"]["sandbox"] == "read-only"
+    assert payload_b2["options"]["sandbox"] == "read-only"
+    assert payload_a2["options"]["color"] == "never"
+    assert payload_b2["options"]["color"] == "always"
 
 
 def test_provider_cli_session_resolves_callable_tool_profile_once_per_turn(

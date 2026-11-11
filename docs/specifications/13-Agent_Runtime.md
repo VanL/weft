@@ -256,14 +256,16 @@ authority class as a security control. As verified against
   the builtin dockerized-agent Codex path appends
   `--sandbox danger-full-access` without separate caller input — the
   container boundary, not the Codex sandbox, is the isolation there. Persistent
-  Codex sessions apply cwd and sandbox flags on the first `exec` turn that
-  creates the session; resumed turns use `codex exec resume --last` and only
-  repeat flags that the resume subcommand accepts. Because `codex exec` has no
-  creation-time session-ID flag and resolves `auth.json` and `config.toml` from
-  `CODEX_HOME` (`~/.codex`), concurrent host `codex` tasks that require
-  isolated native session history must supply distinct `CODEX_HOME` paths via
-  `spec.env` or use container runtime isolation. (Plan:
-  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`)
+  Codex sessions pass `--json` alongside `-o <output_path>`, capture the
+  created session's `thread.started` `thread_id` on turn 0, and invoke
+  `codex exec [EXEC_OPTIONS] resume <thread_id> -o <output_path> <prompt>` on
+  subsequent turns so `--sandbox`, `-C <cwd>`, and configured `codex exec`
+  options remain enforced on every turn without sharing ambient `resume --last`
+  state across concurrent tasks (`CODEX_HOME` still supplies `auth.json` and
+  `config.toml` unless overridden via `spec.env` or container runtime
+  isolation). (Plans:
+  `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`,
+  `docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`)
 - **`agy`** (`AgyProvider`): appends `--mode plan` when
   `authority_class="bounded"` **or** `workspace_access="read-only"`. It reads
   structured JSON output, captures the exact `conversation_id` from the first
@@ -644,7 +646,7 @@ Backend-specific notes:
   `opencode` `run` support is therefore surfaced on first real use, not during
   preflight
 - `workspace_access` support is explicit per provider:
-  - `claude_code`: `read-only`
+  - `claude_code`: `read-only`, `none`
   - `codex`: `read-only`, `workspace-write`
   - `agy`: `read-only`
   - `qwen`: `read-only`
@@ -889,6 +891,7 @@ This slice does not attempt to:
 
 ## Related Plans
 
+- [`docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`](../plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md)
 - retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.
 
 - retired: 2026-09-11-public-python-contracts-plan — source 396c3b85; see docs/plans/README.md

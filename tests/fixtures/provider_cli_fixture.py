@@ -242,19 +242,21 @@ def _run_codex(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SU
     prompt: str | None = None
     session_id: str | None = None
     use_latest = False
+    json_mode = False
     i = 1
     is_resume = False
-    if i < len(argv) and argv[i] == "resume":
-        is_resume = True
-        i += 1
-        if i < len(argv) and argv[i] == "--last":
-            use_latest = True
-            i += 1
-        elif i < len(argv) and not argv[i].startswith("-"):
-            session_id = argv[i]
-            i += 1
     while i < len(argv):
         arg = argv[i]
+        if arg == "resume" and not is_resume and prompt is None:
+            is_resume = True
+            i += 1
+            if i < len(argv) and argv[i] == "--last":
+                use_latest = True
+                i += 1
+            elif i < len(argv) and not argv[i].startswith("-"):
+                session_id = argv[i]
+                i += 1
+            continue
         if is_resume and arg in {
             "--color",
             "--sandbox",
@@ -268,6 +270,10 @@ def _run_codex(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SU
         }:
             print(f"unsupported codex resume option: {arg}", file=sys.stderr)
             return 2
+        if arg == "--json":
+            json_mode = True
+            i += 1
+            continue
         if arg == "--model":
             model = argv[i + 1]
             i += 2
@@ -329,18 +335,38 @@ def _run_codex(argv: list[str]) -> int:  # noqa: C901 approved [TS-3.1] [RUFF-SU
     if prompt is None:
         print("missing prompt", file=sys.stderr)
         return 2
+    effective_session_key = session_id or (
+        f"codex-thread-{uuid4().hex}" if json_mode and not use_latest else None
+    )
     result = _execute_fixture_request(
         provider_name="codex",
         prompt=prompt,
         model=model,
         options=options,
         cwd=cwd,
-        session_key=session_id,
+        session_key=effective_session_key,
         use_latest=use_latest,
     )
     if isinstance(result, int):
         return result
     output_path.write_text(result, encoding="utf-8")
+    if json_mode and effective_session_key is not None:
+        print(
+            json.dumps(
+                {"type": "thread.started", "thread_id": effective_session_key},
+                sort_keys=True,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     print("fixture exec ok")
     return 0
 

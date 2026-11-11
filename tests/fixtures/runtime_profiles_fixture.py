@@ -204,3 +204,14 @@ def unsupported_mcp_tool_profile(
         mcp_servers=(server,),
         metadata={"profile": "unsupported-mcp", "tid": tid},
     )
+
+
+def claude_none_workspace_tool_profile(
+    *, agent: AgentSection, tid: str
+) -> AgentToolProfileResult:
+    del agent
+    return AgentToolProfileResult(
+        instructions="claude workspace none instructions",
+        workspace_access="none",
+        metadata={"profile": "claude-none", "tid": tid},
+    )

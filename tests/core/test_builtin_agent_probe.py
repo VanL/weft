@@ -65,3 +65,33 @@ def test_probe_agents_reports_unattempted_opencode_help_when_executable_is_absen
         "returncode": None,
     }
     assert "not found" in str(run_help["detail"])
+
+
+def test_probe_agents_resolves_project_relative_executable_against_project_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    other_cwd = tmp_path / "elsewhere"
+    (project_root / ".weft").mkdir(parents=True)
+    other_cwd.mkdir(parents=True)
+    bin_dir = project_root / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "codex-custom"
+    script.write_text("#!/bin/sh\necho 'codex 1.0'\n", encoding="utf-8")
+    script.chmod(0o755)
+    (project_root / ".weft" / "agents.json").write_text(
+        '{"provider_cli": {"providers": {"codex": {"executable": "./bin/codex-custom"}}}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(other_cwd)
+
+    result = agent_probe.probe_agents(
+        project_root=project_root,
+        persist_settings=False,
+        providers=(get_provider_cli_provider("codex"),),
+    )
+
+    report = result["providers"][0]
+    assert report["probe_status"] == "available"
+    assert Path(report["resolved_executable"]).resolve() == script.resolve()

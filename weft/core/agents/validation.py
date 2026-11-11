@@ -14,7 +14,7 @@ from typing import Any
 from weft.core.agents.backends import register_builtin_agent_runtimes
 from weft.core.taskspec import AgentSection
 
-from .runtime import get_agent_runtime
+from .runtime import _callable_supports_keyword, get_agent_runtime
 
 
 def validate_taskspec_agent_runtime(
@@ -45,11 +45,14 @@ def validate_taskspec_agent_runtime(
         effective_preflight = preflight and not _is_runner_one_shot_provider_cli(
             taskspec_payload
         )
-        validate(
-            agent=agent,
-            preflight=effective_preflight,
-            bundle_root=bundle_root,
-        )
+        kwargs: dict[str, Any] = {
+            "agent": agent,
+            "preflight": effective_preflight,
+            "bundle_root": bundle_root,
+        }
+        if _callable_supports_keyword(validate, "spec_context"):
+            kwargs["spec_context"] = _spec_context_from_spec(spec)
+        validate(**kwargs)
 
 
 def validate_taskspec_agent_tool_profile(
@@ -80,12 +83,15 @@ def validate_taskspec_agent_tool_profile(
         effective_preflight = preflight and not _is_runner_one_shot_provider_cli(
             taskspec_payload
         )
-        validate(
-            agent=agent,
-            tid=_tid_from_payload(taskspec_payload),
-            preflight=effective_preflight,
-            bundle_root=bundle_root,
-        )
+        kwargs: dict[str, Any] = {
+            "agent": agent,
+            "tid": _tid_from_payload(taskspec_payload),
+            "preflight": effective_preflight,
+            "bundle_root": bundle_root,
+        }
+        if _callable_supports_keyword(validate, "spec_context"):
+            kwargs["spec_context"] = _spec_context_from_spec(spec)
+        validate(**kwargs)
 
 
 def agent_runtime_name_from_taskspec(taskspec_payload: Mapping[str, Any]) -> str | None:
@@ -108,6 +114,13 @@ def _require_mapping(value: object, *, name: str) -> Mapping[str, Any]:
 
 def _tid_from_payload(taskspec_payload: Mapping[str, Any]) -> str | None:
     value = taskspec_payload.get("tid")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _spec_context_from_spec(spec: Mapping[str, Any]) -> str | None:
+    value = spec.get("weft_context")
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None

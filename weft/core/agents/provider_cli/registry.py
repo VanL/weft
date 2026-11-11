@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -260,7 +260,7 @@ class ClaudeCodeProvider(_BaseTextProvider):
     default_executable = "claude"
     supports_model = True
     supports_bounded_authority = True
-    supported_workspace_access_modes = ("read-only",)
+    supported_workspace_access_modes = ("read-only", "none")
     supports_explicit_mcp_servers = True
 
     def validate_tool_profile(
@@ -638,42 +638,41 @@ class CodexProvider(_BaseTextProvider):
     ) -> ProviderCLIInvocation:
         self.validate_model(model)
         self.validate_options(options)
+        if session.turn_index > 0 and session.session_id is None:
+            raise RuntimeError("codex session is missing a session_id")
         output_path = session.tempdir / f"last-message-{session.turn_index + 1}.txt"
-        command = [executable, "exec"]
-        if session.turn_index > 0:
-            command.extend(["resume", "--last"])
+        command = [executable, "exec", "--json"]
         if model:
             command.extend(["--model", model])
-        if session.turn_index == 0:
-            profile = options.get("profile")
-            if profile is not None:
-                command.extend(["--profile", str(profile)])
-            if options.get("oss"):
-                command.append("--oss")
-            local_provider = options.get("local_provider")
-            if local_provider is not None:
-                command.extend(["--local-provider", str(local_provider)])
+        profile = options.get("profile")
+        if profile is not None:
+            command.extend(["--profile", str(profile)])
+        if options.get("oss"):
+            command.append("--oss")
+        local_provider = options.get("local_provider")
+        if local_provider is not None:
+            command.extend(["--local-provider", str(local_provider)])
         for config_value in options.get("config_overrides", ()):
             command.extend(["--config", str(config_value)])
-        if session.turn_index == 0:
-            sandbox = (
-                "read-only"
-                if authority_class == "bounded"
-                else tool_profile.workspace_access or options.get("sandbox")
-            )
-            if sandbox is not None:
-                command.extend(["--sandbox", str(sandbox)])
-            if options.get("full_auto"):
-                command.append("--full-auto")
+        sandbox = (
+            "read-only"
+            if authority_class == "bounded"
+            else tool_profile.workspace_access or options.get("sandbox")
+        )
+        if sandbox is not None:
+            command.extend(["--sandbox", str(sandbox)])
+        if options.get("full_auto"):
+            command.append("--full-auto")
         if options.get("dangerously_bypass_approvals_and_sandbox"):
             command.append("--dangerously-bypass-approvals-and-sandbox")
-        if session.turn_index == 0:
-            for add_dir in options.get("add_dirs", ()):
-                command.extend(["--add-dir", str(add_dir)])
+        for add_dir in options.get("add_dirs", ()):
+            command.extend(["--add-dir", str(add_dir)])
         if options.get("skip_git_repo_check") is True:
             command.append("--skip-git-repo-check")
-        if session.turn_index == 0:
-            command.extend(["--color", str(options.get("color", "never")), "-C", cwd])
+        command.extend(["--color", str(options.get("color", "never")), "-C", cwd])
+        if session.turn_index > 0:
+            assert session.session_id is not None
+            command.extend(["resume", session.session_id])
         command.extend(["-o", str(output_path), prompt])
         return ProviderCLIInvocation(
             command=tuple(command),
@@ -691,14 +690,30 @@ class CodexProvider(_BaseTextProvider):
         if completed.returncode != 0:
             detail = _compact_process_detail(completed)
             raise RuntimeError(f"codex exec failed: {detail}")
+        expects_json_events = "--json" in invocation.command
+        thread_id: str | None = None
+        usage: dict[str, Any] | None = None
+        if expects_json_events:
+            thread_id, usage = _parse_codex_json_events(completed.stdout or "")
+            if thread_id is None:
+                detail = _compact_process_detail(completed)
+                raise RuntimeError(
+                    "codex exec session did not report a thread_id"
+                    + (f": {detail}" if detail else "")
+                )
         output_path = invocation.output_path
         if output_path is not None and output_path.exists():
             output_text = output_path.read_text(encoding="utf-8").strip()
             if output_text:
-                return ProviderCLIResult(output_text=output_text)
-        stdout_text = (completed.stdout or "").strip()
-        if stdout_text:
-            return ProviderCLIResult(output_text=stdout_text)
+                return ProviderCLIResult(
+                    output_text=output_text,
+                    usage=usage,
+                    session_id=thread_id,
+                )
+        if not expects_json_events:
+            stdout_text = (completed.stdout or "").strip()
+            if stdout_text:
+                return ProviderCLIResult(output_text=stdout_text)
         detail = _compact_process_detail(completed)
         raise RuntimeError(
             "codex exec produced no output" + (f": {detail}" if detail else "")
@@ -1133,6 +1148,7 @@ def _resolve_provider_cli_command_path(
     command: str,
     *,
     spec_context: str | None,
+    which: Callable[[str], str | None] | None = None,
 ) -> str | None:
     candidate = Path(command).expanduser()
     if candidate.is_absolute():
@@ -1146,10 +1162,38 @@ def _resolve_provider_cli_command_path(
         if resolved_candidate.exists():
             return str(resolved_candidate)
 
-    resolved = shutil.which(command)
+    which_fn = shutil.which if which is None else which
+    resolved = which_fn(command)
     if resolved is None:
         return None
     return str(Path(resolved).resolve())
+
+
+def _parse_codex_json_events(
+    stdout: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    thread_id: str | None = None
+    usage: dict[str, Any] | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "thread.started":
+            raw_id = event.get("thread_id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                thread_id = raw_id.strip()
+        elif event_type == "turn.completed":
+            raw_usage = event.get("usage")
+            if isinstance(raw_usage, Mapping):
+                usage = dict(raw_usage)
+    return thread_id, usage
 
 
 def _parse_opencode_json_output(stdout: str) -> str:

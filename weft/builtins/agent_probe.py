@@ -19,6 +19,7 @@ from weft.core.agents.provider_cli.probes import (
 )
 from weft.core.agents.provider_cli.registry import (
     ProviderCLIProvider,
+    _resolve_provider_cli_command_path,
     list_provider_cli_providers,
 )
 from weft.core.agents.provider_cli.settings import (
@@ -94,7 +95,11 @@ def _probe_provider(
     )
     configured_executable = configured.executable
     candidate = configured_executable or provider.default_executable
-    resolved = shutil.which(candidate)
+    resolved = _resolve_provider_cli_command_path(
+        candidate,
+        spec_context=str(project_root),
+        which=shutil.which,
+    )
 
     report: dict[str, Any] = {
         "provider": provider.name,

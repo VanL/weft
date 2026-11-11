@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from weft.core.runtime_identity import get_runtime_identity
 from weft.core.taskspec import AgentSection
 
 from ..provider_cli.execution import (
@@ -40,6 +41,15 @@ from ..runtime import AgentExecutionResult, NormalizedAgentWorkItem
 from ..tools import ResolvedAgentTool
 
 
+def _effective_spec_context(spec_context: str | None) -> str:
+    if isinstance(spec_context, str) and spec_context.strip():
+        return spec_context.strip()
+    identity = get_runtime_identity()
+    if identity is not None and identity.context_root:
+        return identity.context_root
+    return str(Path.cwd())
+
+
 class ProviderCLIBackend:
     """Delegated runtime backed by an external provider CLI."""
 
@@ -49,6 +59,7 @@ class ProviderCLIBackend:
         agent: AgentSection,
         preflight: bool = False,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> None:
         provider = resolve_provider_cli(agent)
         provider.validate_authority(agent.resolved_authority_class)
@@ -56,7 +67,10 @@ class ProviderCLIBackend:
         provider.validate_options(dict(agent.options))
         load_agent_resolver(agent, bundle_root=bundle_root)
         if preflight:
-            self._resolve_executable(agent, spec_context=str(Path.cwd()))
+            self._resolve_executable(
+                agent,
+                spec_context=_effective_spec_context(spec_context),
+            )
 
     def validate_tool_profile(
         self,
@@ -65,7 +79,9 @@ class ProviderCLIBackend:
         tid: str | None = None,
         preflight: bool = False,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> None:
+        del spec_context
         provider = resolve_provider_cli(agent)
         tool_profile = resolve_agent_tool_profile(
             agent,
@@ -89,12 +105,19 @@ class ProviderCLIBackend:
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> AgentExecutionResult:
         del tools
-        self.validate(agent=agent, preflight=False, bundle_root=bundle_root)
+        resolved_spec_context = _effective_spec_context(spec_context)
+        self.validate(
+            agent=agent,
+            preflight=False,
+            bundle_root=bundle_root,
+            spec_context=resolved_spec_context,
+        )
 
         cwd = str(Path.cwd())
-        executable = self._resolve_executable(agent, spec_context=cwd)
+        executable = self._resolve_executable(agent, spec_context=resolved_spec_context)
 
         with tempfile.TemporaryDirectory(prefix="weft-provider-cli-") as tempdir:
             prepared = prepare_provider_cli_execution(
@@ -112,6 +135,7 @@ class ProviderCLIBackend:
                 invocation=prepared.invocation,
                 executable=prepared.executable,
                 command_class="execute",
+                spec_context=resolved_spec_context,
             )
         return build_provider_cli_execution_result(
             agent=agent,
@@ -127,17 +151,24 @@ class ProviderCLIBackend:
         agent: AgentSection,
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> ProviderCLIBackendSession:
-        self.validate(agent=agent, preflight=False, bundle_root=bundle_root)
+        resolved_spec_context = _effective_spec_context(spec_context)
+        self.validate(
+            agent=agent,
+            preflight=False,
+            bundle_root=bundle_root,
+            spec_context=resolved_spec_context,
+        )
         self.validate_tool_profile(
             agent=agent,
             tid=tid,
             preflight=True,
             bundle_root=bundle_root,
+            spec_context=resolved_spec_context,
         )
         provider = resolve_provider_cli(agent)
-        cwd = str(Path.cwd())
-        executable = self._resolve_executable(agent, spec_context=cwd)
+        executable = self._resolve_executable(agent, spec_context=resolved_spec_context)
         return ProviderCLIBackendSession(
             backend=self,
             agent=agent,
@@ -145,6 +176,7 @@ class ProviderCLIBackend:
             executable=executable,
             tid=tid,
             bundle_root=bundle_root,
+            spec_context=resolved_spec_context,
         )
 
     def _resolve_executable(
@@ -167,11 +199,12 @@ class ProviderCLIBackend:
         invocation: Any,
         executable: str,
         command_class: Literal["execute", "session"],
+        spec_context: str | None = None,
     ) -> Any:
         env = os.environ.copy()
         if invocation.env:
             env.update(invocation.env)
-        spec_context = invocation.cwd or str(Path.cwd())
+        resolved_spec_context = _effective_spec_context(spec_context)
         try:
             command = tuple(invocation.command)
             if os.name == "nt":
@@ -192,7 +225,7 @@ class ProviderCLIBackend:
                 provider=provider,
                 executable=executable,
                 command_class=command_class,
-                spec_context=spec_context,
+                spec_context=resolved_spec_context,
                 status="failure",
                 detail=str(exc),
             )
@@ -210,7 +243,7 @@ class ProviderCLIBackend:
                 provider=provider,
                 executable=executable,
                 command_class=command_class,
-                spec_context=spec_context,
+                spec_context=resolved_spec_context,
                 status="failure",
                 detail=str(exc),
             )
@@ -219,7 +252,7 @@ class ProviderCLIBackend:
             provider=provider,
             executable=executable,
             command_class=command_class,
-            spec_context=spec_context,
+            spec_context=resolved_spec_context,
             status="success",
             detail=None,
         )
@@ -257,6 +290,7 @@ class ProviderCLIBackendSession:
         executable: str,
         tid: str | None,
         bundle_root: str | None,
+        spec_context: str | None = None,
     ) -> None:
         self._backend = backend
         self._agent = agent
@@ -264,6 +298,7 @@ class ProviderCLIBackendSession:
         self._executable = executable
         self._tid = tid
         self._bundle_root = bundle_root
+        self._spec_context = spec_context
         self._tempdir = tempfile.TemporaryDirectory(prefix="weft-provider-cli-session-")
         self._session = provider.create_session_context(
             executable=executable,
@@ -297,6 +332,7 @@ class ProviderCLIBackendSession:
             invocation=invocation,
             executable=self._executable,
             command_class="session",
+            spec_context=self._spec_context,
         )
         if provider_result.session_id is not None:
             if (

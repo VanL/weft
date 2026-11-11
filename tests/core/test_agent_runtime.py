@@ -38,8 +38,9 @@ class EchoRuntime:
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> AgentExecutionResult:
-        del tid
+        del tid, bundle_root, spec_context
         return AgentExecutionResult(
             runtime=agent.runtime,
             model=agent.model,

@@ -480,3 +480,55 @@ def _write_agent_settings(path: Path, *, provider_name: str, executable: str) ->
         + "\n",
         encoding="utf-8",
     )
+
+
+def test_codex_session_parser_fails_closed_when_thread_id_is_missing(
+    tmp_path: Path,
+) -> None:
+    provider = get_provider_cli_provider("codex")
+    out_file = tmp_path / "last-message.txt"
+    out_file.write_text("hello", encoding="utf-8")
+    completed = subprocess.CompletedProcess(
+        args=["codex", "exec", "--json"],
+        returncode=0,
+        stdout='{"type":"turn.completed"}\n',
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError, match="thread_id"):
+        provider.parse_result(
+            completed=completed,
+            invocation=ProviderCLIInvocation(
+                command=("codex", "exec", "--json", "-o", str(out_file), "hi"),
+                output_path=out_file,
+            ),
+        )
+
+
+def test_provider_cli_separates_selected_spec_context_from_execution_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context-a"
+    work_dir = tmp_path / "cwd-b"
+    (context_root / ".weft").mkdir(parents=True)
+    work_dir.mkdir(parents=True)
+    wrapper = write_provider_cli_wrapper(context_root / "bin", "codex")
+    _write_agent_settings(
+        context_root / ".weft" / "agents.json",
+        provider_name="codex",
+        executable="./bin/" + wrapper.name,
+    )
+    monkeypatch.chdir(work_dir)
+
+    result = execute_agent_target(
+        make_agent_section(executable=None, provider_name="codex"),
+        {"task": "hello"},
+        tid="123",
+        spec_context=str(context_root),
+    )
+
+    payload = json.loads(result.aggregate_public_output())
+    assert payload["cwd"] == str(work_dir)
+    assert (context_root / ".weft" / "agent-health.json").exists()
+    assert not (work_dir / ".weft" / "agent-health.json").exists()

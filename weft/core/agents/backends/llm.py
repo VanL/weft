@@ -36,7 +36,9 @@ class LLMBackend:
         tools: Sequence[ResolvedAgentTool],
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> AgentExecutionResult:
+        del spec_context
         model = self._resolve_model(agent, bundle_root=bundle_root)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return self._execute_with_conversation(
@@ -54,7 +56,9 @@ class LLMBackend:
         agent: AgentSection,
         tid: str | None,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> AgentRuntimeSession:
+        del spec_context
         model = self._resolve_model(agent, bundle_root=bundle_root)
         conversation = model.conversation(chain_limit=agent.max_turns)
         return LLMBackendSession(
@@ -70,7 +74,9 @@ class LLMBackend:
         agent: AgentSection,
         preflight: bool = False,
         bundle_root: str | None = None,
+        spec_context: str | None = None,
     ) -> None:
+        del spec_context
         self._validate_agent(agent)
         self._register_plugin_modules(
             agent.runtime_config.get("plugin_modules"),
