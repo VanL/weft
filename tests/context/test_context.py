@@ -1148,3 +1148,26 @@ def test_build_context_fallback_keeps_root_with_postgres_configuration(
         assert ctx.broker_target.backend_options == {"schema": "configured_schema"}
         assert ctx.database_path is None
     assert not (unrelated / ".weft").exists()
+
+
+def test_build_context_create_dirs_false_does_not_write_project_config(
+    tmp_path: Path,
+) -> None:
+    """build_context(create_dirs=False, create_database=False) leaves .weft uncreated.
+
+    Spec: docs/specifications/04-SimpleBroker_Integration.md [SB-0];
+    docs/specifications/14-Python_API_Surfaces.md [PY-1].
+    """
+    empty_dir = tmp_path / "empty-dir"
+    empty_dir.mkdir()
+
+    ctx = build_context(
+        spec_context=empty_dir,
+        create_dirs=False,
+        create_database=False,
+    )
+
+    assert ctx.root == empty_dir.resolve()
+    assert not (empty_dir / ".weft").exists()
+    assert not ctx.weft_dir.exists()
+    assert not ctx.config_path.exists()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ from weft._exceptions import (
     TaskNotFound,
 )
 from weft.cli.app import app
+from weft.client import WeftClient
 from weft.commands import _observation as observation_cmd
 from weft.commands import events as event_cmd
 from weft.commands import system as status_cmd
@@ -1816,6 +1818,18 @@ def test_stop_tasks_uses_runner_handle_when_available(
     class FakeRunnerPlugin:
         def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             calls.append(("stop", handle.to_dict(), timeout))
+            with ctx.queue(f"T{tid}.ctrl_out", persistent=False) as ctrl_out:
+                ctrl_out.write(
+                    json.dumps(
+                        {
+                            "type": "terminal",
+                            "source": "task",
+                            "tid": tid,
+                            "status": "cancelled",
+                            "timestamp": time.time_ns(),
+                        }
+                    )
+                )
             return True
 
     mapping_queue.write(
@@ -1881,6 +1895,18 @@ def test_stop_tasks_prefers_task_process_over_runner_handle(
     class FakeRunnerPlugin:
         def stop(self, handle: RunnerHandle, *, timeout: float = 2.0) -> bool:
             plugin_calls.append(("stop", handle.to_dict(), timeout))
+            with ctx.queue(f"T{tid}.ctrl_out", persistent=False) as ctrl_out:
+                ctrl_out.write(
+                    json.dumps(
+                        {
+                            "type": "terminal",
+                            "source": "task",
+                            "tid": tid,
+                            "status": "cancelled",
+                            "timestamp": time.time_ns(),
+                        }
+                    )
+                )
             return True
 
     mapping_queue.write(
@@ -2092,7 +2118,12 @@ def test_task_stop_stops_pipeline_run(
     ctrl_queue = ctx.queue(f"P{tid}.ctrl_in", persistent=False)
     _write_logged_pipeline_task(ctx, tid)
     monkeypatch.setattr(
-        task_cmd, "_await_control_surface", lambda ctx, tid, **kwargs: (None, None)
+        task_cmd,
+        "_await_control_surface",
+        lambda ctx, tid, **kwargs: (
+            None,
+            replace(_running_control_snapshot(tid), status="cancelled"),
+        ),
     )
 
     stopped = task_cmd.stop_tasks([tid], context_path=root)
@@ -2151,7 +2182,7 @@ def test_stop_tasks_does_not_force_terminal_consumer_for_external_runner(
 
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=encode_tid(tid),
@@ -2220,7 +2251,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
 
     monkeypatch.setattr(
         task_cmd,
-        "task_status",
+        "_task_status",
         lambda *args, **kwargs: task_cmd.system_cmd.TaskSnapshot(
             tid=tid,
             tid_short=encode_tid(tid),
@@ -2249,7 +2280,7 @@ def test_stop_tasks_does_not_force_stop_consumer_without_runner_handle(
 
     stopped = task_cmd.stop_tasks([tid], context_path=root)
 
-    assert stopped == 1
+    assert stopped == 0
     assert ctrl_queue.read_one() == encode_control_message("STOP")
 
 
@@ -2691,3 +2722,56 @@ def test_task_status_reconciles_dead_live_and_absent_handle_superseded_manager_p
         assert ctrl_in.peek_many(limit=10) == []
     with ctx.queue(f"T{new_mgr_tid}.ctrl_in", persistent=False) as ctrl_in:
         assert ctrl_in.peek_many(limit=10) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Requires POSIX SIGSTOP/SIGCONT")
+def test_stop_task_rejects_unconverged_report_unknown_for_frozen_consumer() -> None:
+    """stop_task and cmd_task_stop reject stop when terminal proof never arrives.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.12a];
+    docs/program-theory.md [WT-2a.13].
+    """
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        ctx = harness.context
+        ready_path = harness.root / "frozen-worker.ready"
+        client = WeftClient(context=ctx)
+        task = client.submit_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, time; "
+                    f"pathlib.Path({str(ready_path)!r}).write_text(str(os.getpid())); "
+                    "time.sleep(60)"
+                ),
+            ],
+            name="frozen-stop-target",
+        )
+        tid = task.tid
+        harness.register_tid(tid)
+        worker_pid = _wait_for_registered_worker_pid(ctx, tid, ready_path=ready_path)
+        assert worker_pid is not None
+        consumer_pid = psutil.Process(worker_pid).ppid()
+        assert consumer_pid > 0
+        assert consumer_pid != os.getpid()
+
+        os.kill(consumer_pid, signal.SIGSTOP)
+        try:
+            with pytest.raises(ControlRejected):
+                task_cmd.stop_task(tid, context=ctx)
+
+            with pytest.raises(ControlRejected) as bulk_exc:
+                task_cmd.cmd_task_stop(
+                    pattern="frozen-stop-target", context=harness.root
+                )
+            assert tuple(item.tid for item in bulk_exc.value.failures) == (tid,)
+        finally:
+            try:
+                os.kill(consumer_pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            try:
+                task_cmd.kill_task(tid, context=ctx)
+            except ControlRejected:
+                pass

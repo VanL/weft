@@ -41,7 +41,10 @@ from weft._constants import (
     CONTROL_PING,
     CONTROL_STATUS,
     CONTROL_STOP,
+    QUEUE_CTRL_IN_SUFFIX,
+    QUEUE_CTRL_OUT_SUFFIX,
     QUEUE_INBOX_SUFFIX,
+    QUEUE_OUTBOX_SUFFIX,
     QUEUE_RESERVED_SUFFIX,
     RETENTION_PRUNE_CLASS_CLAIMED_OUTBOX_RESIDUE_FORCE,
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
@@ -608,56 +611,59 @@ def _task_local_candidates_for_tid(
     candidates: list[RetentionPruneCandidate] = []
     stats: list[RetentionQueueScanStats] = []
 
-    ctrl_out_candidates, scanned = _ctrl_out_candidates(
-        ctx,
-        config=config,
-        evidence=evidence,
-        queue_name=ctrl_out_name,
-        now_ns=now_ns,
-        broker=broker,
-    )
-    candidates.extend(ctrl_out_candidates)
-    stats.append(
-        RetentionQueueScanStats(
-            queue=ctrl_out_name,
-            scanned=scanned,
-            candidates=len(ctrl_out_candidates),
+    if ctrl_out_name == f"T{tid}.{QUEUE_CTRL_OUT_SUFFIX}":
+        ctrl_out_candidates, scanned = _ctrl_out_candidates(
+            ctx,
+            config=config,
+            evidence=evidence,
+            queue_name=ctrl_out_name,
+            now_ns=now_ns,
+            broker=broker,
         )
-    )
+        candidates.extend(ctrl_out_candidates)
+        stats.append(
+            RetentionQueueScanStats(
+                queue=ctrl_out_name,
+                scanned=scanned,
+                candidates=len(ctrl_out_candidates),
+            )
+        )
 
-    outbox_candidates, scanned = _outbox_candidates(
-        ctx,
-        config=config,
-        evidence=evidence,
-        queue_name=outbox_name,
-        now_ns=now_ns,
-        broker=broker,
-    )
-    candidates.extend(outbox_candidates)
-    stats.append(
-        RetentionQueueScanStats(
-            queue=outbox_name,
-            scanned=scanned,
-            candidates=len(outbox_candidates),
+    if outbox_name == f"T{tid}.{QUEUE_OUTBOX_SUFFIX}":
+        outbox_candidates, scanned = _outbox_candidates(
+            ctx,
+            config=config,
+            evidence=evidence,
+            queue_name=outbox_name,
+            now_ns=now_ns,
+            broker=broker,
         )
-    )
+        candidates.extend(outbox_candidates)
+        stats.append(
+            RetentionQueueScanStats(
+                queue=outbox_name,
+                scanned=scanned,
+                candidates=len(outbox_candidates),
+            )
+        )
 
-    ctrl_in_candidates, scanned = _ctrl_in_candidates(
-        ctx,
-        config=config,
-        evidence=evidence,
-        queue_name=ctrl_in_name,
-        now_ns=now_ns,
-        broker=broker,
-    )
-    candidates.extend(ctrl_in_candidates)
-    stats.append(
-        RetentionQueueScanStats(
-            queue=ctrl_in_name,
-            scanned=scanned,
-            candidates=len(ctrl_in_candidates),
+    if ctrl_in_name == f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}":
+        ctrl_in_candidates, scanned = _ctrl_in_candidates(
+            ctx,
+            config=config,
+            evidence=evidence,
+            queue_name=ctrl_in_name,
+            now_ns=now_ns,
+            broker=broker,
         )
-    )
+        candidates.extend(ctrl_in_candidates)
+        stats.append(
+            RetentionQueueScanStats(
+                queue=ctrl_in_name,
+                scanned=scanned,
+                candidates=len(ctrl_in_candidates),
+            )
+        )
 
     for queue_name, candidate_class in (
         (inbox_name, RETENTION_PRUNE_CLASS_OBSOLETE_INBOX_WORK),

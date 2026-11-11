@@ -101,7 +101,7 @@ def _context(spec_context: str | None = None) -> WeftContext:
     if env_context:
         return build_context(spec_context=env_context)
 
-    return build_context(spec_context=os.getcwd())
+    return build_context(spec_context=None)
 
 
 def _queue_entry(queue_name: str, message: QueueMessage) -> QueueEntry:

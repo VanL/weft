@@ -2191,3 +2191,67 @@ def test_client_system_methods_probe_reject_unknown_keyword(tmp_path: Path) -> N
         client.system.task_monitor(bogus=True)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         client.system.stop(bogus=True)  # type: ignore[call-arg]
+
+
+def test_prepare_pipeline_translates_missing_stage_taskspec_to_spec_not_found(
+    tmp_path: Path,
+) -> None:
+    """Missing pipeline stage TaskSpec raises SpecNotFound chaining FileNotFoundError [PY-3]."""
+    root = prepare_project_root(tmp_path / "project")
+    pipeline_path = root / ".weft" / "pipelines" / "broken-pipeline.json"
+    _write_json(
+        pipeline_path,
+        {
+            "name": "broken-pipeline",
+            "stages": [{"name": "only", "task": "missing-stage-taskspec"}],
+        },
+    )
+    client = WeftClient(path=root)
+
+    with pytest.raises(exception_types.SpecNotFound) as exc_info:
+        client.prepare_pipeline("broken-pipeline")
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+
+def test_client_queues_resolves_alias_operands_across_verbs(tmp_path: Path) -> None:
+    """QueuesNamespace canonicalizes @alias operands identically to cmd_queue_*."""
+    root = prepare_project_root(tmp_path / "project")
+    client = WeftClient(path=root)
+    client.queues.aliases.add("src-alias", "canonical.source")
+    client.queues.aliases.add("dst-alias", "canonical.dest")
+    client.queues.aliases.add("watch-dst", "canonical.watch_dest")
+
+    write_receipt = client.queues.write("@src-alias", "first")
+    assert write_receipt.queue == "canonical.source"
+    assert client.queues.exists("@src-alias") is True
+    assert client.queues.stats("@src-alias").name == "canonical.source"
+    assert [entry.message for entry in client.queues.peek("@src-alias")] == ["first"]
+
+    with pytest.raises(
+        exception_types.CommandUsageError,
+        match="source and destination queues cannot be the same",
+    ):
+        client.queues.move("@src-alias", "canonical.source")
+
+    move_receipt = client.queues.move("@src-alias", "@dst-alias")
+    assert move_receipt.source == "canonical.source"
+    assert move_receipt.destination == "canonical.dest"
+    assert move_receipt.moved_count == 1
+    assert [entry.message for entry in client.queues.read("@dst-alias")] == ["first"]
+
+    client.queues.write("@src-alias", "watched")
+    watched = list(
+        client.queues.watch(
+            "@src-alias",
+            limit=1,
+            interval=0.05,
+            move_to="@watch-dst",
+        )
+    )
+    assert [entry.message for entry in watched] == ["watched"]
+    assert [entry.message for entry in client.queues.peek("@watch-dst")] == ["watched"]
+
+    deleted = client.queues.delete("@watch-dst")
+    assert deleted.queue == "canonical.watch_dest"
+    assert deleted.deleted_count == 1
+    assert client.queues.peek("@watch-dst") == []

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     CONTROL_PING,
     RETENTION_PRUNE_CLASS_NONTERMINAL_TASK_LOG_SUPERSEDED,
@@ -1042,3 +1043,90 @@ def test_client_prune_preserves_resolved_directory_and_broker(
         ).candidates
         == 0
     )
+
+
+def test_retention_prune_preserves_custom_shared_queues_under_report_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Foreground retention and task-local prune never scan or delete custom/shared queues.
+
+    Spec: docs/specifications/07-System_Invariants.md [OBS.13.9];
+    docs/program-theory.md [WT-2a.2], [WT-4.2].
+    """
+    monkeypatch.setenv("WEFT_TASK_MONITOR_MODE", "report_only")
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        ctx = harness.context
+        client = WeftClient(context=ctx)
+        shared_outbox = "shared.coordination.outbox"
+        shared_ctrl_out = "shared.coordination.ctrl_out"
+        shared_ctrl_in = "shared.coordination.ctrl_in"
+
+        task = client.submit(
+            {
+                "name": "shared-queue-task",
+                "spec": {
+                    "type": "function",
+                    "function_target": "tests.tasks.sample_targets:echo_payload",
+                    "runner": {"name": "host", "options": {}},
+                },
+                "io": {
+                    "outputs": {"outbox": shared_outbox},
+                    "control": {
+                        "ctrl_in": shared_ctrl_in,
+                        "ctrl_out": shared_ctrl_out,
+                    },
+                },
+            },
+            payload="done",
+        )
+        harness.register_tid(task.tid)
+        completed = task.result(timeout=30.0)
+        assert completed.status == "completed"
+        assert completed.value == "done"
+
+        external_outbox_id = _write_raw(
+            ctx,
+            shared_outbox,
+            "external-live-workflow-message",
+            persistent=True,
+        )
+        external_ctrl_out_id = _write_raw(
+            ctx,
+            shared_ctrl_out,
+            "external-live-ctrl-out-message",
+            persistent=True,
+        )
+        external_ctrl_in_id = _write_raw(
+            ctx,
+            shared_ctrl_in,
+            "external-live-ctrl-in-message",
+            persistent=True,
+        )
+
+        for family in ("retention", "task-local"):
+            archive_path = harness.root / f"archive-{family}.jsonl"
+            result = cmd_system_prune(
+                family=family,
+                apply=True,
+                min_age=0,
+                archive=archive_path,
+                context=harness.root,
+            )
+            assert result.failed == 0, family
+            assert external_outbox_id in _read_ids(
+                ctx, shared_outbox, persistent=True
+            ), family
+            assert external_ctrl_out_id in _read_ids(
+                ctx, shared_ctrl_out, persistent=True
+            ), family
+            assert external_ctrl_in_id in _read_ids(
+                ctx, shared_ctrl_in, persistent=True
+            ), family
+            if archive_path.exists():
+                archived_queues = {
+                    record.get("queue") for record in _read_json_records(archive_path)
+                }
+                assert archived_queues.isdisjoint(
+                    {shared_outbox, shared_ctrl_out, shared_ctrl_in}
+                ), family

@@ -1880,8 +1880,25 @@ def _stop_resolved_tasks(
             and not handled_by_runner
         ):
             task_entry = _latest_task_entry(ctx, lookup, full, task_entry)
-            _stop_via_fallback(task_entry)
-        count += 1
+            if _stop_via_fallback(task_entry):
+                task_entry, snapshot = _await_control_surface(
+                    ctx, full, observation_config=config
+                )
+                decision = reduce_control_convergence(
+                    "escalating_runner",
+                    ControlConvergenceEvidence(
+                        command=CONTROL_STOP,
+                        terminal_status=_control_terminal_status(snapshot),
+                        runner_fallback_attempted=True,
+                        observation_budget_expired=True,
+                    ),
+                )
+                _require_control_action(
+                    decision.action,
+                    {"accept_terminal", "report_unknown"},
+                )
+        if decision.action == "accept_terminal":
+            count += 1
     return count
 
 

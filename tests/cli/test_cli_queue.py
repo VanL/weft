@@ -76,6 +76,7 @@ def test_queue_stdin_uses_read_only_resolved_context_limit(
     facade_name: str,
 ) -> None:
     observed: dict[str, object] = {}
+    monkeypatch.delenv("WEFT_CONTEXT", raising=False)
 
     def fake_context(*args: object, **kwargs: object) -> object:
         observed.update(context_args=args, context_kwargs=kwargs)
@@ -92,7 +93,8 @@ def test_queue_stdin_uses_read_only_resolved_context_limit(
     assert result.exit_code == 2
     assert "maximum size of 4 bytes" in result.stderr
     assert observed["context_kwargs"] == {
-        "spec_context": os.getcwd(),
+        "spec_context": None,
+        "create_dirs": False,
         "create_database": False,
     }
     assert "facade_args" not in observed
@@ -787,3 +789,63 @@ def test_queue_list_endpoints_json_reports_canonical_owner(workdir: Path) -> Non
     finally:
         high_task.cleanup()
         low_task.cleanup()
+
+
+def test_queue_commands_discover_enclosing_project_from_nested_subdirectory(
+    workdir: Path,
+) -> None:
+    """weft queue verbs from nested subdirectories use enclosing .weft without creating nested .weft."""
+    root_ctx = build_context(spec_context=workdir)
+    if root_ctx.database_path is not None:
+        (root_ctx.weft_dir / "broker.toml").write_text(
+            f'version = 1\nbackend = "sqlite"\ntarget = "{root_ctx.database_path.name}"\n',
+            encoding="utf-8",
+        )
+    nested = workdir / "sub1" / "sub2"
+    nested.mkdir(parents=True)
+
+    rc, out, err = run_cli(
+        "queue",
+        "write",
+        "nested.jobs",
+        "from-argv",
+        cwd=nested,
+        prepare_root=False,
+    )
+    assert rc == 0, err
+    assert out == ""
+
+    rc, out, err = run_cli(
+        "queue",
+        "write",
+        "nested.jobs",
+        cwd=nested,
+        stdin="from-stdin",
+        prepare_root=False,
+    )
+    assert rc == 0, err
+    assert out == ""
+
+    assert not (workdir / "sub1" / ".weft").exists()
+    assert not (nested / ".weft").exists()
+
+    rc, out, err = run_cli(
+        "queue",
+        "peek",
+        "nested.jobs",
+        "--all",
+        cwd=nested,
+        prepare_root=False,
+    )
+    assert rc == 0, err
+    assert out.splitlines() == ["from-argv", "from-stdin"]
+
+    rc, out, err = run_cli(
+        "queue",
+        "peek",
+        "nested.jobs",
+        "--all",
+        cwd=workdir,
+    )
+    assert rc == 0, err
+    assert out.splitlines() == ["from-argv", "from-stdin"]

@@ -300,6 +300,7 @@ def build_context(
     if inherit_runtime:
         assert identity is not None and isinstance(identity.broker_target, BrokerTarget)
         broker_target = identity.broker_target
+    root.mkdir(parents=True, exist_ok=True)
     database_path = broker_target.target_path
     weft_dir_name = get_weft_directory_name(resolved_config)
     weft_dir = (root / weft_dir_name).resolve(strict=False)
@@ -307,7 +308,7 @@ def build_context(
     logs_dir = _resolve_logs_dir(root, weft_dir, resolved_config.get("LOGS_DIR"))
     config_path = weft_dir / "config.json"
     autostart_dir = weft_dir / WEFT_AUTOSTART_DIRECTORY_NAME
-    project_config = _load_project_config(config_path)
+    project_config = _load_project_config(config_path, persist_if_missing=create_dirs)
     project_autostart = _project_autostart_default(project_config)
 
     autostart_enabled = (
@@ -506,7 +507,11 @@ def _ensure_database(
         pass
 
 
-def _load_project_config(config_path: Path) -> dict[str, Any]:
+def _load_project_config(
+    config_path: Path,
+    *,
+    persist_if_missing: bool = True,
+) -> dict[str, Any]:
     """Load project metadata from the Weft config file, creating defaults if missing (Spec: [SB-0])."""
     if not config_path.exists():
         payload = {
@@ -514,7 +519,8 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
             "project_name": config_path.parent.parent.name,
             "created": time.time_ns(),
         }
-        write_json_atomically(config_path, payload)
+        if persist_if_missing:
+            write_json_atomically(config_path, payload)
         return payload
 
     try:

@@ -21,6 +21,7 @@ from weft._constants import (
     RUNTIME_PRUNE_DEFAULT_MIN_AGE_SECONDS,
     TASK_PING_TIMEOUT_SECONDS,
 )
+from weft._exceptions import CommandUsageError
 from weft.commands import (
     builtins,
     dump,
@@ -241,7 +242,7 @@ class QueuesNamespace:
     ) -> list[QueueEntry]:
         return queues.read_queue(
             self.client.context,
-            name,
+            queues._canonical_queue_operand(self.client.context, name),
             all_messages=all_messages,
             message_id=message_id,
             after=after,
@@ -249,7 +250,11 @@ class QueuesNamespace:
         )
 
     def write(self, name: str, message: str) -> QueueWriteReceipt:
-        return queues.write_queue(self.client.context, name, message)
+        return queues.write_queue(
+            self.client.context,
+            queues._canonical_queue_operand(self.client.context, name),
+            message,
+        )
 
     def write_endpoint(self, name: str, message: str) -> QueueWriteReceipt:
         return queues.write_endpoint(self.client.context, name, message)
@@ -265,7 +270,7 @@ class QueuesNamespace:
     ) -> list[QueueEntry]:
         return queues.peek_queue(
             self.client.context,
-            name,
+            queues._canonical_queue_operand(self.client.context, name),
             all_messages=all_messages,
             message_id=message_id,
             after=after,
@@ -283,10 +288,20 @@ class QueuesNamespace:
         after: int | None = None,
         before: int | None = None,
     ) -> QueueMoveReceipt:
-        result = queues.move_queue_entries(
+        canonical_source = queues._canonical_queue_operand(
             self.client.context,
             source,
+        )
+        canonical_destination = queues._canonical_queue_operand(
+            self.client.context,
             destination,
+        )
+        if canonical_source == canonical_destination:
+            raise CommandUsageError("source and destination queues cannot be the same")
+        result = queues.move_queue_entries(
+            self.client.context,
+            canonical_source,
+            canonical_destination,
             limit=limit,
             all_messages=all_messages,
             message_id=message_id,
@@ -316,10 +331,16 @@ class QueuesNamespace:
         )
 
     def exists(self, name: str) -> bool:
-        return queues.queue_exists(self.client.context, name)
+        return queues.queue_exists(
+            self.client.context,
+            queues._canonical_queue_operand(self.client.context, name),
+        )
 
     def stats(self, name: str) -> QueueInfo:
-        return queues.queue_info(self.client.context, name)
+        return queues.queue_info(
+            self.client.context,
+            queues._canonical_queue_operand(self.client.context, name),
+        )
 
     def resolve(self, endpoint_name: str) -> EndpointResolution | None:
         return queues.resolve_queue_endpoint(self.client.context, endpoint_name)
@@ -335,15 +356,21 @@ class QueuesNamespace:
         before: int | None = None,
         move_to: str | None = None,
     ) -> Iterator[QueueEntry]:
+        canonical_name = queues._canonical_queue_operand(self.client.context, name)
+        canonical_move_to = (
+            queues._canonical_queue_operand(self.client.context, move_to)
+            if move_to is not None
+            else None
+        )
         yield from queues.watch_queue_entries(
             self.client.context,
-            name,
+            canonical_name,
             limit=limit,
             interval=interval,
             peek=peek,
             after=after,
             before=before,
-            move_to=move_to,
+            move_to=canonical_move_to,
         )
 
     def delete(
@@ -353,9 +380,14 @@ class QueuesNamespace:
         all_queues: bool = False,
         message_id: int | str | None = None,
     ) -> QueueDeleteReceipt:
+        canonical_name = (
+            queues._canonical_queue_operand(self.client.context, name)
+            if name is not None
+            else None
+        )
         return queues.delete_queue_messages(
             self.client.context,
-            name,
+            canonical_name,
             all_queues=all_queues,
             message_id=message_id,
         )

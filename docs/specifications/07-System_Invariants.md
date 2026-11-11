@@ -704,7 +704,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     summary emission; standard `ctrl_out` and outbox remain retention-gated under
     [MF-5], including forced-death and stale-service-owner cleanup. Standard reserved
     remains owned by its existing cleanup policy. Custom/shared queues remain externally
-    owned. Monitor repair covers only reachable current-writer/current-cleanup states;
+    owned: neither `TaskMonitor` nor ordinary foreground `retention` / `task-local` prune
+    scans or deletes rows from non-standard custom/shared queue names. Monitor repair
+    covers only reachable current-writer/current-cleanup states;
     older Monitor schemas use migration, not a permanent compatibility lane.
   - **OBS.13.10**: Built-in task-log cleanup and runtime cleanup are the only
     TaskMonitor worker lanes allowed to own broker/store cleanup effects. The
@@ -1532,6 +1534,7 @@ doc:
 
 ## Related Plans
 
+- [Deep-Dive Reachable Bug Remediation Plan](../plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md) restricts foreground `retention` / `task-local` prune to standard `T{tid}.*` queues and refuses false `stop` acceptance when convergence ends in `report_unknown` ([OBS.12a], [OBS.13.9]).
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([OBS.6], [MANAGER.11]).
 - [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) publishes one Consumer snapshot per owner step under [OBS.6a].
 - [Manager dispatch and launch-result round trips](../plans/2026-11-08-manager-dispatch-path-plan.md) removes Manager round trips that no contract needs from the launch receipt, reap and dispatch handler: no usage read for an undurable receipt before the missing-publication fallback is due, one terminal-proof read for a clean reap's failsafe check, no second acknowledgement of an acknowledged reservation, one STOP check per launch ([MA-1.6a], [MA-1.8], [MA-3]).

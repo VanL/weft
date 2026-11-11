@@ -1194,3 +1194,34 @@ def test_resolve_command_filters_stale_endpoint_records_without_deleting(
         assert remaining[0][0]["tid"] == "1775630560447778816"
     finally:
         registry.close()
+
+
+def test_queue_context_discovers_enclosing_project_without_creating_nested_weft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cmd_queue_* resolves the enclosing .weft project when WEFT_CONTEXT is unset."""
+    root = prepare_project_root(tmp_path / "project")
+    root_ctx = build_context(spec_context=root)
+    if root_ctx.database_path is not None:
+        (root_ctx.weft_dir / "broker.toml").write_text(
+            f'version = 1\nbackend = "sqlite"\ntarget = "{root_ctx.database_path.name}"\n',
+            encoding="utf-8",
+        )
+    nested = root / "sub1" / "sub2"
+    nested.mkdir(parents=True)
+    monkeypatch.delenv("WEFT_CONTEXT", raising=False)
+    monkeypatch.chdir(nested)
+
+    queue_cmd.cmd_queue_write("cmd.nested.jobs", "hello")
+    entries = queue_cmd.cmd_queue_peek("cmd.nested.jobs", all=True)
+
+    assert [entry.message for entry in entries] == ["hello"]
+    assert not (root / "sub1" / ".weft").exists()
+    assert not (nested / ".weft").exists()
+    assert [
+        entry.message
+        for entry in WeftClient(path=root).queues.peek(
+            "cmd.nested.jobs", all_messages=True
+        )
+    ] == ["hello"]

@@ -910,11 +910,14 @@ def prepare_pipeline(
     pipeline_spec = load_pipeline_spec_payload(resolved.payload)
 
     def _load_pipeline_stage(task_name: str) -> dict[str, Any]:
-        stage_ref = resolve_named_spec(
-            task_name,
-            spec_type=SPEC_TYPE_TASK,
-            context_path=context.root,
-        )
+        try:
+            stage_ref = resolve_named_spec(
+                task_name,
+                spec_type=SPEC_TYPE_TASK,
+                context_path=context.root,
+            )
+        except FileNotFoundError as exc:
+            raise SpecNotFound(str(exc)) from exc
         return encode_taskspec_transport_payload(
             validate_taskspec_payload(
                 stage_ref.payload,

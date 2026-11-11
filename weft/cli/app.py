@@ -536,7 +536,8 @@ def _stdin_message(message: str | None) -> str:
         return message
     try:
         context = build_context(
-            spec_context=os.environ.get(WEFT_CONTEXT_ENV) or os.getcwd(),
+            spec_context=os.environ.get(WEFT_CONTEXT_ENV) or None,
+            create_dirs=False,
             create_database=False,
         )
         maximum = resolve_broker_max_message_size(context.config)
