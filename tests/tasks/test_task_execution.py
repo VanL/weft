@@ -1645,10 +1645,10 @@ def test_agent_session_terminate_reports_os_join_failure_by_branch(
 
     tree_calls = 0
 
-    def terminate_tree(*_args: Any, **_kwargs: Any) -> set[int]:
+    def terminate_tree(*_args: Any, **_kwargs: Any) -> bool:
         nonlocal tree_calls
         tree_calls += 1
-        return set()
+        return False
 
     process = Process()
     session = AgentSession(
@@ -1658,7 +1658,9 @@ def test_agent_session_terminate_reports_os_join_failure_by_branch(
         None,
         timeout=None,
     )
-    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(
+        sessions_module, "terminate_verified_process_tree", terminate_tree
+    )
     caplog.set_level(logging.WARNING, logger="weft.core.runners.sessions")
 
     deadline = time.monotonic() + 1.0 if deadline_enabled else None
@@ -1774,19 +1776,22 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
         pass
 
     process = FakeProcess()
-    calls: list[tuple[int, float, bool]] = []
+    calls: list[tuple[int, float | None, float, bool]] = []
 
     def terminate_tree(
         pid: int,
+        create_time: float | None,
         *,
-        timeout: float,
-        kill_after: bool,
-    ) -> set[int]:
-        calls.append((pid, timeout, kill_after))
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        calls.append((pid, create_time, timeout, kill))
         process.alive = False
-        return {pid}
+        return True
 
-    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(
+        sessions_module, "terminate_verified_process_tree", terminate_tree
+    )
     session = AgentSession(
         process,  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
@@ -1798,10 +1803,10 @@ def test_agent_session_deadline_preserves_process_tree_kill_escalation(
     session.terminate(deadline=time.monotonic() + 0.2)
 
     assert len(calls) == 1
-    pid, timeout, kill_after = calls[0]
+    pid, _create_time, timeout, kill = calls[0]
     assert pid == 456
     _assert_timeout_with_boundary_tolerance(timeout, 0.1)
-    assert kill_after is True
+    assert kill is False
     assert process.join_calls == 1
 
 
@@ -1831,18 +1836,21 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
         pass
 
     process = FakeProcess()
-    calls: list[tuple[int, float, bool]] = []
+    calls: list[tuple[int, float | None, float, bool]] = []
 
     def terminate_tree(
         pid: int,
+        create_time: float | None,
         *,
-        timeout: float,
-        kill_after: bool,
-    ) -> set[int]:
-        calls.append((pid, timeout, kill_after))
-        return set()
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        calls.append((pid, create_time, timeout, kill))
+        return False
 
-    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(
+        sessions_module, "terminate_verified_process_tree", terminate_tree
+    )
     session = AgentSession(
         process,  # type: ignore[arg-type]
         FakeQueue(),  # type: ignore[arg-type]
@@ -1853,7 +1861,9 @@ def test_agent_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
 
     session.terminate(deadline=time.monotonic() - 1.0)
 
-    assert calls == [(654, 0.0, True)]
+    assert len(calls) == 1
+    assert calls[0][0] == 654
+    assert calls[0][2:] == (0.0, True)
     assert process.kill_calls == 1
     assert process.join_calls == 1
 
@@ -1974,19 +1984,22 @@ def test_command_session_deadline_preserves_process_tree_kill_escalation(
             self.alive = False
 
     process = FakeProcess()
-    calls: list[tuple[int, float, bool]] = []
+    calls: list[tuple[int, float | None, float, bool]] = []
 
     def terminate_tree(
         pid: int,
+        create_time: float | None,
         *,
-        timeout: float,
-        kill_after: bool,
-    ) -> set[int]:
-        calls.append((pid, timeout, kill_after))
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        calls.append((pid, create_time, timeout, kill))
         process.alive = False
-        return {pid}
+        return True
 
-    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(
+        sessions_module, "terminate_verified_process_tree", terminate_tree
+    )
     session = CommandSession(
         process,  # type: ignore[arg-type]
         queue.Queue(),
@@ -1997,10 +2010,10 @@ def test_command_session_deadline_preserves_process_tree_kill_escalation(
     session.terminate(deadline=time.monotonic() + 0.2)
 
     assert len(calls) == 1
-    pid, timeout, kill_after = calls[0]
+    pid, _create_time, timeout, kill = calls[0]
     assert pid == 123
     _assert_timeout_with_boundary_tolerance(timeout, 0.1)
-    assert kill_after is True
+    assert kill is False
 
 
 def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
@@ -2021,18 +2034,21 @@ def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
             self.alive = False
 
     process = FakeProcess()
-    calls: list[tuple[int, float, bool]] = []
+    calls: list[tuple[int, float | None, float, bool]] = []
 
     def terminate_tree(
         pid: int,
+        create_time: float | None,
         *,
-        timeout: float,
-        kill_after: bool,
-    ) -> set[int]:
-        calls.append((pid, timeout, kill_after))
-        return set()
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        calls.append((pid, create_time, timeout, kill))
+        return False
 
-    monkeypatch.setattr(sessions_module, "terminate_process_tree", terminate_tree)
+    monkeypatch.setattr(
+        sessions_module, "terminate_verified_process_tree", terminate_tree
+    )
     session = CommandSession(
         process,  # type: ignore[arg-type]
         queue.Queue(),
@@ -2042,7 +2058,9 @@ def test_command_session_expired_deadline_uses_nonblocking_hard_tree_sweep(
 
     session.terminate(deadline=time.monotonic() - 1.0)
 
-    assert calls == [(789, 0.0, True)]
+    assert len(calls) == 1
+    assert calls[0][0] == 789
+    assert calls[0][2:] == (0.0, True)
     assert process.kill_calls == 1
 
 

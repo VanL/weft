@@ -5891,6 +5891,7 @@ def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
     canonical_tid = "1777000000000000600"
     duplicate_tid = "1777000000000000700"
     duplicate_pid = 424701
+    duplicate_created = 1_700_000_701.0
 
     class FakeLiveProcess:
         exitcode = None
@@ -5914,37 +5915,51 @@ def test_task_monitor_duplicate_tracked_child_force_kills_owned_process(
         persistent=True,
         internal_role=INTERNAL_RUNTIME_TASK_CLASS_TASK_MONITOR,
     )
-    killed: list[tuple[int, float]] = []
+    manager._scheduler_residents[duplicate_tid] = {
+        "host_processes": [{"pid": duplicate_pid, "create_time": duplicate_created}]
+    }
+    killed: list[tuple[int, float | None, bool, float]] = []
 
-    def _record_kill(pid: int, *, timeout: float = 0.5) -> set[int]:
-        killed.append((pid, timeout))
-        return {pid}
+    def _record_verified_kill(
+        pid: int,
+        create_time: float | None,
+        *,
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        killed.append((pid, create_time, kill, timeout))
+        return True
 
-    monkeypatch.setattr(manager_mod, "kill_process_tree", _record_kill)
-
-    manager._terminate_duplicate_service_candidates(
-        INTERNAL_SERVICE_KEY_TASK_MONITOR,
-        canonical_tid=canonical_tid,
-        candidates=[
-            manager_mod.ServiceCandidate(
-                key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
-                tid=canonical_tid,
-                state="live",
-                source="service-registry",
-            ),
-            manager_mod.ServiceCandidate(
-                key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
-                tid=duplicate_tid,
-                state="live",
-                source="manager-child",
-            ),
-        ],
+    monkeypatch.setattr(
+        manager_mod, "terminate_verified_process_tree", _record_verified_kill
     )
+
+    try:
+        manager._terminate_duplicate_service_candidates(
+            INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            canonical_tid=canonical_tid,
+            candidates=[
+                manager_mod.ServiceCandidate(
+                    key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                    tid=canonical_tid,
+                    state="live",
+                    source="service-registry",
+                ),
+                manager_mod.ServiceCandidate(
+                    key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+                    tid=duplicate_tid,
+                    state="live",
+                    source="manager-child",
+                ),
+            ],
+        )
+    finally:
+        manager._scheduler_residents.pop(duplicate_tid, None)
 
     assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
         CONTROL_KILL
     )
-    assert killed == [(duplicate_pid, 0.2)]
+    assert killed == [(duplicate_pid, duplicate_created, True, 0.2)]
 
 
 def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
@@ -5957,14 +5972,17 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     canonical_tid = "1777000000000000800"
     duplicate_tid = "1777000000000000900"
     duplicate_pid = 424901
+    duplicate_created = 1_700_000_901.0
     for tid in (canonical_tid, duplicate_tid):
         _write_managed_service_owner(
             make_queue,
             service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
             tid=tid,
-            runtime_handle=_host_runtime_handle(duplicate_pid)
+            runtime_handle=_host_runtime_handle_with_create_time(
+                duplicate_pid, duplicate_created
+            )
             if tid == duplicate_tid
-            else _host_runtime_handle(424900),
+            else _host_runtime_handle_with_create_time(424900, 1_700_000_900.0),
         )
     monkeypatch.setattr(
         manager,
@@ -5977,15 +5995,23 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     monkeypatch.setattr(
         manager_mod,
         "live_host_processes_from_handle",
-        lambda handle: ((int(handle.id), None),),
+        lambda handle: handle.scoped_host_processes(),
     )
-    killed: list[tuple[int, float]] = []
+    killed: list[tuple[int, float | None, bool, float]] = []
 
-    def _record_kill(pid: int, *, timeout: float = 0.5) -> set[int]:
-        killed.append((pid, timeout))
-        return {pid}
+    def _record_verified_kill(
+        pid: int,
+        create_time: float | None,
+        *,
+        kill: bool,
+        timeout: float = 0.5,
+    ) -> bool:
+        killed.append((pid, create_time, kill, timeout))
+        return True
 
-    monkeypatch.setattr(manager_mod, "kill_process_tree", _record_kill)
+    monkeypatch.setattr(
+        manager_mod, "terminate_verified_process_tree", _record_verified_kill
+    )
 
     manager._tick_internal_services(force=True)
 
@@ -5993,7 +6019,125 @@ def test_task_monitor_duplicate_runtime_handle_force_kills_scoped_host_pid(
     assert make_queue(f"T{duplicate_tid}.ctrl_in").read_one() == encode_control_message(
         CONTROL_KILL
     )
-    assert killed == [(duplicate_pid, 0.2)]
+    assert killed == [(duplicate_pid, duplicate_created, True, 0.2)]
+
+
+def test_duplicate_service_runtime_handle_without_create_time_does_not_kill_real_process(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host-pid handle with create_time=None (host_processes=()) never authorizes SIGKILL."""
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    canonical_tid = "1777000000000000810"
+    duplicate_tid = "1777000000000000910"
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+
+    live_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        live_pid = live_proc.pid
+        assert live_pid > 0
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=canonical_tid,
+            runtime_handle=_host_runtime_handle(os.getpid()),
+        )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=duplicate_tid,
+            runtime_handle={
+                "runner": "host",
+                "kind": "process",
+                "id": str(live_pid),
+                "control": {"authority": "host-pid"},
+                "observations": {"host_pids": [live_pid]},
+                "metadata": {},
+            },
+        )
+
+        manager._tick_internal_services(force=True)
+
+        assert make_queue(f"T{canonical_tid}.ctrl_in").read_one() is None
+        assert make_queue(
+            f"T{duplicate_tid}.ctrl_in"
+        ).read_one() == encode_control_message(CONTROL_KILL)
+        assert live_proc.poll() is None
+    finally:
+        if live_proc.poll() is None:
+            live_proc.terminate()
+        live_proc.wait(timeout=5.0)
+
+
+def test_duplicate_service_runtime_handle_verified_create_time_kills_only_matching_real_process(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verified (pid, create_time) terminates duplicate service process while stale create_time survives."""
+    manager, make_queue = manager_setup
+    manager._task_monitor_enabled = True
+    manager._queue_names["inbox"] = WEFT_SPAWN_REQUESTS_QUEUE
+    canonical_tid = "1777000000000000820"
+    verified_duplicate_tid = "1777000000000000920"
+    stale_duplicate_tid = "1777000000000000930"
+    monkeypatch.setattr(
+        manager,
+        "_evaluate_dispatch_ownership",
+        lambda: DispatchOwnership(state="self", leader_tid=manager.tid),
+    )
+
+    verified_proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    stale_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        verified_pid = verified_proc.pid
+        verified_ct = process_create_time(verified_pid)
+        stale_pid = stale_proc.pid
+        stale_ct = process_create_time(stale_pid)
+        assert verified_ct is not None
+        assert stale_ct is not None
+
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=canonical_tid,
+            runtime_handle=_host_runtime_handle(os.getpid()),
+        )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=verified_duplicate_tid,
+            runtime_handle=_host_runtime_handle_with_create_time(
+                verified_pid, verified_ct
+            ),
+        )
+        _write_managed_service_owner(
+            make_queue,
+            service_key=INTERNAL_SERVICE_KEY_TASK_MONITOR,
+            tid=stale_duplicate_tid,
+            runtime_handle=_host_runtime_handle_with_create_time(
+                stale_pid, stale_ct - 100.0
+            ),
+        )
+
+        manager._tick_internal_services(force=True)
+
+        assert verified_proc.wait(timeout=5.0) != 0
+        assert stale_proc.poll() is None
+        assert not hasattr(Manager, "_candidate_force_kill_pids")
+        assert not hasattr(Manager, "_runtime_handle_force_kill_pids")
+    finally:
+        for proc in (verified_proc, stale_proc):
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=5.0)
 
 
 def test_task_monitor_internal_pending_spawn_request_blocks_duplicate_restart(

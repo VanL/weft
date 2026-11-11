@@ -22,6 +22,7 @@ from weft._constants import (
     CONTROL_KILL,
     CONTROL_STOP,
     INTERACTIVE_OUTPUT_DRAIN_TIMEOUT,
+    INTERACTIVE_STDIN_EOF_GRACE_SECONDS,
     INTERACTIVE_STOP_GRACE_SECONDS,
     TERMINAL_TASK_STATUSES,
 )
@@ -543,33 +544,46 @@ class InteractiveTaskMixin(ABC):
             session.close_stdin()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive stdin", exc_info=True)
-        shutdown_deadline = (
-            time.monotonic() + INTERACTIVE_STOP_GRACE_SECONDS
-            if deadline is None
-            else deadline
+        if reason == "killed":
+            if session.is_alive():
+                session.terminate(deadline=time.monotonic())
+            session.stop_monitor()
+            self._interactive_drain_remaining(
+                session, self._queue(self._queue_names["outbox"])
+            )
+            self._interactive_finalize_session(failure_reason=reason)
+            return
+
+        now = time.monotonic()
+        overall_deadline = (
+            now + INTERACTIVE_STOP_GRACE_SECONDS if deadline is None else deadline
         )
+        eof_grace = min(
+            INTERACTIVE_STDIN_EOF_GRACE_SECONDS,
+            max(0.0, (overall_deadline - now) * 0.25),
+        )
+        eof_deadline = min(overall_deadline, now + eof_grace)
         # The host runner's exit waiter records exit and then calls the
         # activity callback, so this waits on that event rather than a cadence;
         # it does not depend on the reactor arbiter, which may have stopped
         # ([CC-2.2.1], [CC-3.1]).
-        while time.monotonic() < shutdown_deadline:
+        while time.monotonic() < eof_deadline:
             self._interactive_activity.clear()
             self._interactive_flush_outputs()
             if not session.is_alive():
                 break
-            remaining = shutdown_deadline - time.monotonic()
+            remaining = eof_deadline - time.monotonic()
             if remaining <= 0:
                 break
             self._interactive_activity.wait(remaining)
         if session.is_alive():
-            session.terminate(deadline=shutdown_deadline)
+            session.terminate(deadline=overall_deadline)
         session.stop_monitor()
-        self._interactive_flush_outputs()
-        self._interactive_finalize_session(failure_reason=reason)
-
-    def _interactive_on_stop(self) -> None:
-        if getattr(self, "_interactive_mode", False):
-            self._interactive_shutdown()
+        if getattr(self, "_interactive_session", None) is not None:
+            self._interactive_drain_remaining(
+                session, self._queue(self._queue_names["outbox"])
+            )
+            self._interactive_finalize_session(failure_reason=reason)
 
     def _interactive_handle_control(self, request: ControlRequest) -> bool:
         """Publish terminal proof after unwind; write no reply.

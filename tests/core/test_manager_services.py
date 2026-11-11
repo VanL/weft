@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from weft.core.manager import Manager
 from weft.core.manager_services import (
     ManagedServiceAction,
     ManagedServiceEvidence,
@@ -398,3 +399,37 @@ def test_service_candidate_selection_and_summary_order_by_int_tid() -> None:
         )
     )
     assert [c.tid for c in uncertain_summary.uncertain] == [smaller_tid, larger_tid]
+
+
+def test_candidate_force_kill_processes_requires_verified_pid_and_create_time() -> None:
+    """Candidate force-kill metadata uses single-contract (pid, create_time) pairs only ([WT-2a.9], [LIVENESS.R5])."""
+    candidate = ServiceCandidate(
+        key=SERVICE_KEY,
+        tid="1777000000000000999",
+        state="live",
+        source="service-registry",
+        metadata={
+            "force_kill_pids": [12345],
+            "force_kill_processes": [
+                (12345, 1_700_000_000.5),
+                (12346, None),
+                (0, 1_700_000_001.0),
+                (True, 1_700_000_002.0),
+                (12347, False),
+                [12348, 1_700_000_003],
+            ],
+        },
+    )
+
+    assert Manager._candidate_force_kill_processes(candidate) == (
+        (12345, 1_700_000_000.5),
+        (12348, 1_700_000_003.0),
+    )
+    legacy_only = ServiceCandidate(
+        key=SERVICE_KEY,
+        tid="1777000000000001000",
+        state="live",
+        source="service-registry",
+        metadata={"force_kill_pids": [99999]},
+    )
+    assert Manager._candidate_force_kill_processes(legacy_only) == ()

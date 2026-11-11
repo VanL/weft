@@ -93,12 +93,10 @@ from weft.ext import (
 from weft.helpers import (
     ContainerRuntimeDetection,
     detect_container_runtime,
-    kill_process_tree,
     pid_is_live,
     pid_matches_create_time,
     process_create_time,
     safe_cancel,
-    terminate_process_tree,
     terminate_verified_process_tree,
 )
 
@@ -1012,11 +1010,24 @@ class HostTaskRunner:
             close_supervised_pipes(process.stdin, process.stdout, process.stderr)
             raise
 
+        scoped_processes = runtime_handle.scoped_host_processes()
+        worker_create_time = scoped_processes[0][1] if scoped_processes else None
+
         def _stop_runtime() -> None:
-            terminate_process_tree(process.pid or -1, timeout=0.2)
+            terminate_verified_process_tree(
+                process.pid or -1,
+                worker_create_time,
+                kill=False,
+                timeout=0.2,
+            )
 
         def _kill_runtime() -> None:
-            kill_process_tree(process.pid or -1, timeout=0.2)
+            terminate_verified_process_tree(
+                process.pid or -1,
+                worker_create_time,
+                kill=True,
+                timeout=0.2,
+            )
 
         return run_monitored_subprocess(
             process=process,

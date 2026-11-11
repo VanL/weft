@@ -7613,7 +7613,12 @@ class Manager(ServiceTask):
             if self._child_has_exited(child):
                 continue
             pid = child.process.pid
-            force_kill_pids = [pid] if isinstance(pid, int) and pid > 0 else []
+            created = self._launched_child_create_time(tid, child)
+            force_kill_processes = (
+                [(pid, created)]
+                if isinstance(pid, int) and pid > 0 and created is not None
+                else []
+            )
             if scan_terminal_proof and self._tracked_service_terminal_proof_visible(
                 tid, child
             ):
@@ -7639,7 +7644,7 @@ class Manager(ServiceTask):
                             ("ctrl_in", child.ctrl_queue),
                             ("ctrl_out", child.ctrl_out_queue),
                             ("pid", pid),
-                            ("force_kill_pids", force_kill_pids),
+                            ("force_kill_processes", force_kill_processes),
                         )
                         if value not in (None, [])
                     },
@@ -7723,8 +7728,14 @@ class Manager(ServiceTask):
             ctrl_queue = child.ctrl_queue or f"T{tid}.{QUEUE_CTRL_IN_SUFFIX}"
             self._send_child_control_command(ctrl_queue, CONTROL_KILL)
             pid = child.process.pid
-            if isinstance(pid, int):
-                self._kill_duplicate_service_pid(tid, pid, killed_pids=killed_pids)
+            created = self._launched_child_create_time(tid, child)
+            if isinstance(pid, int) and created is not None:
+                self._kill_duplicate_service_process(
+                    tid,
+                    pid,
+                    created,
+                    killed_pids=killed_pids,
+                )
             signaled.add(tid)
 
         for candidate in candidates:
@@ -7737,28 +7748,45 @@ class Manager(ServiceTask):
                 if isinstance(ctrl_in_name, str) and ctrl_in_name:
                     self._send_child_control_command(ctrl_in_name, CONTROL_KILL)
                     signaled.add(candidate.tid)
-            for pid in self._candidate_force_kill_pids(candidate):
-                self._kill_duplicate_service_pid(
+            for pid, create_time in self._candidate_force_kill_processes(candidate):
+                self._kill_duplicate_service_process(
                     candidate.tid,
                     pid,
+                    create_time,
                     killed_pids=killed_pids,
                 )
 
     @staticmethod
-    def _candidate_force_kill_pids(candidate: ServiceCandidate) -> tuple[int, ...]:
-        raw_pids = candidate.metadata.get("force_kill_pids")
-        if not isinstance(raw_pids, Sequence) or isinstance(raw_pids, (str, bytes)):
+    def _candidate_force_kill_processes(
+        candidate: ServiceCandidate,
+    ) -> tuple[tuple[int, float], ...]:
+        raw_processes = candidate.metadata.get("force_kill_processes")
+        if not isinstance(raw_processes, Sequence) or isinstance(
+            raw_processes, (str, bytes)
+        ):
             return ()
-        return tuple(
-            pid
-            for pid in raw_pids
-            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-        )
+        processes: list[tuple[int, float]] = []
+        for item in raw_processes:
+            if not isinstance(item, Sequence) or isinstance(item, (str, bytes)):
+                continue
+            if len(item) != 2:
+                continue
+            pid, raw_create_time = item[0], item[1]
+            if (
+                isinstance(pid, int)
+                and not isinstance(pid, bool)
+                and pid > 0
+                and isinstance(raw_create_time, int | float)
+                and not isinstance(raw_create_time, bool)
+            ):
+                processes.append((pid, float(raw_create_time)))
+        return tuple(processes)
 
     @staticmethod
-    def _kill_duplicate_service_pid(
+    def _kill_duplicate_service_process(
         tid: str,
         pid: int,
+        create_time: float,
         *,
         killed_pids: set[int],
     ) -> None:
@@ -7772,8 +7800,13 @@ class Manager(ServiceTask):
                 pid,
             )
             return
-        kill_process_tree(pid, timeout=0.2)
-        killed_pids.add(pid)
+        if terminate_verified_process_tree(
+            pid,
+            create_time,
+            timeout=0.2,
+            kill=True,
+        ):
+            killed_pids.add(pid)
 
     def _latest_tid_runtime_handle(self, tid: str) -> RunnerHandle | None:
         """Read the canonical newest valid mapping handle ([OBS.4])."""
@@ -7816,9 +7849,9 @@ class Manager(ServiceTask):
             except ValueError:
                 runtime_handle = None
         if runtime_handle is not None:
-            pids = self._runtime_handle_force_kill_pids(runtime_handle)
-            if pids:
-                metadata["force_kill_pids"] = list(pids)
+            processes = self._runtime_handle_force_kill_processes(runtime_handle)
+            if processes:
+                metadata["force_kill_processes"] = list(processes)
         return metadata, runtime_handle
 
     def _service_candidate_from_service_owner_record(
@@ -8095,11 +8128,15 @@ class Manager(ServiceTask):
         return False
 
     @staticmethod
-    def _runtime_handle_force_kill_pids(handle: RunnerHandle) -> tuple[int, ...]:
+    def _runtime_handle_force_kill_processes(
+        handle: RunnerHandle,
+    ) -> tuple[tuple[int, float], ...]:
         if handle.control.get("authority") != "host-pid":
             return ()
         return tuple(
-            pid for pid, _create_time in live_host_processes_from_handle(handle)
+            (pid, float(create_time))
+            for pid, create_time in live_host_processes_from_handle(handle)
+            if create_time is not None
         )
 
     def _manager_context(self) -> WeftContext:

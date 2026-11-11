@@ -1934,6 +1934,15 @@ INTERACTIVE_OUTPUT_DRAIN_TIMEOUT: Final[float] = 0.25
 INTERACTIVE_STOP_GRACE_SECONDS: Final[float] = 2.0
 """Grace period for interactive tasks to exit cleanly after stdin closure."""
 
+INTERACTIVE_STDIN_EOF_GRACE_SECONDS: Final[float] = 0.5
+"""Maximum stdin-EOF wait before interactive shutdown signals the process tree.
+
+Must leave enough of ``INTERACTIVE_STOP_GRACE_SECONDS`` /
+``CONTROL_SURFACE_WAIT_TIMEOUT`` (2.0s) for ``CommandSession.terminate`` to
+deliver ``SIGTERM`` grace and reap the session before ``_stop_resolved_tasks``
+escalates to runner fallback.
+"""
+
 COMMAND_SESSION_TERMINATION_TIMEOUT: Final[float] = 2.0
 """Base timeout for command-session termination steps."""
 

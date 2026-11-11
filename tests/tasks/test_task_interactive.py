@@ -19,11 +19,15 @@ import pytest
 from simplebroker import Queue
 from tests.helpers.reactor_driver import drive_until
 from tests.helpers.typing import BrokerEnv
+from tests.helpers.weft_harness import WeftTestHarness
 from weft._constants import (
     QUEUE_RESERVED_SUFFIX,
     WEFT_GLOBAL_LOG_QUEUE,
     WEFT_STREAMING_SESSIONS_QUEUE,
 )
+from weft.commands import submission
+from weft.commands import tasks as task_cmd
+from weft.commands.types import TaskSnapshot
 from weft.core.control_messages import ControlRequest, encode_control_message
 from weft.core.runners.sessions import CommandSession
 from weft.core.task_evidence import coerce_terminal_envelope
@@ -995,7 +999,12 @@ def test_interactive_command_control_unwinds_before_terminal(
     if started:
         script = tmp_path / "output_on_stdin_close.py"
         script.write_text(
-            "import sys\nsys.stdin.read()\n"
+            "import sys, time\n"
+            "sys.stdin.readline()\n"
+            "print('started stdout', flush=True)\n"
+            "print('started stderr', file=sys.stderr, flush=True)\n"
+            "sys.stdin.read()\n"
+            "time.sleep(0.1)\n"
             "print('final stdout', flush=True)\n"
             "print('final stderr', file=sys.stderr, flush=True)\n",
             encoding="utf-8",
@@ -1008,10 +1017,15 @@ def test_interactive_command_control_unwinds_before_terminal(
     session = None
     try:
         if started:
+            outbox = make_queue(spec.io.outputs["outbox"])
             make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": "first\n"}))
             drive_until(
-                lambda: task._interactive_session,
-                lambda value: value is not None,
+                lambda: [
+                    raw
+                    for raw in outbox.peek_generator()
+                    if json.loads(raw).get("data") == f"started stdout{os.linesep}"
+                ],
+                bool,
                 step=task.process_once,
                 wait=task.wait_for_activity,
                 timeout=10,
@@ -1088,11 +1102,29 @@ def test_interactive_command_control_unwinds_before_terminal(
             assert stderr_finals[0] < terminal_timestamp
             assert stdout_finals[0] < terminal_timestamp
             assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
-            assert any(row.get("data") == "final stderr\n" for row, _ in rows)
             assert any(
-                json.loads(raw).get("data") == f"final stdout{os.linesep}"
+                row.get("data") == f"started stderr{os.linesep}" for row, _ in rows
+            )
+            assert any(
+                json.loads(raw).get("data") == f"started stdout{os.linesep}"
                 for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
             )
+            if command == "STOP":
+                assert any(
+                    row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
+                )
+                assert any(
+                    json.loads(raw).get("data") == f"final stdout{os.linesep}"
+                    for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
+                )
+            else:
+                assert not any(
+                    row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
+                )
+                assert not any(
+                    json.loads(raw).get("data") == f"final stdout{os.linesep}"
+                    for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
+                )
         # The status, not a new emission ledger, prevents a repeated command
         # from re-emitting terminal proof after the session has been released.
         task._interactive_handle_control(
@@ -1497,3 +1529,120 @@ if __name__ == "__main__":
         assert not any(event["event"] == "work_failed" for event in events)
     finally:
         task.stop(join=False)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM grace semantics")
+def test_cmd_task_stop_gives_interactive_session_sigterm_grace_within_control_budget(
+    tmp_path: Path,
+) -> None:
+    """cmd_task_stop delivers SIGTERM grace inside the 2.0s caller budget without SIGKILL preemption."""
+    marker = tmp_path / "clean-sigterm.txt"
+    ready_file = tmp_path / "interactive-ready.txt"
+    script = tmp_path / "interactive_sigterm_grace.py"
+    script.write_text(
+        (
+            "from __future__ import annotations\n"
+            "import signal, sys, time\n"
+            "from pathlib import Path\n"
+            f"marker = Path({str(marker)!r})\n"
+            f"ready = Path({str(ready_file)!r})\n"
+            "def _handle_term(_sig: int, _frame: object) -> None:\n"
+            "    time.sleep(0.5)\n"
+            "    marker.write_text('CLEAN_SIGTERM_EXIT', encoding='utf-8')\n"
+            "    print('CLEAN_SIGTERM_EXIT', flush=True)\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, _handle_term)\n"
+            "ready.write_text('ready', encoding='utf-8')\n"
+            "print('READY', flush=True)\n"
+            "while True:\n"
+            "    time.sleep(0.05)\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with WeftTestHarness() as harness:
+        harness.ensure_foreground_manager()
+        template: dict[str, Any] = {
+            "name": "interactive-sigterm-grace",
+            "spec": {
+                "type": "command",
+                "process_target": sys.executable,
+                "args": ["-u", str(script)],
+                "interactive": True,
+                "stream_output": True,
+            },
+        }
+        receipt = submission.submit(
+            harness.context,
+            template,
+            payload={"stdin": "hello\n"},
+        )
+        harness.register_tid(receipt.tid)
+
+        ready_deadline = time.monotonic() + 15.0
+        while not ready_file.exists() and time.monotonic() < ready_deadline:
+            time.sleep(0.02)
+        assert ready_file.exists()
+
+        stop_result = task_cmd.cmd_task_stop(receipt.tid, context=harness.root)
+        assert stop_result.accepted == (receipt.tid,)
+        assert stop_result.failures == ()
+
+        status = task_cmd.cmd_task_status(receipt.tid, context=harness.root)
+        assert isinstance(status, TaskSnapshot)
+        assert status.status == "cancelled"
+        assert marker.exists() and marker.read_text(encoding="utf-8") == (
+            "CLEAN_SIGTERM_EXIT"
+        )
+        outbox = harness.context.queue(f"T{receipt.tid}.outbox", persistent=False)
+        try:
+            chunks = [
+                json.loads(raw).get("data", "")
+                for raw in outbox.peek_generator()
+                if raw
+            ]
+        finally:
+            outbox.close()
+        assert any("CLEAN_SIGTERM_EXIT" in chunk for chunk in chunks)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal exit codes")
+def test_interactive_consumer_cleanup_marks_terminated_child_failed(
+    tmp_path: Path,
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """Consumer cleanup (reason=None) marks an interactive child terminated by signal as failed."""
+    db_path, make_queue = broker_env
+    ready_file = tmp_path / "cleanup-ready.txt"
+    script = tmp_path / "interactive_ignore_eof.py"
+    script.write_text(
+        (
+            "import time\n"
+            "from pathlib import Path\n"
+            f"Path({str(ready_file)!r}).write_text('ready', encoding='utf-8')\n"
+            "print('READY', flush=True)\n"
+            "while True:\n"
+            "    time.sleep(0.05)\n"
+        ),
+        encoding="utf-8",
+    )
+    spec = make_interactive_spec(unique_tid, script_path=str(script))
+    task = Consumer(db_path, spec)
+    try:
+        make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": "start\n"}))
+        drive_until(
+            ready_file.exists,
+            bool,
+            step=task.process_once,
+            wait=task.wait_for_activity,
+            timeout=10.0,
+        )
+        assert task._interactive_session is not None
+        assert task._interactive_session.is_alive()
+    finally:
+        task.cleanup()
+
+    assert task.taskspec.state.status == "failed"
+    assert task.taskspec.state.return_code is not None
+    assert task.taskspec.state.return_code < 0

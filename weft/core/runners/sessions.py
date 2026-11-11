@@ -56,9 +56,28 @@ from weft.core.terminal_handoff_transport import (
     wait_terminal_payload,
 )
 from weft.ext import RunnerHandle, SessionExecutionResult
-from weft.helpers import safe_cancel, terminate_process_tree
+from weft.helpers import (
+    process_create_time,
+    safe_cancel,
+    terminate_verified_process_tree,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_session_create_time(
+    process: Any,
+    handle: RunnerHandle | None,
+) -> float | None:
+    """Return the creation-time identity captured at session start [RM-5.1]."""
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if handle is not None:
+        for handle_pid, create_time in handle.scoped_host_processes():
+            if handle_pid == pid and create_time is not None:
+                return create_time
+    return process_create_time(pid)
 
 
 class CommandSession:
@@ -83,6 +102,7 @@ class CommandSession:
         self._stderr_queue = stderr_queue
         self._monitor: BaseResourceMonitor | None = monitor
         self._handle = handle
+        self._process_create_time = _resolve_session_create_time(process, handle)
         self._stdin_writer = stdin_writer
         self._stdin_closer = stdin_closer
         self._cleanup_callback = cleanup_callback
@@ -148,10 +168,11 @@ class CommandSession:
                     pid = self._process.pid
                     remaining = max(0.0, deadline - time.monotonic())
                     if isinstance(pid, int) and pid > 0:
-                        terminate_process_tree(
+                        terminate_verified_process_tree(
                             pid,
-                            timeout=remaining / 2.0 if remaining > 0 else 0.0,
-                            kill_after=True,
+                            self._process_create_time,
+                            kill=(remaining <= 0.0),
+                            timeout=remaining / 2.0 if remaining > 0.0 else 0.0,
                         )
                     if self.is_alive():
                         self._process.kill()
@@ -163,8 +184,10 @@ class CommandSession:
             if self.is_alive():
                 pid = self._process.pid
                 if isinstance(pid, int) and pid > 0:
-                    terminate_process_tree(
+                    terminate_verified_process_tree(
                         pid,
+                        self._process_create_time,
+                        kill=False,
                         timeout=COMMAND_SESSION_TERMINATION_TIMEOUT,
                     )
                 try:
@@ -175,6 +198,10 @@ class CommandSession:
                         self._process.wait(timeout=COMMAND_SESSION_TERMINATION_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         self._process.kill()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            self._process.wait(
+                                timeout=COMMAND_SESSION_POST_TERMINATION_WAIT
+                            )
         finally:
             self.close()
 
@@ -229,6 +256,7 @@ class AgentSession:
         self._monitor = monitor
         self._timeout = timeout
         self._handle = handle
+        self._process_create_time = _resolve_session_create_time(process, handle)
         # The runner's limits input chooses the sampling clock ([RM-5.1]);
         # the monitor protocol does not expose limits.
         self._limits = limits
@@ -857,10 +885,11 @@ class AgentSession:
             pid = self._process.pid
             remaining = max(0.0, deadline - time.monotonic())
             if isinstance(pid, int) and pid > 0:
-                terminate_process_tree(
+                terminate_verified_process_tree(
                     pid,
-                    timeout=remaining / 2.0 if remaining > 0 else 0.0,
-                    kill_after=True,
+                    self._process_create_time,
+                    kill=(remaining <= 0.0),
+                    timeout=remaining / 2.0 if remaining > 0.0 else 0.0,
                 )
             if self.is_alive():
                 try:
@@ -884,7 +913,12 @@ class AgentSession:
 
         pid = self._process.pid
         if isinstance(pid, int) and pid > 0:
-            terminate_process_tree(pid, timeout=0.5)
+            terminate_verified_process_tree(
+                pid,
+                self._process_create_time,
+                kill=False,
+                timeout=0.5,
+            )
 
         try:
             self._process.join(timeout=0.2)

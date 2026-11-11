@@ -6,6 +6,7 @@ import functools
 import logging
 import multiprocessing
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -4919,7 +4920,7 @@ def test_host_process_stop_propagates_unexpected_join_failure(
             raise RuntimeError("unexpected process wait defect")
 
     monkeypatch.setattr(
-        host_module, "terminate_process_tree", lambda *_args, **_kwargs: None
+        host_module, "terminate_verified_process_tree", lambda *_args, **_kwargs: False
     )
 
     with pytest.raises(RuntimeError, match="unexpected process wait defect"):
@@ -5448,6 +5449,93 @@ def test_command_handle_acquisition_failure_reaps_process_and_closes_pipes(
             pipe is None or pipe.closed
             for pipe in (process.stdin, process.stdout, process.stderr)
         )
+    finally:
+        for process in created:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+
+def test_command_session_terminate_preserves_owned_popen_signal_returncode() -> None:
+    """CommandSession.terminate never lets psutil waitpid steal Popen's exit status [WT-4.2]."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        session = sessions_module.CommandSession(
+            process,
+            queue.Queue(),
+            queue.Queue(),
+            None,
+        )
+        session.terminate()
+        rc = session.returncode()
+        assert rc is not None
+        assert rc != 0
+        if os.name == "posix":
+            assert rc < 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def test_host_command_cancellation_preserves_owned_popen_signal_returncode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """HostTaskRunner._run_command_with_hooks reaps cancelled Popen with real signal status [WT-4.2]."""
+    created: list[subprocess.Popen[str]] = []
+    real_open = host_module.open_supervised_process
+    worker_started = threading.Event()
+
+    def opened(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        process = real_open(*args, **kwargs)
+        created.append(process)
+        return process
+
+    monkeypatch.setattr(host_module, "open_supervised_process", opened)
+    runner = host_module.HostTaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=["-c", "import time; print('ready', flush=True); time.sleep(30)"],
+        kwargs=None,
+        env={},
+        working_dir=str(tmp_path),
+        timeout=10.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.1,
+        bundle_root=None,
+    )
+    try:
+        outcome = runner.run_with_hooks(
+            {},
+            cancel_requested=worker_started.is_set,
+            on_stdout_chunk=lambda chunk, _final: (
+                worker_started.set() if "ready" in chunk else None
+            ),
+        )
+        assert outcome.status == "cancelled"
+        assert len(created) == 1
+        rc = created[0].returncode
+        assert rc is not None
+        assert rc != 0
+        if os.name == "posix":
+            assert rc < 0
     finally:
         for process in created:
             if process.poll() is None:
