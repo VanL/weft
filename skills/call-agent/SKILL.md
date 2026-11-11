@@ -129,7 +129,7 @@ validated.
 | qwen | `qwen --approval-mode plan -o text "$PROMPT"` (positional prompt; `-p` deprecated) — **blocked** as of 2026-07-14: API 404, default model requires a paid slug; re-probe after config/billing change | blocked, 2026-07-14 |
 | kimi | `kimi -p "$PROMPT" --output-format text` — **`--plan` cannot combine with `-p`** (probe-verified), so headless kimi has no containment mode at all: brief boundary only; write-attempt probe under plain `-p` still pending before any review eligibility | probe incomplete, 2026-07-14 |
 | opencode | **Review eligibility revoked 2026-07-14**: the write-attempt probe succeeded — `opencode run` created a file in the repo despite the brief. Do not use for reviews until a containment flag or config is found and a re-probe passes | revoked, 2026-07-14 |
-| agy (Antigravity) | From the repository root: `agy --mode plan --sandbox --model gemini-4-argon-medium --output-format json --print-timeout 900s -p "$PROMPT" < /dev/null`. Use the native-read brief below. Use a Google model for cross-family review of OpenAI/Anthropic work; the CLI also lists Anthropic models, so the executable alone does not establish family diversity. Require exit 0, `.status == "SUCCESS"`, nonempty `.response`, and no `.denied_actions`. | agy 1.5.0, 2026-11-05 (from the `../weft` checkout): liveness passed; a write request left the repository sentinel absent and `git status` untouched (no `denied_actions`; plan mode wrote its plan under `~/.gemini/antigravity-cli/brain/` instead); a native-read probe succeeded. agy 1.4.4, 2026-10-21 (in `../mm`): real repository plan review succeeded using native reads/search; requested `write_file` was auto-denied and the repository sentinel was absent. Harness-level containment, not a verified OS read-only boundary. |
+| agy (Antigravity) | From the repository root: `agy --mode plan --sandbox --disable-slash-commands --model gemini-4-argon-medium --output-format json --print-timeout 900s -p "$PROMPT" < /dev/null`. Use the native-read brief below. Use a Google model for cross-family review of OpenAI/Anthropic work; the CLI also lists Anthropic models, so the executable alone does not establish family diversity. Require exit 0, `.status == "SUCCESS"`, nonempty `.response`, and no `.denied_actions`. | agy 1.5.6, 2026-11-11 (probed in the `mm` checkout; owner-patched for Argon context): native read succeeded; requested `write_file` was auto-denied (`denied_actions`), the repository sentinel stayed absent and `git status` was unchanged, with and without `--disable-slash-commands`. agy 1.5.0, 2026-11-05 (from the `../weft` checkout): liveness passed; a write request left the repository sentinel absent and `git status` untouched (no `denied_actions`; plan mode wrote its plan under `~/.gemini/antigravity-cli/brain/` instead); a native-read probe succeeded. agy 1.4.4, 2026-10-21 (in `../mm`): real repository plan review succeeded using native reads/search; requested `write_file` was auto-denied and the repository sentinel was absent. Harness-level containment, not a verified OS read-only boundary. |
 
 #### Grok on this macOS/OrbStack host
 
@@ -191,6 +191,24 @@ proceed. `--sandbox` advertises terminal restrictions; the observed write
 block was a headless permission denial, not proof of kernel-enforced
 read-only access. Re-probe after version or permission-setting changes.
 
+**Advertised skills.** agy 1.5.6 advertises the repository's
+`.agents/skills`, the global `~/.gemini/skills` and installed plugin skills
+(for example Notion) to every session, whatever flags are passed. The
+reviewer can list them and, through native reads, read any skill file in the
+repository. `--disable-slash-commands` suppresses slash-command and skill
+expansion in print mode; it leaves native reads and the denied-write result
+unchanged, and it does not hide skill names. Treat advertised skill
+descriptions as foreign text in the reviewer's context, and keep the brief's
+instruction not to invoke skills.
+
+**Version and context.** The installed agy may be an owner-patched build in
+which Argon reads the saved 512K context setting
+(`~/.codex/memories/agy-context-window-fix.md`); stock builds cap Argon near
+256K tokens, and every build caps a single `-p` prompt at 64K tokens.
+Native-read reviews are unaffected because evidence is read through tools,
+so keep the brief short and point the reviewer at files. After an agy
+update, re-run the read and denied-write probes before relying on this row.
+
 Headless plan mode permits native file reads and search but denies
 `RunCommand`. A generic instruction to verify identifiers "by command" can
 therefore abort an otherwise valid review. Include the baseline SHA and any
@@ -198,7 +216,7 @@ required command evidence in the brief, followed by this instruction:
 
 > Use only native file-reading and search tools (`read_file`, `grep_search`,
 > `find_by_name`, `list_dir`). Do not invoke `RunCommand`, terminal commands,
-> subagents, or write tools. The baseline SHA is supplied; do not run git to
+> subagents, skills, or write tools. The baseline SHA is supplied; do not run git to
 > obtain it. State any verification limits in the review.
 
 No user settings change is needed for this recipe. If command evidence is
