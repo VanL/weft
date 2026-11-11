@@ -14751,3 +14751,53 @@ def test_manager_apply_reserved_policy_with_exact_timestamp_covers_internal_spaw
         assert internal_inbox.peek_one() is None
     finally:
         manager.cleanup()
+
+
+@pytest.mark.parametrize("commit_on_call", [2, 3])
+def test_draining_manager_wakes_immediately_when_last_launch_commits_after_drain_step(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+    commit_on_call: int,
+) -> None:
+    """Mid-turn or trailing launch completion must settle drain immediately instead of parking with [] timeouts."""
+    manager, _make_queue = manager_setup
+    manager._begin_shutdown_drain(
+        message_id=time.time_ns(),
+        reason="STOP command received",
+        event="control_stop",
+        completion_event="manager_stop_drained",
+    )
+    manager._active_child_launches["internal-heartbeat-launch"] = (
+        manager_mod._ManagerChildLaunchRequest(
+            child_spec=manager.taskspec,
+            task_cls=Consumer,
+            internal_role="heartbeat",
+            service_key="_weft.service.heartbeat",
+            autostart_source=None,
+            detach_stdio=True,
+        )
+    )
+    calls = 0
+
+    def _commit_on_nth_drain() -> None:
+        nonlocal calls
+        calls += 1
+        if (
+            calls >= commit_on_call
+            and "internal-heartbeat-launch" in manager._active_child_launches
+        ):
+            manager._clear_active_child_launch("internal-heartbeat-launch")
+
+    monkeypatch.setattr(manager, "_drain_worker_results", _commit_on_nth_drain)
+
+    manager._process_reactor_turn()
+
+    assert manager._active_child_launches == {}
+    if commit_on_call == 2:
+        assert manager.should_stop is True
+        assert manager._manager_drain_timeouts(now_ns=time.time_ns()) == []
+    else:
+        assert manager.should_stop is False
+        assert manager._manager_drain_timeouts(now_ns=time.time_ns()) == [0.0]
+        manager._process_reactor_turn()
+        assert manager.should_stop is True

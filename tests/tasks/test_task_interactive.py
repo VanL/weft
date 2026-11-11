@@ -1646,3 +1646,84 @@ def test_interactive_consumer_cleanup_marks_terminated_child_failed(
     assert task.taskspec.state.status == "failed"
     assert task.taskspec.state.return_code is not None
     assert task.taskspec.state.return_code < 0
+
+
+class _LaggingExitSession:
+    pid = 424242
+    handle = None
+    last_metrics = None
+
+    def __init__(self, activity_event: threading.Event) -> None:
+        self._activity_event = activity_event
+        self._alive = True
+        self._stdout_closed = False
+        self._stderr_closed = False
+
+    def send(self, data: str) -> None:
+        del data
+
+    def close_stdin(self) -> None:
+        return None
+
+    def poll_stdout(self) -> list[str]:
+        self._stdout_closed = True
+        return []
+
+    def poll_stderr(self) -> list[str]:
+        self._stderr_closed = True
+        return []
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def returncode(self) -> int | None:
+        return None if self._alive else -9
+
+    def _publish_exit(self) -> None:
+        time.sleep(0.05)
+        self._alive = False
+        self._activity_event.set()
+
+    def terminate(self, *, deadline: float | None = None) -> None:
+        del deadline
+        threading.Thread(target=self._publish_exit, daemon=True).start()
+
+    def close(self) -> None:
+        return None
+
+    def poll_limits(self) -> tuple[bool, str | None]:
+        return False, None
+
+    def stop_monitor(self) -> None:
+        return None
+
+
+def test_interactive_kill_waits_for_exit_publication_after_pipe_eof(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """KILL unwind waits for tracked session exit even when pipe EOF arrives first."""
+    db_path, make_queue = broker_env
+    spec = make_interactive_spec(unique_tid)
+    task = Consumer(db_path, spec)
+    ctrl_out = make_queue(spec.io.control["ctrl_out"])
+    session = _LaggingExitSession(task._interactive_activity)
+    try:
+        task.taskspec.mark_started()
+        task._interactive_runner = cast(Any, object())
+        task._interactive_session = session
+        make_queue(spec.io.control["ctrl_in"]).write(
+            encode_control_message("KILL", request_id="kill-lagging-exit")
+        )
+        task.process_once()
+
+        assert not session.is_alive()
+        terminals = [
+            json.loads(raw)
+            for raw in ctrl_out.peek_generator()
+            if json.loads(raw).get("type") == "terminal"
+        ]
+        assert len(terminals) == 1
+        assert terminals[0]["status"] == "killed"
+    finally:
+        task.cleanup()

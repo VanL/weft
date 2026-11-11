@@ -1742,6 +1742,8 @@ def _await_launcher_first_line(
 ) -> str:
     """Read the initial event while retaining cleanup ownership on every exit."""
     try:
+        if deadline is None and cancel_event is None:
+            return _read_launcher_first_line(launcher_process)
         return _read_launcher_first_line(
             launcher_process, deadline=deadline, cancel_event=cancel_event
         )

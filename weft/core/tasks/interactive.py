@@ -371,30 +371,41 @@ class InteractiveTaskMixin(ABC):
             self._interactive_stderr_final_sent = False
 
     def _interactive_drain_remaining(
-        self, session: CommandSessionProtocol, outbox_queue: Queue
+        self,
+        session: CommandSessionProtocol,
+        outbox_queue: Queue,
+        *,
+        deadline: float | None = None,
     ) -> None:
-        """Emit remaining output until both streams report EOF or the budget ends.
+        """Emit remaining output until both streams report EOF and the session exits.
 
-        A runner session's stream readers publish each chunk or EOF and then
-        call the activity callback, which sets ``_interactive_activity``; the
-        drain waits on that event, cleared before each read so a publication
-        after the read still wakes it. An owner-local session (no runner, the
-        built-in Debugger) has no asynchronous producer, so one emit suffices.
+        A runner session's stream readers and exit waiter publish each chunk,
+        EOF, or tracked-runtime exit and then call the activity callback, which
+        sets ``_interactive_activity``; the drain waits on that event, cleared
+        before each read so a publication after the read still wakes it. An
+        owner-local session (no runner, the built-in Debugger) has no
+        asynchronous producer, so one emit suffices.
 
         Spec: [CC-2.2.1], [CC-3.1], [RM-5.2]
         """
         if self._interactive_runner is None:
             self._interactive_emit_chunks(session, outbox_queue)
             return
-        deadline = time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT
+        drain_deadline = (
+            time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT
+            if deadline is None
+            else max(deadline, time.monotonic() + INTERACTIVE_OUTPUT_DRAIN_TIMEOUT)
+        )
         while True:
             self._interactive_activity.clear()
             self._interactive_emit_chunks(session, outbox_queue)
-            if getattr(session, "_stdout_closed", False) and getattr(
-                session, "_stderr_closed", False
+            if (
+                getattr(session, "_stdout_closed", False)
+                and getattr(session, "_stderr_closed", False)
+                and not session.is_alive()
             ):
                 break
-            remaining = deadline - time.monotonic()
+            remaining = drain_deadline - time.monotonic()
             if remaining <= 0:
                 break
             self._interactive_activity.wait(remaining)
@@ -544,20 +555,22 @@ class InteractiveTaskMixin(ABC):
             session.close_stdin()
         except Exception:  # pragma: no cover - session teardown best effort
             logger.debug("Failed to close interactive stdin", exc_info=True)
+        now = time.monotonic()
+        overall_deadline = (
+            now + INTERACTIVE_STOP_GRACE_SECONDS if deadline is None else deadline
+        )
         if reason == "killed":
             if session.is_alive():
                 session.terminate(deadline=time.monotonic())
             session.stop_monitor()
             self._interactive_drain_remaining(
-                session, self._queue(self._queue_names["outbox"])
+                session,
+                self._queue(self._queue_names["outbox"]),
+                deadline=overall_deadline,
             )
             self._interactive_finalize_session(failure_reason=reason)
             return
 
-        now = time.monotonic()
-        overall_deadline = (
-            now + INTERACTIVE_STOP_GRACE_SECONDS if deadline is None else deadline
-        )
         eof_grace = min(
             INTERACTIVE_STDIN_EOF_GRACE_SECONDS,
             max(0.0, (overall_deadline - now) * 0.25),
@@ -581,7 +594,9 @@ class InteractiveTaskMixin(ABC):
         session.stop_monitor()
         if getattr(self, "_interactive_session", None) is not None:
             self._interactive_drain_remaining(
-                session, self._queue(self._queue_names["outbox"])
+                session,
+                self._queue(self._queue_names["outbox"]),
+                deadline=overall_deadline,
             )
             self._interactive_finalize_session(failure_reason=reason)
 

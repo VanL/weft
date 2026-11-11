@@ -1633,7 +1633,10 @@ class Manager(ServiceTask):
 
         self._child_launch_started_ns.pop(tid, None)
         self._clear_admission_retry()
-        return self._active_child_launches.pop(tid, None)
+        removed = self._active_child_launches.pop(tid, None)
+        if self._draining and not self.should_stop and not self._active_child_launches:
+            self._drain_immediate_work_pending = True
+        return removed
 
     def _retry_stale_child_launches(self) -> bool:
         """Missing launch results are ambiguous; reconcile without duplicate spawn [MF-6]."""
@@ -9437,7 +9440,7 @@ class Manager(ServiceTask):
     def _manager_drain_timeouts(self, *, now_ns: int) -> list[float]:
         """Return exact clocks needed while a Manager drain is in progress."""
 
-        if not self._draining:
+        if not self._draining or self.should_stop:
             return []
         if self._drain_immediate_work_pending:
             return [0.0]
@@ -9446,6 +9449,8 @@ class Manager(ServiceTask):
         if self._drain_stops_children:
             members = self._drain_phase_members()
             phase_active = bool(members) or self._has_active_child_launches()
+            if not phase_active:
+                return [0.0]
             # Drain windows measure elapsed time on the monotonic clock; a
             # wall-clock step neither shortens nor stretches them.
             monotonic_now = time.monotonic_ns()
@@ -9589,8 +9594,10 @@ class Manager(ServiceTask):
             # Finish an in-flight drain before reevaluating leadership. Otherwise a
             # slow turn can re-enter the yield path and skip the corresponding
             # *_drained completion event once children are gone.
-            self._continue_shutdown_drain()
             self._drain_worker_results()
+            self._continue_shutdown_drain()
+            if not self.should_stop:
+                self._drain_worker_results()
             return
         self._timed_manager_call("evidence_refresh", self._refresh_scheduler_evidence)
         self._timed_manager_call(
@@ -9610,8 +9617,10 @@ class Manager(ServiceTask):
                 force=True,
             )
             if self._draining:
-                self._continue_shutdown_drain()
                 self._drain_worker_results()
+                self._continue_shutdown_drain()
+                if not self.should_stop:
+                    self._drain_worker_results()
                 return
         self._publish_undurable_receipts()
         # Reuse the completed turn sweep only during ordinary delivery [MA-3].
@@ -9643,8 +9652,10 @@ class Manager(ServiceTask):
         finally:
             self._dispatch_cleanup_scope = False
         if self._draining:
-            self._continue_shutdown_drain()
             self._drain_worker_results()
+            self._continue_shutdown_drain()
+            if not self.should_stop:
+                self._drain_worker_results()
             return
         if self._maybe_yield_leadership():
             self._drain_worker_results()
@@ -9653,8 +9664,10 @@ class Manager(ServiceTask):
             "service_convergence", self._run_managed_service_convergence
         )
         if self._draining:
-            self._continue_shutdown_drain()
             self._drain_worker_results()
+            self._continue_shutdown_drain()
+            if not self.should_stop:
+                self._drain_worker_results()
             return
         if self._maybe_yield_leadership():
             self._drain_worker_results()

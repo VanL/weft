@@ -47,6 +47,7 @@ from weft._constants import (
     INTERNAL_SERVICE_KEY_METADATA_KEY,
     INTERNAL_SERVICE_LIFECYCLE_METADATA_KEY,
     MANAGER_LAUNCHER_SIGNAL_SUCCESS,
+    MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
     TASK_POLL_INTERVAL_NONE_TOKEN,
     TASKSPEC_BUNDLE_ROOT_FIELD,
     WEFT_GLOBAL_LOG_QUEUE,
@@ -4001,7 +4002,7 @@ def _stop_all_active_managers_and_wait(harness: WeftTestHarness) -> None:
             [reg], config=harness.context.config
         )
         try:
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + MANAGER_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + 10.0
             while time.monotonic() < deadline:
                 snap = core_manager_runtime._snapshot_registry(
                     harness.context, prune_stale=False
@@ -4123,12 +4124,12 @@ def test_accepted_waiters_recover_when_manager_stops_after_submission_check(
             def _wait_result() -> Any:
                 with wait_lock:
                     worker_threads.add(threading.get_ident())
-                return t_res.result(4.0)
+                return t_res.result(10.0)
 
             def _wait_realtime() -> list[Any]:
                 with wait_lock:
                     worker_threads.add(threading.get_ident())
-                return list(t_rt.realtime_events(follow=True, timeout=4.0))
+                return list(t_rt.realtime_events(follow=True, timeout=10.0))
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 fut_res = pool.submit(_wait_result)
@@ -4142,8 +4143,8 @@ def test_accepted_waiters_recover_when_manager_stops_after_submission_check(
                 os.kill(m1_pid, signal.SIGCONT)
                 m1_paused = False
 
-                res_out = fut_res.result(timeout=12.0)
-                rt_events = fut_rt.result(timeout=12.0)
+                res_out = fut_res.result(timeout=15.0)
+                rt_events = fut_rt.result(timeout=15.0)
         finally:
             if m1_paused:
                 with suppress(OSError):
