@@ -281,6 +281,26 @@ def _merge_stage_defaults(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-030] except
     return candidate
 
 
+def _validate_stage_spec_compatibility(
+    stage_name: str,
+    spec_section: Mapping[str, Any],
+) -> None:
+    if bool(spec_section.get("persistent")):
+        raise ValueError(f"stage '{stage_name}' cannot reference a persistent task")
+    if bool(spec_section.get("interactive")):
+        raise ValueError(f"stage '{stage_name}' cannot reference an interactive task")
+    if bool(spec_section.get("stream_output")):
+        raise ValueError(f"stage '{stage_name}' cannot use streaming output")
+    if spec_section.get("parameterization") is not None:
+        raise ValueError(
+            f"stage '{stage_name}' cannot declare submission-only parameterization"
+        )
+    if spec_section.get("run_input") is not None:
+        raise ValueError(
+            f"stage '{stage_name}' cannot declare submission-only run_input"
+        )
+
+
 def _validate_stage_template(stage: PipelineStage, payload: Mapping[str, Any]) -> None:
     """Validate that a stored stage target is pipeline-compatible.
 
@@ -304,12 +324,7 @@ def _validate_stage_template(stage: PipelineStage, payload: Mapping[str, Any]) -
             f"stage '{stage.name}' cannot reference an internal pipeline edge"
         )
 
-    if bool(spec_section.get("persistent")):
-        raise ValueError(f"stage '{stage.name}' cannot reference a persistent task")
-    if bool(spec_section.get("interactive")):
-        raise ValueError(f"stage '{stage.name}' cannot reference an interactive task")
-    if bool(spec_section.get("stream_output")):
-        raise ValueError(f"stage '{stage.name}' cannot use streaming output")
+    _validate_stage_spec_compatibility(stage.name, spec_section)
 
 
 def _stage_owner_config(

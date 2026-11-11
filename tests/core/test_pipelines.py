@@ -42,16 +42,23 @@ def _task_payload(
     persistent: bool = False,
     interactive: bool = False,
     stream_output: bool = False,
+    parameterization: dict[str, Any] | None = None,
+    run_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "type": "function",
+        "function_target": function_target,
+        "persistent": persistent,
+        "interactive": interactive,
+        "stream_output": stream_output,
+    }
+    if parameterization is not None:
+        spec["parameterization"] = parameterization
+    if run_input is not None:
+        spec["run_input"] = run_input
     return {
         "name": "task",
-        "spec": {
-            "type": "function",
-            "function_target": function_target,
-            "persistent": persistent,
-            "interactive": interactive,
-            "stream_output": stream_output,
-        },
+        "spec": spec,
         "metadata": {},
     }
 
@@ -353,6 +360,24 @@ def test_pipeline_compiler_sets_defaults_input_override_for_interior_edge(
         (_task_payload(persistent=True), "persistent"),
         (_task_payload(interactive=True), "interactive"),
         (_task_payload(stream_output=True), "streaming"),
+        (
+            _task_payload(
+                parameterization={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {},
+                }
+            ),
+            r"stage 'bad'.*submission-only.*parameterization",
+        ),
+        (
+            _task_payload(
+                run_input={
+                    "adapter_ref": "tests.tasks.sample_targets:echo_payload",
+                    "arguments": {},
+                }
+            ),
+            r"stage 'bad'.*submission-only.*run_input",
+        ),
     ],
 )
 def test_pipeline_compiler_rejects_incompatible_stage_task(

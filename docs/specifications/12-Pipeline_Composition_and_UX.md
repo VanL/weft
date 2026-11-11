@@ -422,11 +422,15 @@ In the initial pipeline contract:
   implementation of the pipeline contract, not extra user-authored stages
 - pipeline-compatible stages must not be interactive
 - pipeline-compatible stages must not use streaming output
+- pipeline-compatible stages must not declare submission-only
+  `spec.parameterization` or `spec.run_input` adapters
 - successful pipeline-compatible stages must emit exactly one handoff payload
 
 _Implementation mapping_: `weft/core/pipelines.py` (`_validate_stage_template`
-enforces stage compatibility and rejects pipeline or internal edge targets;
-`compile_linear_pipeline` realizes concrete stage and edge TaskSpecs).
+enforces stage compatibility and rejects pipeline, internal edge, or
+submission-only parameterized/`run_input` targets;
+`compile_linear_pipeline` realizes concrete stage and edge TaskSpecs; plan:
+`docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`).
 
 ## Runtime Model [PL-3]
 
@@ -968,6 +972,7 @@ before it has a solid, first-class, linear, task-shaped pipeline run.
 
 ## Related Plans
 
+- [`docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`](../plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md) rejects submission-only `spec.parameterization` and `spec.run_input` adapters on pipeline stage templates ([PL-2.7]).
 - retired: `2026-11-03-control-replies-only-on-request-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the STOP, KILL, PAUSE, and RESUME replies, whose outcome is the published state change, and answers STATUS on the requester's `reply_to` ([PL-1.5]).
 - [Work-conserving family scheduling](../plans/2026-10-15-work-conserving-family-scheduling.md) removes the frontier cap and enables native PostgreSQL measured admission by default.
 
