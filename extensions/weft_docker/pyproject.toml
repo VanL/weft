@@ -28,5 +28,6 @@ docker = "weft_docker.plugin:get_runner_plugin"
 [tool.hatch.build]
 include = [
     "weft_docker/**/*.py",
+    "weft_docker/py.typed",
     "README.md",
 ]

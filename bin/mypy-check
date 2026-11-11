@@ -10,7 +10,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-# Scope matches the CI mypy gate in .github/workflows/test.yml.
+# Full first-party package and test-suite scope per [TS-3].
 exec "$PYTHON_BIN" -m mypy \
   --config-file="$CONFIG_FILE" \
   "$ROOT/weft" \
@@ -18,6 +18,10 @@ exec "$PYTHON_BIN" -m mypy \
   "$ROOT/benchmarks" \
   "$ROOT/bin" \
   "$ROOT/integrations/weft_django/weft_django" \
+  "$ROOT/integrations/weft_django/tests" \
   "$ROOT/extensions/weft_docker/weft_docker" \
+  "$ROOT/extensions/weft_docker/tests" \
   "$ROOT/extensions/weft_macos_sandbox/weft_macos_sandbox" \
-  "$ROOT/extensions/weft_microsandbox/weft_microsandbox"
+  "$ROOT/extensions/weft_macos_sandbox/tests" \
+  "$ROOT/extensions/weft_microsandbox/weft_microsandbox" \
+  "$ROOT/extensions/weft_microsandbox/tests"

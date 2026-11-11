@@ -28,5 +28,6 @@ microsandbox = "weft_microsandbox.plugin:get_runner_plugin"
 [tool.hatch.build]
 include = [
     "weft_microsandbox/**/*.py",
+    "weft_microsandbox/py.typed",
     "README.md",
 ]

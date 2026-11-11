@@ -2853,6 +2853,7 @@ def test_task_detail_view_reuses_request_owned_client(
         response = weft_django_views.task_detail_view(request, "1770000000000000333")
         assert response.status_code == 200
         assert len(created_core_clients) == 1
-        active_client.core_client.task.assert_called_once_with("1770000000000000333")
+        assert active_client.core_client is created_core_clients[0]
+        created_core_clients[0].task.assert_called_once_with("1770000000000000333")
     finally:
         weft_django_lifecycle.request_finished_receiver(sender=object())

@@ -1004,7 +1004,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates(
         for target in extensions:
             assert target.package_dir.relative_to(_REPO_ROOT).as_posix() in command
     # [TS-3]: mypy covers tests/, benchmarks/ and bin/ as well as every
-    # first-party package.
+    # first-party package and its test suite.
     assert "weft" in mypy_command
     assert "tests" in mypy_command
     assert "benchmarks" in mypy_command
@@ -1012,6 +1012,7 @@ def test_build_precheck_commands_cover_release_gate_and_quality_gates(
     for target in extensions:
         relative = target.package_dir.relative_to(_REPO_ROOT)
         assert (relative / relative.name).as_posix() in mypy_command
+        assert _suite_path(target) in mypy_command
 
     addopts = release.build_precheck_env_overrides()["PYTEST_ADDOPTS"].split()
     assert "-x" in addopts or "--exitfirst" in addopts or "--maxfail=1" in addopts

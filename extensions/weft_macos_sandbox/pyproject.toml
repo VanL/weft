@@ -27,5 +27,6 @@ macos-sandbox = "weft_macos_sandbox.plugin:get_runner_plugin"
 [tool.hatch.build]
 include = [
     "weft_macos_sandbox/**/*.py",
+    "weft_macos_sandbox/py.typed",
     "README.md",
 ]
