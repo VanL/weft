@@ -188,6 +188,8 @@ def _spawn_reconciliation_queue_specs(
 def _open_spawn_reconciliation_monitor(
     context: WeftContext,
     queue_specs: tuple[tuple[str, bool], ...],
+    *,
+    cancel_event: Any | None = None,
 ) -> Iterator[tuple[list[Queue], QueueChangeMonitor]]:
     """Close the watcher before every queue, including construction failure."""
     with ExitStack() as resources:
@@ -197,6 +199,9 @@ def _open_spawn_reconciliation_monitor(
         ]
         monitor = QueueChangeMonitor(queues, config=context.config)
         resources.callback(monitor.close)
+        register = getattr(cancel_event, "_register_wakeup", None)
+        if callable(register):
+            resources.callback(register(monitor.wake))
         yield queues, monitor
 
 
@@ -240,6 +245,7 @@ def reconcile_submitted_spawn(
     poll_interval: float = CONTROL_SURFACE_WAIT_INTERVAL,
     reserved_is_terminal: bool = True,
     queued_is_terminal: bool = True,
+    cancel_event: Any | None = None,
 ) -> SpawnSubmissionReconciliation:
     """Classify a previously submitted spawn request using durable state only.
 
@@ -257,7 +263,9 @@ def reconcile_submitted_spawn(
         with log_queue.get_connection() as broker:
             queue_specs = _spawn_reconciliation_queue_specs(context, tid, broker=broker)
         _monitor_queues, monitor = monitor_resources.enter_context(
-            _open_spawn_reconciliation_monitor(context, queue_specs)
+            _open_spawn_reconciliation_monitor(
+                context, queue_specs, cancel_event=cancel_event
+            )
         )
         while True:
             with log_queue.get_connection() as broker:
@@ -273,7 +281,7 @@ def reconcile_submitted_spawn(
                     return result
 
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or (cancel_event is not None and cancel_event.is_set()):
                 if last_reserved is not None:
                     return last_reserved
                 return result
@@ -286,7 +294,9 @@ def reconcile_submitted_spawn(
                 monitor_resources.close()
                 queue_specs = current_specs
                 _monitor_queues, monitor = monitor_resources.enter_context(
-                    _open_spawn_reconciliation_monitor(context, queue_specs)
+                    _open_spawn_reconciliation_monitor(
+                        context, queue_specs, cancel_event=cancel_event
+                    )
                 )
                 continue
 

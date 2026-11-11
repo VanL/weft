@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+import threading
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ from weft._constants import (
     TASK_MONITOR_DEAD_TID_CLEANUP_MIN_AGE_SECONDS,
     WEFT_MANAGER_OUTBOX_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
+    load_config,
 )
 from weft._exceptions import CommandUsageError
 from weft.commands.tasks import list_tasks
@@ -824,3 +827,126 @@ def test_pong_gate_nonempty_record_context_overrides_root() -> None:
     record = {"weft_context": "/projects/other"}
     assert _gate(_eligible_payload(weft_context="/projects/other"), record) is True
     assert _gate(_eligible_payload(weft_context=_ROOT), record) is False
+
+
+class _WakeableCancelEvent:
+    """Wakeable cancel event matching Weft's `_register_wakeup` contract."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._wakeups: dict[object, Callable[[], None]] = {}
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def _register_wakeup(self, callback: Callable[[], None]) -> Callable[[], None]:
+        fire_immediately = False
+        token = object()
+        with self._lock:
+            if self._event.is_set():
+                fire_immediately = True
+            else:
+                self._wakeups[token] = callback
+        if fire_immediately:
+            callback()
+            return lambda: None
+
+        def _deregister() -> None:
+            with self._lock:
+                self._wakeups.pop(token, None)
+
+        return _deregister
+
+    def set(self) -> None:
+        with self._lock:
+            callbacks = (
+                tuple(self._wakeups.values()) if not self._event.is_set() else ()
+            )
+            self._event.set()
+        for callback in callbacks:
+            callback()
+
+
+def test_send_keyed_ping_probe_wakes_immediately_on_cancel_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked keyed PING probe interrupts immediately when cancel_event fires."""
+
+    ctx = build_context(
+        spec_context=prepare_project_root(tmp_path),
+        config={**load_config(), "INITIAL_CHECKS": 0, "MAX_INTERVAL": 50.0},
+    )
+    tid = "1775622400000000901"
+    ctrl_in_name = f"T{tid}.ctrl_in"
+    cancel_event = _WakeableCancelEvent()
+    probe_written = threading.Event()
+    original_write = control_probe_mod._write_probe_request
+
+    def _signal_write(*args: Any, **kwargs: Any) -> int:
+        row_id = original_write(*args, **kwargs)
+        probe_written.set()
+        return row_id
+
+    monkeypatch.setattr(control_probe_mod, "_write_probe_request", _signal_write)
+    cancel_set_at: list[float] = []
+
+    def _cancel_after_park() -> None:
+        assert probe_written.wait(timeout=2.0)
+        # Allow the caller thread to park inside a multi-hundred-millisecond wait.
+        time.sleep(0.25)
+        cancel_set_at.append(time.monotonic())
+        cancel_event.set()
+
+    canceller = threading.Thread(target=_cancel_after_park, daemon=True)
+    canceller.start()
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=ctrl_in_name,
+        timeout=5.0,
+        cancel_event=cancel_event,
+    )
+    finished_at = time.monotonic()
+    canceller.join(timeout=1.0)
+
+    assert cancel_set_at, "canceller thread never fired"
+    elapsed_after_cancel = finished_at - cancel_set_at[0]
+    assert result.matched is None
+    assert result.error is None
+    assert result.timed_out is True
+    assert elapsed_after_cancel < 0.15, (
+        f"cancel_event failed to interrupt parked probe wait ({elapsed_after_cancel:.3f}s)"
+    )
+    with ctx.queue(ctrl_in_name, persistent=False) as ctrl_in:
+        assert ctrl_in.peek_many(limit=10, include_claimed=True) == []
+    assert not any(
+        name.endswith(".ctrl_in") and name != ctrl_in_name for name in _queue_names(ctx)
+    )
+
+
+def test_send_keyed_ping_probe_matches_pong_with_unset_cancel_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Providing an unset cancel_event still receives and matches a live PONG."""
+
+    ctx = build_context(spec_context=prepare_project_root(tmp_path))
+    tid = "1775622400000000902"
+    cancel_event = _WakeableCancelEvent()
+    _respond_to_probe_write(ctx, monkeypatch, tid=tid)
+
+    result = send_keyed_ping_probe(
+        ctx,
+        tid=tid,
+        ctrl_in_name=f"T{tid}.ctrl_in",
+        request_id="cancel-capable-match",
+        timeout=1.0,
+        cancel_event=cancel_event,
+    )
+
+    assert result.error is None
+    assert result.timed_out is False
+    assert result.matched is not None
+    assert result.matched.request_id == "cancel-capable-match"

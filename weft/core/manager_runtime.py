@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from contextlib import ExitStack
@@ -238,6 +239,8 @@ def _manager_registry_disposition(
     probe_cache: dict[str, int | None] | None,
     observe: bool = False,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> _ManagerRegistryDisposition:
     """Filter one active manager row without taking delete custody ([MA-1]).
 
@@ -259,8 +262,22 @@ def _manager_registry_disposition(
     if (
         probe_stale
         and is_canonical_manager_record(record)
-        and _manager_record_has_matched_pong(
-            context, record, probe_cache=probe_cache, broker=broker
+        and (
+            _manager_record_has_matched_pong(
+                context,
+                record,
+                probe_cache=probe_cache,
+                broker=broker,
+            )
+            if deadline is None and cancel_event is None
+            else _manager_record_has_matched_pong(
+                context,
+                record,
+                probe_cache=probe_cache,
+                broker=broker,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
         )
     ):
         return "keep"
@@ -293,6 +310,8 @@ def _snapshot_registry(
     observe: bool = False,
     queue: Queue | None = None,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fold included manager rows without deleting peer evidence ([MF-3.1])."""
     snapshot: dict[str, dict[str, Any]] = {}
@@ -333,6 +352,8 @@ def _snapshot_registry(
                     probe_cache=probe_cache,
                     observe=observe,
                     broker=broker,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
                 )
                 if disposition == "omit":
                     continue
@@ -468,22 +489,54 @@ def _read_public_spawn_backlog(context: WeftContext, *, broker: Any | None) -> b
     )
 
 
+def _recovery_interrupted_reason(
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> str | None:
+    if cancel_event is not None and cancel_event.is_set():
+        return "recovery_cancelled"
+    if deadline is not None and time.monotonic() >= deadline:
+        return "recovery_budget_exhausted"
+    return None
+
+
 def _probe_recovery_candidate(
     context: WeftContext,
     record: dict[str, Any],
     *,
     broker: Any | None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> ControlProbeResult:
     """Run one full control-surface proof round for automatic recovery."""
 
+    if _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event):
+        return ControlProbeResult(request_id="interrupted", timed_out=True)
+    probe_timeout = (
+        CONTROL_SURFACE_WAIT_TIMEOUT
+        if deadline is None
+        else max(0.0, min(CONTROL_SURFACE_WAIT_TIMEOUT, deadline - time.monotonic()))
+    )
+    if probe_timeout <= 0.0:
+        return ControlProbeResult(request_id="interrupted", timed_out=True)
     tid = str(record.get("tid", ""))
     ctrl_in_name = _manager_ctrl_queue_name(tid, record)
+    if cancel_event is None:
+        return send_keyed_ping_probe(
+            context,
+            tid=tid,
+            ctrl_in_name=ctrl_in_name,
+            timeout=probe_timeout,
+            broker=broker,
+        )
     return send_keyed_ping_probe(
         context,
         tid=tid,
         ctrl_in_name=ctrl_in_name,
-        timeout=CONTROL_SURFACE_WAIT_TIMEOUT,
+        timeout=probe_timeout,
         broker=broker,
+        cancel_event=cancel_event,
     )
 
 
@@ -509,6 +562,8 @@ def observe_manager_availability(
     context: WeftContext,
     *,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> ManagerAvailabilityObservation:
     """Observe availability and run at most the first keyed proof round.
 
@@ -522,10 +577,26 @@ def observe_manager_availability(
     Spec: [MA-1] item 4, [MA-3], [MANAGER.8], [SB-0.4]
     """
 
+    interrupted = _recovery_interrupted_reason(
+        deadline=deadline, cancel_event=cancel_event
+    )
+    if interrupted is not None:
+        return ManagerAvailabilityObservation(
+            outcome="uncertain",
+            manager_record=None,
+            first_uncertain_at=None,
+            backlog_pending=None,
+            reason=interrupted,
+        )
     try:
         if broker is None:
             with context.session() as session, session.connection() as opened:
-                return observe_manager_availability(context, broker=opened)
+                return observe_manager_availability(
+                    context,
+                    broker=opened,
+                    deadline=deadline,
+                    cancel_event=cancel_event,
+                )
         outcome, record = _read_recovery_snapshot(context, broker=broker)
     except (BrokerError, OSError) as exc:
         return ManagerAvailabilityObservation(
@@ -564,7 +635,13 @@ def observe_manager_availability(
             backlog_pending=None,
             reason=f"backlog_read_error:{exc}",
         )
-    probe_result = _probe_recovery_candidate(context, record, broker=broker)
+    probe_result = _probe_recovery_candidate(
+        context,
+        record,
+        broker=broker,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     if _probe_proves_recovery_candidate(context, record, probe_result):
         return ManagerAvailabilityObservation(
             outcome="ready",
@@ -587,11 +664,41 @@ def observe_manager_availability(
     )
 
 
+def _wait_ambiguous_backlog_grace(
+    grace_seconds: float,
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> str | None:
+    capped = (
+        grace_seconds
+        if deadline is None
+        else max(0.0, min(grace_seconds, deadline - time.monotonic()))
+    )
+    if capped > 0.0:
+        wait_fn = getattr(cancel_event, "wait", None)
+        register = getattr(cancel_event, "_register_wakeup", None)
+        if callable(wait_fn):
+            wait_fn(capped)
+        elif callable(register):
+            wake_event = threading.Event()
+            deregister = register(wake_event.set)
+            try:
+                wake_event.wait(capped)
+            finally:
+                deregister()
+        else:
+            time.sleep(capped)
+    return _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event)
+
+
 def decide_manager_recovery(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-375] exception
     context: WeftContext,
     observation: ManagerAvailabilityObservation,
     *,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> ManagerRecoveryDecision:
     """Refresh evidence and make the final reuse/launch/no-start decision.
 
@@ -635,8 +742,20 @@ def decide_manager_recovery(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-375] exce
             + MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS
             - time.monotonic(),
         )
-        if remaining_grace:
-            time.sleep(remaining_grace)
+        if _wait_ambiguous_backlog_grace(
+            remaining_grace, deadline=deadline, cancel_event=cancel_event
+        ):
+            return ManagerRecoveryDecision(
+                outcome="no_start",
+                manager_record=observation.manager_record,
+                reason="recovery_interrupted",
+            )
+    elif _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event):
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=observation.manager_record,
+            reason="recovery_interrupted",
+        )
 
     try:
         outcome, record = _read_recovery_snapshot(context, broker=broker)
@@ -683,12 +802,25 @@ def decide_manager_recovery(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-375] exce
             manager_record=record,
             reason="no_pending_backlog",
         )
-    second_probe = _probe_recovery_candidate(context, record, broker=broker)
+    second_probe = _probe_recovery_candidate(
+        context,
+        record,
+        broker=broker,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     if _probe_proves_recovery_candidate(context, record, second_probe):
         return ManagerRecoveryDecision(
             outcome="reuse",
             manager_record=record,
             reason="second_probe_ready",
+            probe_request_id=second_probe.request_id,
+        )
+    if _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event):
+        return ManagerRecoveryDecision(
+            outcome="no_start",
+            manager_record=record,
+            reason="recovery_interrupted",
             probe_request_id=second_probe.request_id,
         )
     if second_probe.error is not None:
@@ -827,7 +959,7 @@ def _manager_record_diagnostic(
         liveness=liveness,
         proof_source=source,
         proof_detail=detail,
-        dispatch_eligible=liveness == "live",
+        dispatch_eligible=(status == SERVICE_STATUS_ACTIVE and liveness == "live"),
         canonical_candidate=True,
     )
 
@@ -956,6 +1088,8 @@ def _registry_view(
     probe_cache: dict[str, int | None] | None = None,
     queue: Queue | None = None,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> ManagerRegistryView:
     snapshot = _snapshot_registry(
         context,
@@ -964,6 +1098,8 @@ def _registry_view(
         probe_cache=probe_cache,
         queue=queue,
         broker=broker,
+        deadline=deadline,
+        cancel_event=cancel_event,
     )
     return ManagerRegistryView(
         records=snapshot,
@@ -1072,6 +1208,8 @@ def _manager_record_has_matched_pong(
     *,
     probe_cache: dict[str, int | None] | None,
     broker: Any | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> bool:
     tid_value = record.get("tid")
     if not isinstance(tid_value, str) or not tid_value:
@@ -1083,15 +1221,34 @@ def _manager_record_has_matched_pong(
             return False
         record[MANAGER_PONG_LIVE_AT_KEY] = observed_at
         return True
+    if _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event):
+        return False
+
+    probe_timeout = _manager_probe_timeout()
+    if deadline is not None:
+        probe_timeout = max(0.0, min(probe_timeout, deadline - time.monotonic()))
+        if probe_timeout <= 0.0:
+            return False
 
     ctrl_in_name = _manager_ctrl_queue_name(tid, record)
     ctrl_out_name = _manager_ctrl_out_queue_name(tid, record)
-    result = send_keyed_ping_probe(
-        context,
-        tid=tid,
-        ctrl_in_name=ctrl_in_name,
-        broker=broker,
-        timeout=_manager_probe_timeout(),
+    result = (
+        send_keyed_ping_probe(
+            context,
+            tid=tid,
+            ctrl_in_name=ctrl_in_name,
+            broker=broker,
+            timeout=probe_timeout,
+        )
+        if cancel_event is None
+        else send_keyed_ping_probe(
+            context,
+            tid=tid,
+            ctrl_in_name=ctrl_in_name,
+            broker=broker,
+            timeout=probe_timeout,
+            cancel_event=cancel_event,
+        )
     )
     if result.matched is None or not pong_proves_dispatch_eligible(
         result.matched.payload,
@@ -1101,7 +1258,13 @@ def _manager_record_has_matched_pong(
         outbox_name=WEFT_MANAGER_OUTBOX_QUEUE,
         root_context=str(context.root),
     ):
-        if probe_cache is not None:
+        if (
+            probe_cache is not None
+            and _recovery_interrupted_reason(
+                deadline=deadline, cancel_event=cancel_event
+            )
+            is None
+        ):
             probe_cache[tid] = None
         return False
 
@@ -1510,7 +1673,12 @@ def _cleanup_startup_stderr(path: Path) -> None:
         return
 
 
-def _read_launcher_first_line(process: subprocess.Popen[str]) -> str:
+def _read_launcher_first_line(
+    process: subprocess.Popen[str],
+    *,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
+) -> str:
     """Bound first-event observation without creating an unowned reader thread.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-3]
@@ -1518,12 +1686,16 @@ def _read_launcher_first_line(process: subprocess.Popen[str]) -> str:
     if process.stdout is None:
         return ""
     descriptor = process.stdout.fileno()
-    deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+    effective_deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+    if deadline is not None:
+        effective_deadline = min(effective_deadline, deadline)
     data = bytearray()
     os.set_blocking(descriptor, False)
     try:
         while True:
-            if time.monotonic() >= deadline:
+            if _recovery_interrupted_reason(
+                deadline=effective_deadline, cancel_event=cancel_event
+            ):
                 raise subprocess.TimeoutExpired(
                     process.args, MANAGER_STARTUP_TIMEOUT_SECONDS
                 )
@@ -1535,7 +1707,7 @@ def _read_launcher_first_line(process: subprocess.Popen[str]) -> str:
                 time.sleep(
                     min(
                         MANAGER_LAUNCHER_POLL_INTERVAL,
-                        max(0.0, deadline - time.monotonic()),
+                        max(0.0, effective_deadline - time.monotonic()),
                     )
                 )
                 continue
@@ -1562,11 +1734,17 @@ def _abort_unconfirmed_launcher(process: subprocess.Popen[str]) -> tuple[str, st
 
 
 def _await_launcher_first_line(
-    launcher_process: subprocess.Popen[str], stderr_path: Path
+    launcher_process: subprocess.Popen[str],
+    stderr_path: Path,
+    *,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> str:
     """Read the initial event while retaining cleanup ownership on every exit."""
     try:
-        return _read_launcher_first_line(launcher_process)
+        return _read_launcher_first_line(
+            launcher_process, deadline=deadline, cancel_event=cancel_event
+        )
     except BaseException as exc:
         try:
             stdout_text, stderr_text = _abort_unconfirmed_launcher(launcher_process)
@@ -1595,6 +1773,9 @@ def _await_launcher_first_line(
 def _launch_detached_manager(
     context: WeftContext,
     invocation: ManagerRuntimeInvocation,
+    *,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> DetachedManagerLaunch:
     try:
         stderr_path = _manager_startup_stderr_path(context, invocation.tid)
@@ -1611,7 +1792,12 @@ def _launch_detached_manager(
         raise ManagerStartFailed(
             f"Failed to start Manager process: detached launcher setup failed: {exc}"
         ) from exc
-    first_line = _await_launcher_first_line(launcher_process, stderr_path)
+    first_line = _await_launcher_first_line(
+        launcher_process,
+        stderr_path,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     event = _parse_launcher_event(first_line)
     if event is None or event.get("event") != "spawned":
         stdout_tail, stderr_text = _abort_unconfirmed_launcher(launcher_process)
@@ -1720,7 +1906,13 @@ def _await_manager_start_settlement(
     manager_tid: str,
     deadline: float,
     session_owned: bool = False,
+    bounded_probe: bool = False,
+    cancel_event: Any | None = None,
 ) -> dict[str, Any] | None:
+    if (bounded_probe or cancel_event is not None) and _recovery_interrupted_reason(
+        deadline=deadline, cancel_event=cancel_event
+    ):
+        return None
     grace_deadline = min(
         deadline,
         time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
@@ -1734,21 +1926,33 @@ def _await_manager_start_settlement(
         resources.callback(registry_queue.close)
         monitor = QueueChangeMonitor([registry_queue], config=context.config)
         resources.callback(monitor.close)
+        _register_monitor_wakeup(resources, monitor, cancel_event)
         while True:
-            view = _registry_view(
+            if (
+                bounded_probe or cancel_event is not None
+            ) and _recovery_interrupted_reason(
+                deadline=grace_deadline, cancel_event=cancel_event
+            ):
+                return last_active
+            view = _start_registry_view(
                 context,
                 target_tid=manager_tid,
                 probe_stale=True,
                 probe_cache=probe_cache,
                 queue=registry_queue,
+                deadline=grace_deadline,
+                cancel_event=cancel_event,
+                bounded=(bounded_probe or cancel_event is not None),
             )
             last_active = view.active_manager
             if last_active is not None and last_active.get("tid") != manager_tid:
                 return last_active
-            remaining = grace_deadline - time.monotonic()
-            if remaining <= 0:
+            if not _wait_manager_registry_change(
+                monitor,
+                effective_deadline=grace_deadline,
+                cancel_event=cancel_event,
+            ):
                 return last_active
-            monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
 
 
 def _wait_for_process_exit(
@@ -2006,12 +2210,84 @@ def _acknowledge_competing_and_return(
     return record, False, None
 
 
+def _start_registry_view(
+    context: WeftContext,
+    *,
+    target_tid: str,
+    probe_stale: bool,
+    probe_cache: dict[str, int | None],
+    queue: Queue | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
+    bounded: bool = False,
+) -> ManagerRegistryView:
+    if not bounded:
+        if queue is None:
+            return _registry_view(
+                context,
+                target_tid=target_tid,
+                probe_stale=probe_stale,
+                probe_cache=probe_cache,
+            )
+        return _registry_view(
+            context,
+            target_tid=target_tid,
+            probe_stale=probe_stale,
+            probe_cache=probe_cache,
+            queue=queue,
+        )
+    return _registry_view(
+        context,
+        target_tid=target_tid,
+        probe_stale=probe_stale,
+        probe_cache=probe_cache,
+        queue=queue,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+
+
+def _start_await_settlement(
+    context: WeftContext,
+    *,
+    manager_tid: str,
+    deadline: float,
+    session_owned: bool = False,
+    cancel_event: Any | None = None,
+    bounded: bool = False,
+) -> dict[str, Any] | None:
+    if not bounded:
+        if session_owned:
+            return _await_manager_start_settlement(
+                context,
+                manager_tid=manager_tid,
+                deadline=deadline,
+                session_owned=True,
+            )
+        return _await_manager_start_settlement(
+            context,
+            manager_tid=manager_tid,
+            deadline=deadline,
+        )
+    return _await_manager_start_settlement(
+        context,
+        manager_tid=manager_tid,
+        deadline=deadline,
+        session_owned=session_owned,
+        bounded_probe=True,
+        cancel_event=cancel_event,
+    )
+
+
 def _reconcile_competing_manager_start(
     context: WeftContext,
     *,
     launch: DetachedManagerLaunch,
     manager_tid: str,
     record: dict[str, Any],
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
+    bounded: bool = False,
 ) -> tuple[dict[str, Any], bool, None]:
     """Resolve a post-loop competing/settled manager into a non-owning result.
 
@@ -2020,11 +2296,14 @@ def _reconcile_competing_manager_start(
     return ``record`` as a non-owning start result.
     """
 
-    view = _registry_view(
+    view = _start_registry_view(
         context,
         target_tid=manager_tid,
         probe_stale=True,
         probe_cache={},
+        deadline=deadline,
+        cancel_event=cancel_event,
+        bounded=bounded,
     )
     if _view_contains_registered_launch(
         view,
@@ -2077,8 +2356,76 @@ def _registry_start_timeout_message(
     )
 
 
+def _effective_manager_start_deadline(deadline: float | None) -> float:
+    default = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+    return default if deadline is None else min(default, deadline)
+
+
+def _register_monitor_wakeup(
+    resources: ExitStack,
+    monitor: QueueChangeMonitor,
+    cancel_event: Any | None,
+) -> None:
+    register = getattr(cancel_event, "_register_wakeup", None)
+    if callable(register):
+        resources.callback(register(monitor.wake))
+
+
+def _wait_manager_registry_change(
+    monitor: QueueChangeMonitor,
+    *,
+    effective_deadline: float,
+    cancel_event: Any | None,
+) -> bool:
+    if _recovery_interrupted_reason(
+        deadline=effective_deadline, cancel_event=cancel_event
+    ):
+        return False
+    remaining = effective_deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
+    return True
+
+
+def _settlement_after_start_loop(
+    context: WeftContext,
+    *,
+    manager_tid: str,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> dict[str, Any] | None:
+    if _recovery_interrupted_reason(deadline=deadline, cancel_event=cancel_event):
+        return None
+    settle_deadline = time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS
+    if deadline is not None:
+        settle_deadline = min(settle_deadline, deadline)
+    return _start_await_settlement(
+        context,
+        manager_tid=manager_tid,
+        deadline=settle_deadline,
+        cancel_event=cancel_event,
+        bounded=(deadline is not None or cancel_event is not None),
+    )
+
+
+def _ensure_not_interrupted_before_launch(
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> None:
+    interrupted = _recovery_interrupted_reason(
+        deadline=deadline, cancel_event=cancel_event
+    )
+    if interrupted is not None:
+        raise ManagerStartFailed(f"Failed to start Manager process: {interrupted}")
+
+
 def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     context: WeftContext,
+    *,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> tuple[dict[str, Any], bool, subprocess.Popen[Any] | None]:
     """Observe readiness while retaining custody until SUCCESS is sent.
 
@@ -2086,13 +2433,24 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
     cleanup. Once SUCCESS is sent, an observation failure cannot revoke the
     detached runtime. Spec: [MA-3], [SB-0.4].
     """
+    _ensure_not_interrupted_before_launch(deadline=deadline, cancel_event=cancel_event)
     invocation = _build_manager_runtime_invocation(context)
     manager_tid = invocation.tid
-    launch = _launch_detached_manager(context, invocation)
+    bounded = deadline is not None or cancel_event is not None
+    launch = (
+        _launch_detached_manager(context, invocation)
+        if not bounded
+        else _launch_detached_manager(
+            context,
+            invocation,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+    )
 
     launch_handed_off = False
     try:
-        deadline = time.monotonic() + MANAGER_STARTUP_TIMEOUT_SECONDS
+        effective_deadline = _effective_manager_start_deadline(deadline)
         competing_record: dict[str, Any] | None = None
         last_view: ManagerRegistryView | None = None
         last_child_pid_live: bool | None = None
@@ -2104,13 +2462,19 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
             resources.callback(registry_queue.close)
             monitor = QueueChangeMonitor([registry_queue], config=context.config)
             resources.callback(monitor.close)
-            while time.monotonic() < deadline:
-                view = _registry_view(
+            _register_monitor_wakeup(resources, monitor, cancel_event)
+            while not _recovery_interrupted_reason(
+                deadline=effective_deadline, cancel_event=cancel_event
+            ):
+                view = _start_registry_view(
                     context,
                     target_tid=manager_tid,
                     probe_stale=True,
                     probe_cache=probe_cache,
                     queue=registry_queue,
+                    deadline=effective_deadline,
+                    cancel_event=cancel_event,
+                    bounded=bounded,
                 )
                 last_view = view
                 last_selected_proof = None
@@ -2147,11 +2511,13 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                                         abort_launcher=True,
                                     )
                                 launch_handed_off = True
-                                settled_record = _await_manager_start_settlement(
+                                settled_record = _start_await_settlement(
                                     context,
                                     manager_tid=manager_tid,
-                                    deadline=deadline,
+                                    deadline=effective_deadline,
                                     session_owned=True,
+                                    cancel_event=cancel_event,
+                                    bounded=bounded,
                                 )
                                 if (
                                     settled_record is not None
@@ -2159,12 +2525,15 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                                 ):
                                     _cleanup_startup_stderr(launch.stderr_path)
                                     return settled_record, False, None
-                                view_after_ack = _registry_view(
+                                view_after_ack = _start_registry_view(
                                     context,
                                     target_tid=manager_tid,
                                     probe_stale=True,
                                     probe_cache=probe_cache,
                                     queue=registry_queue,
+                                    deadline=effective_deadline,
+                                    cancel_event=cancel_event,
+                                    bounded=bounded,
                                 )
                                 last_view = view_after_ack
                                 current_record = view_after_ack.target_record or (
@@ -2194,11 +2563,13 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
 
                 if launch.launcher_process.poll() is not None:
                     if competing_record is None:
-                        competing_record = _await_manager_start_settlement(
+                        competing_record = _start_await_settlement(
                             context,
                             manager_tid=manager_tid,
-                            deadline=deadline,
+                            deadline=effective_deadline,
                             session_owned=True,
+                            cancel_event=cancel_event,
+                            bounded=bounded,
                         )
                     if competing_record is not None:
                         _cleanup_startup_stderr(launch.stderr_path)
@@ -2211,11 +2582,13 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                 last_child_pid_live = pid_is_live(launch.pid)
                 if not last_child_pid_live:
                     if competing_record is None:
-                        competing_record = _await_manager_start_settlement(
+                        competing_record = _start_await_settlement(
                             context,
                             manager_tid=manager_tid,
-                            deadline=deadline,
+                            deadline=effective_deadline,
                             session_owned=True,
+                            cancel_event=cancel_event,
+                            bounded=bounded,
                         )
                     if competing_record is not None:
                         _send_launcher_signal(
@@ -2230,22 +2603,28 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                         message="Failed to start Manager process; detached manager PID exited before startup stabilized.",
                         abort_launcher=True,
                     )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if not _wait_manager_registry_change(
+                    monitor,
+                    effective_deadline=effective_deadline,
+                    cancel_event=cancel_event,
+                ):
                     break
-                monitor.wait(min(remaining, MANAGER_REGISTRY_POLL_INTERVAL))
         if competing_record is not None:
             return _reconcile_competing_manager_start(
                 context,
                 launch=launch,
                 manager_tid=manager_tid,
                 record=competing_record,
+                deadline=effective_deadline,
+                cancel_event=cancel_event,
+                bounded=bounded,
             )
 
-        settled_record = _await_manager_start_settlement(
+        settled_record = _settlement_after_start_loop(
             context,
             manager_tid=manager_tid,
-            deadline=time.monotonic() + MANAGER_COMPETING_STARTUP_GRACE_SECONDS,
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         if settled_record is not None:
             return _reconcile_competing_manager_start(
@@ -2253,6 +2632,9 @@ def start_manager(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-018] exception
                 launch=launch,
                 manager_tid=manager_tid,
                 record=settled_record,
+                deadline=effective_deadline,
+                cancel_event=cancel_event,
+                bounded=bounded,
             )
 
         _fail_manager_start(

@@ -5,18 +5,23 @@ from __future__ import annotations
 import base64
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import pytest
 
+import weft.commands._result_wait as result_wait_mod
 import weft.commands._spawn_submission as spawn_submission_cmd
+import weft.commands.result as result_cmd
 import weft.commands.run as run_cmd
 import weft.commands.submission as submission_cmd
 from simplebroker import Config, Queue
@@ -27,6 +32,7 @@ from tests.helpers.weft_harness import (
     WeftTestHarness,
 )
 from weft._constants import (
+    CONTROL_STOP,
     INTERNAL_AUTOSTART_ENABLED_METADATA_KEY,
     INTERNAL_AUTOSTART_SOURCE_METADATA_KEY,
     INTERNAL_HEARTBEAT_ENDPOINT_NAME,
@@ -48,8 +54,15 @@ from weft._constants import (
     WEFT_SERVICES_REGISTRY_QUEUE,
     WEFT_SPAWN_REQUESTS_QUEUE,
 )
-from weft._exceptions import CommandUsageError, ManagerStartFailed, SubmissionError
+from weft._exceptions import (
+    CommandTimeoutError,
+    CommandUsageError,
+    ManagerStartFailed,
+    SubmissionError,
+)
 from weft.cli.run import render_run_result
+from weft.client import WeftClient
+from weft.commands import events as events_cmd
 from weft.commands import system as system_cmd
 from weft.commands import tasks as task_cmd
 from weft.commands._spawn_submission import (
@@ -67,10 +80,12 @@ from weft.commands.run import (
 from weft.commands.types import RunExecutionResult
 from weft.context import WeftContext, build_context
 from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_messages import encode_control_message
 from weft.core.control_probe import ControlProbeResult, MatchedPong
 from weft.core.monitor.collation import MonitorTaskEventUpdate
 from weft.core.monitor.store import open_monitor_store
 from weft.core.service_convergence import build_manager_service_payload
+from weft.core.spawn_requests import observe_spawn_request_custody
 from weft.core.task_state import task_state_queue_name
 from weft.core.taskspec import (
     IOSection,
@@ -79,7 +94,12 @@ from weft.core.taskspec import (
     TaskSpec,
     decode_taskspec_transport_payload,
 )
-from weft.helpers import encode_tid, iter_queue_json_entries, process_create_time
+from weft.helpers import (
+    _register_observation_wakeup,
+    encode_tid,
+    iter_queue_json_entries,
+    process_create_time,
+)
 from weft.liveness.models import HostProcessObservation
 
 pytestmark = [pytest.mark.shared]
@@ -3965,3 +3985,362 @@ def test_apply_explicit_run_name_allows_human_readable_non_persistent_pipeline_n
 
     with pytest.raises(RunUsageError, match="Task name must not be empty"):
         run_cmd._derive_name("   ", (), "tests.tasks:echo")
+
+
+def _stop_all_active_managers_and_wait(harness: WeftTestHarness) -> None:
+    for mgr_tid, rec in list(
+        core_manager_runtime._snapshot_registry(
+            harness.context, prune_stale=False
+        ).items()
+    ):
+        if rec.get("status") in {"active", "draining"}:
+            with harness.context.queue(f"T{mgr_tid}.ctrl_in", persistent=False) as q:
+                q.write(encode_control_message(CONTROL_STOP))
+    with harness.context.queue(WEFT_SERVICES_REGISTRY_QUEUE, persistent=True) as reg:
+        monitor = result_wait_mod.QueueChangeMonitor(
+            [reg], config=harness.context.config
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                snap = core_manager_runtime._snapshot_registry(
+                    harness.context, prune_stale=False
+                )
+                if not any(
+                    r.get("status") in {"active", "draining"} for r in snap.values()
+                ):
+                    return
+                monitor.wait(max(0.0, deadline - time.monotonic()))
+        finally:
+            monitor.close()
+    raise AssertionError("Managers did not settle to stopped before bare-TID probe")
+
+
+def _assert_bare_tid_result_never_starts_manager(
+    harness: WeftTestHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stop_all_active_managers_and_wait(harness)
+    unclaimed_tid, _ = _enqueue_taskspec(
+        harness.context, _make_taskspec(str(time.time_ns())), None
+    )
+    assert (
+        observe_spawn_request_custody(
+            harness.context, str(unclaimed_tid), reserved_routes=()
+        ).state
+        == "queued"
+    )
+
+    def _forbid_recovery(*_a: Any, **_kw: Any) -> None:
+        raise AssertionError("bare-TID result wait must never start a Manager")
+
+    monkeypatch.setattr(
+        submission_cmd, "ensure_manager_after_submission", _forbid_recovery
+    )
+    monkeypatch.setattr(
+        result_wait_mod,
+        "ensure_manager_after_submission",
+        _forbid_recovery,
+        raising=False,
+    )
+    with pytest.raises(CommandTimeoutError):
+        list(
+            result_cmd._iter_task_result(
+                harness.context, str(unclaimed_tid), timeout=0.25
+            )
+        )
+    assert (
+        observe_spawn_request_custody(
+            harness.context, str(unclaimed_tid), reserved_routes=()
+        ).state
+        == "queued"
+    )
+    _delete_spawn_request(harness.context, unclaimed_tid)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGSTOP race probe")
+def test_accepted_waiters_recover_when_manager_stops_after_submission_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiters parked before M1 receives STOP wake on weft.state.services and recover via M2 ([WT-2a.14], [MF-5])."""
+    del tmp_path
+    with WeftTestHarness() as harness:
+        m1_record, _started, m1_proc = core_manager_runtime.start_manager(
+            harness.context
+        )
+        m1_tid = str(m1_record["tid"])
+        m1_handle = core_manager_runtime._manager_handle_from_record(m1_record)
+        assert m1_handle is not None
+        m1_processes = m1_handle.scoped_host_processes()
+        assert m1_processes
+        m1_pid = int(m1_processes[0][0])
+        harness.register_manager_tid(m1_tid)
+
+        client = WeftClient(harness.context)
+        m1_paused = False
+        try:
+            os.kill(m1_pid, signal.SIGSTOP)
+            m1_paused = True
+
+            t_res = client.submit_command(
+                [sys.executable, "-c", "print('POST_CHECK_RESULT_OK')"]
+            )
+            t_rt = client.submit_command(
+                [sys.executable, "-c", "print('POST_CHECK_REALTIME_OK')"]
+            )
+            harness.register_tid(t_res.tid)
+            harness.register_tid(t_rt.tid)
+
+            assert (
+                WEFT_SERVICES_REGISTRY_QUEUE
+                not in result_wait_mod._result_observation_names(
+                    t_res.tid, result_wait_mod.ResultMaterialization(None)
+                )
+            )
+
+            parked_threads: set[int] = set()
+            wait_lock = threading.Lock()
+            both_parked = threading.Event()
+            worker_threads: set[int] = set()
+            original_wait = result_wait_mod.QueueChangeMonitor.wait
+
+            def _counting_wait(
+                self: result_wait_mod.QueueChangeMonitor,
+                timeout: float | None = None,
+            ) -> bool:
+                ident = threading.get_ident()
+                with wait_lock:
+                    if ident in worker_threads:
+                        parked_threads.add(ident)
+                        if len(parked_threads) >= 2:
+                            both_parked.set()
+                return original_wait(self, timeout)
+
+            monkeypatch.setattr(
+                result_wait_mod.QueueChangeMonitor, "wait", _counting_wait
+            )
+
+            def _wait_result() -> Any:
+                with wait_lock:
+                    worker_threads.add(threading.get_ident())
+                return t_res.result(4.0)
+
+            def _wait_realtime() -> list[Any]:
+                with wait_lock:
+                    worker_threads.add(threading.get_ident())
+                return list(t_rt.realtime_events(follow=True, timeout=4.0))
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_res = pool.submit(_wait_result)
+                fut_rt = pool.submit(_wait_realtime)
+                assert both_parked.wait(timeout=5.0)
+
+                with harness.context.queue(
+                    f"T{m1_tid}.ctrl_in", persistent=False
+                ) as ctrl_in:
+                    ctrl_in.write(encode_control_message(CONTROL_STOP))
+                os.kill(m1_pid, signal.SIGCONT)
+                m1_paused = False
+
+                res_out = fut_res.result(timeout=12.0)
+                rt_events = fut_rt.result(timeout=12.0)
+        finally:
+            if m1_paused:
+                with suppress(OSError):
+                    os.kill(m1_pid, signal.SIGCONT)
+            if m1_proc is not None and m1_proc.poll() is None:
+                with suppress(subprocess.TimeoutExpired, OSError):
+                    m1_proc.wait(timeout=5.0)
+
+        snap = core_manager_runtime._snapshot_registry(
+            harness.context, prune_stale=False
+        )
+        for mgr_tid in snap:
+            harness.register_manager_tid(str(mgr_tid))
+
+        assert res_out.status == "completed"
+        assert "POST_CHECK_RESULT_OK" in (res_out.stdout or str(res_out.value))
+        assert any(
+            ev.event_type == "result" and ev.payload.get("status") == "completed"
+            for ev in rt_events
+        )
+        _assert_bare_tid_result_never_starts_manager(harness, monkeypatch)
+
+
+class _WakeableCancelEvent:
+    """Test cancel event implementing Weft's paired `_register_wakeup` contract."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self._wakeups: dict[object, Callable[[], None]] = {}
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+    def _register_wakeup(self, callback: Callable[[], None]) -> Callable[[], None]:
+        return _register_observation_wakeup(
+            self._lock, self._event, self._wakeups, callback
+        )
+
+    def set(self) -> None:
+        with self._lock:
+            callbacks = tuple(self._wakeups.values()) if not self.is_set() else ()
+            self._event.set()
+        for callback in callbacks:
+            callback()
+
+
+def test_prespawn_recovery_respects_observer_timeout_and_cancel_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-spawn recovery bounds start_manager and nested settlement/probes by deadline and cancel_event."""
+    with WeftTestHarness() as harness:
+        launches: list[core_manager_runtime.DetachedManagerLaunch] = []
+        launch_started = threading.Event()
+        launch_started_at: list[float] = []
+        original_launch = core_manager_runtime._launch_detached_manager
+
+        def _capturing_launch(
+            *args: Any, **kwargs: Any
+        ) -> core_manager_runtime.DetachedManagerLaunch:
+            launched = original_launch(*args, **kwargs)
+            launches.append(launched)
+            launch_started_at.append(time.monotonic())
+            launch_started.set()
+            return launched
+
+        def _assert_launches_aborted() -> None:
+            for launched in launches:
+                assert launched.launcher_process.poll() is not None
+                reap_deadline = time.monotonic() + 2.0
+                while (
+                    core_manager_runtime.pid_is_live(launched.pid)
+                    and time.monotonic() < reap_deadline
+                ):
+                    time.sleep(0.02)
+                assert not core_manager_runtime.pid_is_live(launched.pid)
+
+        monkeypatch.setattr(
+            core_manager_runtime, "_launch_detached_manager", _capturing_launch
+        )
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "_build_manager_process_command",
+            lambda *_a, **_kw: [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+
+        # Case 1: Short result timeout bounds start_manager well below 10s startup timeout.
+        tid_1 = str(time.time_ns())
+        spec_1 = _make_taskspec(tid_1)
+        enq_1, _ = _enqueue_taskspec(harness.context, spec_1, None)
+        t0 = time.monotonic()
+        with pytest.raises(CommandTimeoutError):
+            list(
+                result_cmd._iter_task_result(
+                    harness.context,
+                    str(enq_1),
+                    timeout=1.5,
+                    _accepted_taskspec=spec_1,
+                )
+            )
+        elapsed_timeout = time.monotonic() - t0
+        _delete_spawn_request(harness.context, enq_1)
+        assert elapsed_timeout < 4.5, (
+            f"recovery ignored observer timeout ({elapsed_timeout:.2f}s)"
+        )
+        assert launches, "expected recovery to enter start_manager before timeout"
+        _assert_launches_aborted()
+
+        # Case 2: Wakeable cancel_event interrupts realtime recovery without polling timers.
+        launches.clear()
+        launch_started.clear()
+        launch_started_at.clear()
+        tid_2 = str(time.time_ns())
+        spec_2 = _make_taskspec(tid_2)
+        enq_2, _ = _enqueue_taskspec(harness.context, spec_2, None)
+        cancel_ev = _WakeableCancelEvent()
+
+        def _trigger_cancel() -> None:
+            if launch_started.wait(timeout=3.0):
+                time.sleep(0.05)
+                cancel_ev.set()
+
+        canceller = threading.Thread(target=_trigger_cancel, daemon=True)
+        canceller.start()
+        events = list(
+            events_cmd.iter_task_realtime_events(
+                harness.context,
+                str(enq_2),
+                follow=True,
+                cancel_event=cancel_ev,
+                timeout=10.0,
+                _accepted_taskspec=spec_2,
+            )
+        )
+        elapsed_after_launch = time.monotonic() - launch_started_at[0]
+        canceller.join(timeout=1.0)
+        _delete_spawn_request(harness.context, enq_2)
+        assert events == [] or all(ev.event_type != "result" for ev in events)
+        assert elapsed_after_launch < 1.5, (
+            f"recovery ignored cancel_event ({elapsed_after_launch:.2f}s after launch)"
+        )
+        assert launches, "expected recovery to enter start_manager before cancel"
+        _assert_launches_aborted()
+
+        # Case 3: Unexpired unknown registry record + early-exiting launch exercises nested
+        # _registry_view(probe_stale=True) -> _manager_record_has_matched_pong and
+        # _await_manager_start_settlement under cancel_event wakeup.
+        launches.clear()
+        launch_started.clear()
+        launch_started_at.clear()
+        unknown_mgr_tid = "1775622400000000999"
+        monkeypatch.setattr(
+            "weft.core.manager_runtime.runtime_liveness_from_registered_probe",
+            lambda _handle: "unknown",
+        )
+        _write_active_manager_registry_record(
+            harness.context,
+            tid=unknown_mgr_tid,
+            runtime_handle=_external_supervisor_runtime_handle(),
+            timestamp=time.time_ns(),
+        )
+        monkeypatch.setattr(
+            core_manager_runtime,
+            "_build_manager_process_command",
+            lambda *_a, **_kw: [sys.executable, "-c", "raise SystemExit(1)"],
+        )
+        tid_3 = str(time.time_ns())
+        spec_3 = _make_taskspec(tid_3)
+        enq_3, _ = _enqueue_taskspec(harness.context, spec_3, None)
+        cancel_ev_3 = _WakeableCancelEvent()
+
+        def _trigger_cancel_settlement() -> None:
+            if launch_started.wait(timeout=8.0):
+                time.sleep(0.05)
+                cancel_ev_3.set()
+
+        canceller_3 = threading.Thread(target=_trigger_cancel_settlement, daemon=True)
+        canceller_3.start()
+        events_3 = list(
+            events_cmd.iter_task_realtime_events(
+                harness.context,
+                str(enq_3),
+                follow=True,
+                cancel_event=cancel_ev_3,
+                timeout=15.0,
+                _accepted_taskspec=spec_3,
+            )
+        )
+        elapsed_settlement = time.monotonic() - launch_started_at[0]
+        canceller_3.join(timeout=1.0)
+        _delete_spawn_request(harness.context, enq_3)
+        assert events_3 == [] or all(ev.event_type != "result" for ev in events_3)
+        assert elapsed_settlement < 1.5, (
+            f"nested settlement/probe ignored cancel_event ({elapsed_settlement:.2f}s)"
+        )
+        assert launches, "expected recovery with unknown record to enter start_manager"
+        _assert_launches_aborted()

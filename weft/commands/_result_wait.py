@@ -20,14 +20,17 @@ from weft._constants import (
     TASK_HISTORY_MAX_MESSAGE_ID,
     WEFT_COMPLETED_RESULT_GRACE_SECONDS,
     WEFT_GLOBAL_LOG_QUEUE,
+    WEFT_SERVICES_REGISTRY_QUEUE,
 )
 from weft._exceptions import CommandTimeoutError
 from weft.context import WeftContext
 from weft.core import task_evidence
+from weft.core.manager_runtime import _read_recovery_snapshot
 from weft.core.outbox import decode_result_payload
 from weft.core.outbox import process_outbox_message as decode_outbox_message
 from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.runtime_identity import get_runtime_identity
+from weft.core.spawn_requests import observe_spawn_request_custody
 from weft.core.task_evidence import coerce_terminal_envelope
 from weft.core.task_state import read_task_state_snapshot, task_state_queue_name
 from weft.core.taskspec import TaskSpec
@@ -41,6 +44,7 @@ from ._streaming import (
     handle_ctrl_stream,
     process_outbox_message,
 )
+from .submission import ensure_manager_after_submission
 from .types import TaskEvent, TaskResult
 
 
@@ -244,6 +248,67 @@ def _accepted_result_materialization(taskspec: TaskSpec) -> ResultMaterializatio
     return ResultMaterialization(config, taskspec_payload=payload)
 
 
+def _accepted_submission_needs_manager_watch(
+    materialized: ResultMaterialization,
+) -> bool:
+    """Return whether an accepted-submission waiter still needs pre-spawn recovery [MF-5]."""
+    return (
+        materialized.taskspec_payload is not None
+        and materialized.mapping_entry is None
+        and materialized.terminal_evidence is None
+        and materialized.output_evidence is None
+        and not materialized.result_surface_had_activity
+    )
+
+
+def _check_prespawn_recovery_needed(
+    context: WeftContext,
+    tid: str,
+    materialized: ResultMaterialization,
+    broker: Any,
+    *,
+    last_horizon: int | None,
+) -> tuple[bool, int | None]:
+    """Check whether a pre-spawn accepted submission needs Manager recovery [WT-2a.14], [MF-5]."""
+    if not _accepted_submission_needs_manager_watch(materialized):
+        return False, last_horizon
+    horizon_raw = broker.latest_pending_timestamp(WEFT_SERVICES_REGISTRY_QUEUE)
+    horizon = int(horizon_raw) if horizon_raw is not None else None
+    if horizon == last_horizon:
+        return False, last_horizon
+    state, _record = _read_recovery_snapshot(context, broker=broker)
+    if state == "ready":
+        return False, horizon
+    custody = observe_spawn_request_custody(
+        context, tid, reserved_routes=(), broker=broker
+    )
+    return custody.state == "queued", horizon
+
+
+def _recover_prespawn_manager_or_wait(
+    context: WeftContext,
+    tid: str,
+    *,
+    needs_recovery: bool,
+    monitor: QueueChangeMonitor,
+    wait_until: float | None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
+) -> None:
+    """Run post-submission Manager recovery or wait on the activity monitor [MF-5]."""
+    if needs_recovery:
+        ensure_manager_after_submission(
+            context,
+            submitted_tid=tid,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
+        return
+    monitor.wait(
+        None if wait_until is None else max(0.0, wait_until - time.monotonic())
+    )
+
+
 def _result_observation_names(
     tid: str,
     materialized: ResultMaterialization,
@@ -259,6 +324,8 @@ def _result_observation_names(
         names.extend((config.outbox, config.ctrl_out))
         if config.pipeline_status is not None:
             names.append(config.pipeline_status)
+    if materialized.taskspec_payload is not None:
+        names.append(WEFT_SERVICES_REGISTRY_QUEUE)
     if include_history:
         names.append(WEFT_GLOBAL_LOG_QUEUE)
     return list(dict.fromkeys(names))
@@ -1003,6 +1070,7 @@ def _iter_consuming_result(
                 context, names, retain_connections=not release_while_waiting
             )
         )
+        last_recovery_registry_horizon: int | None = -1
         while True:
             queues, monitor = observation
             with (
@@ -1045,6 +1113,15 @@ def _iter_consuming_result(
                         connection_owner,
                         broker,
                         now=time.monotonic(),
+                    )
+                    needs_recovery, last_recovery_registry_horizon = (
+                        _check_prespawn_recovery_needed(
+                            context,
+                            tid,
+                            materialized,
+                            broker,
+                            last_horizon=last_recovery_registry_horizon,
+                        )
                     )
                 if pending_events:
                     yield from _lifecycle_events(tid, pending_events)
@@ -1118,9 +1195,12 @@ def _iter_consuming_result(
                     raise CommandTimeoutError(
                         f"Timed out after {timeout} seconds waiting for task {tid}"
                     )
-                wait = (
-                    None
-                    if decision.wait_until is None
-                    else max(0.0, decision.wait_until - time.monotonic())
-                )
-            monitor.wait(wait)
+                wait_until = decision.wait_until
+            _recover_prespawn_manager_or_wait(
+                context,
+                tid,
+                needs_recovery=needs_recovery,
+                monitor=monitor,
+                wait_until=wait_until,
+                deadline=deadline,
+            )

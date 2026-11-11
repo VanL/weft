@@ -1265,7 +1265,12 @@ or indefinitely when no deadline exists.
 Notifications are hints; durable messages determine the result.
 
 Ordinary result waits with known immutable task configuration observe the configured
-outbox and `ctrl_out`, plus the existing task-local runtime wake/evidence surfaces. They
+outbox and `ctrl_out`, plus the existing task-local runtime wake/evidence surfaces;
+when waiting on an accepted submission, they also include `weft.state.services` in
+that wake set and, before any task-local state, terminal, or output evidence appears,
+re-run post-submission Manager recovery if the request remains `queued` with no
+`ready` Manager ([WT-2a.14]; bare-TID `weft result` and `terminal_snapshot` never
+start a Manager). They
 do not subscribe to or scan `weft.log.tasks` for live completion. Task-local completion
 records carry the same lifecycle fact as global history; existing terminal precedence,
 persistent work boundaries, output grace, and claim settlement apply.
@@ -2284,6 +2289,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
+- [Deep-Dive Reachable Bug Remediation — Core Runtime](../plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md) includes `weft.state.services` in pre-spawn accepted-submission result/event waits and re-runs Manager recovery when a `queued` request loses `ready` Manager availability ([WT-2a.14], [MF-5]).
 - [Measured memory admission and startup-window parity](../plans/2026-11-09-measured-memory-admission-plan.md) adds the measured_memory_exhausted dispatch refusal and per-lane refusal reasons under [MF-5].
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([MF-5]).
 - [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md): collation and lifetime reports take terminality and status from the task's typed terminal record, the event-name map is removed, and the version 6 to 7 Monitor migration closes families stranded by the old reducer ([MF-3], [MF-5], [OBS.13.4]).

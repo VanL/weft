@@ -11396,6 +11396,63 @@ def test_manager_keeps_internal_reserved_when_manager_liveness_unknown(
         manager.cleanup()
 
 
+def test_manager_preserves_draining_peer_internal_reserved_and_marks_draining_diagnostic_ineligible(
+    broker_env: BrokerEnv,
+    unique_tid: str,
+) -> None:
+    """A live draining Manager keeps its .internal_reserved queue and is never dispatch_eligible ([WT-2a.7], [MA-1.4])."""
+    db_path, make_queue = broker_env
+    config = load_config(
+        {"WEFT_TASK_MONITOR_ENABLED": "0", "WEFT_LIVENESS_MONITOR_ENABLED": "0"}
+    )
+    manager = Manager(db_path, make_manager_spec(unique_tid), config=config)
+    draining_tid = str(int(unique_tid) - 200)
+    stale_tid = str(int(unique_tid) - 300)
+    draining_reserved = make_queue(f"T{draining_tid}.internal_reserved")
+    stale_reserved = make_queue(f"T{stale_tid}.internal_reserved")
+    drain(draining_reserved)
+    drain(stale_reserved)
+    draining_reserved.write("draining-internal")
+    stale_reserved.write("stale-internal")
+
+    ctx = manager._manager_context()
+    registry = make_queue(WEFT_SERVICES_REGISTRY_QUEUE)
+    drain(registry)
+    manager._register_manager()
+    registry.write(
+        json.dumps(
+            service_convergence_mod.build_manager_service_payload(
+                context=ctx,
+                tid=draining_tid,
+                status="draining",
+                name="manager",
+                queues={
+                    "ctrl_in": f"T{draining_tid}.ctrl_in",
+                    "ctrl_out": f"T{draining_tid}.ctrl_out",
+                    "outbox": "weft.manager.outbox",
+                    "requests": WEFT_SPAWN_REQUESTS_QUEUE,
+                },
+                runtime_handle=_host_runtime_handle(os.getpid()),
+            )
+        )
+    )
+
+    try:
+        manager._cleanup_stale_internal_reserved_queues(force=True)
+        assert draining_reserved.peek_one() == "draining-internal"
+        assert stale_reserved.peek_one() is None
+
+        diagnostics = {
+            str(row["tid"]): row
+            for row in manager_runtime_mod.manager_diagnostic_records(ctx)
+        }
+        assert diagnostics[draining_tid]["status"] == "draining"
+        assert diagnostics[draining_tid]["dispatch_eligible"] is False
+    finally:
+        manager.stop(join=False)
+        manager.cleanup()
+
+
 def test_manager_service_convergence_advances_without_dispatch_ownership(
     broker_env: BrokerEnv,
     unique_tid: str,

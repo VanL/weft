@@ -304,6 +304,72 @@ def _receipt(name: str, tid: str, *, context_root: Path) -> SubmittedTaskReceipt
     )
 
 
+def _observe_availability_for_recovery(
+    context: WeftContext,
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> manager_runtime.ManagerAvailabilityObservation:
+    if deadline is None and cancel_event is None:
+        return manager_runtime.observe_manager_availability(context)
+    return manager_runtime.observe_manager_availability(
+        context, deadline=deadline, cancel_event=cancel_event
+    )
+
+
+def _decide_recovery_for_submission(
+    context: WeftContext,
+    observation: manager_runtime.ManagerAvailabilityObservation,
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> manager_runtime.ManagerRecoveryDecision:
+    if deadline is None and cancel_event is None:
+        return manager_runtime.decide_manager_recovery(context, observation)
+    return manager_runtime.decide_manager_recovery(
+        context,
+        observation,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+
+
+def _start_manager_for_recovery(
+    context: WeftContext,
+    *,
+    deadline: float | None,
+    cancel_event: Any | None,
+) -> tuple[dict[str, Any], bool, Any]:
+    if deadline is None and cancel_event is None:
+        return manager_runtime.start_manager(context)
+    return manager_runtime.start_manager(
+        context,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+
+
+def _reconciliation_timeout(
+    observation: manager_runtime.ManagerAvailabilityObservation,
+    *,
+    deadline: float | None,
+) -> float:
+    timeout = 0.0
+    if (
+        observation.first_uncertain_at is not None
+        and observation.backlog_pending is True
+    ):
+        timeout = max(
+            0.0,
+            observation.first_uncertain_at
+            + MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS
+            - time.monotonic(),
+        )
+    if deadline is not None:
+        timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+    return timeout
+
+
 def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-116] exception
     context: WeftContext,
     *,
@@ -311,6 +377,8 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
     ensure_manager_fn: Callable[..., manager_runtime.ManagerEnsureResult] | None = None,
     delete_spawn_request_fn: Callable[[WeftContext, int], bool] | None = None,
     observation: manager_runtime.ManagerAvailabilityObservation | None = None,
+    deadline: float | None = None,
+    cancel_event: Any | None = None,
 ) -> manager_runtime.ManagerEnsureResult:
     """Recover manager availability without revoking accepted queue work.
 
@@ -330,7 +398,9 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
         return ensure_manager_fn(context)
 
     if observation is None:
-        observation = manager_runtime.observe_manager_availability(context)
+        observation = _observe_availability_for_recovery(
+            context, deadline=deadline, cancel_event=cancel_event
+        )
     if observation.outcome == "ready":
         return manager_runtime.ManagerEnsureResult(
             outcome="ready",
@@ -345,23 +415,26 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
             ),
         )
 
-    timeout = 0.0
-    if (
-        observation.first_uncertain_at is not None
-        and observation.backlog_pending is True
-    ):
-        timeout = max(
-            0.0,
-            observation.first_uncertain_at
-            + MANAGER_NAMESPACE_AMBIGUOUS_BACKLOG_GRACE_SECONDS
-            - time.monotonic(),
+    interrupted = manager_runtime._recovery_interrupted_reason(
+        deadline=deadline, cancel_event=cancel_event
+    )
+    if interrupted is not None:
+        return manager_runtime.ManagerEnsureResult(
+            outcome="uncertain",
+            manager_record=None,
+            started_here=False,
+            process_handle=None,
+            reason=interrupted,
         )
+
+    timeout = _reconciliation_timeout(observation, deadline=deadline)
     try:
         reconciliation = reconcile_submitted_spawn(
             context,
             submitted_tid_str,
             timeout=timeout,
             queued_is_terminal=False,
+            cancel_event=cancel_event,
         )
     except (BrokerError, OSError) as exc:
         return manager_runtime.ManagerEnsureResult(
@@ -394,7 +467,12 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
             reason="accepted_request_location_unknown",
         )
 
-    decision = manager_runtime.decide_manager_recovery(context, observation)
+    decision = _decide_recovery_for_submission(
+        context,
+        observation,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     if decision.outcome == "reuse":
         return manager_runtime.ManagerEnsureResult(
             outcome="ready",
@@ -419,6 +497,7 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
             context,
             submitted_tid_str,
             timeout=0.0,
+            cancel_event=cancel_event,
         )
     except (BrokerError, OSError) as exc:
         return manager_runtime.ManagerEnsureResult(
@@ -459,7 +538,11 @@ def ensure_manager_after_submission(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-1
             },
         )
     try:
-        record, started_here, process_handle = manager_runtime.start_manager(context)
+        record, started_here, process_handle = _start_manager_for_recovery(
+            context,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        )
     except (BrokerError, ManagerStartFailed, OSError) as exc:
         return manager_runtime.ManagerEnsureResult(
             outcome="uncertain",

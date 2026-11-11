@@ -52,8 +52,10 @@ from ._result_wait import (
     ResultMaterialization,
     _accepted_result_materialization,
     _acquire_result_observation,
+    _check_prespawn_recovery_needed,
     _classify_result_observation,
     _CollectedResult,
+    _recover_prespawn_manager_or_wait,
     _result_observation_names,
     _result_stream_payload,
     append_public_value,
@@ -389,6 +391,7 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
             queue_names=watched_names,
         )
         resources.enter_context(route_resources)
+        last_recovery_registry_horizon: int | None = -1
 
         while not observation_cancelled(cancel_event):
             now = time.monotonic()
@@ -588,6 +591,15 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                         )
                     ),
                 )
+                needs_recovery, last_recovery_registry_horizon = (
+                    _check_prespawn_recovery_needed(
+                        context,
+                        normalized_tid,
+                        materialized,
+                        broker,
+                        last_horizon=last_recovery_registry_horizon,
+                    )
+                )
             if observation_cancelled(cancel_event):
                 return
             if (
@@ -664,7 +676,12 @@ def iter_task_realtime_events(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-107] ex
                 )
             if observation_cancelled(cancel_event):
                 return
-            wait_until = decision.wait_until
-            monitor.wait(
-                None if wait_until is None else max(0.0, wait_until - time.monotonic())
+            _recover_prespawn_manager_or_wait(
+                context,
+                normalized_tid,
+                needs_recovery=needs_recovery,
+                monitor=monitor,
+                wait_until=decision.wait_until,
+                deadline=deadline if follow else None,
+                cancel_event=cancel_event,
             )

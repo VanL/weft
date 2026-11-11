@@ -13,7 +13,7 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +28,7 @@ from weft._constants import (
 from weft._exceptions import CommandUsageError
 from weft.context import WeftContext
 from weft.core.control_messages import decode_control_object, encode_control_message
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.spawn_requests import generate_spawn_request_timestamp
 from weft.core.tasks.multiqueue_watcher import MultiQueueWatcher, QueueMessageContext
 
@@ -300,6 +301,15 @@ def _stop_probe_watcher(watcher: MultiQueueWatcher) -> None:
             logger.debug("Failed to retry ephemeral PING watcher stop", exc_info=True)
 
 
+def _close_probe_monitor(monitor: QueueChangeMonitor) -> None:
+    """Best-effort release without replacing the probe's primary outcome."""
+
+    try:
+        monitor.close()
+    except (BrokerError, OSError, RuntimeError):  # pragma: no cover - defensive
+        logger.debug("Failed to close ephemeral PING monitor", exc_info=True)
+
+
 def send_keyed_ping_probe(
     ctx: WeftContext,
     *,
@@ -308,6 +318,7 @@ def send_keyed_ping_probe(
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     request_id: str | None = None,
     broker: Any | None = None,
+    cancel_event: Any | None = None,
 ) -> ControlProbeResult:
     """Send a keyed PING and wait on an ephemeral requester control queue.
 
@@ -326,7 +337,9 @@ def send_keyed_ping_probe(
         ctrl_in_name=ctrl_in_name,
         request_id=request_id or uuid.uuid4().hex,
     )
-    return send_keyed_ping_round(ctx, (target,), timeout=timeout, broker=broker)[tid]
+    return send_keyed_ping_round(
+        ctx, (target,), timeout=timeout, broker=broker, cancel_event=cancel_event
+    )[tid]
 
 
 def _write_round_requests(
@@ -377,7 +390,8 @@ def _await_round_pongs(
 
     deadline = time.monotonic() + timeout
     while pending:
-        watcher.wait_for_activity(max(0.0, deadline - time.monotonic()))
+        remaining = max(0.0, deadline - time.monotonic())
+        watcher.wait_for_activity(remaining)
         _read_matching_pongs(reply_queue, pending, results)
         if time.monotonic() >= deadline:
             break
@@ -387,12 +401,106 @@ def _await_round_pongs(
         )
 
 
+def _await_round_pongs_with_monitor(
+    monitor: QueueChangeMonitor,
+    reply_queue: Any,
+    pending: dict[str, KeyedPingTarget],
+    results: dict[str, ControlProbeResult],
+    *,
+    timeout: float,
+    cancel_event: Any,
+) -> None:
+    """Wait on ``QueueChangeMonitor`` so ``cancel_event`` interrupts immediately."""
+
+    deregister: Callable[[], None] | None = None
+    register = getattr(cancel_event, "_register_wakeup", None)
+    if callable(register):
+        deregister = register(monitor.wake)
+    try:
+        deadline = time.monotonic() + timeout
+        if not cancel_event.is_set():
+            _read_matching_pongs(reply_queue, pending, results)
+        while pending and not cancel_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            monitor.wait(remaining)
+            if cancel_event.is_set():
+                break
+            _read_matching_pongs(reply_queue, pending, results)
+    finally:
+        if deregister is not None:
+            deregister()
+    for target in pending.values():
+        results[target.tid] = ControlProbeResult(
+            request_id=target.request_id, timed_out=True
+        )
+
+
+def _open_probe_wait_surface(
+    ctx: WeftContext,
+    reply_queue_name: str,
+    *,
+    cancel_event: Any | None,
+) -> tuple[Any, MultiQueueWatcher | None, QueueChangeMonitor | None]:
+    """Open the ephemeral reply queue and its wait owner."""
+
+    if cancel_event is None:
+        watcher = MultiQueueWatcher(
+            {
+                reply_queue_name: {
+                    # Manual waits only observe readiness; they never dispatch.
+                    "handler": _unused_probe_handler,
+                }
+            },
+            db=ctx.broker_target,
+            persistent=False,
+            config=ctx.broker_config,
+        )
+        reply_queue = watcher.get_queue(reply_queue_name)
+        assert reply_queue is not None  # constructor invariant
+        return reply_queue, watcher, None
+    reply_queue = ctx.queue(reply_queue_name, persistent=False)
+    try:
+        monitor = QueueChangeMonitor([reply_queue], config=ctx.config)
+    except BaseException:
+        _retire_probe_reply_queue(reply_queue)
+        raise
+    return reply_queue, None, monitor
+
+
+def _cleanup_probe_wait_surface(
+    reply_queue: Any | None,
+    watcher: MultiQueueWatcher | None,
+    monitor: QueueChangeMonitor | None,
+    *,
+    broker: Any | None,
+    written: Mapping[str, tuple[str, int]],
+    pending: Mapping[str, KeyedPingTarget],
+) -> None:
+    """Retract unanswered PINGs and retire the ephemeral wait surface."""
+
+    if reply_queue is not None:
+        _retract_probe_requests(
+            reply_queue,
+            broker=broker,
+            requests=dict(written[tid] for tid in pending if tid in written),
+        )
+    if monitor is not None:
+        _close_probe_monitor(monitor)
+    if watcher is not None:
+        _stop_probe_watcher(watcher)
+    if reply_queue is not None:
+        _retire_probe_reply_queue(reply_queue)
+
+
 def send_keyed_ping_round(
     ctx: WeftContext,
     targets: Sequence[KeyedPingTarget],
     *,
     timeout: float = CONTROL_SURFACE_WAIT_TIMEOUT,
     broker: Any | None = None,
+    cancel_event: Any | None = None,
 ) -> dict[str, ControlProbeResult]:
     """Send keyed PINGs to several targets and wait once for all PONGs.
 
@@ -413,9 +521,15 @@ def send_keyed_ping_round(
     results: dict[str, ControlProbeResult] = {}
     written: dict[str, tuple[str, int]] = {}
     watcher: MultiQueueWatcher | None = None
+    monitor: QueueChangeMonitor | None = None
     reply_queue: Any | None = None
     if not pending:
         return results
+    if cancel_event is not None and cancel_event.is_set():
+        return {
+            target.tid: ControlProbeResult(request_id=target.request_id, timed_out=True)
+            for target in pending.values()
+        }
     try:
         requester_tid = generate_spawn_request_timestamp(
             ctx.broker_target,
@@ -423,28 +537,35 @@ def send_keyed_ping_round(
             broker=broker,
         )
         reply_queue_name = f"T{requester_tid}.{QUEUE_CTRL_IN_SUFFIX}"
-        watcher = MultiQueueWatcher(
-            {
-                reply_queue_name: {
-                    # Manual waits only observe readiness; they never dispatch.
-                    "handler": _unused_probe_handler,
-                }
-            },
-            db=ctx.broker_target,
-            persistent=False,
-            config=ctx.broker_config,
+        reply_queue, watcher, monitor = _open_probe_wait_surface(
+            ctx,
+            reply_queue_name,
+            cancel_event=cancel_event,
         )
-        reply_queue = watcher.get_queue(reply_queue_name)
-        assert reply_queue is not None  # constructor invariant
         written, failed = _write_round_requests(
             reply_queue, targets, broker=broker, reply_to=reply_queue_name
         )
         results.update(failed)
         for tid in failed:
             pending.pop(tid)
-        _await_round_pongs(
-            watcher, reply_queue, pending, results, timeout=probe_timeout
-        )
+        if monitor is not None:
+            _await_round_pongs_with_monitor(
+                monitor,
+                reply_queue,
+                pending,
+                results,
+                timeout=probe_timeout,
+                cancel_event=cancel_event,
+            )
+        else:
+            assert watcher is not None
+            _await_round_pongs(
+                watcher,
+                reply_queue,
+                pending,
+                results,
+                timeout=probe_timeout,
+            )
     except (BrokerError, OSError) as exc:
         for target in pending.values():
             results.setdefault(
@@ -452,14 +573,12 @@ def send_keyed_ping_round(
                 ControlProbeResult(request_id=target.request_id, error=str(exc)),
             )
     finally:
-        if reply_queue is not None:
-            _retract_probe_requests(
-                reply_queue,
-                broker=broker,
-                requests=dict(written[tid] for tid in pending if tid in written),
-            )
-        if watcher is not None:
-            _stop_probe_watcher(watcher)
-        if reply_queue is not None:
-            _retire_probe_reply_queue(reply_queue)
+        _cleanup_probe_wait_surface(
+            reply_queue,
+            watcher,
+            monitor,
+            broker=broker,
+            written=written,
+            pending=pending,
+        )
     return results

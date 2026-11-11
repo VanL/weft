@@ -6222,6 +6222,7 @@ class Manager(ServiceTask):
         if not self._admission_bootstrapped:
             self._refresh_scheduler_evidence()
         self._drain_stop_targets = self._collect_drain_stop_targets()
+        self._unregister_manager(status=SERVICE_STATUS_DRAINING)
         self._signal_children_to_stop(self._user_work_children())
 
     def _begin_leadership_drain(self, *, leader_tid: str) -> None:
@@ -6768,7 +6769,8 @@ class Manager(ServiceTask):
         protected_tids.update(
             tid
             for tid, record in self._manager_registry_snapshot.items()
-            if record.get("status") == SERVICE_STATUS_ACTIVE
+            if record.get("status") in {SERVICE_STATUS_ACTIVE, SERVICE_STATUS_DRAINING}
+            and manager_registry_record_liveness(record) != "stale"
         )
         protected_tids.add(self.tid)
 

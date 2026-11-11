@@ -1,6 +1,6 @@
 # Control-Plane, Process Supervision, and Manager Drain Bug Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: `docs/program-theory.md` ([WT-2a.2], [WT-2a.6], [WT-2a.7], [WT-2a.9], [WT-2a.12], [WT-2a.13], [WT-2a.14], [WT-4.1], [WT-4.2], [WT-4.3], [ALT-WT-009], [WT-7]); `docs/specifications/01-Core_Components.md` ([CC-2.4], [CC-3.1], [CC-3.2]); `docs/specifications/03-Manager_Architecture.md` ([MA-1.4], [MA-1.6a], [MA-3]); `docs/specifications/05-Message_Flow_and_State.md` ([MF-3], [MF-5]); `docs/specifications/06-Resource_Management.md` ([RM-5.1]); `docs/specifications/07-System_Invariants.md` ([OBS.12a], [OBS.13.7], [OBS.13.9], [LIVENESS.R3], [LIVENESS.R5]); `docs/specifications/08-Testing_Strategy.md` ([TS-1]); `docs/specifications/09-Implementation_Plan.md` ([IP-1]); `docs/specifications/10-CLI_Interface.md` ([CLI-0.1], [CLI-1.3], [CLI-4]); `docs/specifications/14-Python_API_Surfaces.md` ([PY-2], [PY-3])
 Superseded by: none
 
@@ -92,7 +92,7 @@ Per the owner's filter (*"addressing real reachable bugs, not just over-armoring
 - **Single current contract (`[WT-2a.9]`)**: Replace `force_kill_pids` outright with `force_kill_processes` (`tuple[tuple[int, float], ...]`); no dual compatibility field and no extra `weft.helpers` wrapper.
 - **Death/stop proof & `(pid, create_time)` signal authority (`[WT-2a.13]`, `[WT-4.3]`, `[OBS.12a]`, `[LIVENESS.R3]`, `[LIVENESS.R5]`)**: `report_unknown` never increments accepted stops; host `SIGTERM`/`SIGKILL` is authorized only by verified `(pid, create_time)` pairs (`create_time is not None`) captured at launch or persisted on `RunnerHandle.scoped_host_processes()`.
 - **Single child reap owner (`[WT-4.2]`)**: Every `subprocess.Popen` or `BaseProcess` root is reaped solely by its creator (`wait()` / `join()`).
-- **Non-blocking submission progress & event-driven waiting (`[WT-2a.14]`, `[WT-2a.6]`, `[WT-4.1]`, `[WT-4.3]`, `[MF-5]`)**: Accepted-submission result/event waits subscribe to `weft.state.services` via `QueueChangeMonitor` only until task-local state/result activity appears, recovering Manager availability on durable registry transitions with zero polling timers, while bare-TID `weft result <tid>` and `terminal_snapshot` remain strictly non-spawning.
+- **Non-blocking submission progress & event-driven waiting (`[WT-2a.14]`, `[WT-2a.6]`, `[WT-4.1]`, `[WT-4.3]`, `[MF-5]`)**: Accepted-submission result/event waits include `weft.state.services` in their `QueueChangeMonitor` set and run pre-spawn Manager recovery checks only until task-local state, terminal, or result activity appears, recovering Manager availability on durable registry transitions with zero polling timers, while bare-TID `weft result <tid>` and `terminal_snapshot` remain strictly non-spawning.
 
 ### 4.2 Difference Registers
 
@@ -101,7 +101,7 @@ Per the owner's filter (*"addressing real reachable bugs, not just over-armoring
    - *Intentional differences*: `stop` sends `CONTROL_STOP`, calls `_stop_via_fallback`, has no separate `"escalate_host"` reducer rung, and increments `count` only on `"accept_terminal"`; `kill` sends `CONTROL_KILL`, calls `_kill_via_fallback`, has an `"escalate_host"` `SIGKILL` rung, and accepts `"accept_terminal"` and post-`SIGKILL` `"accept_dead_runtime"`.
 2. **Accepted-submission waiters (`_LiveRunSession` / `Task` with `_accepted_taskspec`) vs bare-TID observers (`weft result <tid>` / `terminal_snapshot`)**:
    - *Converged*: Both use `_result_observation_names` and `QueueChangeMonitor` over task-owned surfaces without scanning `weft.log.tasks`.
-   - *Intentional difference*: Only callers holding an accepted submission (`materialized.taskspec_payload is not None`) include `weft.state.services` prior to first task-local state/result evidence and invoke `ensure_manager_after_submission` when `observe_spawn_request_custody(context, tid, reserved_routes=(), broker=broker).state == "queued"` with no `ready` Manager; bare-TID `weft result <tid>` (`taskspec_payload is None`) and `terminal_snapshot` never start a Manager.
+   - *Intentional difference*: Only callers holding an accepted submission (`materialized.taskspec_payload is not None`) include `weft.state.services` in `_result_observation_names` and, prior to first task-local state/terminal/result evidence, invoke `ensure_manager_after_submission` when `observe_spawn_request_custody(context, tid, reserved_routes=(), broker=broker).state == "queued"` with no `ready` Manager; bare-TID `weft result <tid>` (`taskspec_payload is None`) and `terminal_snapshot` never subscribe to `weft.state.services` or start a Manager.
 
 ### 4.3 Anti-Mocking, Commit Isolation & Rollback
 
@@ -113,13 +113,14 @@ Per the owner's filter (*"addressing real reachable bugs, not just over-armoring
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| `[MF-5]` | Drop `WEFT_SERVICES_REGISTRY_QUEUE` from `_result_observation_names` dynamically once task-local evidence appears | Retain `WEFT_SERVICES_REGISTRY_QUEUE` stably in `_result_observation_names` when `materialized.taskspec_payload is not None`, while gating `_check_prespawn_recovery_needed` on `_accepted_submission_needs_manager_watch(materialized)` | `[SB-0.4]` permits dynamic waiter membership replacement, so this is an implementation tradeoff rather than a broker prohibition: keeping the accepted-submission watcher set stable avoids closing and recreating `QueueChangeMonitor` (and tearing down active queue connections) on first task-local activity, while `_check_prespawn_recovery_needed` still stops all registry/custody recovery reads immediately once task-local state, terminal, or result evidence appears | Updated `[MF-5]` replacement text in place (Strategy B) |
 
 ## Spec Baseline
 
 - **Baseline Commit / Tag**: `dbbf5526` (`v0.9.124` on `main`, `2026-11-10`)
 - **Plan Type**: `implementation with spec revision`
 - **Promotion Strategy**: **Strategy B (atomic per slice)** across `docs/specifications/07-System_Invariants.md` (Slice 1), `docs/specifications/03-Manager_Architecture.md` (Slices 2 & 3), and `docs/specifications/05-Message_Flow_and_State.md` (Slice 3).
-- **Promotion Baseline Identifier**: `pending`
+- **Promotion Baseline Identifier**: `ddd6697d` (Slice 1), `6806b0e0` (Slice 2), and this Slice 3 closeout commit
 
 ## Proposed Spec Delta
 
@@ -192,9 +193,9 @@ Replacement (`docs/specifications/05-Message_Flow_and_State.md`):
 ```markdown
 Ordinary result waits with known immutable task configuration observe the configured
 outbox and `ctrl_out`, plus the existing task-local runtime wake/evidence surfaces;
-when waiting on an accepted submission before any task-local state, terminal, or
-output evidence appears, they also include `weft.state.services` in that wake set
-and re-run post-submission Manager recovery if the request remains `queued` with no
+when waiting on an accepted submission, they also include `weft.state.services` in
+that wake set and, before any task-local state, terminal, or output evidence appears,
+re-run post-submission Manager recovery if the request remains `queued` with no
 `ready` Manager ([WT-2a.14]; bare-TID `weft result` and `terminal_snapshot` never
 start a Manager). They
 do not subscribe to or scan `weft.log.tasks` for live completion. Task-local completion
@@ -269,11 +270,11 @@ persistent work boundaries, output grace, and claim settlement apply.
    - **Files to touch**:
      - `weft/core/manager.py`: in `Manager._begin_shutdown_drain`, run `self._apply_reserved_policy(policy)`, then `if not self._admission_bootstrapped: self._refresh_scheduler_evidence()`, then `self._drain_stop_targets = self._collect_drain_stop_targets()`, and **immediately after freezing `_drain_stop_targets`** call `self._unregister_manager(status=SERVICE_STATUS_DRAINING)` *before* `self._signal_children_to_stop(...)`; in `Manager._cleanup_stale_internal_reserved_queues`, include `SERVICE_STATUS_DRAINING` alongside `SERVICE_STATUS_ACTIVE` in `protected_tids`.
      - `weft/core/manager_runtime.py` (`_manager_record_diagnostic`: set `dispatch_eligible=(status == SERVICE_STATUS_ACTIVE and liveness == "live")`).
-     - `weft/commands/_result_wait.py` (`_result_observation_names`, `_iter_consuming_result`) and `weft/commands/events.py` (`iter_task_realtime_events`): when `materialized.taskspec_payload is not None` and `materialized.mapping_entry is None`, `materialized.terminal_evidence is None`, and `not materialized.result_surface_had_activity`, include `WEFT_SERVICES_REGISTRY_QUEUE` in the watched queue names; track `last_recovery_registry_horizon: int | None = -1` and whenever `broker.latest_pending_timestamp(WEFT_SERVICES_REGISTRY_QUEUE) != last_recovery_registry_horizon`, check `_read_recovery_snapshot(context, broker=broker)[0] != "ready"` and `observe_spawn_request_custody(context, tid, reserved_routes=(), broker=broker).state == "queued"`, releasing the borrowed connection before calling `ensure_manager_after_submission(context, submitted_tid=tid)`.
+     - `weft/commands/_result_wait.py` (`_result_observation_names`, `_iter_consuming_result`) and `weft/commands/events.py` (`iter_task_realtime_events`): when `materialized.taskspec_payload is not None`, include `WEFT_SERVICES_REGISTRY_QUEUE` in the watched queue names, and while `materialized.mapping_entry is None`, `materialized.terminal_evidence is None`, and `not materialized.result_surface_had_activity`, track `last_recovery_registry_horizon: int | None = -1` and whenever `broker.latest_pending_timestamp(WEFT_SERVICES_REGISTRY_QUEUE) != last_recovery_registry_horizon`, check `_read_recovery_snapshot(context, broker=broker)[0] != "ready"` and `observe_spawn_request_custody(context, tid, reserved_routes=(), broker=broker).state == "queued"`, releasing the borrowed connection before calling `ensure_manager_after_submission(context, submitted_tid=tid, deadline=..., cancel_event=...)`.
      - `docs/specifications/03-Manager_Architecture.md` (§4c.2B + `## Related Plans`) and `docs/specifications/05-Message_Flow_and_State.md` (§4c.3 + `## Related Plans`).
      - `tests/core/test_manager.py`, `tests/system/test_manager_process.py`, `tests/commands/test_run.py`.
    - **Read first**: `weft/core/manager.py::_begin_shutdown_drain`, `weft/core/spawn_requests.py::observe_spawn_request_custody`, `weft/commands/submission.py::ensure_manager_after_submission`, `weft/commands/_result_wait.py`, `weft/commands/events.py`.
-   - **Constraints**: Zero polling timers (`[WT-2a.6]`, `[WT-4.3]`); once task-local mapping, terminal, or result evidence appears, `WEFT_SERVICES_REGISTRY_QUEUE` drops out of `_result_observation_names` so existing dynamic route replacement unsubscribes automatically; bare-TID `weft result <tid>` (`materialized.taskspec_payload is None`) must never subscribe to `weft.state.services` or start a Manager.
+   - **Constraints**: Zero polling timers (`[WT-2a.6]`, `[WT-4.3]`, `[ALT-WT-002]`); once task-local mapping, terminal, or result evidence appears, `_check_prespawn_recovery_needed` stops performing registry/custody recovery reads while `_result_observation_names` keeps the watcher set stable (see `## Deviation Log`); bare-TID `weft result <tid>` (`materialized.taskspec_payload is None`) must never subscribe to `weft.state.services` or start a Manager.
    - **RED -> GREEN tests** (use deterministic queue/file readiness synchronization rather than blind sleeps):
      1. *During-drain race & target-freeze safety*: Start `M1` running a child task `T_hold` that signals a ready file, traps `SIGTERM`, and waits on a release file before exiting; send `STOP` to `M1`, wait until `M1`'s `weft.state.services` row transitions to `status="draining"` while `T_hold` keeps `M1` draining, then run `cmd_run(..., wait=True)` (and `Task.follow()`). Assert `M2` starts, executes the new task to `completed` with expected output *while `M1` is still draining* (proving `M1` did not `STOP` `M2`'s child), and release `T_hold` afterward (fails RED on `HEAD`).
      2. *Post-check `STOP` race*: Enqueue a spawn request while `M1` is `ready` (pausing `M1` or holding `M1` before dispatch), enter `_iter_consuming_result` / `iter_task_realtime_events` so the waiter is already parked before `STOP` arrives, deliver `STOP` to `M1`, and assert the waiter wakes on `M1`'s `draining`/`stopped` registry publication, starts `M2`, and returns the completed result.
@@ -316,7 +317,7 @@ persistent work boundaries, output grace, and claim settlement apply.
 - **Predicts**:
   - Submitting work via `cmd_run(..., wait=True)` or `Task.follow()` while `M1` is draining (or immediately before `M1` receives `STOP`) starts `M2` and completes without `M1` stopping `M2`'s child or stranding the waiter; `stop_task` on a `SIGSTOP`ped `Consumer` raises `ControlRejected`; `cmd_task_stop` on an interactive task with a `0.5s` `SIGTERM` handler exits cleanly with `cancelled`; a `RunnerHandle` with `host_pids=[pid]` and `host_processes=()` kills zero host processes.
 - **Fits worst**:
-  - `[ALT-WT-009]` states *"A waiter with known configuration watches its own queues only."* Including `weft.state.services` in `_result_observation_names` for accepted-submission waiters prior to first task-local state/output evidence stretches that literal wording (and briefly exposes pre-spawn waiters to low-frequency service-registry owner-row refreshes until `weft.state.tasks.<tid>` appears and unsubscribes them) in order to satisfy `[WT-2a.14]` (*Submission never blocks*) when a Manager `STOP` lands after `submit`'s initial availability check.
+  - `[ALT-WT-009]` states *"A waiter with known configuration watches its own queues only."* Including `weft.state.services` in `_result_observation_names` on the accepted-submission `QueueChangeMonitor` registration (kept stable across the wait as an implementation tradeoff to avoid monitor/connection teardown churn on first task-local activity, while `_check_prespawn_recovery_needed` stops recovery reads once `weft.state.tasks.<tid>` or result/control activity appears; see `## Deviation Log`) stretches that literal wording and exposes accepted-submission waiters to low-frequency service-registry owner-row wakeups in order to satisfy `[WT-2a.14]` (*Submission never blocks*) when a Manager `STOP` lands after `submit`'s initial availability check.
 
 ### 8.2 Blind Other-Family `[WT-7]` Fit Account & Divergence Classification
 
@@ -329,7 +330,7 @@ persistent work boundaries, output grace, and claim settlement apply.
   - *Fits worst*: `[ALT-WT-009]` (*"A waiter with known configuration watches its own queues only"*): watching `weft.state.services` pre-launch exceeds that task-local-only sentence and could wake pre-spawn waiters on shared registry refreshes.
 - **Divergence classification**:
   - **Pre-comparison agreement on governing entries**: Both accounts independently grounded the boundary in `[WT-2a.13]` / `[WT-4.3]` (availability vs death, `report_unknown` rejection, `(pid, create_time)` verification), `[WT-4.2]` (single resource/reap owner), `[WT-2a.7]` (draining peer `.internal_reserved` custody), `[WT-2a.2]` (drain status as queue fact), and `[WT-2a.14]` / `[ALT-WT-002]` / `[ALT-WT-007]` (event-driven Manager availability recovery without polling timers or reviving a draining Manager).
-  - **Initial divergence & accepted refinement (`[ALT-WT-009]`)**: The author's original pre-comparison account returned `Fits` and named `[WT-2a.14]`'s accepted-submission vs bare-TID observation split as its worst-fit tension without citing `[ALT-WT-009]`. The blind account returned `fits with strain` and located the sharper tension in `[ALT-WT-009]` (*"A waiter with known configuration watches its own queues only"* vs watching shared `weft.state.services` pre-launch). Classified as an **author-account omission resolved in §8.1 above** (not a theory or code deficiency): pre-spawn `weft.state.services` subscription drops out as soon as `weft.state.tasks.<tid>` or result/control activity appears, and `horizon` gating (`latest_pending_timestamp`) performs recovery reads only when `weft.state.services` actually changes while `M1` is not `ready`.
+  - **Initial divergence & accepted refinement (`[ALT-WT-009]`)**: The author's original pre-comparison account returned `Fits` and named `[WT-2a.14]`'s accepted-submission vs bare-TID observation split as its worst-fit tension without citing `[ALT-WT-009]`. The blind account returned `fits with strain` and located the sharper tension in `[ALT-WT-009]` (*"A waiter with known configuration watches its own queues only"* vs watching shared `weft.state.services` pre-launch). Classified as an **author-account omission resolved in §8.1 above** (not a theory or code deficiency): `_result_observation_names` keeps the accepted-submission watcher set stable as an implementation tradeoff to avoid recreating `QueueChangeMonitor` on first task-local activity (while `[SB-0.4]` itself permits dynamic replacement; see `## Deviation Log`), `_check_prespawn_recovery_needed` skips recovery reads immediately once `weft.state.tasks.<tid>` or result/control activity appears, and `horizon` gating (`latest_pending_timestamp`) performs pre-spawn recovery reads only when `weft.state.services` actually changes while `M1` is not `ready`.
 
 ### 8.3 Cross-Family Plan Review Log
 
@@ -347,6 +348,14 @@ persistent work boundaries, output grace, and claim settlement apply.
 - **Post-split Round 3 Scoped Verification (`2026-11-10`)**:
   - **Reviewer family & invocation**: OpenAI Codex CLI (`codex exec -C /Users/van/Developer/weft resume -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="high"' 01a1c763-c263-7b31-96a5-17058e503b35`).
   - **Verdict**: `PASS` (zero open findings; `R2-2` and `R2-3` verified resolved).
+
+### 8.4 Post-Implementation Completion Review
+
+- **Reviewer family**: OpenAI Codex CLI (`codex exec -s read-only -C /Users/van/Developer/weft -c 'model_reasoning_effort="high"'`, thread `01a1c827-8bfd-7cd0-961a-1dddc2318f0e`)
+- **Round 1 (`2026-11-10`)**: Reviewed full `833dd4b8..working-tree` diff across Slices 1, 2, and 3; verified Slice 1 and Slice 2 implementations clean and identified 3 Slice-3 findings (`[P2]` pre-spawn recovery ignoring observer `timeout` / `cancel_event`, `[P2]` `0.05s` polling caps in `_wait_ambiguous_backlog_grace` and `_wait_manager_registry_change` violating `[ALT-WT-002]`, and `[P3]` Strategy B spec/plan synchronization on stable `_result_observation_names` membership). All 3 reproduced RED and fixed.
+- **Rounds 2–3 (`2026-11-10`)**: Scoped follow-up passes on thread `01a1c827-8bfd-7cd0-961a-1dddc2318f0e` verified observer deadline threading into nested `_registry_view` / `_await_manager_start_settlement`, non-poisoning of `probe_cache` on interrupted probes, `[SB-0.4]` Deviation Log rationale accuracy, and caught that `watcher._strategy.notify_activity` in `weft/core/control_probe.py` only armed a local flag without interrupting a parked blocking wait; replaced the `cancel_event` probe wait path with `QueueChangeMonitor` + `monitor.wake()` and added `test_send_keyed_ping_probe_wakes_immediately_on_cancel_event` (`RED` `0.559s` -> `GREEN` `< 0.15s` on SQLite and PostgreSQL 18).
+- **Round 4 (`2026-11-10`)**: Scoped verification on thread `01a1c827-8bfd-7cd0-961a-1dddc2318f0e` verified immediate probe cancellation wake (`0.0001s`), callback deregistration, and cleanup with zero remaining findings.
+- Final Completion Review Verdict: APPROVE
 
 ## 9. Out of Scope
 

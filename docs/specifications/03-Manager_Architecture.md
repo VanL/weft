@@ -908,6 +908,13 @@ Current leadership-view rules:
   enters leadership drain and revalidates the replacement; if the replacement
   becomes stale or unknown, it may publish `manager_leadership_resumed`, restore
   active ownership, and return to the ordinary manager loop
+- a manager entering graceful `STOP` shutdown drain applies its reserved-queue
+  policy, snapshots its `STOP`-drain target set, and immediately publishes
+  `status="draining"` in `weft.state.services` before signaling or waiting on
+  active children so replacement managers do not have newly launched work swept
+  into the old drain and concurrent availability/recovery checks do not treat a
+  stopping manager as `ready`; stale `.internal_reserved` queue cleanup protects
+  both `active` and `draining` canonical manager records
 - a manager treats its own active canonical registry row as live while it has
   not unregistered and is not stopping; host/PONG liveness probes are for other
   processes, and the manager refreshes its own registry row periodically so

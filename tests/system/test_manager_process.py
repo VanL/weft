@@ -4,16 +4,32 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 import warnings
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from simplebroker import Config, serialize_config
+from tests.helpers.weft_harness import WeftTestHarness
 from weft import manager_process
-from weft._constants import load_config, resolve_runtime_config
+from weft._constants import (
+    CONTROL_STOP,
+    WEFT_SERVICES_REGISTRY_QUEUE,
+    load_config,
+    resolve_runtime_config,
+)
+from weft.client import WeftClient
+from weft.core import manager_runtime as core_manager_runtime
+from weft.core.control_messages import encode_control_message
+from weft.core.queue_wait import QueueChangeMonitor
 from weft.core.taskspec import (
     TaskSpec,
     encode_taskspec_transport_payload,
@@ -405,3 +421,104 @@ def test_run_manager_process_preserves_bundle_provenance_at_task_entry(
     assert config.prefix == "WEFT"
     assert config["CACHE_MB"] == 17
     assert config["TASK_MONITOR_BATCH_SIZE"] == 37
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGSTOP drain hold")
+def test_submission_during_manager_stop_drain_starts_replacement_without_stopping_new_work(
+    tmp_path: Path,
+) -> None:
+    """Work submitted while M1 is draining starts M2 and completes while M1 is still draining ([WT-2a.14], [MA-1.4])."""
+    ready_file = tmp_path / "hold-ready.txt"
+    release_file = tmp_path / "hold-release.txt"
+    hold_script = tmp_path / "hold_drain.py"
+    hold_script.write_text(
+        (
+            "import os, time\n"
+            "from pathlib import Path\n"
+            f"ready = Path({str(ready_file)!r})\n"
+            f"release = Path({str(release_file)!r})\n"
+            "partial = ready.with_suffix('.tmp')\n"
+            "partial.write_text(str(os.getppid()), encoding='utf-8')\n"
+            "partial.replace(ready)\n"
+            "while not release.exists():\n"
+            "    time.sleep(0.05)\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with WeftTestHarness() as harness:
+        m1_record, _started, m1_proc = core_manager_runtime.start_manager(
+            harness.context
+        )
+        m1_tid = str(m1_record["tid"])
+        harness.register_manager_tid(m1_tid)
+        client = WeftClient(harness.context)
+        consumer_pid: int | None = None
+        try:
+            hold_task = client.submit_command([sys.executable, "-u", str(hold_script)])
+            harness.register_tid(hold_task.tid)
+            deadline = time.monotonic() + 15.0
+            while not ready_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert ready_file.exists()
+            consumer_pid = int(ready_file.read_text(encoding="utf-8").strip())
+            os.kill(consumer_pid, signal.SIGSTOP)
+
+            with harness.context.queue(
+                f"T{m1_tid}.ctrl_in", persistent=False
+            ) as ctrl_in:
+                ctrl_in.write(encode_control_message(CONTROL_STOP))
+
+            with harness.context.queue(
+                WEFT_SERVICES_REGISTRY_QUEUE, persistent=True
+            ) as registry:
+                monitor = QueueChangeMonitor([registry], config=harness.context.config)
+                try:
+                    drain_deadline = time.monotonic() + 2.0
+                    m1_status = None
+                    while time.monotonic() < drain_deadline:
+                        snap = core_manager_runtime._snapshot_registry(
+                            harness.context, prune_stale=False
+                        )
+                        rec = snap.get(m1_tid)
+                        m1_status = rec.get("status") if rec is not None else None
+                        if m1_status == "draining":
+                            break
+                        monitor.wait(max(0.0, drain_deadline - time.monotonic()))
+                    assert m1_status == "draining"
+                finally:
+                    monitor.close()
+
+            new_task = client.submit_command(
+                [sys.executable, "-c", "print('DURING_DRAIN_OK')"]
+            )
+            harness.register_tid(new_task.tid)
+            res = new_task.result(timeout=10.0)
+            assert res.status == "completed"
+            assert "DURING_DRAIN_OK" in (res.stdout or str(res.value))
+
+            follow_task = client.submit_command(
+                [sys.executable, "-c", "print('FOLLOW_DRAIN_OK')"]
+            )
+            harness.register_tid(follow_task.tid)
+            events = list(follow_task.follow(timeout=10.0))
+            assert any(ev.event_type == "result" for ev in events)
+
+            snap_after = core_manager_runtime._snapshot_registry(
+                harness.context, prune_stale=False
+            )
+            for mgr_tid in snap_after:
+                harness.register_manager_tid(str(mgr_tid))
+            assert snap_after.get(m1_tid, {}).get("status") == "draining"
+            assert any(
+                tid != m1_tid and rec.get("status") == "active"
+                for tid, rec in snap_after.items()
+            )
+        finally:
+            release_file.write_text("release", encoding="utf-8")
+            if consumer_pid is not None:
+                with suppress(OSError):
+                    os.kill(consumer_pid, signal.SIGCONT)
+            if m1_proc is not None and m1_proc.poll() is None:
+                with suppress(subprocess.TimeoutExpired, OSError):
+                    m1_proc.wait(timeout=5.0)
