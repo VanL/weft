@@ -19,6 +19,7 @@ from weft.core.agents.backends import provider_cli as provider_cli_backend
 from weft.core.agents.provider_cli import probes
 from weft.core.agents.provider_cli.registry import (
     ProviderCLIProvider,
+    get_provider_cli_provider,
     list_provider_cli_providers,
 )
 from weft.core.agents.validation import (
@@ -26,6 +27,7 @@ from weft.core.agents.validation import (
     validate_taskspec_agent_runtime,
     validate_taskspec_agent_tool_profile,
 )
+from weft.ext import AgentToolProfileResult
 
 _MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 
@@ -405,19 +407,39 @@ def test_validate_agent_tool_profile_rejects_unsupported_explicit_mcp(
         validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
 
 
-def test_validate_agent_tool_profile_accepts_claude_workspace_access_none(
+def test_validate_agent_tool_profile_rejects_claude_workspace_access_none(
     tmp_path: Path,
 ) -> None:
+    executable = str(write_provider_cli_wrapper(tmp_path, "claude_code"))
     taskspec = create_valid_provider_cli_agent_taskspec(
         provider="claude_code",
-        executable=str(write_provider_cli_wrapper(tmp_path, "claude_code")),
+        executable=executable,
     )
     payload = taskspec.model_dump(mode="python")
     payload["spec"]["agent"]["runtime_config"]["tool_profile_ref"] = (
         "tests.fixtures.runtime_profiles_fixture:claude_none_workspace_tool_profile"
     )
 
-    validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
+    with pytest.raises(
+        ValueError,
+        match="claude_code does not support workspace_access='none'",
+    ):
+        validate_taskspec_agent_tool_profile(payload, load_runtime=True, preflight=True)
+
+    provider = get_provider_cli_provider("claude_code")
+    read_only_invocation = provider.build_invocation(
+        executable=executable,
+        authority_class="general",
+        prompt="hello",
+        cwd=str(tmp_path),
+        model=None,
+        options={},
+        tempdir=tmp_path,
+        tool_profile=AgentToolProfileResult(workspace_access="read-only"),
+    )
+    assert "--permission-mode" in read_only_invocation.command
+    assert "plan" in read_only_invocation.command
+    assert "--dangerously-skip-permissions" not in read_only_invocation.command
 
 
 def test_validate_agent_runtime_preflight_uses_taskspec_weft_context_over_cwd(

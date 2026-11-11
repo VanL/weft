@@ -238,10 +238,11 @@ authority class as a security control. As verified against
 - **`claude_code`** (`ClaudeCodeProvider.build_invocation` /
   `build_session_invocation`): appends `--permission-mode plan` when
   `authority_class="bounded"` **or** the resolved tool profile's
-  `workspace_access="read-only"`. Otherwise, if `workspace_access` is not
-  `"none"`, it appends `--dangerously-skip-permissions`. `bounded` also forces
-  `strict_mcp_config=True` and routes all configured MCP servers through an
-  explicit `--mcp-config` file.
+  `workspace_access="read-only"`. Otherwise, it appends
+  `--dangerously-skip-permissions` (`workspace_access="none"` is rejected by
+  `ClaudeCodeProvider` validation until workspace-tool disablement is enforced).
+  `bounded` also forces `strict_mcp_config=True` and routes all configured MCP
+  servers through an explicit `--mcp-config` file.
 - **`codex`** (`CodexProvider`): when `authority_class="bounded"`, forces
   `--sandbox read-only` and raises a `ValueError` at option-resolution time if
   the caller (via `spec.agent.options` or the tool profile) tries to request
@@ -646,7 +647,7 @@ Backend-specific notes:
   `opencode` `run` support is therefore surfaced on first real use, not during
   preflight
 - `workspace_access` support is explicit per provider:
-  - `claude_code`: `read-only`, `none`
+  - `claude_code`: `read-only`
   - `codex`: `read-only`, `workspace-write`
   - `agy`: `read-only`
   - `qwen`: `read-only`

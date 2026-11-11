@@ -532,3 +532,29 @@ def test_provider_cli_separates_selected_spec_context_from_execution_cwd(
     assert payload["cwd"] == str(work_dir)
     assert (context_root / ".weft" / "agent-health.json").exists()
     assert not (work_dir / ".weft" / "agent-health.json").exists()
+
+
+def test_provider_cli_missing_context_relative_executable_does_not_fall_back_to_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context-a"
+    work_dir = tmp_path / "cwd-b"
+    (context_root / ".weft").mkdir(parents=True)
+    work_dir.mkdir(parents=True)
+    cwd_wrapper = write_provider_cli_wrapper(work_dir / "bin", "codex")
+    _write_agent_settings(
+        context_root / ".weft" / "agents.json",
+        provider_name="codex",
+        executable="./bin/" + cwd_wrapper.name,
+    )
+    monkeypatch.chdir(work_dir)
+
+    with pytest.raises(RuntimeError, match="Unable to locate executable"):
+        execute_agent_target(
+            make_agent_section(executable=None, provider_name="codex"),
+            {"task": "hello"},
+            tid="123",
+            spec_context=str(context_root),
+        )
+    assert not (context_root / ".weft" / "agent-health.json").exists()

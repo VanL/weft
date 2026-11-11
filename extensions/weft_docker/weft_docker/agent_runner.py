@@ -91,6 +91,7 @@ class DockerProviderCLIRunner:
             options.get("network"),
             name="spec.runner.options.network",
         )
+        _validate_network_limits_conflict(self._network, self._limits)
         self._mounts = _normalize_mounts(
             options.get("mounts"),
             name="spec.runner.options.mounts",
@@ -171,6 +172,7 @@ class DockerProviderCLIRunner:
                 agent,
                 default_executable=image_result.recipe.default_executable,
                 runtime_mounts=runtime_requirements.mounts,
+                work_item_mounts=resolved_work_item_mounts,
             )
             prepared = prepare_provider_cli_execution(
                 agent=agent,
@@ -272,7 +274,7 @@ class DockerProviderCLIRunner:
                         status = state.get("Status")
                         if status in {"created", "running", "restarting"}:
                             if cancel_requested is not None and cancel_requested():
-                                container.kill()
+                                container.stop(timeout=2)
                                 terminal_status = "cancelled"
                                 terminal_error = "Target execution cancelled"
                                 break
@@ -449,6 +451,7 @@ class DockerProviderCLIRunner:
         *,
         default_executable: str | None,
         runtime_mounts: Sequence[ResolvedProviderContainerMount],
+        work_item_mounts: Sequence[Mapping[str, Any]] = (),
     ) -> str:
         configured = runtime_config_str(agent, "executable")
         if configured is None:
@@ -458,19 +461,27 @@ class DockerProviderCLIRunner:
                     "default executable or spec.agent.runtime_config.executable"
                 )
             return default_executable
-        return self._translate_host_path(configured, runtime_mounts=runtime_mounts)
+        return self._translate_host_path(
+            configured,
+            runtime_mounts=runtime_mounts,
+            work_item_mounts=work_item_mounts,
+        )
 
     def _translate_host_path(
         self,
         path: str,
         *,
         runtime_mounts: Sequence[ResolvedProviderContainerMount],
+        work_item_mounts: Sequence[Mapping[str, Any]] = (),
     ) -> str:
         source_path = Path(path).expanduser()
         if not source_path.is_absolute():
             return path
         resolved = source_path.resolve()
-        for host_source, target in self._path_mappings(runtime_mounts=runtime_mounts):
+        for host_source, target in self._path_mappings(
+            runtime_mounts=runtime_mounts,
+            work_item_mounts=work_item_mounts,
+        ):
             if resolved == host_source:
                 return target
             if host_source.is_dir():
@@ -485,6 +496,7 @@ class DockerProviderCLIRunner:
         self,
         *,
         runtime_mounts: Sequence[ResolvedProviderContainerMount],
+        work_item_mounts: Sequence[Mapping[str, Any]] = (),
     ) -> list[tuple[Path, str]]:
         mappings: list[tuple[Path, str]] = []
         if self._mount_workdir and self._working_dir:
@@ -494,6 +506,13 @@ class DockerProviderCLIRunner:
             )
         for runtime_mount in runtime_mounts:
             mappings.append((runtime_mount.source.resolve(), runtime_mount.target))
+        for work_item_mount in work_item_mounts:
+            mappings.append(
+                (
+                    Path(str(work_item_mount["source"])).expanduser().resolve(),
+                    str(work_item_mount["target"]),
+                )
+            )
         for explicit_mount in self._mounts:
             mappings.append(
                 (
@@ -518,10 +537,10 @@ class DockerProviderCLIRunner:
         return env
 
     def _network_mode(self) -> str | None:
+        if _is_zero_max_connections(self._limits):
+            return "none"
         if self._network is not None:
             return self._network
-        if _limit_value(self._limits, "max_connections") == 0:
-            return "none"
         return None
 
     def _resolve_container_runtime(
@@ -583,6 +602,22 @@ def _limit_value(limits: Any | None, name: str) -> Any | None:
     if isinstance(limits, Mapping):
         return limits.get(name)
     return getattr(limits, name, None)
+
+
+def _is_zero_max_connections(limits: Any | None) -> bool:
+    max_connections = _limit_value(limits, "max_connections")
+    return not isinstance(max_connections, bool) and max_connections in (0, 0.0)
+
+
+def _validate_network_limits_conflict(
+    network: str | None,
+    limits: Any | None,
+) -> None:
+    if _is_zero_max_connections(limits) and network not in (None, "none"):
+        raise ValueError(
+            "spec.runner.options.network conflicts with "
+            "spec.limits.max_connections=0 (requires network='none')"
+        )
 
 
 def _normalize_mounts(value: object, *, name: str) -> list[dict[str, Any]]:

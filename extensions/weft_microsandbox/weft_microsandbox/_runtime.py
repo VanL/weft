@@ -200,7 +200,11 @@ class MicrosandboxRuntime:
                     duration=time.monotonic() - started,
                     cancelled=True,
                 )
-            await _copy_back_files(sandbox, spec.copy_back)
+            await _copy_back_files(
+                sandbox,
+                spec.copy_back,
+                strict=int(output.exit_code) == 0,
+            )
             return MicrosandboxRunResult(
                 sandbox_id=sandbox_name,
                 sandbox_name=sandbox_name,
@@ -221,6 +225,8 @@ class MicrosandboxRuntime:
                     timed_out=True,
                     duration=time.monotonic() - started,
                 )
+            if isinstance(exc, MicrosandboxRuntimeError):
+                raise
             raise MicrosandboxRuntimeError(str(exc)) from exc
         finally:
             if sandbox is not None:
@@ -370,8 +376,19 @@ async def _prepare_guest_filesystem(
 async def _copy_back_files(
     sandbox: Any,
     copy_back: Sequence[FileCopyBack],
+    *,
+    strict: bool = False,
 ) -> None:
     for item in copy_back:
+        if strict:
+            try:
+                await sandbox.fs.copy_to_host(item.guest_path, item.host_path)
+            except Exception as exc:
+                raise MicrosandboxRuntimeError(
+                    f"Failed to copy guest output '{item.guest_path}' to host "
+                    f"'{item.host_path}': {exc}"
+                ) from exc
+            continue
         try:
             await sandbox.fs.copy_to_host(item.guest_path, item.host_path)
         except Exception:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-291] exception

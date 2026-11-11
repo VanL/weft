@@ -25,6 +25,7 @@ from weft.core.agents.provider_cli.registry import (
     ProviderCLIInvocation,
     ProviderCLIResult,
 )
+from weft.core.taskspec import AgentSection
 
 pytestmark = [pytest.mark.shared]
 
@@ -405,7 +406,7 @@ def test_agent_runner_uses_cached_image_tag_returned_by_ensure_agent_image(  # n
 def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-201] exception
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    killed: list[bool] = []
+    events: list[tuple[str, object]] = []
 
     class FakeContainer:
         def __init__(self) -> None:
@@ -424,18 +425,21 @@ def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 appro
         def reload(self) -> None:
             return None
 
-        def kill(self) -> None:
-            killed.append(True)
+        def stop(self, *, timeout: int = 2) -> None:
+            events.append(("stop", timeout))
             state = cast(dict[str, object], self.attrs["State"])
             state["Status"] = "exited"
-            state["ExitCode"] = 137
+            state["ExitCode"] = 143
+
+        def kill(self) -> None:
+            events.append(("kill", None))
 
         def logs(self, *, stdout: bool = False, stderr: bool = False) -> bytes:
             del stdout, stderr
             return b""
 
         def remove(self, force: bool = False) -> None:
-            del force
+            events.append(("remove", force))
 
     class FakeContainers:
         def create(
@@ -521,9 +525,100 @@ def test_agent_runner_reports_cancel_requested_as_cancelled(  # noqa: C901 appro
         cancel_requested=lambda: True,
     )
 
-    assert killed == [True]
+    assert events == [("stop", 2), ("remove", True)]
     assert outcome.status == "cancelled"
     assert outcome.error == "Target execution cancelled"
+
+
+def test_agent_runner_path_mappings_and_executable_include_work_item_mounts(
+    tmp_path: Path,
+) -> None:
+    tool_dir = tmp_path / "host-tools"
+    tool_dir.mkdir()
+    executable_path = tool_dir / "bin" / "codex"
+    executable_path.parent.mkdir()
+    executable_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    runner = DockerProviderCLIRunner(
+        tid="1234567890",
+        agent={
+            "runtime": "provider_cli",
+            "authority_class": "general",
+            "conversation_scope": "per_message",
+            "runtime_config": {
+                "provider": "codex",
+                "executable": str(executable_path),
+            },
+        },
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        monitor_interval=0.01,
+        runner_options={
+            "mount_workdir": False,
+            "work_item_mounts": [
+                {
+                    "source_path_ref": "metadata.tool_dir",
+                    "target": "/mnt/tools",
+                    "read_only": True,
+                    "kind": "dir",
+                }
+            ],
+        },
+    )
+    resolved_mounts = _resolve_work_item_mounts(
+        runner._work_item_mounts,
+        {"metadata": {"tool_dir": str(tool_dir)}},
+        name="spec.runner.options.work_item_mounts",
+    )
+    agent_section = runner._agent_payload
+
+    translated = runner._container_executable(
+        AgentSection.model_validate(agent_section),
+        default_executable="codex",
+        runtime_mounts=(),
+        work_item_mounts=resolved_mounts,
+    )
+    assert translated == "/mnt/tools/bin/codex"
+
+
+def test_agent_runner_enforces_zero_max_connections_network_isolation() -> None:
+    isolated = DockerProviderCLIRunner(
+        tid="1234567890",
+        agent={
+            "runtime": "provider_cli",
+            "authority_class": "general",
+            "conversation_scope": "per_message",
+            "runtime_config": {"provider": "codex"},
+        },
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits={"max_connections": 0},
+        monitor_interval=0.01,
+        runner_options={},
+    )
+    assert isolated._network_mode() == "none"
+    isolated._network = "bridge"
+    assert isolated._network_mode() == "none"
+
+    with pytest.raises(ValueError, match="max_connections"):
+        DockerProviderCLIRunner(
+            tid="1234567890",
+            agent={
+                "runtime": "provider_cli",
+                "authority_class": "general",
+                "conversation_scope": "per_message",
+                "runtime_config": {"provider": "codex"},
+            },
+            env={},
+            working_dir=None,
+            timeout=5.0,
+            limits={"max_connections": 0},
+            monitor_interval=0.01,
+            runner_options={"network": "bridge"},
+        )
 
 
 def test_docker_provider_cli_runner_rejects_missing_required_provider_runtime_requirements(

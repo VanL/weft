@@ -12,6 +12,7 @@ import pytest
 
 from weft.core.agents.provider_cli.execution import ProviderCLIPreparedExecution
 from weft.core.agents.runtime import AgentExecutionResult
+from weft_microsandbox import _runtime
 from weft_microsandbox import plugin as plugin_module
 from weft_microsandbox._runtime import (
     MicrosandboxRunResult,
@@ -436,3 +437,83 @@ def test_agent_runner_malformed_provider_output_fails() -> None:
 
     assert outcome.status == "error"
     assert "produced empty stdout" in (outcome.error or "")
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "guest_stderr", "expected_error_substring", "expected_returncode"),
+    [
+        (0, "", "Failed to copy guest output", None),
+        (2, "codex: invalid API key", "codex: invalid API key", 2),
+    ],
+)
+def test_agent_runner_copy_back_error_surfaces_on_zero_exit_and_preserves_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    guest_stderr: str,
+    expected_error_substring: str,
+    expected_returncode: int | None,
+) -> None:
+    class Fs:
+        async def mkdir(self, _path: str) -> None:
+            return None
+
+        async def copy_from_host(self, _host_path: str, _guest_path: str) -> None:
+            return None
+
+        async def copy_to_host(self, _guest_path: str, _host_path: str) -> None:
+            raise FileNotFoundError("missing codex output file")
+
+    class Sandbox:
+        fs = Fs()
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                exit_code=exit_code,
+                stdout_text="",
+                stderr_text=guest_stderr,
+            )
+
+        async def stop(self, *, timeout: float) -> None:
+            del timeout
+
+    class SandboxAPI:
+        @staticmethod
+        async def create(_name: str, **_kwargs: object) -> Sandbox:
+            return Sandbox()
+
+        @staticmethod
+        async def remove(_name: str) -> None:
+            return None
+
+    sdk = SimpleNamespace(
+        Sandbox=SandboxAPI,
+        Network=SimpleNamespace(none=lambda: object(), allow_all=lambda: object()),
+        ExecTimeoutError=TimeoutError,
+        MicrosandboxError=RuntimeError,
+    )
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: sdk)
+
+    runner = MicrosandboxRunner(
+        target_type="agent",
+        tid="1234567890123456789",
+        process_target=None,
+        agent=_agent("codex"),
+        args=[],
+        env={},
+        working_dir=None,
+        timeout=5.0,
+        limits=None,
+        runner_options={
+            "image": "agent:latest",
+            "executable": "codex",
+            "cwd": "/workspace",
+        },
+        runtime=_runtime.MicrosandboxRuntime(),
+    )
+
+    outcome = runner.run("question")
+
+    assert outcome.status == "error"
+    assert expected_error_substring in (outcome.error or "")
+    assert "produced empty stdout" not in (outcome.error or "")
+    assert outcome.returncode == expected_returncode

@@ -1699,3 +1699,222 @@ def test_docker_preserves_direct_create_capability_behavior(capability: str) -> 
         )
         is not None
     )
+
+
+def test_command_runner_removes_ephemeral_build_image_but_preserves_explicit_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    removed_images: list[tuple[str, bool]] = []
+    events: list[str] = []
+
+    class FakeProcess:
+        pid = 4321
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def poll(self) -> int | None:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            del timeout
+            return 0
+
+    class FakeImages:
+        def remove(self, *, image: str, force: bool = False) -> None:
+            events.append(f"remove_image:{image}")
+            removed_images.append((image, force))
+
+    class FakeClient:
+        images = FakeImages()
+
+    @contextmanager
+    def fake_docker_client() -> Iterator[FakeClient]:
+        yield FakeClient()
+
+    monkeypatch.setattr(
+        plugin, "open_supervised_process", lambda *args, **kwargs: FakeProcess()
+    )
+    monkeypatch.setattr(plugin, "_resolve_docker_binary", lambda value: value)
+    monkeypatch.setattr(
+        plugin,
+        "_build_docker_image",
+        lambda executable, *, build, tag: events.append(f"build:{tag}"),
+    )
+    monkeypatch.setattr(plugin, "_docker_client", fake_docker_client)
+    monkeypatch.setattr(
+        plugin,
+        "_wait_for_container",
+        lambda client, runtime_id, process: SimpleNamespace(
+            id="cid-1",
+            attrs={"State": {"Status": "running"}},
+            reload=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "wait_for_container_runtime_start",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        plugin,
+        "run_monitored_subprocess",
+        lambda **kwargs: plugin.RunnerOutcome(
+            status="ok",
+            value=None,
+            error=None,
+            stdout=None,
+            stderr=None,
+            returncode=0,
+            duration=0.0,
+            runtime_handle=kwargs["runtime_handle"],
+        ),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_describe_runtime",
+        lambda client, runtime_id, base_metadata: RunnerRuntimeDescription(
+            runner="docker",
+            id=runtime_id,
+            state="exited",
+            metadata=dict(base_metadata),
+        ),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_remove_container",
+        lambda client, runtime_id: events.append(f"remove_container:{runtime_id}"),
+    )
+
+    build_runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('built')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        options=plugin._parse_command_options({"build": {"context": str(tmp_path)}}),
+    )
+    outcome = build_runner.run_with_hooks({})
+    assert outcome.status == "ok"
+    assert len(removed_images) == 1
+    removed_tag, force_flag = removed_images[0]
+    assert removed_tag.startswith("weft-build-")
+    assert force_flag is True
+    assert events.index(f"remove_image:{removed_tag}") > next(
+        idx for idx, item in enumerate(events) if item.startswith("remove_container:")
+    )
+
+    removed_images.clear()
+    image_runner = plugin.DockerCommandRunner(
+        tid="1234567890",
+        process_target="python3",
+        args=["-c", "print('explicit')"],
+        env={},
+        working_dir=str(tmp_path),
+        timeout=5.0,
+        limits=None,
+        monitor_class=None,
+        monitor_interval=0.01,
+        options=plugin._parse_command_options({"image": "busybox:latest"}),
+    )
+    explicit_outcome = image_runner.run_with_hooks({})
+    assert explicit_outcome.status == "ok"
+    assert removed_images == []
+
+
+@pytest.mark.parametrize(
+    ("status", "stats_error"),
+    [
+        ("exited", AssertionError("stats must not run on exited container")),
+        ("running", APIError("stats endpoint transient failure")),
+        ("running", OSError("docker socket closed")),
+    ],
+)
+def test_describe_runtime_skips_stats_when_exited_and_suppresses_stats_errors(
+    status: str,
+    stats_error: BaseException,
+) -> None:
+    stats_calls: list[bool] = []
+
+    class FakeContainer:
+        id = "container-stats-test"
+
+        def __init__(self) -> None:
+            self.attrs = {
+                "Name": "/weft-stats-test",
+                "Config": {"Image": "busybox:latest"},
+                "State": {
+                    "Status": status,
+                    "OOMKilled": False,
+                    "ExitCode": 0,
+                },
+                "HostConfig": {"NetworkMode": "default"},
+            }
+
+        def reload(self) -> None:
+            return None
+
+        def stats(self, *, stream: bool = False) -> dict[str, object]:
+            stats_calls.append(stream)
+            raise stats_error
+
+    class FakeContainers:
+        def get(self, runtime_id: str) -> FakeContainer:
+            assert runtime_id == "weft-stats-test"
+            return FakeContainer()
+
+    client = SimpleNamespace(containers=FakeContainers())
+    description = plugin._describe_runtime(
+        client,
+        runtime_id="weft-stats-test",
+        base_metadata={"image": "busybox:latest"},
+    )
+
+    assert description.state == status
+    if status == "exited":
+        assert stats_calls == []
+    else:
+        assert stats_calls == [False]
+
+
+def test_docker_runner_rejects_agent_network_conflicting_with_zero_max_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Docker runner is currently unsupported on Windows")
+    runner_plugin = get_runner_plugin()
+    monkeypatch.setattr(
+        plugin,
+        "get_agent_image_recipe",
+        lambda provider_name: SimpleNamespace(
+            provider=provider_name,
+            default_executable="codex",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="max_connections"):
+        runner_plugin.validate_taskspec(
+            {
+                "spec": {
+                    "type": "agent",
+                    "limits": {"max_connections": 0},
+                    "runner": {
+                        "name": "docker",
+                        "options": {"network": "bridge"},
+                    },
+                    "agent": {
+                        "runtime": "provider_cli",
+                        "authority_class": "general",
+                        "conversation_scope": "per_message",
+                        "runtime_config": {"provider": "codex"},
+                    },
+                }
+            }
+        )

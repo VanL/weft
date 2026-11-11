@@ -1055,3 +1055,114 @@ def test_cleanup_sandbox_reports_each_failure_and_continues(
     ]
     assert all(record.exc_info is None for record in caplog.records)
     assert "sensitive" not in caplog.text
+
+
+def test_run_raises_runtime_error_when_copy_back_fails_after_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Fs:
+        async def copy_to_host(self, guest_path: str, host_path: str) -> None:
+            del guest_path, host_path
+            raise FileNotFoundError("guest artifact missing")
+
+    class Sandbox:
+        fs = Fs()
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(exit_code=0, stdout_text="", stderr_text="")
+
+        async def stop(self, *, timeout: float) -> None:
+            del timeout
+
+    class SandboxAPI:
+        @staticmethod
+        async def create(_name: str, **_kwargs: object) -> Sandbox:
+            return Sandbox()
+
+        @staticmethod
+        async def remove(_name: str) -> None:
+            return None
+
+    sdk = SimpleNamespace(
+        Sandbox=SandboxAPI,
+        Network=SimpleNamespace(none=lambda: object()),
+        ExecTimeoutError=TimeoutError,
+    )
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: sdk)
+
+    with pytest.raises(
+        _runtime.MicrosandboxRuntimeError,
+        match="Failed to copy guest output",
+    ) as exc_info:
+        MicrosandboxRuntime().run(
+            MicrosandboxRunSpec(
+                name="copy-back-zero-exit",
+                image="python:3.12",
+                command=("codex", "exec"),
+                env={},
+                cwd="/workspace",
+                network="none",
+                workspace=WorkspaceSpec(),
+                copy_back=(FileCopyBack("/tmp/out.txt", "/tmp/host-out.txt"),),
+            )
+        )
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+
+def test_run_preserves_nonzero_guest_failure_when_copy_back_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Fs:
+        async def copy_to_host(self, guest_path: str, host_path: str) -> None:
+            del guest_path, host_path
+            raise FileNotFoundError("guest artifact never written")
+
+    class Sandbox:
+        fs = Fs()
+
+        async def exec(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                exit_code=2,
+                stdout_text="",
+                stderr_text="guest CLI authentication error",
+            )
+
+        async def stop(self, *, timeout: float) -> None:
+            del timeout
+
+    class SandboxAPI:
+        @staticmethod
+        async def create(_name: str, **_kwargs: object) -> Sandbox:
+            return Sandbox()
+
+        @staticmethod
+        async def remove(_name: str) -> None:
+            return None
+
+    sdk = SimpleNamespace(
+        Sandbox=SandboxAPI,
+        Network=SimpleNamespace(none=lambda: object()),
+        ExecTimeoutError=TimeoutError,
+    )
+    monkeypatch.setattr(_runtime, "_load_sdk", lambda: sdk)
+    caplog.set_level(logging.WARNING, logger="weft_microsandbox._runtime")
+
+    result = MicrosandboxRuntime().run(
+        MicrosandboxRunSpec(
+            name="copy-back-nonzero-exit",
+            image="python:3.12",
+            command=("codex", "exec"),
+            env={},
+            cwd="/workspace",
+            network="none",
+            workspace=WorkspaceSpec(),
+            copy_back=(FileCopyBack("/tmp/out.txt", "/tmp/host-out.txt"),),
+        )
+    )
+
+    assert result.exit_code == 2
+    assert result.stderr == "guest CLI authentication error"
+    assert [record.getMessage() for record in caplog.records] == [
+        "Failed to copy Microsandbox output to the host"
+    ]

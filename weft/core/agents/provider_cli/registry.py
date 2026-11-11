@@ -260,7 +260,7 @@ class ClaudeCodeProvider(_BaseTextProvider):
     default_executable = "claude"
     supports_model = True
     supports_bounded_authority = True
-    supported_workspace_access_modes = ("read-only", "none")
+    supported_workspace_access_modes = ("read-only",)
     supports_explicit_mcp_servers = True
 
     def validate_tool_profile(
@@ -329,7 +329,7 @@ class ClaudeCodeProvider(_BaseTextProvider):
             command.extend(["--model", model])
         if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
             command.extend(["--permission-mode", "plan"])
-        elif tool_profile.workspace_access != "none":
+        else:
             command.append("--dangerously-skip-permissions")
         if authority_class == "bounded" or tool_profile.mcp_servers:
             config_path = _write_claude_mcp_config(tempdir, tool_profile.mcp_servers)
@@ -378,7 +378,7 @@ class ClaudeCodeProvider(_BaseTextProvider):
             command.extend(["--model", model])
         if authority_class == "bounded" or tool_profile.workspace_access == "read-only":
             command.extend(["--permission-mode", "plan"])
-        elif tool_profile.workspace_access != "none":
+        else:
             command.append("--dangerously-skip-permissions")
         if authority_class == "bounded" or tool_profile.mcp_servers:
             config_path = _write_claude_mcp_config(
@@ -1159,8 +1159,7 @@ def _resolve_provider_cli_command_path(
             resolved_candidate = (Path(spec_context).expanduser() / candidate).resolve()
         else:
             resolved_candidate = candidate.resolve()
-        if resolved_candidate.exists():
-            return str(resolved_candidate)
+        return str(resolved_candidate) if resolved_candidate.exists() else None
 
     which_fn = shutil.which if which is None else which
     resolved = which_fn(command)

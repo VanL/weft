@@ -222,94 +222,98 @@ class DockerCommandRunner:
         on_stderr_chunk: Callable[[str, bool], None] | None = None,
     ) -> RunnerOutcome:
         executable = _resolve_docker_binary(self._docker_binary)
-        image = self._ensure_image(executable)
         container_name = _container_name(self._tid)
-        command, stdin_data = self._build_docker_command(
-            work_item,
-            container_name,
-            executable=executable,
-            image=image,
-        )
         with _docker_client() as client:
-            process = open_supervised_process(
-                command,
-                pipe_stdin=stdin_data is not None,
-                encoding="utf-8",
-                errors="replace",
-                env=os.environ.copy(),
-            )
-
+            image = self._ensure_image(executable)
             try:
-                container = _wait_for_container(
-                    client,
-                    runtime_id=container_name,
-                    process=process,
-                )
-                wait_for_container_runtime_start(
-                    container,
-                    process=process,
-                    timeout=weft_constants.DOCKER_CONTAINER_START_TIMEOUT,
-                    interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
-                )
-                runtime_handle = _runtime_handle_for_container(
-                    container_name=container_name,
-                    image=image,
-                    docker_binary=self._docker_binary,
-                    container=container,
-                )
-                monitor = DockerContainerMonitor(
-                    runtime_id=container_name,
-                    limits=self._limits,
+                command, stdin_data = self._build_docker_command(
+                    work_item,
+                    container_name,
+                    executable=executable,
                     image=image,
                 )
-
-                def _stop_runtime() -> None:
-                    _docker_stop(client, container_name, timeout=2.0)
-
-                def _kill_runtime() -> None:
-                    _docker_kill(client, container_name)
-
-                outcome = run_monitored_subprocess(
-                    process=process,
-                    stdin_data=stdin_data,
-                    timeout=self._timeout,
-                    limits=self._limits,
-                    monitor_class=None,
-                    monitor_interval=self._monitor_interval,
-                    monitor=monitor,
-                    runtime_handle=runtime_handle,
-                    cancel_requested=cancel_requested,
-                    on_worker_started=on_worker_started,
-                    on_runtime_handle_started=on_runtime_handle_started,
-                    on_stdout_chunk=on_stdout_chunk,
-                    on_stderr_chunk=on_stderr_chunk,
-                    stop_runtime=_stop_runtime,
-                    kill_runtime=_kill_runtime,
-                    worker_pid=process.pid,
+                process = open_supervised_process(
+                    command,
+                    pipe_stdin=stdin_data is not None,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=os.environ.copy(),
                 )
 
-                final_description = _describe_runtime(
-                    client,
-                    runtime_id=container_name,
-                    base_metadata=dict(runtime_handle.metadata),
-                )
-                outcome = _apply_terminal_state(
-                    outcome,
-                    final_description=final_description,
-                    limits=self._limits,
-                )
-
-                updated_handle = _handle_with_runtime_metadata(
-                    runtime_handle,
-                    final_description,
-                )
-                outcome.runtime_handle = updated_handle
-                return outcome
-            finally:
                 try:
-                    _cleanup_process(process)
+                    container = _wait_for_container(
+                        client,
+                        runtime_id=container_name,
+                        process=process,
+                    )
+                    wait_for_container_runtime_start(
+                        container,
+                        process=process,
+                        timeout=weft_constants.DOCKER_CONTAINER_START_TIMEOUT,
+                        interval=weft_constants.DOCKER_CONTAINER_LOOKUP_INTERVAL,
+                    )
+                    runtime_handle = _runtime_handle_for_container(
+                        container_name=container_name,
+                        image=image,
+                        docker_binary=self._docker_binary,
+                        container=container,
+                    )
+                    monitor = DockerContainerMonitor(
+                        runtime_id=container_name,
+                        limits=self._limits,
+                        image=image,
+                    )
+
+                    def _stop_runtime() -> None:
+                        _docker_stop(client, container_name, timeout=2.0)
+
+                    def _kill_runtime() -> None:
+                        _docker_kill(client, container_name)
+
+                    outcome = run_monitored_subprocess(
+                        process=process,
+                        stdin_data=stdin_data,
+                        timeout=self._timeout,
+                        limits=self._limits,
+                        monitor_class=None,
+                        monitor_interval=self._monitor_interval,
+                        monitor=monitor,
+                        runtime_handle=runtime_handle,
+                        cancel_requested=cancel_requested,
+                        on_worker_started=on_worker_started,
+                        on_runtime_handle_started=on_runtime_handle_started,
+                        on_stdout_chunk=on_stdout_chunk,
+                        on_stderr_chunk=on_stderr_chunk,
+                        stop_runtime=_stop_runtime,
+                        kill_runtime=_kill_runtime,
+                        worker_pid=process.pid,
+                    )
+
+                    final_description = _describe_runtime(
+                        client,
+                        runtime_id=container_name,
+                        base_metadata=dict(runtime_handle.metadata),
+                    )
+                    outcome = _apply_terminal_state(
+                        outcome,
+                        final_description=final_description,
+                        limits=self._limits,
+                    )
+
+                    updated_handle = _handle_with_runtime_metadata(
+                        runtime_handle,
+                        final_description,
+                    )
+                    outcome.runtime_handle = updated_handle
+                    return outcome
                 finally:
-                    _remove_container(client, container_name)
+                    try:
+                        _cleanup_process(process)
+                    finally:
+                        _remove_container(client, container_name)
+            finally:
+                if self._build is not None:
+                    _remove_image(client, image)
 
     def start_session(
         self, *, on_activity: Callable[[], None]
@@ -595,16 +599,31 @@ class DockerRunnerPlugin:
         )
         _validate_mount_target_conflicts(explicit_mounts, work_item_mounts)
         network = options.get("network")
-        if network is not None:
+        normalized_network = (
             _normalize_optional_text(network, name="spec.runner.options.network")
+            if network is not None
+            else None
+        )
 
         limits = spec.get("limits")
         if isinstance(limits, Mapping):
             max_connections = limits.get("max_connections")
-            if max_connections not in (None, 0, 0.0):
+            if isinstance(max_connections, bool) or max_connections not in (
+                None,
+                0,
+                0.0,
+            ):
                 raise ValueError(
                     "Docker runner supports spec.limits.max_connections only when "
                     "it is 0 (mapped to Docker network isolation)"
+                )
+            if max_connections in (0, 0.0) and normalized_network not in (
+                None,
+                "none",
+            ):
+                raise ValueError(
+                    "spec.runner.options.network conflicts with "
+                    "spec.limits.max_connections=0 (requires network='none')"
                 )
 
         provider_name = str(agent.runtime_config.get("provider") or "").strip()
@@ -969,8 +988,14 @@ def _describe_runtime(  # noqa: C901 approved [TS-3.1] [RUFF-SUP-206] exception
         if isinstance(network_mode, str) and network_mode:
             metadata["network_mode"] = network_mode
 
-    stats_metadata = _docker_stats_metadata(container.stats(stream=False))
-    metadata.update(stats_metadata)
+    if state == "running":
+        docker = _load_docker_sdk()
+        try:
+            stats_payload = container.stats(stream=False)
+        except (docker.errors.DockerException, OSError):
+            stats_payload = None
+        if isinstance(stats_payload, Mapping):
+            metadata.update(_docker_stats_metadata(stats_payload))
 
     return RunnerRuntimeDescription(
         runner="docker",
@@ -1251,6 +1276,18 @@ def _remove_container(client: Any, runtime_id: str) -> None:
     try:
         container.remove(force=True)
     except docker.errors.DockerException:  # pragma: no cover - best-effort cleanup
+        return
+
+
+def _remove_image(client: Any, image_ref: str) -> None:
+    images = getattr(client, "images", None)
+    remove = getattr(images, "remove", None)
+    if not callable(remove):
+        return
+    docker = _load_docker_sdk()
+    try:
+        remove(image=image_ref, force=True)
+    except (docker.errors.DockerException, OSError):
         return
 
 

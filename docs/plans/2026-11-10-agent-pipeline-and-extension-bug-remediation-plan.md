@@ -1,6 +1,6 @@
 # Agent Runtime, Pipeline Stage Validation, and Sandbox Runner Bug Remediation Plan
 
-Status: draft
+Status: completed
 Source specs: `docs/program-theory.md` ([WT-1], [WT-2a.4], [WT-2a.9], [WT-2a.11], [WT-3], [WT-4.1], [WT-4.2], [WT-5], [ALT-WT-011], [ALT-WT-012], [WT-7]); `docs/specifications/12-Pipeline_Composition_and_UX.md` ([PL-2.7], [PL-4.3]); `docs/specifications/13-Agent_Runtime.md` ([AR-2.1], [AR-5], [AR-6]); `docs/specifications/08-Testing_Strategy.md` ([TS-1], [TS-3.1])
 Superseded by: none
 
@@ -56,19 +56,21 @@ Remediate the empirically verified, concretely reachable defects in Weft's deleg
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| `[PL-2.7]`, `[PY-3]` | Task 2.1 Outcome prose noted that `_validate_stage_template` raises `ValueError`, "which `prepare_pipeline` surfaces as `SubmissionValidationError`." | `_validate_stage_template` raises `ValueError`, and `prepare_pipeline` propagates `ValueError` directly without wrapping in `SubmissionValidationError` (`weft/commands/submission.py` untouched). | Per `docs/specifications/14-Python_API_Surfaces.md` `[PY-3]`, `prepare(...)` and `prepare_pipeline(...)` propagate raw `ValueError` / `TypeError` (matching existing `persistent`/`interactive`/`stream_output` stage rejections), whereas only `prepare_spec(...)` translates to `SubmissionValidationError`. | None (`[PY-3]` already governs). |
+| `[AR-2.1]`, `[AR-5]` | Task 1.1 planned adding `"none"` to `ClaudeCodeProvider.supported_workspace_access_modes` based on the `elif tool_profile.workspace_access != "none":` branch in `build_invocation` / `build_session_invocation`. | Retained `ClaudeCodeProvider.supported_workspace_access_modes = ("read-only",)`, simplified the unreachable `elif tool_profile.workspace_access != "none":` branch to `else:`, updated `13-Agent_Runtime.md` Security Model prose to remove the stale `if workspace_access is not "none"` wording, and added a regression proving `workspace_access="none"` is rejected while `"read-only"` is enforced. | Post-implementation cross-family review (`01a1c886-be86-7703-8f25-6b02ae0a3179`) demonstrated that omitting `--dangerously-skip-permissions` (`claude -p <prompt>`) under `general` authority or passing `--permission-mode plan` under `bounded` authority does not disable Claude Code workspace tools, so advertising `"none"` violated `[AR-5]` by accepting an unenforced restriction. | Updated `13-Agent_Runtime.md` `[AR-2.1]` Security Model bullet in place; `claude_code` `workspace_access` remains `read-only` only. |
 
 ## Spec Baseline
 
 - **Baseline Commit / Tag**: `dbbf5526` (`v0.9.124` on `main`, `2026-11-10`)
 - **Plan Type**: `implementation with spec revision`
 - **Promotion Strategy**: **Strategy B (atomic per slice)** for `docs/specifications/13-Agent_Runtime.md` (Slice 1) and `docs/specifications/12-Pipeline_Composition_and_UX.md` (Slice 2).
-- **Promotion Baseline Identifier**: `pending`
+- **Promotion Baseline Identifier**: `Slices 1–3 atomic commits on main (2026-11-10)`
 
 ## Proposed Spec Delta
 
 | Spec file | Strategy | Sections touched |
 |-----------|----------|------------------|
-| `docs/specifications/13-Agent_Runtime.md` | B — atomic in Slice 1 | `[AR-2.1]` Codex persistent session `thread_id` & flag preservation; `[AR-5]` `claude_code` `workspace_access="none"`; `## Related Plans` |
+| `docs/specifications/13-Agent_Runtime.md` | B — atomic in Slice 1 (+ completion review sync) | `[AR-2.1]` Codex persistent session `thread_id` & flag preservation, `claude_code` Security Model clarity; `## Related Plans` |
 | `docs/specifications/12-Pipeline_Composition_and_UX.md` | B — atomic in Slice 2 | `[PL-2.7]` stage template rejection of `spec.parameterization` and `spec.run_input`; `## Related Plans` |
 
 ### 1. `docs/specifications/13-Agent_Runtime.md` (`[AR-2.1]` & `[AR-5]` — Slice 1)
@@ -93,19 +95,21 @@ Replacement (`docs/specifications/13-Agent_Runtime.md`):
   `docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`)
 ```
 
-- **Exact pre-change target B (`docs/specifications/13-Agent_Runtime.md:646-651`)**:
-  - Starts with: ``- `workspace_access` support is explicit per provider:``
-  - Ends with: ``  - `opencode`: none in the built-in adapter``
-- **Clause audit B**: Adds `"none"` to `claude_code` and preserves every other provider bullet verbatim.
+- **Exact pre-change target B (`docs/specifications/13-Agent_Runtime.md:238-245`)**:
+  - Starts with: ``- **`claude_code`** (`ClaudeCodeProvider.build_invocation` /``
+  - Ends with: ``  explicit `--mcp-config` file.``
+- **Clause audit B**: Removes the misleading `if workspace_access is not "none"` phrasing now that the unreachable `!= "none"` branch is removed and `ClaudeCodeProvider` explicitly rejects `workspace_access="none"` until workspace-tool disablement is enforced.
 
 Replacement (`docs/specifications/13-Agent_Runtime.md`):
 ```markdown
-- `workspace_access` support is explicit per provider:
-  - `claude_code`: `read-only`, `none`
-  - `codex`: `read-only`, `workspace-write`
-  - `agy`: `read-only`
-  - `qwen`: `read-only`
-  - `opencode`: none in the built-in adapter
+- **`claude_code`** (`ClaudeCodeProvider.build_invocation` /
+  `build_session_invocation`): appends `--permission-mode plan` when
+  `authority_class="bounded"` **or** the resolved tool profile's
+  `workspace_access="read-only"`. Otherwise, it appends
+  `--dangerously-skip-permissions` (`workspace_access="none"` is rejected by
+  `ClaudeCodeProvider` validation until workspace-tool disablement is enforced).
+  `bounded` also forces `strict_mcp_config=True` and routes all configured MCP
+  servers through an explicit `--mcp-config` file.
 ```
 
 ### 2. `docs/specifications/12-Pipeline_Composition_and_UX.md` (`[PL-2.7]` — Slice 2)
@@ -134,12 +138,12 @@ submission-only parameterized/`run_input` targets;
 
 ### Slice 1: Agent Runtime Session Isolation, Authority Preservation & Context Propagation (`[AR-2.1]`, `[AR-5]`, `[AR-6]`)
 
-1. **Task 1.1: Isolate Persistent `CodexProvider` Sessions by `thread_id`, Enable `ClaudeCodeProvider` `workspace_access="none"`, and Propagate Selected Weft Context**
+1. **Task 1.1: Isolate Persistent `CodexProvider` Sessions by `thread_id`, Remove Unreachable `ClaudeCodeProvider` `workspace_access="none"` Branch, and Propagate Selected Weft Context**
    - **Outcome**:
      1. `CodexProvider.build_session_invocation` passes `--json` + `-o <output_path>`, places top-level `codex exec` flags (`--model`, `--profile`, `--oss`, `--local-provider`, `--config`, `--sandbox`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, `--skip-git-repo-check`, `--color`, `-C <cwd>`) before `resume <session.session_id>` on `session.turn_index > 0`, and `CodexProvider.parse_result` extracts `thread_id` (and `turn.completed` `usage` when present) from JSONL stdout while failing closed with `RuntimeError` if `session_id` or `thread_id` is missing on a session turn. One-shot `CodexProvider.build_invocation` remains unchanged.
      2. Update `tests/fixtures/provider_cli_fixture.py::_run_codex` to parse top-level `codex exec` options before `resume <session_id>`, accept `--json`, and emit `{"type": "thread.started", "thread_id": session_key}` on stdout, and update `tests/core/test_provider_cli_session_backend.py` to assert `provider_session_id` continuity AND preserved `sandbox`, `profile`, `color`, and `cwd` across turn 2+ (plus concurrent two-session isolation sharing `CODEX_HOME`).
-     3. `ClaudeCodeProvider.supported_workspace_access_modes` becomes `("read-only", "none")`.
-     4. Add `spec_context: str | None = None` to `AgentRuntimeAdapter.execute` (`weft/core/agents/runtime.py`), `LLMBackend` (`execute`, `start_session`, `validate` in `weft/core/agents/backends/llm.py`), and `ProviderCLIBackend` (`validate`, `validate_tool_profile`, `execute`, `start_session`, `_run_provider_invocation`, `ProviderCLIBackendSession` in `weft/core/agents/backends/provider_cli.py`), using `_callable_supports_keyword(..., "spec_context")` in `validation.py` and `runtime.py` only for custom third-party `register_agent_runtime` adapters. `ProviderCLIBackend` resolves `effective_spec_context = spec_context or (identity.context_root if (identity := get_runtime_identity()) is not None and identity.context_root else None) or str(Path.cwd())` for `.weft/agents.json` and `.weft/agent-health.json` while **preserving `invocation.cwd` untouched**; `weft/builtins/agent_probe.py` uses `_resolve_provider_cli_command_path`.
+     3. Keep `ClaudeCodeProvider.supported_workspace_access_modes = ("read-only",)` and remove the unreachable `!= "none"` branch (see `## Deviation Log`).
+     4. Add `spec_context: str | None = None` to `AgentRuntimeAdapter.execute` (`weft/core/agents/runtime.py`), `LLMBackend` (`execute`, `start_session`, `validate` in `weft/core/agents/backends/llm.py`), and `ProviderCLIBackend` (`validate`, `validate_tool_profile`, `execute`, `start_session`, `_run_provider_invocation`, `ProviderCLIBackendSession` in `weft/core/agents/backends/provider_cli.py`), using `_callable_supports_keyword(..., "spec_context")` in `validation.py` and `runtime.py` only for custom third-party `register_agent_runtime` adapters. `ProviderCLIBackend` resolves `effective_spec_context = spec_context or (identity.context_root if (identity := get_runtime_identity()) is not None and identity.context_root else None) or str(Path.cwd())` for `.weft/agents.json` and `.weft/agent-health.json` while **preserving `invocation.cwd` untouched**; `weft/builtins/agent_probe.py` uses `_resolve_provider_cli_command_path`, and `_resolve_provider_cli_command_path` returns `None` on missing explicit relative paths instead of falling back to `shutil.which`.
    - **Files to touch**: `weft/core/agents/provider_cli/registry.py`, `weft/core/agents/backends/provider_cli.py`, `weft/core/agents/backends/llm.py`, `weft/core/agents/validation.py`, `weft/core/agents/runtime.py`, `weft/builtins/agent_probe.py`, `docs/specifications/13-Agent_Runtime.md` (§4c.1 + `## Related Plans`), `tests/fixtures/provider_cli_fixture.py`, `tests/core/test_provider_cli_session_backend.py`, `tests/core/test_provider_cli_backend.py`, `tests/core/test_agent_runtime.py`, `tests/core/test_agent_validation.py`, `tests/core/test_builtin_agent_probe.py`.
    - **Done when**: `pytest tests/core/test_provider_cli_session_backend.py tests/core/test_provider_cli_backend.py tests/core/test_agent_runtime.py tests/core/test_agent_validation.py tests/core/test_builtin_agent_probe.py -q` passes.
 
@@ -225,6 +229,15 @@ submission-only parameterized/`run_input` targets;
   - **Reviewer family & invocation**: OpenAI Codex CLI (`codex exec -C /Users/van/Developer/weft resume -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="high"' 01a1c763-c263-7b31-96a5-17058e503b35`).
   - **Verdict**: `PASS` for Plan 2 (`F4`, `F5`, `F8`–`F10`, and §8.1/§8.2 `[WT-7]` fit accounts verified aligned with `docs/program-theory.md`; suite-wide `Verdict: PASS` confirmed in Round 3).
 
+### 8.4 Post-Implementation Completion Review
+
+- **Reviewer family**: OpenAI Codex CLI (`codex exec -s read-only -C /Users/van/Developer/weft -c 'model_reasoning_effort="high"'`, thread `01a1c886-be86-7703-8f25-6b02ae0a3179`, `2026-11-10`).
+- **Round 1 dispositions (verified with `RED -> GREEN` regressions)**:
+  1. `ClaudeCodeProvider` accepting `workspace_access="none"` without disabling workspace tools (`[P2]`): **Accept (`fixed`)** — retained `supported_workspace_access_modes = ("read-only",)`, simplified the unreachable `!= "none"` branch to `else:`, synchronized `13-Agent_Runtime.md` (`238-245`, `649`), and added `test_validate_agent_tool_profile_rejects_claude_workspace_access_none`.
+  2. `_resolve_provider_cli_command_path` falling back to `shutil.which` on missing context-relative paths (`[P2]`): **Accept (`fixed`)** — returned `None` immediately when an explicit relative path does not exist under `spec_context`, with regressions in `test_provider_cli_backend.py` and `test_builtin_agent_probe.py`.
+- **Round 2 scoped verification (`01a1c886-be86-7703-8f25-6b02ae0a3179`)**: Both fixes and falsifiable regressions verified with zero remaining findings; Task 1.1 outcome 3 aligned during closeout.
+- Final Completion Review Verdict: APPROVE
+
 ## 9. Out of Scope
 
 - Core control-plane, process-tree reap ownership, and Manager drain fixes (`docs/plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md`).
@@ -240,3 +253,4 @@ submission-only parameterized/`run_input` targets;
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-10 | `dbbf5526` (post-split R1–R2) | §2, §3, Tasks 1.1 & 3.2, §7, §8 | Resolved Codex Round-1 `F4`, `F5`, `F8`–`F10` and blind `[WT-7]` `[WT-2a.9]` `LLMBackend` parity (`01a1c763-b87d-7eb1-b4ec-5df966e43530`). | Completed (`Verdict: PASS` on `01a1c763-c263-7b31-96a5-17058e503b35`) |
+| 2026-11-10 | `31c5253b` + worktree (completion R1–R2) | Deviation Log, §4c.1 B, Task 1.1, §8.4, `registry.py`, `13-Agent_Runtime.md`, tests | Retained `ClaudeCodeProvider` rejection of unenforced `workspace_access="none"` and prevented `_resolve_provider_cli_command_path` from falling back to `shutil.which` on missing context-relative paths (`01a1c886-be86-7703-8f25-6b02ae0a3179`). | Completed (`APPROVE` on `01a1c886-be86-7703-8f25-6b02ae0a3179`) |
