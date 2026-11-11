@@ -139,10 +139,10 @@ available yet. `wait()` and `result()` both return the structured Weft
 `TaskResult`.
 
 Module-level `status(tid)` and `terminal_snapshot(tid)` use Weft's compact
-known-TID terminal snapshot path. They are read-only and can report terminal
-Monitor-store fallback after raw task-log rows retire. Use `snapshot(tid)` when
-callers need diagnostic fields such as task metadata, runtime details, or
-timestamps.
+known-TID terminal snapshot path. They are read-only observations over broker
+runtime, log, control, and outbox surfaces (never private Monitor-store tables).
+Use `snapshot(tid)` when callers need diagnostic fields such as task metadata,
+runtime details, or timestamps.
 
 `enqueue_on_commit(...)` and the native `*_on_commit(...)` helpers return
 `WeftDeferredSubmission`. The deferred handle has a stable `name` immediately
@@ -298,3 +298,7 @@ Notes:
 `delay` and `shared_task` are intentionally not shipped. They are close enough
 to invite mechanical porting and far enough from Weft semantics to create
 delayed failures.
+
+## Related Plans
+
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../../docs/plans/2026-11-10-extension-typing-and-spec-sync-plan.md) reconciles `status(tid)` and `terminal_snapshot(tid)` broker-only read documentation ([WT-2a.2], [OBS.13.1]).

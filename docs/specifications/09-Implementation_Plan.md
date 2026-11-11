@@ -134,9 +134,9 @@ capabilities, not a separate runtime API.
 - Known-TID terminal snapshots are non-consuming observations. When they include
   exact acknowledgement targets, callers must acknowledge explicitly. This
   keeps read-only observers from stealing task results or mutating queue state.
-  After raw task-log retirement, known-TID terminal snapshots may fall back to
-  terminal Monitor-store rows; nonterminal Monitor-store rows are not live task
-  proof. A positive `timeout` bounds the observation and returns the latest
+  Known-TID terminal snapshots read broker runtime/log/control/outbox surfaces
+  only and never query private Monitor-store tables ([WT-2a.2], [OBS.13.1]). A
+  positive `timeout` bounds the observation and returns the latest
   nonterminal snapshot on expiry; it never publishes a task timeout or consumes
   a result.
 - Realtime event iteration peeks task-log, outbox, and terminal-control
@@ -166,7 +166,7 @@ Client API parity matrix:
 | Submit command argv | `client` | `WeftClient.submit_command` | Convenience wrapper over command submission. |
 | Bind a task handle | `client` | `WeftClient.task` | Normalizes TID and returns a lazy handle. |
 | Task status/result/events | `task_handle` | `Task.snapshot`, `Task.result`, `Task.events`, `Task.realtime_events`, `Task.follow` | Reuses command/event/result helpers; realtime iteration is non-consuming. |
-| Task terminal observation | `task_handle` and `namespace` | `Task.terminal_snapshot`, `client.tasks.terminal_snapshot`, `client.tasks.ack_terminal_snapshot` | Observes known-TID terminal evidence, including terminal Monitor-store fallback after raw task-log retirement, without consuming result queues unless explicitly acknowledged. |
+| Task terminal observation | `task_handle` and `namespace` | `Task.terminal_snapshot`, `client.tasks.terminal_snapshot`, `client.tasks.ack_terminal_snapshot` | Observes known-TID terminal evidence from broker queue surfaces (never private Monitor-store tables) without consuming result queues unless explicitly acknowledged. |
 | Task keyed liveness probe | `task_handle` and `namespace` | `Task.ping`, `client.tasks.ping` | Programmatic counterpart of `weft task ping`; returns the matched PONG payload. |
 | Task stop/kill | `task_handle` and `namespace` | `Task.stop`, `Task.kill`, `client.tasks.stop`, `client.tasks.kill`, `client.tasks.stop_many`, `client.tasks.kill_many` | Delegates to command control convergence and runner fallback behavior. |
 | Task list/stats/watch/TID resolution | `namespace` | `client.tasks.list`, `client.tasks.stats`, `client.tasks.status`, `client.tasks.watch`, `client.tasks.resolve_tid` | Same status reconstruction as CLI task/status surfaces. |
@@ -223,6 +223,7 @@ That index is intentionally lightweight:
 
 ## Related Plans
 
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) removes stale `MonitorStore` fallback claims from `terminal_snapshot` ([WT-2a.2], [OBS.13.1]).
 - retired: 2026-11-02-cli-client-surface-parity-plan — source 0ff8cfbf; see docs/plans/README.md
 
 - retired: 2026-09-11-per-tid-task-state-namespace-plan — source 396c3b85; see docs/plans/README.md

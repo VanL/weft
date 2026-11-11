@@ -36,7 +36,7 @@ Boundary:
 Future-only work in this area would add or refine:
 
 - extra operator-facing discovery helpers beyond the current command surface
-- an explicit public TID lookup or resolution surface if operators need one
+  (`weft task tid` already ships short-to-full TID resolution)
 - deeper OS-level process integration when the current helper layer is not
   enough
 
@@ -79,6 +79,10 @@ Boundary:
 - do not convert dev-only measurement scripts into default contract by
   accident
 - keep canonical test coverage in [08-Testing_Strategy.md](08-Testing_Strategy.md)
+
+## Related Plans
+
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) reconciles [IP-A1] with shipped `weft task tid` short-to-full TID resolution.
 
 ## Backlink
 

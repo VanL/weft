@@ -31,7 +31,7 @@ There are currently 71 plan files in this directory.
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
 | [`2026-11-10-program-theory-fit-cadence-and-gate-plan.md`](./2026-11-10-program-theory-fit-cadence-and-gate-plan.md) | Program Theory `[REV-WT-007]`: Forward-Only Mechanical `[WT-7]` Plan Gate and `[ALT-WT-004]` Reconciliation Plan | `completed` | none |
-| [`2026-11-10-extension-typing-and-spec-sync-plan.md`](./2026-11-10-extension-typing-and-spec-sync-plan.md) | Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan | `draft` | none |
+| [`2026-11-10-extension-typing-and-spec-sync-plan.md`](./2026-11-10-extension-typing-and-spec-sync-plan.md) | Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan | `completed` | none |
 | [`2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`](./2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md) | Agent Runtime, Pipeline Stage Validation, and Sandbox Runner Bug Remediation Plan | `completed` | none |
 | [`2026-11-10-deep-dive-reachable-bug-remediation-plan.md`](./2026-11-10-deep-dive-reachable-bug-remediation-plan.md) | Control-Plane, Process Supervision, and Manager Drain Bug Remediation Plan | `completed` | none |
 | [`2026-11-09-reaped-wrapper-exit-proof-plan.md`](./2026-11-09-reaped-wrapper-exit-proof-plan.md) | Reaped Wrapper Exit Proof Retires Its Resident | `completed` | none |

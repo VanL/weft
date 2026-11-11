@@ -236,14 +236,14 @@ SIGINT, fallback, notification-only interest and real PostgreSQL paths.
 
 _Downstream exact copy_: Taut vendors `weft/core/tasks/multiqueue_watcher.py`
 whole and unmodified as its scheduler block (Taut reactor restoration plan,
-S1), pinned to Weft `9fc913c1` (0.9.105), whole-file SHA-256
-`3afa84fc7998644cc63d40374fad9326236b73ba3e408a86086a6dc33089da89`. That file
-is unchanged through `cfa5bb21` (0.9.106), so the pin is still exact. The
+S1); current Weft `dbbf5526` (0.9.124) whole-file SHA-256 is
+`713060f2880b401220505e82f9fad11916740a8355cad026f869ac61dfdbf086` (verified by
+`tests/specs/test_multiqueue_watcher_pin.py`). The
 [QUEUE.8] contract above, including the standalone `_sigint_handler` signal-frame
 rule and owner-thread mutation between dispatch passes, is therefore a contract
-for that copy as well. A change to this file must be recorded in the CHANGELOG
-so Taut can re-pin and re-record its digest; Taut does not import Weft at
-runtime.
+for that copy as well. A change to this file must update this digest and be
+recorded in the CHANGELOG so Taut can re-pin and re-record its digest; Taut
+does not import Weft at runtime.
 
 ### Resource Invariants
 
@@ -743,8 +743,9 @@ _Implementation mapping_: `weft/core/tasks/base.py`, `weft/core/process_title.py
     change terminal task-log proof fields, reserved deletion authority, or
     global-log bounds. Persisted task-owned control observations outrank later
     Manager fallback; task-log terminal proof outranks both. Changed selected
-    evidence invalidates summary verification and requires a corrected report
-    with distinct stable evidence identity before cleanup/retirement. Bounded
+    control-observation evidence (or task-log terminal proof superseding a prior
+    control projection) invalidates summary verification and requires a corrected
+    report with distinct stable evidence identity before cleanup/retirement. Bounded
     finite-horizon inspection shares the existing maintenance owner and budgets;
     partial or failed inspection is retryable, not absence proof. For families
     lacking task-log proof, ctrl_out deletion covers only the inspected and
@@ -1534,6 +1535,7 @@ doc:
 
 ## Related Plans
 
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) updates the [QUEUE.8] `multiqueue_watcher.py` SHA-256 pin with executable verification (`tests/specs/test_multiqueue_watcher_pin.py`) and clarifies [OBS.13.13] summary invalidation scope.
 - [Deep-Dive Reachable Bug Remediation Plan](../plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md) restricts foreground `retention` / `task-local` prune to standard `T{tid}.*` queues and refuses false `stop` acceptance when convergence ends in `report_unknown` ([OBS.12a], [OBS.13.9]).
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([OBS.6], [MANAGER.11]).
 - [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) publishes one Consumer snapshot per owner step under [OBS.6a].

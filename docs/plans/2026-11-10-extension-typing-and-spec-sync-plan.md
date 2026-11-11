@@ -1,6 +1,6 @@
 # Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan
 
-Status: draft
+Status: completed
 Source specs: `docs/program-theory.md` ([WT-0], [WT-2a.2], [WT-2a.9], [WT-2a.13], [WT-3], [WT-4], [ALT-WT-018], [ALT-WT-020], [WT-7]); `docs/specifications/00-Quick_Reference.md`; `docs/specifications/05-Message_Flow_and_State.md` ([MF-5], [MF-6]); `docs/specifications/07-System_Invariants.md` ([QUEUE.8], [OBS.13.1], [OBS.13.3], [OBS.13.7], [OBS.13.13]); `docs/specifications/08-Testing_Strategy.md` ([TS-1], [TS-3], [TS-4]); `docs/specifications/09-Implementation_Plan.md` ([IP-1]); `docs/specifications/09A-Implementation_Roadmap_Planned.md` ([IP-A1]); `docs/specifications/13C-Using_Weft_With_Django.md` ([DJ-19])
 Superseded by: none
 
@@ -54,13 +54,14 @@ Close the repository-wide type-checking, local release-gate parity, and specific
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| `CLAUDE.md` §8 | Optional Task 2.2 gated `.github/workflows/test.yml` edits on explicit owner confirmation. | Skipped Optional Task 2.2 (`.github/workflows/*` untouched). | Owner explicitly instructed: *"Leave the CI checks alone"*. | None. |
 
 ## Spec Baseline
 
 - **Baseline Commit / Tag**: `dbbf5526` (`v0.9.124` on `main`, `2026-11-10`)
 - **Plan Type**: `implementation with spec revision`
 - **Promotion Strategy**: **Strategy D / B (atomic with pin tests in Slice 3)** across `00-Quick_Reference.md`, `05-Message_Flow_and_State.md`, `07-System_Invariants.md`, `09-Implementation_Plan.md`, `09A-Implementation_Roadmap_Planned.md`, and `integrations/weft_django/README.md`.
-- **Promotion Baseline Identifier**: `pending`
+- **Promotion Baseline Identifier**: `Slices 1–3 atomic commits on main (2026-11-10)`
 
 ## Proposed Spec Delta
 
@@ -308,6 +309,16 @@ Replacement (`docs/specifications/00-Quick_Reference.md`):
   - **Reviewer family & invocation**: OpenAI Codex CLI (`codex exec -C /Users/van/Developer/weft resume -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort="high"' 01a1c763-c263-7b31-96a5-17058e503b35`).
   - **Verdict**: `PASS` (`F6`, `F8`, `F9`, `R2-1`, and §8.1/§8.2 `[WT-7]` fit accounts verified aligned with `[OBS.13.7]` and `docs/program-theory.md`; zero open findings).
 
+### 8.4 Post-Implementation Completion Review
+
+- **Reviewer family**: OpenAI Codex CLI (`codex exec -s read-only -C /Users/van/Developer/weft -c 'model_reasoning_effort="high"'`, thread `01a1c89d-df4b-7d72-8d07-a36619f2a3d6`, `2026-11-10`).
+- **Round 1 dispositions (all verified `RED -> GREEN` and applied in Slice 3)**:
+  - Nested subcommand coverage in `tests/specs/test_spec_hygiene.py`: expanded `_typer_cli_surface()` and `_parse_quick_reference_cli_surface()` to recursively inspect nested `typer.core.TyperGroup` subcommands (`weft queue alias add/list/remove`) rather than collapsing `alias` to a leaf command, and added `test_quick_reference_cli_surface_detects_nested_subcommand_drift`.
+  - Bidirectional plan backlinks: added `## Related Plans` links to `integrations/weft_django/README.md` and `docs/specifications/09A-Implementation_Roadmap_Planned.md`.
+  - Formatting: applied `ruff format` to `tests/specs/test_spec_hygiene.py`.
+- **Round 2 verification**: Resumed thread `01a1c89d-df4b-7d72-8d07-a36619f2a3d6` over the updated diff and test evidence (`15 passed` in `tests/specs/`, wheel `py.typed` checks, `mypy-check` across `533` files, `ruff`, `check-doc-paths`, `check-dom15-fixtures`, and `release.py --dry-run`); zero remaining findings.
+- Final Completion Review Verdict: APPROVE
+
 ## 9. Out of Scope
 
 - Runtime bug fixes in core `weft/` or extensions (covered by the two companion bug-remediation plans).
@@ -322,3 +333,4 @@ Replacement (`docs/specifications/00-Quick_Reference.md`):
 | Date | Baseline | Section | Change and reason | Re-review required? |
 |------|----------|---------|-------------------|---------------------|
 | 2026-11-10 | `dbbf5526` (post-split R1–R3) | §2, §3, §4, §4c.1 C2, Task 2.1, §7, §8 | Resolved Codex `F6`, `F8`, `F9`, `R2-1`, enforced `[ALT-WT-018]` on `bin/release.py`, and recorded blind `[WT-7]` fit account (`01a1c763-b875-77b0-994a-7af5a3076445`). | Completed (`Verdict: PASS` on `01a1c763-c263-7b31-96a5-17058e503b35`) |
+| 2026-11-10 | Slices 1–3 (`ff5574b1`, `9db9fad8`, Slice 3) | Deviation Log, Spec Baseline, §8.4 | Recorded owner skip of Optional Task 2.2, resolved Codex completion-review Round 1 items (`01a1c89d-df4b-7d72-8d07-a36619f2a3d6`), and closed plan after Round 2 approval. | Completed (`APPROVE` on `01a1c89d-df4b-7d72-8d07-a36619f2a3d6`) |

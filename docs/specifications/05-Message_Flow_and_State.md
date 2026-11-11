@@ -2006,13 +2006,14 @@ self-maintenance, and explicit operator commands for force and compaction:
   addition without changing the surrounding lifetime-report schema. Nothing
   is ever auto-requeued. `weft.log.tasks` is now
   table driven under collated ownership: the monitor scans visible
-  rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, deletes
-  malformed rows, folds valid rows into the Monitor table and, in `delete`
-  mode, then
-  deletes those exact raw rows once the fold is durably recorded
-  ([OBS.13.3]); in `jsonl_then_delete` mode valid raw rows are retained
-  until the family's `task_lifetime_report` has been handed off, and only
-  malformed rows are deleted at fold time. Family summaries are emitted only
+  rows in FIFO order up to `WEFT_TASK_MONITOR_TASK_LOG_SCAN_LIMIT`, folds valid
+  rows into the Monitor table and, in both `delete` and `jsonl_then_delete`
+  modes, deletes those exact valid raw rows once the collation update and
+  raw-message reference commit durably ([OBS.13.3]); in `jsonl_then_delete`
+  mode, malformed/unrecognized raw rows and inferred runtime cleanup reports
+  still require accepted external emission or durable deferred-report handoff
+  before destructive cleanup, while family `task_lifetime_report` emission uses
+  the durable Monitor store rows. Family summaries are emitted only
   after a
   completed FIFO high-water pass, never after a scan-limited or error-limited
   pass. A row closes its lifecycle group only when it is the task's typed
@@ -2097,12 +2098,12 @@ self-maintenance, and explicit operator commands for force and compaction:
   terminal retention, a terminal family is summary-ready (and control-cleanup
   ready) once `last_message_id` is at or behind the `weft.log.tasks`
   checkpoint. Wall-clock cutoffs remain correct only for observed-staleness
-  windows (stale-open classification). In `jsonl_then_delete`, no raw
-  task-log row of a family may be deleted before that family's
-  `summary_emitted_at_ns` is set. The main deletion path and the
-  marked-without-refs orphan recovery path both carry the summary gate.
-  `raw_deleted_at_ns` means verified deletion: the exact-row apply layer
-  re-verifies each candidate per ID when a batch under-deletes, so a
+  windows (stale-open classification). In `jsonl_then_delete`, folded valid raw
+  `weft.log.tasks` rows may be deleted after durable store commit ([OBS.13.3]),
+  while no collated Monitor-store family may be retired before that family's
+  `summary_emitted_at_ns` is set. `raw_deleted_at_ns` means verified deletion:
+  the exact-row apply layer re-verifies each candidate per ID when a batch
+  under-deletes, so a
   still-present row is never reported deleted and families cannot be marked
   vacuously.
 - `weft system prune --family task-log|task-local|retention` is an explicit
@@ -2205,9 +2206,10 @@ deletion is logged at error level when Weft logging is enabled
   `task_lifetime_report` JSON shapes; file output uses Python's standard
   rotating logfile handler and defaults to `logs/weft.log` under the Weft
   project root when a mode enables it. It uses the same canonical exact-delete
-  helper after durable table ingestion for collated mode, after accepted
-  lifetime-report handoff for `jsonl_then_delete`, and after raw external emit
-  for raw mode.
+  helper after durable table ingestion for collated `delete` and
+  `jsonl_then_delete` modes (with malformed/unrecognized raw rows in
+  `jsonl_then_delete` gated on accepted external emission or deferred handoff),
+  and after raw external emit for raw mode.
   The Monitor collation store is always enabled; there is no disabled
   mode. Retained `weft.log.tasks` deletion has exactly two owners, selected
   by configuration, not by `WEFT_TASK_MONITOR_MODE`: when
@@ -2239,14 +2241,16 @@ deletion is logged at error level when Weft logging is enabled
   is skipped, mirroring how a quiet-but-live plain task — one with no
   reporting interval, which by definition emits nothing after `work_started`
   — is otherwise indistinguishable from an abandoned family in the task log
-  alone. The destruction-protected set covers proven-live owners (live
-  host-PID `(pid, create_time)` proof, live service-registry rows) plus
-  owners whose newest `weft.state.tasks.<tid>` row is undecidable
-  (non-host runner handles with no probeable host PIDs), applying the same
-  undecidable-means-live rule the tid-mapping cleanup policy uses to keep
-  the row itself. Delete-time rechecks apply the same standard to disposed
-  families without terminal proof, while terminal-proven families keep the
-  positive-evidence recheck only. See [OBS.13.7] for the full
+  alone. Whole-family destruction protection (both at `stale_open` disposal
+  time and at delete time, including already-disposed families with terminal
+  task-log proof — terminal proof never overrides current non-terminal snapshot
+  presence) is newest valid non-terminal `weft.state.tasks.<tid>` snapshot
+  presence plus live service-registry ownership (`TaskMonitor` neither
+  classifies snapshots nor probes host/runtime liveness; `LivenessMonitor` is
+  the sole deleter of `weft.state.tasks.<tid>`). Independently, newest
+  liveness-valid snapshot presence, including terminal rows, holds standard
+  `T{tid}.ctrl_out` and `T{tid}.outbox` until `LivenessMonitor` retirement
+  ([MF-5]). See [OBS.13.7] for the full
   evidence-model statement. PONG exposes
   cached external-log status, deferred-write counts, and retention settings
   only; it does not open files, scan queues, flush deferred writes, or query
@@ -2289,6 +2293,7 @@ _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigrat
 
 ## Related Plans
 
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) reconciles `jsonl_then_delete` raw-row deletion and non-probing `TaskMonitor` snapshot-presence protection with [OBS.13.3] and [OBS.13.7].
 - [Deep-Dive Reachable Bug Remediation — Core Runtime](../plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md) includes `weft.state.services` in pre-spawn accepted-submission result/event waits and re-runs Manager recovery when a `queued` request loses `ready` Manager availability ([WT-2a.14], [MF-5]).
 - [Measured memory admission and startup-window parity](../plans/2026-11-09-measured-memory-admission-plan.md) adds the measured_memory_exhausted dispatch refusal and per-lane refusal reasons under [MF-5].
 - [Manager Checkpoint Volume](../plans/2026-11-08-manager-checkpoint-volume-plan.md) publishes one complete Manager checkpoint per reactor turn, keeps the pre-launch, bootstrap and pre-dispatch receipt barriers immediate, and republishes only the custody fields of each resident ([MF-5]).

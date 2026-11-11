@@ -115,7 +115,7 @@ Current top-level verbs and subcommands:
 | `weft manager` | `start`, `serve`, `stop`, `list`, `status` |
 | `weft spec` | `create`, `list`, `show`, `delete`, `validate`, `generate` |
 | `weft queue` | `read`, `write`, `peek`, `move`, `list`, `exists`, `stats`, `resolve`, `watch`, `delete`, `broadcast`, `alias add/list/remove` |
-| `weft system` | `tidy`, `dump`, `builtins`, `load`, `task-monitor`, `prune` |
+| `weft system` | `tidy`, `dump`, `builtins`, `load`, `task-monitor`, `prune`, `stop` |
 
 Public Python surfaces: `weft.client`, `weft.ext`, and `weft.commands`.
 Each surface's `__all__` is authoritative. `weft.commands` mirrors every CLI
@@ -249,6 +249,7 @@ _Implementation mapping_: `weft/core/taskspec/model.py` (process_target, peak_* 
 
 ## Related Plans
 
+- [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) adds `stop` to the `weft system` CLI Surface row and pins CLI subcommands in `tests/specs/test_spec_hygiene.py`.
 - [The Monitor Trusts the Typed Terminal Record](../plans/2026-11-09-typed-terminal-record-plan.md) states that terminal families retire only after the task-log retention period (the `WEFT_LOG_TASKS_RETENTION_PERIOD_SECONDS` row).
 - [Context-Level Service Singletons: Managers Ensure, Services Own Their Lifetime](../plans/2026-11-04-context-level-service-singletons-plan.md) restates the `weft.state.heartbeats` row: the heartbeat is a context-level singleton any canonical manager ensures.
 - retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock (the `WEFT_TASK_MONITOR_INTERVAL_SECONDS` row). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it (the `weft.state.heartbeats` row).
