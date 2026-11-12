@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.125] - 2026-11-12
+
+Released with `weft-django` 0.9.60, `weft-docker` 0.9.100,
+`weft-macos-sandbox` 0.6.29 and `weft-microsandbox` 0.5.30; each extension
+requires `weft` 0.9.125 or newer.
 
 ### Changed
 
@@ -15,6 +19,92 @@
   the caller forks, or start children from a fresh process image. Weft's own
   task runtime already uses spawn and is unchanged, as are PostgreSQL-backed
   projects.
+- A pipeline stage template that declares `spec.parameterization` or
+  `spec.run_input` is now rejected when the pipeline is prepared, with an
+  error naming the stage. Stages take their input from the pipeline's edge
+  queues, so both fields were silently ignored before ([PL-2.7]).
+- `weft-docker`, `weft-macos-sandbox` and `weft-microsandbox` ship a
+  `py.typed` marker, so type checkers use their annotations ([TS-3]).
+
+### Fixed
+
+- `weft system prune` for the `retention` and `task-local` families deletes
+  only a completed task's standard `T{tid}.*` queues. It could delete
+  messages from a custom or shared queue that the task had named as its
+  outbox or control queue ([OBS.13.9]).
+- `weft task stop` no longer counts a task as stopped when the stop could not
+  be confirmed. An unconverged STOP now escalates to the runner fallback, and
+  an outcome that is still unknown is not reported as accepted ([OBS.12a]).
+- `weft queue` commands run from a subdirectory use the enclosing project's
+  `.weft/` instead of creating a nested one, and building a context with
+  `create_dirs=False` no longer writes `.weft/config.json` ([CLI-0.1],
+  [SB-0.4], [PY-1]).
+- Preparing a pipeline whose stage names a missing TaskSpec raises
+  `SpecNotFound` instead of a raw `FileNotFoundError`, and the client's
+  `queues` namespace accepts `@alias` queue operands ([PY-2], [PY-3]).
+- Terminating a host command, a command session or an agent session no longer
+  takes the child's exit status away from its owner, which could record exit
+  code 0 for a process that had been killed. The owning `Popen.wait()` or
+  `join()` is the only reaper ([WT-4.2], [LIVENESS.R5]).
+- An interactive task that receives STOP gets its SIGTERM grace again. The
+  wait for stdin EOF is capped at 0.5 s (`INTERACTIVE_STDIN_EOF_GRACE_SECONDS`)
+  and skipped on KILL; it used to spend the whole 2 s stop budget and go
+  straight to SIGKILL ([MF-3], [CC-2.2.1]).
+- The Manager force-kills a duplicate service only by verified
+  `(pid, create_time)` identity. A process handle with an unknown creation
+  time no longer authorizes SIGKILL ([MA-1.6a], [LIVENESS.R5]).
+- A Manager that starts a STOP drain publishes `status="draining"` as soon as
+  it has frozen its drain targets, so a submission that arrives during the
+  drain starts a replacement Manager instead of waiting on the one that is
+  exiting. Peer Managers keep a draining Manager's reserved queues, and only
+  an `active` Manager is reported as eligible for dispatch ([MA-1.4], [MA-3],
+  [WT-2a.7]).
+- A result or event wait on an accepted submission also wakes on
+  service-registry changes, so a submission that races a Manager STOP is
+  picked up by the next Manager instead of waiting indefinitely. The wait
+  stays bounded by the caller's deadline and cancellation and adds no polling
+  timer ([WT-2a.14], [MF-5]).
+- Cancelling a keyed Manager PING probe interrupts it immediately on SQLite
+  and PostgreSQL.
+- Three shutdown races are closed: an interactive KILL waits for the session's
+  exit to be published before unwinding, a draining Manager is no longer
+  stranded when an internal service launch completes during the same turn,
+  and the launcher's first line is read the same way with and without a
+  deadline.
+- Codex agent sessions resume their own thread. The first turn captures the
+  session's `thread_id` and later turns run `codex exec ... resume
+  <thread_id>` with the sandbox, working directory and configured options
+  applied on every turn. Sessions used `resume --last`, so concurrent tasks or
+  terminals could continue each other's conversation, and those options were
+  dropped after the first turn ([AR-2.1], [AR-6]).
+- Provider-CLI agents read `.weft/agents.json` executable overrides and write
+  `.weft/agent-health.json` relative to the selected Weft context instead of
+  the working directory, and the `probe-agents` builtin resolves
+  project-relative executables the same way. A context-relative executable that does not exist
+  is an error instead of falling back to `PATH`.
+- `weft-docker`: a one-shot build removes its temporary `weft-build-*` image
+  tag; runtime description asks for container stats only while the container
+  is running; the provider-CLI runner translates paths under work-item
+  mounts; `max_connections = 0` forces `network='none'` and rejects a
+  conflicting network option; cancellation stops the container before
+  removing it.
+- `weft-microsandbox`: when the guest command succeeded but copying a
+  required output file back failed, the run raises `MicrosandboxRuntimeError`
+  instead of reporting empty output. When the guest command itself failed,
+  its exit code and stderr are returned unchanged ([WT-1]).
+
+### Development
+
+- `bin/release.py` prechecks now lint and format-check `bin`, and run the
+  suppression index check, `bin/check-doc-paths` and
+  `bin/check-dom15-fixtures`. Type checking covers the Django integration and
+  all extension test suites.
+- Specifications `00`, `05`, `07`, `09` and `09A` and the Django README were
+  synchronized with current behavior, with new tests pinning the
+  multi-queue watcher digest and the quick reference's CLI subcommands.
+- Class 5 plans dated 2026-11-10 or later need a non-placeholder Theory Fit
+  account and an explicit final completion verdict before they can be marked
+  completed ([REV-WT-007]).
 
 ## [0.9.124] - 2026-11-10
 
