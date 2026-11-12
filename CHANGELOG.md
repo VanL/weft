@@ -105,6 +105,12 @@ requires `weft` 0.9.125 or newer.
 - Class 5 plans dated 2026-11-10 or later need a non-placeholder Theory Fit
   account and an explicit final completion verdict before they can be marked
   completed ([REV-WT-007]).
+- Four tests added or changed since 0.9.124 now hold on every CI platform:
+  `.gitattributes` checks `weft/core/tasks/multiqueue_watcher.py` out with LF
+  so the [QUEUE.8] digest pin matches on Windows, the project-relative agent
+  probe tests use the cross-platform provider wrapper, the interactive
+  stop/kill test expects `\n` on stderr, and the waiter-recovery test only
+  leaves the Manager stopped when it holds no SQLite write lock.
 
 ## [0.9.124] - 2026-11-10
 

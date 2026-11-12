@@ -1,0 +1,5 @@
+# [QUEUE.8] pins the whole-file SHA-256 of this module for the downstream Taut
+# copy (docs/specifications/07-System_Invariants.md, checked by
+# tests/specs/test_multiqueue_watcher_pin.py). Check it out with LF on every
+# platform; a CRLF checkout on Windows changes the bytes and the digest.
+weft/core/tasks/multiqueue_watcher.py text eol=lf

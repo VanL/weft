@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
+import psutil
 import pytest
 
 import weft.commands._result_wait as result_wait_mod
@@ -4058,6 +4060,51 @@ def _assert_bare_tid_result_never_starts_manager(
     _delete_spawn_request(harness.context, unclaimed_tid)
 
 
+def _sqlite_write_lock_is_free(database_path: Path) -> bool:
+    """Report whether another process could start a SQLite write right now."""
+
+    probe = sqlite3.connect(database_path, timeout=0.25, isolation_level=None)
+    try:
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc):
+            raise
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def _sigstop_clear_of_sqlite_write_lock(context: WeftContext, pid: int) -> None:
+    """SIGSTOP ``pid`` at a point where it holds no SQLite write lock.
+
+    SIGSTOP freezes a process wherever it is. Frozen inside a SQLite write it
+    keeps the database lock for as long as it stays stopped, so every other
+    writer, this test's submissions included, fails with "database is locked"
+    once its busy timeout and retries run out. Probe the lock after each stop
+    and, if it is held, resume the process and stop it again. A backend with
+    no database file has no single writer lock to probe.
+    """
+
+    process = psutil.Process(pid)
+    deadline = time.monotonic() + 10.0
+    while True:
+        os.kill(pid, signal.SIGSTOP)
+        # The signal is asynchronous: probe only once the process has stopped.
+        while process.status() != psutil.STATUS_STOPPED:
+            assert time.monotonic() < deadline, f"pid {pid} did not stop"
+            time.sleep(0.001)
+        database_path = context.database_path
+        if database_path is None or _sqlite_write_lock_is_free(database_path):
+            return
+        os.kill(pid, signal.SIGCONT)
+        assert time.monotonic() < deadline, (
+            f"pid {pid} never stopped clear of the SQLite write lock"
+        )
+        time.sleep(0.01)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGSTOP race probe")
 def test_accepted_waiters_recover_when_manager_stops_after_submission_check(
     tmp_path: Path,
@@ -4080,8 +4127,8 @@ def test_accepted_waiters_recover_when_manager_stops_after_submission_check(
         client = WeftClient(harness.context)
         m1_paused = False
         try:
-            os.kill(m1_pid, signal.SIGSTOP)
             m1_paused = True
+            _sigstop_clear_of_sqlite_write_lock(harness.context, m1_pid)
 
             t_res = client.submit_command(
                 [sys.executable, "-c", "print('POST_CHECK_RESULT_OK')"]

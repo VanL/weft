@@ -1102,25 +1102,22 @@ def test_interactive_command_control_unwinds_before_terminal(
             assert stderr_finals[0] < terminal_timestamp
             assert stdout_finals[0] < terminal_timestamp
             assert max(stderr_finals + stdout_finals) < lifecycle[0][1]
-            assert any(
-                row.get("data") == f"started stderr{os.linesep}" for row, _ in rows
-            )
+            # The host session preserves the child's stdout newlines ([RM-5.2])
+            # but reads stderr with universal newlines, so stdout carries
+            # os.linesep and stderr always carries "\n".
+            assert any(row.get("data") == "started stderr\n" for row, _ in rows)
             assert any(
                 json.loads(raw).get("data") == f"started stdout{os.linesep}"
                 for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
             )
             if command == "STOP":
-                assert any(
-                    row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
-                )
+                assert any(row.get("data") == "final stderr\n" for row, _ in rows)
                 assert any(
                     json.loads(raw).get("data") == f"final stdout{os.linesep}"
                     for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()
                 )
             else:
-                assert not any(
-                    row.get("data") == f"final stderr{os.linesep}" for row, _ in rows
-                )
+                assert not any(row.get("data") == "final stderr\n" for row, _ in rows)
                 assert not any(
                     json.loads(raw).get("data") == f"final stdout{os.linesep}"
                     for raw in make_queue(spec.io.outputs["outbox"]).peek_generator()

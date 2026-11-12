@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from tests.fixtures.provider_cli_fixture import write_provider_cli_wrapper
 from weft.builtins import agent_probe
 from weft.core.agents.provider_cli.registry import get_provider_cli_provider
 
 pytestmark = pytest.mark.shared
+
+
+def _configure_project_relative_codex(project_root: Path, script: Path) -> None:
+    """Point the project's codex provider at ``./bin/<script name>``.
+
+    The script comes from ``write_provider_cli_wrapper`` so it is runnable on
+    every platform (a ``.cmd`` wrapper on Windows, a shell script elsewhere).
+    """
+
+    settings = {
+        "provider_cli": {"providers": {"codex": {"executable": f"./bin/{script.name}"}}}
+    }
+    (project_root / ".weft" / "agents.json").write_text(
+        json.dumps(settings) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_probe_agents_reports_opencode_help_process_facts_without_support_claim(
@@ -75,15 +93,8 @@ def test_probe_agents_resolves_project_relative_executable_against_project_root(
     other_cwd = tmp_path / "elsewhere"
     (project_root / ".weft").mkdir(parents=True)
     other_cwd.mkdir(parents=True)
-    bin_dir = project_root / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "codex-custom"
-    script.write_text("#!/bin/sh\necho 'codex 1.0'\n", encoding="utf-8")
-    script.chmod(0o755)
-    (project_root / ".weft" / "agents.json").write_text(
-        '{"provider_cli": {"providers": {"codex": {"executable": "./bin/codex-custom"}}}}\n',
-        encoding="utf-8",
-    )
+    script = write_provider_cli_wrapper(project_root / "bin", "codex")
+    _configure_project_relative_codex(project_root, script)
     monkeypatch.chdir(other_cwd)
 
     result = agent_probe.probe_agents(
@@ -104,15 +115,8 @@ def test_probe_agents_missing_project_relative_executable_ignores_cwd_binary(
     project_root = tmp_path / "project"
     other_cwd = tmp_path / "elsewhere"
     (project_root / ".weft").mkdir(parents=True)
-    cwd_bin = other_cwd / "bin"
-    cwd_bin.mkdir(parents=True)
-    script = cwd_bin / "codex-custom"
-    script.write_text("#!/bin/sh\necho 'codex 1.0'\n", encoding="utf-8")
-    script.chmod(0o755)
-    (project_root / ".weft" / "agents.json").write_text(
-        '{"provider_cli": {"providers": {"codex": {"executable": "./bin/codex-custom"}}}}\n',
-        encoding="utf-8",
-    )
+    script = write_provider_cli_wrapper(other_cwd / "bin", "codex")
+    _configure_project_relative_codex(project_root, script)
     monkeypatch.chdir(other_cwd)
 
     result = agent_probe.probe_agents(
