@@ -9351,6 +9351,16 @@ def _task_log_entries(log_queue: Queue) -> list[tuple[dict[str, Any], int]]:
     ]
 
 
+def _summarize_task_log(entries: list[tuple[dict[str, Any], int]]) -> str:
+    """Render task-log rows as ``id tid event type status`` for a failure message."""
+
+    return "; ".join(
+        f"{timestamp} {payload.get('tid')} {payload.get('event')} "
+        f"{payload.get('type')} {payload.get('status')}"
+        for payload, timestamp in entries
+    )
+
+
 def _first_terminal_log_id(
     entries: list[tuple[dict[str, Any], int]], tid: str
 ) -> int | None:
@@ -9486,7 +9496,13 @@ def test_manager_stop_drains_user_work_then_manager_leaving_services(
 
         # Check 2: the drained event follows user work and ends the stop.
         user_terminal_id = _first_terminal_log_id(entries, user_tid)
-        assert user_terminal_id is not None
+        # This failed once on CI (ubuntu, 2026-11-12) with nothing to say why;
+        # the message records what the task log held and how the wrapper exited.
+        assert user_terminal_id is not None, (
+            f"no terminal record for user task {user_tid} at should_stop "
+            f"(wrapper exitcode={user_process.exitcode}); task log: "
+            f"{_summarize_task_log(entries)}"
+        )
         drained_id = _first_event_log_id(entries, manager.tid, "manager_stop_drained")
         assert drained_id is not None
         assert user_terminal_id < drained_id

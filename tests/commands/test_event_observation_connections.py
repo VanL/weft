@@ -25,19 +25,56 @@ pytestmark = [pytest.mark.shared, pytest.mark.timeout(30)]
 
 
 @pytest.fixture
+def connection_openers() -> dict[int, int]:
+    """Map ``id(connection)`` to the thread that opened it.
+
+    Filled by ``observed_connections``, which keeps every connection alive in
+    its list, so an id is never reused within a test.
+    """
+
+    return {}
+
+
+def _opened_by_this_thread(
+    connections: list[Any], connection_openers: dict[int, int]
+) -> int:
+    """Count the observed connections that the calling thread opened.
+
+    ``QueueChangeMonitor`` watcher threads each open their own connection when
+    they start, at a moment the scheduler picks. Whether the observer's
+    rechecks reuse a connection is a fact about the observing thread alone.
+    """
+
+    ident = threading.get_ident()
+    return sum(
+        1
+        for connection in tuple(connections)
+        if connection_openers[id(connection)] == ident
+    )
+
+
+@pytest.fixture
 def observed_connections(
-    workdir: Path, monkeypatch: pytest.MonkeyPatch
+    workdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connection_openers: dict[int, int],
 ) -> Iterator[tuple[WeftContext, list[Any], list[Queue]]]:
     ctx = build_context(spec_context=workdir)
     connections: list[Any] = []
     queues: list[Queue] = []
+
+    def record(connection: Any) -> None:
+        # Opener first: a reader that sees the connection finds its opener.
+        connection_openers[id(connection)] = threading.get_ident()
+        connections.append(connection)
+
     if ctx.backend_name == "postgres":
         psycopg = pytest.importorskip("psycopg")
         original_connect = psycopg.Connection.connect.__func__
 
         def connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
             connection = original_connect(cls, *args, **kwargs)
-            connections.append(connection)
+            record(connection)
             return connection
 
         monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connect))
@@ -47,7 +84,7 @@ def observed_connections(
 
         def sqlite_connect(*args: Any, **kwargs: Any) -> Any:
             connection = original_sqlite_connect(*args, **kwargs)
-            connections.append(connection)
+            record(connection)
             return connection
 
         monkeypatch.setattr(sqlite3, "connect", sqlite_connect)
@@ -101,6 +138,7 @@ def _seed_task(
 @pytest.mark.parametrize("streams", [False, True])
 def test_realtime_evidence_rechecks_reuse_connection_after_initial_scan(
     observed_connections: tuple[WeftContext, list[Any], list[Queue]],
+    connection_openers: dict[int, int],
     monkeypatch: pytest.MonkeyPatch,
     streams: bool,
 ) -> None:
@@ -111,18 +149,22 @@ def test_realtime_evidence_rechecks_reuse_connection_after_initial_scan(
     deltas: list[tuple[int, int]] = []
     turns = 0
 
+    def counts() -> tuple[int, int]:
+        return _opened_by_this_thread(connections, connection_openers), len(queues)
+
     def wait(_monitor: Any, _timeout: float | None) -> bool:
         nonlocal turns, previous
         turns += 1
         assert turns <= 5
         if previous is not None and turns > 2:
-            deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
+            opened, queued = counts()
+            deltas.append((opened - previous[0], queued - previous[1]))
         if turns == 5:
             cancelled.set()
         else:
             with ctx.broker() as writer:
                 writer.write(f"T{tid}.ctrl_out", json.dumps({"unrelated": turns}))
-        previous = (len(connections), len(queues))
+        previous = counts()
         return True
 
     monkeypatch.setattr(events_cmd.QueueChangeMonitor, "wait", wait)
@@ -138,6 +180,7 @@ def test_realtime_evidence_rechecks_reuse_connection_after_initial_scan(
 
 def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     observed_connections: tuple[WeftContext, list[Any], list[Queue]],
+    connection_openers: dict[int, int],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ctx, connections, queues = observed_connections
@@ -147,14 +190,18 @@ def test_realtime_result_grace_borrows_owner_and_observes_late_result(
     deltas: list[tuple[int, int]] = []
     original_peek = events_cmd._peek_result_value
 
+    def counts() -> tuple[int, int]:
+        return _opened_by_this_thread(connections, connection_openers), len(queues)
+
     def peek(*args: Any, **kwargs: Any) -> Any:
         nonlocal reads
-        previous = (len(connections), len(queues))
+        previous = counts()
         reads += 1
         assert reads <= 4
         result = original_peek(*args, **kwargs)
         if reads > 1:
-            deltas.append((len(connections) - previous[0], len(queues) - previous[1]))
+            opened, queued = counts()
+            deltas.append((opened - previous[0], queued - previous[1]))
         return result
 
     def wait(_monitor: Any, timeout: float | None) -> bool:

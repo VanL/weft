@@ -1544,7 +1544,12 @@ def test_cmd_task_stop_gives_interactive_session_sigterm_grace_within_control_bu
             f"marker = Path({str(marker)!r})\n"
             f"ready = Path({str(ready_file)!r})\n"
             "def _handle_term(_sig: int, _frame: object) -> None:\n"
-            "    time.sleep(0.5)\n"
+            # The stop path sends SIGKILL 0.75s after SIGTERM (half of what is
+            # left of INTERACTIVE_STOP_GRACE_SECONDS once the stdin-EOF grace
+            # has run). The handler needs only to take measurable time: an
+            # immediate SIGKILL still loses the marker, and a short handler
+            # leaves a loaded runner most of that window to schedule it.
+            "    time.sleep(0.1)\n"
             "    marker.write_text('CLEAN_SIGTERM_EXIT', encoding='utf-8')\n"
             "    print('CLEAN_SIGTERM_EXIT', flush=True)\n"
             "    sys.exit(0)\n"

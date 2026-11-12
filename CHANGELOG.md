@@ -111,6 +111,12 @@ requires `weft` 0.9.125 or newer.
   probe tests use the cross-platform provider wrapper, the interactive
   stop/kill test expects `\n` on stderr, and the waiter-recovery test only
   leaves the Manager stopped when it holds no SQLite write lock.
+- Three timing-sensitive tests no longer depend on runner speed: the keyed
+  PING cancel test bounds the wake against the probe's timeout instead of
+  against cleanup I/O, the realtime recheck tests count only connections the
+  observing thread opened, and the interactive SIGTERM-grace test uses a
+  shorter handler. The Manager drain test now reports the task log when its
+  user-work terminal record is missing.
 
 ## [0.9.124] - 2026-11-10
 

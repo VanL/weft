@@ -916,7 +916,11 @@ def test_send_keyed_ping_probe_wakes_immediately_on_cancel_event(
     assert result.matched is None
     assert result.error is None
     assert result.timed_out is True
-    assert elapsed_after_cancel < 0.15, (
+    # Unwoken, the probe stays parked for the rest of its 5.0s timeout (about
+    # 4.75s here). The elapsed time also covers retracting the PING and
+    # retiring the reply queue, which is broker I/O of no fixed duration, so
+    # the bound only has to separate "woken" from "ran out the timeout".
+    assert elapsed_after_cancel < 2.0, (
         f"cancel_event failed to interrupt parked probe wait ({elapsed_after_cancel:.3f}s)"
     )
     with ctx.queue(ctrl_in_name, persistent=False) as ctrl_in:
