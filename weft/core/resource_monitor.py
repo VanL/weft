@@ -206,9 +206,15 @@ class ResourceMonitor(BaseResourceMonitor):
         connections = 0
         for process in processes:
             try:
-                memory_mb += process.memory_info().rss / (1024 * 1024)
+                rss = process.memory_info().rss
             except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
                 continue
+            if rss <= 0:
+                # Linux reads an exited, unreaped process as zeros where other
+                # platforms raise. That is exit evidence, not a measurement of
+                # running work [RM-5.1].
+                continue
+            memory_mb += rss / (1024 * 1024)
             measured_processes += 1
 
             open_files += self._open_file_count(process)

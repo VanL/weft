@@ -93,6 +93,17 @@ requires `weft` 0.9.125 or newer.
   instead of reporting empty output. When the guest command itself failed,
   its exit code and stderr are returned unchanged ([WT-1]).
 
+- On Linux, a command that exits between the runner's liveness check and its
+  next resource sample no longer reports all-zero metrics. Linux reads an
+  exited, unreaped process as zero memory, files and connections instead of
+  raising; the monitor now treats that as an exit and keeps the last sample
+  taken while the work ran ([RM-5.1]).
+- A stopping Manager releases a wrapper it was holding for a surviving
+  managed process on the turn that survivor's exit wakes it, even when the
+  host process table still lists the exited PID, as Windows can. It could
+  stay held until the stop-escalation or drain window and then log a false
+  drain timeout ([MA-1.6a], [MA-3]).
+
 ### Development
 
 - `bin/release.py` prechecks now lint and format-check `bin`, and run the
@@ -117,6 +128,11 @@ requires `weft` 0.9.125 or newer.
   observing thread opened, and the interactive SIGTERM-grace test uses a
   shorter handler. The Manager drain test now reports the task log when its
   user-work terminal record is missing.
+- Two more tests no longer depend on scheduling: the interactive drain test
+  holds its fixture process alive for a fixed number of turns and bounds only
+  the calls the drain makes, and the Manager stop-drain test runs its task
+  monitor in `report_only` mode so a monitor cycle cannot delete the log rows
+  it reads.
 
 ## [0.9.124] - 2026-11-10
 

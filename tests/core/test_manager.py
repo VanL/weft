@@ -4153,8 +4153,8 @@ def test_manager_child_sentinel_adapter_closes_owned_exit_sources_off_wait() -> 
     adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
     first, second, third = OwnedSource(), OwnedSource(), OwnedSource()
     try:
-        adapter.watch_exit("held", first)
-        adapter.watch_exit("held", second)
+        adapter.watch_exit("held", first, os.getpid())
+        adapter.watch_exit("held", second, os.getpid())
         assert first.closed.wait(10.0), "replaced source never closed"
         assert first.closer is adapter._thread
         assert not second.closed.is_set()
@@ -4163,12 +4163,70 @@ def test_manager_child_sentinel_adapter_closes_owned_exit_sources_off_wait() -> 
         assert second.closed.wait(10.0), "removed source never closed"
         assert second.closer is adapter._thread
 
-        adapter.watch_exit("other", third)
+        adapter.watch_exit("other", third, os.getpid())
         adapter.close(timeout=10.0)
         assert third.closed.is_set()
     finally:
         adapter.close(timeout=10.0)
         for owned in (first, second, third):
+            if not owned.closed.is_set():
+                owned.source.close()
+
+
+def test_manager_child_sentinel_adapter_reports_a_fired_exit_source_once() -> None:
+    """A fired exit source names the PID it watched, once, and is retired.
+
+    The exit source is the kernel's own word that the watched process exited;
+    the host process table can lag it. Taking the PID retires the source, so
+    it cannot be credited to whatever the TID watches next.
+
+    Spec: [MA-1.6a], [MA-3]
+    """
+
+    class OwnedSource:
+        def __init__(self, pid: int) -> None:
+            source = open_process_exit_source(pid)
+            assert source is not None
+            self.source = source
+            self.closed = threading.Event()
+            self.closer: threading.Thread | None = None
+
+        def fileno(self) -> int:
+            return self.source.fileno()
+
+        def close(self) -> None:
+            self.closer = threading.current_thread()
+            self.source.close()
+            self.closed.set()
+
+    exiting = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    adapter = manager_mod._ManagerChildSentinelAdapter(lambda: None)
+    fired, unfired = OwnedSource(exiting.pid), OwnedSource(os.getpid())
+    try:
+        adapter.watch_exit("held", fired, exiting.pid)
+        adapter.watch_exit("other", unfired, os.getpid())
+        assert adapter.take_exited_pid("held") is None
+        assert adapter.take_exited_pid("unknown") is None
+
+        assert exiting.stdin is not None
+        exiting.stdin.close()
+        assert adapter.wait(15.0), "exit source never fired"
+
+        assert adapter.take_exited_pid("other") is None
+        assert adapter.take_exited_pid("held") == exiting.pid
+        assert adapter.take_exited_pid("held") is None
+        assert fired.closed.wait(10.0), "taken source never closed"
+        assert fired.closer is adapter._thread
+        assert not unfired.closed.is_set()
+    finally:
+        if exiting.poll() is None:
+            exiting.kill()
+        exiting.wait(timeout=15.0)
+        adapter.close(timeout=10.0)
+        for owned in (fired, unfired):
             if not owned.closed.is_set():
                 owned.source.close()
 
@@ -9419,6 +9477,10 @@ def test_manager_stop_drains_user_work_then_manager_leaving_services(
         config=load_config(
             {
                 "WEFT_TASK_MONITOR_ENABLED": "1",
+                # The default mode deletes each task-log row it ingests, and
+                # this test reads the raw log: the monitor's first cycle can
+                # land between the user task's terminal record and the read.
+                "WEFT_TASK_MONITOR_MODE": "report_only",
                 "WEFT_LIVENESS_MONITOR_ENABLED": "0",
             }
         ),
@@ -12570,6 +12632,233 @@ def test_stopping_drain_survivor_hold_publishes_no_due_clock_and_wakes_on_exit(
     finally:
         if survivor.poll() is None:
             survivor.kill()
+            survivor.wait(timeout=15.0)
+        wrapper.join(timeout=15.0)
+        _remove_drain_snapshots(make_queue, (tid,))
+
+
+def test_survivor_hold_releases_on_exit_wake_while_host_still_lists_the_pid(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fired exit source settles its survivor even if the host lags.
+
+    Windows can signal a process handle while the system process list still
+    carries the PID, and psutil reads a listed PID as running. The turn that
+    the survivor's exit wake causes then sees the survivor as live. The exit
+    source is one-shot and a held child publishes no deadline, so a hold that
+    trusts the host reading on that turn is never woken for this child again.
+
+    That lag cannot be produced on POSIX, where an exited child is a zombie,
+    so the two host readings the hold consults report the exited survivor
+    live for that one turn. The wrapper, survivor, exit source and adapter
+    are real.
+
+    Spec: [MA-1.6a], [MA-3]
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns())
+    survivor = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    wrapper = multiprocessing.get_context("spawn").Process(target=os._exit, args=(0,))
+
+    host_still_lists_survivor = [False]
+    lagging_evaluations = [0]
+    real_pid_is_live = manager_mod.pid_is_live
+    real_managed_pids = manager._managed_pids_for_child
+
+    def lagging_pid_is_live(pid: int | None) -> bool:
+        if host_still_lists_survivor[0] and pid == survivor.pid:
+            return True
+        return real_pid_is_live(pid)
+
+    def lagging_managed_pids(child_tid: str) -> set[int]:
+        pids = real_managed_pids(child_tid)
+        if host_still_lists_survivor[0] and child_tid == tid:
+            lagging_evaluations[0] += 1
+            pids = pids | {survivor.pid}
+        return pids
+
+    monkeypatch.setattr(manager_mod, "pid_is_live", lagging_pid_is_live)
+    monkeypatch.setattr(manager, "_managed_pids_for_child", lagging_managed_pids)
+    try:
+        created = process_create_time(survivor.pid)
+        assert created is not None
+        make_queue(task_state_queue_name(tid)).write(
+            json.dumps(_drain_snapshot_payload(tid, pid=survivor.pid, created=created))
+        )
+        make_queue(f"T{tid}.ctrl_out").write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "task",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            )
+        )
+        wrapper.start()
+        child = ManagedChild(
+            wrapper,
+            f"T{tid}.ctrl_in",
+            ctrl_out_queue=f"T{tid}.ctrl_out",
+            launched_ns=time.time_ns(),
+        )
+        manager._child_processes[tid] = child
+        manager._register_child_sentinel(tid, child)
+        manager._begin_shutdown_drain(
+            message_id=None,
+            reason="test",
+            event=None,
+            completion_event="manager_stop_drained",
+        )
+
+        assert manager._child_sentinel_adapter.wait(15.0), "wrapper exit not observed"
+        _await_os_exit_status(wrapper)
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert manager._child_processes == {tid: child}
+        assert child.survivor_hold_pid == survivor.pid
+
+        # The survivor exits and its exit source wakes the reactor. It stays
+        # unreaped so its PID cannot be recycled while it is reported live.
+        assert survivor.stdin is not None
+        survivor.stdin.close()
+        assert manager._child_sentinel_adapter.wait(15.0), "survivor exit not observed"
+
+        # The turn that wake causes, with the host still listing the PID.
+        host_still_lists_survivor[0] = True
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert lagging_evaluations[0] >= 1, "the lagging evaluation was not forced"
+
+        assert manager._child_processes == {}, (
+            "the survivor's exit source fired, but the wrapper is still held "
+            f"for pid {child.survivor_hold_pid}; nothing is armed to wake it"
+        )
+        assert manager.should_stop is True
+    finally:
+        if survivor.poll() is None:
+            survivor.kill()
+        survivor.wait(timeout=15.0)
+        wrapper.join(timeout=15.0)
+        _remove_drain_snapshots(make_queue, (tid,))
+
+
+def test_survivor_hold_does_not_credit_a_fired_exit_source_to_an_unwatched_survivor(
+    manager_setup: tuple[Manager, Callable[[str], Queue]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One survivor's fired exit source is not exit evidence for another.
+
+    The wrapper names two managed processes. The first is watched and exits;
+    no exit source can be opened for the second. The first survivor's source
+    stays this TID's fired input, and the second survivor must still be held
+    on every later turn until the host reports it gone.
+
+    Spec: [MA-1.6a], [MA-3]
+    """
+
+    manager, make_queue = manager_setup
+    tid = str(time.time_ns())
+    survivors = [
+        subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    # The hold watches the lowest live PID first.
+    watched, unwatched = sorted(survivors, key=lambda process: process.pid)
+    wrapper = multiprocessing.get_context("spawn").Process(target=os._exit, args=(0,))
+    real_open = manager_mod.open_process_exit_source
+    refused: list[int] = []
+
+    def open_unless_unwatched(pid: int) -> Any:
+        if pid == unwatched.pid:
+            refused.append(pid)
+            raise OSError("exit source unavailable")
+        return real_open(pid)
+
+    monkeypatch.setattr(manager_mod, "open_process_exit_source", open_unless_unwatched)
+    try:
+        payload = _drain_snapshot_payload(
+            tid, pid=watched.pid, created=process_create_time(watched.pid)
+        )
+        # host_processes is one list shared by the row and its runtime handle.
+        cast(list[dict[str, object]], payload["host_processes"]).append(
+            {"pid": unwatched.pid, "create_time": process_create_time(unwatched.pid)}
+        )
+        handle = cast(dict[str, Any], payload["runtime_handle"])
+        handle["observations"]["host_pids"].append(unwatched.pid)
+        make_queue(task_state_queue_name(tid)).write(json.dumps(payload))
+        make_queue(f"T{tid}.ctrl_out").write(
+            json.dumps(
+                {
+                    "type": TERMINAL_ENVELOPE_TYPE,
+                    "source": "task",
+                    "tid": tid,
+                    "status": "cancelled",
+                }
+            )
+        )
+        wrapper.start()
+        child = ManagedChild(
+            wrapper,
+            f"T{tid}.ctrl_in",
+            ctrl_out_queue=f"T{tid}.ctrl_out",
+            launched_ns=time.time_ns(),
+        )
+        manager._child_processes[tid] = child
+        manager._register_child_sentinel(tid, child)
+        manager._begin_shutdown_drain(
+            message_id=None,
+            reason="test",
+            event=None,
+            completion_event="manager_stop_drained",
+        )
+
+        assert manager._child_sentinel_adapter.wait(15.0), "wrapper exit not observed"
+        _await_os_exit_status(wrapper)
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert child.survivor_hold_pid == watched.pid
+        assert refused == []
+
+        assert watched.stdin is not None
+        watched.stdin.close()
+        assert manager._child_sentinel_adapter.wait(15.0), "survivor exit not observed"
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert refused == [unwatched.pid]
+        assert manager._child_processes == {tid: child}
+        assert child.survivor_hold_pid == unwatched.pid
+
+        # A later turn: the first survivor's source is still the fired input.
+        manager._drain_child_sentinel_events()
+        manager._continue_shutdown_drain()
+        assert manager._child_processes == {tid: child}
+        assert child.survivor_hold_pid == unwatched.pid
+
+        assert unwatched.stdin is not None
+        unwatched.stdin.close()
+        unwatched.wait(timeout=15.0)
+        # Nothing watches this survivor, so its release rests on the host
+        # reading, which can trail the exit (Windows).
+        deadline = time.monotonic() + 15.0
+        while manager_mod.pid_is_live(unwatched.pid):
+            assert time.monotonic() < deadline, "host still lists the exited survivor"
+            time.sleep(0.01)
+        manager._continue_shutdown_drain()
+        assert manager._child_processes == {}
+        assert manager.should_stop is True
+    finally:
+        for survivor in survivors:
+            if survivor.poll() is None:
+                survivor.kill()
             survivor.wait(timeout=15.0)
         wrapper.join(timeout=15.0)
         _remove_drain_snapshots(make_queue, (tid,))

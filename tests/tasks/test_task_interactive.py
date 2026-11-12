@@ -727,6 +727,28 @@ def _install_recording_time(monkeypatch: pytest.MonkeyPatch) -> _RecordingTimeMo
     return recorder
 
 
+class _RecordingActivity(threading.Event):
+    """``_interactive_activity`` stand-in that logs every clear and set."""
+
+    def __init__(self, log: list[str]) -> None:
+        super().__init__()
+        self._log = log
+        self.published = threading.Event()
+
+    def set(self) -> None:
+        self._log.append("set")
+        super().set()
+        self.published.set()
+
+    def clear(self) -> None:
+        self._log.append("clear")
+        super().clear()
+
+
+_HELD_DRIVER_TURNS = 4
+"""Reactor turns driven while the fixture's parent process is still alive."""
+
+
 @pytest.mark.shared
 def test_interactive_drain_waits_once_while_descendant_holds_pipes(
     broker_env: BrokerEnv,
@@ -736,6 +758,14 @@ def test_interactive_drain_waits_once_while_descendant_holds_pipes(
 ) -> None:
     """Post-exit drain waits on the activity callback, not a 10 ms cadence.
 
+    Every reactor turn flushes interactive output once, so the number of
+    ``poll_stdout`` calls before the drain is the number of turns the driver
+    ran while the parent was alive. The test fixes that number: the parent
+    waits for a release file, the driver runs ``_HELD_DRIVER_TURNS`` turns,
+    and the exit publication is awaited before the turn that observes it.
+    The bound is on the calls the drain itself makes: one on entry, one when
+    its budget ends, and one per activity publication in between.
+
     Spec: [CC-2.2.1], [CC-3.1], [RM-5.2]
     """
 
@@ -743,16 +773,21 @@ def test_interactive_drain_waits_once_while_descendant_holds_pipes(
     db_path, make_queue = broker_env
     pidfile = tmp_path / "interactive-descendant.pid"
     pidfile_pending = tmp_path / "interactive-descendant.pid.pending"
+    release = tmp_path / "interactive-parent.release"
     script = tmp_path / "interactive_parent_exit.py"
     script.write_text(
         (
-            "import subprocess, sys\n"
+            "import subprocess, sys, time\n"
             "from pathlib import Path\n"
             "child = subprocess.Popen("
             "[sys.executable, '-c', 'import time; time.sleep(30)'])\n"
             f"pending = Path({str(pidfile_pending)!r})\n"
             "pending.write_text(str(child.pid), encoding='utf-8')\n"
             f"pending.replace(Path({str(pidfile)!r}))\n"
+            f"release = Path({str(release)!r})\n"
+            "deadline = time.monotonic() + 20.0\n"
+            "while not release.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.002)\n"
         ),
         encoding="utf-8",
     )
@@ -764,17 +799,36 @@ def test_interactive_drain_waits_once_while_descendant_holds_pipes(
     task = Consumer(db_path, spec)
     child: Any | None = None
     try:
-        # The parent can exit inside the turn that starts it, so the
-        # delegating counter wraps the session class before the first turn.
+        # Each poll_stdout call is attributed to the drain or to a turn flush.
+        log: list[str] = []
+        in_drain = [0]
+        turns = [0]
         real_poll_stdout = CommandSession.poll_stdout
-        poll_stdout_calls: list[None] = []
+        real_drain = Consumer._interactive_drain_remaining
+        real_process_once = task.process_once
 
         def counting_poll_stdout(self: CommandSession) -> list[str]:
-            poll_stdout_calls.append(None)
+            log.append("poll:drain" if in_drain[0] else "poll:turn")
             return real_poll_stdout(self)
 
+        def tracking_drain(self: Consumer, *args: Any, **kwargs: Any) -> None:
+            in_drain[0] += 1
+            try:
+                real_drain(self, *args, **kwargs)
+            finally:
+                in_drain[0] -= 1
+
+        def counting_process_once() -> None:
+            turns[0] += 1
+            real_process_once()
+
         monkeypatch.setattr(CommandSession, "poll_stdout", counting_poll_stdout)
+        monkeypatch.setattr(Consumer, "_interactive_drain_remaining", tracking_drain)
+        monkeypatch.setattr(task, "process_once", counting_process_once)
+        activity = _RecordingActivity(log)
+        task._interactive_activity = activity
         recorder = _install_recording_time(monkeypatch)
+
         make_queue(spec.io.inputs["inbox"]).write(json.dumps({"stdin": ""}))
         task.process_once()
         pidfile_deadline = time.monotonic() + 5.0
@@ -784,10 +838,32 @@ def test_interactive_drain_waits_once_while_descendant_holds_pipes(
         child_pid = int(pidfile.read_text(encoding="utf-8"))
         child = psutil.Process(child_pid)
 
+        turns_at_start = turns[0]
+        _drive_interactive(
+            task, lambda: turns[0] - turns_at_start >= _HELD_DRIVER_TURNS
+        )
+        session = task._interactive_session
+        assert session is not None and session.is_alive()
+        assert "clear" not in log, "the drain started while the parent was alive"
+
+        # Release the parent and wait for the exit waiter's publication, so
+        # the next turn is the one that observes the exit.
+        release.write_text("go", encoding="utf-8")
+        assert activity.published.wait(10.0)
         _drive_interactive(task, lambda: _finished(task))
 
+        # Snapshot before the finally block kills the descendant: its death
+        # closes the pipes and the readers then publish EOF.
+        observed = list(log)
+        drain_polls = observed.count("poll:drain")
+        drain_start = observed.index("clear") if "clear" in observed else len(observed)
+        wakes_during_drain = observed[drain_start:].count("set")
         assert recorder.sleeps == []
-        assert 1 <= len(poll_stdout_calls) <= 8
+        assert observed.count("poll:turn") == turns[0] + 1, (
+            "one flush per turn, plus the flush that ends message handling"
+        )
+        assert wakes_during_drain <= 1, "only the exit waiter can publish here"
+        assert 1 <= drain_polls <= 2 + wakes_during_drain
         assert child.is_running()
         assert task.taskspec.state.status == "completed"
     finally:

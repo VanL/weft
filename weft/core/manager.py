@@ -31,7 +31,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cache, partial
 from heapq import nsmallest
 from itertools import chain, islice
@@ -296,6 +296,8 @@ class ManagedChild:
     """The reap's proof read found task-owned terminal proof [MA-1.6a]."""
     survivor_hold_pid: int = 0
     """Live managed process a stopping drain holds this exited wrapper for."""
+    survivor_exited_pids: set[int] = field(default_factory=set)
+    """Managed PIDs whose own exit source fired during the hold [MA-3]."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,10 +429,10 @@ class _ManagerChildSentinelAdapter:
 
     A TID's input is its child's process sentinel, or a process-exit source
     handed over by ``watch_exit`` for a managed process the stopping drain
-    holds that child for. The adapter owns such a source: replacement,
-    removal or close retires it, and the observer thread closes a retired
-    source only between waits, so no wait ever holds a closed descriptor or
-    handle.
+    holds that child for. The adapter owns such a source together with the
+    PID it was opened on: replacement, removal, close, or taking its fired
+    PID retires it, and the observer thread closes a retired source only
+    between waits, so no wait ever holds a closed descriptor or handle.
 
     Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
     """
@@ -442,7 +444,7 @@ class _ManagerChildSentinelAdapter:
         self._notify_activity = notify_activity
         self._lock = threading.Lock()
         self._membership: dict[str, int] = {}
-        self._owned_sources: dict[str, ProcessExitSource] = {}
+        self._owned_sources: dict[str, tuple[ProcessExitSource, int]] = {}
         self._retired_sources: list[ProcessExitSource] = []
         self._suppressed: set[tuple[str, int]] = set()
         self._wake_token_pending = False
@@ -505,11 +507,12 @@ class _ManagerChildSentinelAdapter:
             self._membership[tid] = sentinel
             self._wake_observer_locked()
 
-    def watch_exit(self, tid: str, source: ProcessExitSource) -> None:
+    def watch_exit(self, tid: str, source: ProcessExitSource, pid: int) -> None:
         """Make an owned process-exit source this TID's input, replacing the last.
 
-        The adapter takes ownership of ``source`` and closes it once it is
-        replaced or removed, or when the adapter closes.
+        ``pid`` is the process ``source`` was opened on. The adapter takes
+        ownership of ``source`` and closes it once it is replaced, removed or
+        taken, or when the adapter closes.
         """
         with self._lock:
             if self._stopping or self._closed:
@@ -519,9 +522,35 @@ class _ManagerChildSentinelAdapter:
             if previous is not None:
                 self._suppressed.discard((tid, previous))
             self._retire_owned_source_locked(tid)
-            self._owned_sources[tid] = source
+            self._owned_sources[tid] = (source, pid)
             self._membership[tid] = source.fileno()
             self._wake_observer_locked()
+
+    def take_exited_pid(self, tid: str) -> int | None:
+        """Return the PID whose owned exit source fired, retiring that source.
+
+        The observer records a fired input before it publishes the event, so
+        the turn an exit source wakes finds its PID here. A fired source is
+        the kernel's statement that the process it was opened on has exited;
+        it is reported once and then retired, so it is never credited to a
+        later input of the same TID. ``None`` while the source has not fired
+        or when the TID's input is not an owned source.
+
+        Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
+        """
+        with self._lock:
+            owned = self._owned_sources.get(tid)
+            if owned is None:
+                return None
+            sentinel = self._membership.get(tid)
+            if sentinel is None or (tid, sentinel) not in self._suppressed:
+                return None
+            self._suppressed.discard((tid, sentinel))
+            del self._membership[tid]
+            self._retire_owned_source_locked(tid)
+            if not (self._stopping or self._closed):
+                self._wake_observer_locked()
+            return owned[1]
 
     def remove(self, tid: str) -> None:
         """Forget one child and invalidate any queued observation of its identity."""
@@ -536,9 +565,9 @@ class _ManagerChildSentinelAdapter:
             self._wake_observer_locked()
 
     def _retire_owned_source_locked(self, tid: str) -> None:
-        source = self._owned_sources.pop(tid, None)
-        if source is not None:
-            self._retired_sources.append(source)
+        owned = self._owned_sources.pop(tid, None)
+        if owned is not None:
+            self._retired_sources.append(owned[0])
 
     def _close_retired_sources(self) -> None:
         with self._lock:
@@ -585,7 +614,7 @@ class _ManagerChildSentinelAdapter:
             if self._closed:
                 return
             self._closed = True
-            owned = list(self._owned_sources.values())
+            owned = [source for source, _pid in self._owned_sources.values()]
             self._owned_sources.clear()
         self._recv_conn.close()
         self._send_conn.close()
@@ -5543,16 +5572,24 @@ class Manager(ServiceTask):
         survivor's kernel exit source, handed to the child-sentinel adapter as
         this TID's input, so that survivor's exit wakes the reactor; the next
         evaluation then holds for another live survivor or releases the
-        wrapper. A held wrapper publishes no child deadline. If no exit source
-        can be opened, the hold is logged and bounded by the drain window: no
-        polling deadline replaces the missing sentinel ([WT-4.3],
-        [ALT-WT-002]).
+        wrapper. A fired exit source settles the exit of the PID it watched:
+        the host process table can still list that PID (Windows, while a
+        handle to the process is open), and a hold that trusted the table on
+        the wake turn would wait on an event already consumed. A held wrapper
+        publishes no child deadline. If no exit source can be opened, the hold
+        is logged and bounded by the drain window: no polling deadline
+        replaces the missing sentinel ([WT-4.3], [ALT-WT-002]).
 
         Spec: docs/specifications/03-Manager_Architecture.md [MA-1.6a], [MA-3]
         """
 
+        exited_pid = self._child_sentinel_adapter.take_exited_pid(tid)
+        if exited_pid is not None:
+            child.survivor_exited_pids.add(exited_pid)
         live = sorted(
-            pid for pid in self._managed_pids_for_child(tid) if pid_is_live(pid)
+            pid
+            for pid in self._managed_pids_for_child(tid)
+            if pid not in child.survivor_exited_pids and pid_is_live(pid)
         )
         if child.survivor_hold_pid in live:
             return True
@@ -5573,7 +5610,7 @@ class Manager(ServiceTask):
             if source is None:
                 # It exited after the liveness check.
                 continue
-            self._child_sentinel_adapter.watch_exit(tid, source)
+            self._child_sentinel_adapter.watch_exit(tid, source, pid)
             child.survivor_hold_pid = pid
             return True
         return False

@@ -18,6 +18,7 @@ from io import TextIOWrapper
 from itertools import combinations
 from multiprocessing.connection import Connection
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 from unittest.mock import Mock
 
@@ -2583,6 +2584,175 @@ def test_task_runner_sampling_clock_follows_configured_limits(
     assert outcome.metrics.memory_mb > 0
     assert samples >= min_samples
     assert max_samples is None or samples <= max_samples
+
+
+_ON_LINUX = sys.platform.startswith("linux")
+
+# Announces itself, then exits 0 once the release file exists. Its own
+# deadline keeps a broken test from leaving it behind.
+_GATED_EXIT_CHILD = """
+import os, sys, time
+ready, release = sys.argv[1], sys.argv[2]
+open(ready, "w").close()
+deadline = time.monotonic() + 25
+while not os.path.exists(release):
+    if time.monotonic() > deadline:
+        sys.exit(3)
+    time.sleep(0.005)
+"""
+
+
+def _is_unreaped_exit(process: psutil.Process) -> bool:
+    try:
+        return bool(process.status() == psutil.STATUS_ZOMBIE)
+    except psutil.ZombieProcess:
+        return True
+
+
+def _wait_until(predicate: Any, *, what: str) -> None:
+    deadline = time.monotonic() + 15.0
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        time.sleep(0.002)
+
+
+class _LinuxExitReadings:
+    """One psutil process as Linux reports it once exited and unreaped.
+
+    Live readings pass through untouched. Where this platform raises
+    ``ZombieProcess``, the value Linux psutil returns is substituted:
+    ``rss=0``, CPU times 0.0, ``num_fds() == 0``, no connections.
+    """
+
+    substitutions: ClassVar[list[str]] = []
+
+    def __init__(self, process: psutil.Process) -> None:
+        self._process = process
+        self.pid = process.pid
+
+    def _read(self, name: str, exited_value: Any) -> Any:
+        try:
+            return getattr(self._process, name)()
+        except psutil.ZombieProcess:
+            type(self).substitutions.append(name)
+            return exited_value
+
+    def memory_info(self) -> Any:
+        return self._read("memory_info", SimpleNamespace(rss=0))
+
+    def cpu_times(self) -> Any:
+        return self._read("cpu_times", SimpleNamespace(user=0.0, system=0.0))
+
+    def num_fds(self) -> int:
+        return int(self._read("num_fds", 0))
+
+    def net_connections(self) -> list[Any]:
+        return list(self._read("net_connections", []))
+
+
+class _ExitBetweenPollAndSampleMonitor(ResourceMonitor):
+    """The built-in monitor; its second sample finds the root just exited.
+
+    The supervisor calls ``check_limits`` only after ``process.poll()``
+    returned ``None``, and it is the only caller of ``poll``. The second call
+    releases the child and reaches the real ``check_limits`` only once the
+    child has exited and is unreaped: the ordering "root exits between the
+    liveness poll and the sample".
+    """
+
+    ready_path: ClassVar[Path]
+    release_path: ClassVar[Path]
+    calls: ClassVar[int] = 0
+    live_samples: ClassVar[list[ResourceMetrics | None]] = []
+    root_exited_at_second_sample: ClassVar[list[bool]] = []
+    errors: ClassVar[list[BaseException]] = []
+
+    def _process_tree(self) -> list[Any]:
+        if _ON_LINUX:
+            return super()._process_tree()
+        assert self._process is not None
+        # The child has no descendants.
+        return [_LinuxExitReadings(self._process)]
+
+    def check_limits(self) -> tuple[bool, str | None]:
+        cls = type(self)
+        cls.calls += 1
+        try:
+            assert self._process is not None
+            root = self._process
+            if cls.calls == 1:
+                _wait_until(cls.ready_path.exists, what="child start")
+                result = super().check_limits()
+                cls.live_samples.append(self.last_metrics())
+                return result
+            if cls.calls == 2:
+                cls.release_path.touch()
+                _wait_until(lambda: _is_unreaped_exit(root), what="child exit")
+                cls.root_exited_at_second_sample.append(_is_unreaped_exit(root))
+        except BaseException as exc:  # the runner would only log it
+            cls.errors.append(exc)
+            raise
+        return super().check_limits()
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="Windows has no exited-but-unreaped process state"
+)
+def test_command_runner_keeps_live_metrics_when_root_exits_between_poll_and_sample(
+    tmp_path: Path,
+) -> None:
+    """A work item sampled while alive reports that sample, not zeros.
+
+    Spec: [RM-5.1]
+    """
+
+    monitor_cls = _ExitBetweenPollAndSampleMonitor
+    monitor_cls.ready_path = tmp_path / "ready"
+    monitor_cls.release_path = tmp_path / "release"
+    monitor_cls.calls = 0
+    monitor_cls.live_samples = []
+    monitor_cls.root_exited_at_second_sample = []
+    monitor_cls.errors = []
+    _LinuxExitReadings.substitutions = []
+
+    runner = TaskRunner(
+        target_type="command",
+        tid=None,
+        function_target=None,
+        process_target=sys.executable,
+        agent=None,
+        args=[
+            "-c",
+            _GATED_EXIT_CHILD,
+            str(monitor_cls.ready_path),
+            str(monitor_cls.release_path),
+        ],
+        kwargs=None,
+        env={},
+        working_dir=None,
+        timeout=30.0,
+        limits=LimitsSection(memory_mb=4096),
+        monitor_class=f"{__name__}._ExitBetweenPollAndSampleMonitor",
+        monitor_interval=0.05,
+    )
+
+    outcome = runner.run({})
+
+    # The ordering was forced as described, and the exit readings were the
+    # platform's own on Linux and the substituted Linux values elsewhere.
+    assert monitor_cls.errors == []
+    assert monitor_cls.calls == 2
+    assert monitor_cls.root_exited_at_second_sample == [True]
+    assert bool(_LinuxExitReadings.substitutions) == (not _ON_LINUX)
+    (live,) = monitor_cls.live_samples
+    assert live is not None and live.memory_mb > 0
+    assert outcome.status == "ok"
+    assert outcome.returncode == 0
+
+    assert outcome.metrics is not None
+    assert outcome.metrics.memory_mb > 0
+    assert outcome.metrics == live
 
 
 def test_task_runner_enforces_cpu_limit(tmp_path: Path) -> None:
