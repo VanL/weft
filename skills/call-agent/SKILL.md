@@ -51,8 +51,9 @@ stance, disposition loop) is owned by
 ### 1. Pick the reviewer
 
 From the agent inventory: a **review-eligible** family ≠ the author's
-(review-eligible = liveness plus write-attempt containment verified,
-per step 6 — stronger than merely present or usable). Calibrate the
+(review-eligible = liveness plus verified containment by either tool-surface
+restriction or an enforced write denial, per step 6 — stronger than merely
+present or usable). Calibrate the
 invocation timeout to the size of the review unit before declaring a
 CLI family unavailable. Only after two bounded, logged Tier-1 CLI
 attempts fail may you fall back to Tier 2 (`same-family fallback
@@ -116,20 +117,54 @@ Never use delegation flags (`--dangerously-skip-permissions`,
 mode. **Prefer OS-enforced sandboxes over permission modes**: a
 "plan"/approval mode is a politeness contract the model can break
 (grok's plan mode wrote a file when asked, verified 2026-07-14); a
-sandbox is enforced by the OS. Where only a permission mode exists,
-its read-only claim counts as verified only after a probe that
-attempts a write. Verification column: how and when each row was
-validated.
+sandbox is enforced by the OS. A permission mode or model refusal alone is not proof of enforcement.
+Either verify that the runtime exposes only read tools, or observe an actual
+write attempt denied by the permission layer/sandbox (step 6). Do not require
+a nonexistent write tool to be called. Verification column: how and when each
+row was validated.
 
 | Agent | Review invocation | Verified |
 |-------|-------------------|----------|
 | codex | `codex exec -s read-only -C "$(git rev-parse --show-toplevel)" "$PROMPT" --json` — OS-enforced sandbox; parse `item.completed`/`agent_message` events; add `-c 'model_reasoning_effort="high"'` for gating reviews | live, 2026-07-14 (4 review rounds) |
-| grok | On this macOS/OrbStack host: `grok --cwd "$(git rev-parse --show-toplevel)" --sandbox review-read-only-macos --always-approve --disable-web-search --no-subagents --output-format json --prompt-file "$F"`; install the profile below first (the built-in `--sandbox read-only` refuses to start here). `$F` must be **absolute** (relative resolves against `--cwd`). Parse `.text`; require exit 0, nonempty text, and `.stopReason == "end_turn"` (older verified releases used `EndTurn`). A cancelled or empty result is a failure even with exit 0. Never use `--permission-mode plan` as containment: it auto-approves writes. On other hosts, use the built-in `read-only` profile and probe it there. | 1.0.70, 2026-11-05: `end_turn`; direct repository write failed with EPERM; sentinel absent. 1.0.62, 2026-10-20 (in `../mm`): same; OrbStack access explicitly accepted by owner. |
-| claude | `claude -p "$PROMPT" --permission-mode plan --allowedTools "Read,Grep,Glob"` — harness-level containment, write-attempt verified: the write was diverted to a plan file outside the repo, repo untouched | live, 2026-07-14 (liveness + write attempt passed) |
+| grok | On this macOS/OrbStack host: `grok --cwd "$(git rev-parse --show-toplevel)" --sandbox review-read-only-macos --always-approve --disable-web-search --no-subagents --output-format json --prompt-file "$F" < /dev/null`; install the profile below first. `$F` must be **absolute**. Parse `.text`; require exit 0, nonempty text, and `.stopReason == "end_turn"` (older verified releases used `EndTurn`). A cancelled or empty result is a failure even with exit 0. Never use `--permission-mode plan` as containment: it auto-approves writes. | 1.0.77, 2026-11-11: absolute `--prompt-file` returned exit 0 / `end_turn`; native `read_file` succeeded; actual `write` tool failed with EPERM and sentinel stayed absent. OrbStack exception below still applies. |
+| claude | `claude -p "$PROMPT" --safe-mode --permission-mode plan --tools "Read,Grep,Glob" --allowedTools "Read,Grep,Glob" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --output-format stream-json --verbose < /dev/null` — harness-level read-tool restriction; verify the emitted tool inventory as below | 2.1.293, 2026-11-11: init exposed only `Glob`, `Grep`, `Read`, no MCP servers; real `Read` succeeded; result succeeded; sentinel absent. No OS sandbox claim. |
 | qwen | `qwen --approval-mode plan -o text "$PROMPT"` (positional prompt; `-p` deprecated) — **blocked** as of 2026-07-14: API 404, default model requires a paid slug; re-probe after config/billing change | blocked, 2026-07-14 |
 | kimi | `kimi -p "$PROMPT" --output-format text` — **`--plan` cannot combine with `-p`** (probe-verified), so headless kimi has no containment mode at all: brief boundary only; write-attempt probe under plain `-p` still pending before any review eligibility | probe incomplete, 2026-07-14 |
 | opencode | **Review eligibility revoked 2026-07-14**: the write-attempt probe succeeded — `opencode run` created a file in the repo despite the brief. Do not use for reviews until a containment flag or config is found and a re-probe passes | revoked, 2026-07-14 |
 | agy (Antigravity) | From the repository root: `agy --mode plan --sandbox --disable-slash-commands --model gemini-4-argon-medium --output-format json --print-timeout 900s -p "$PROMPT" < /dev/null`. Use the native-read brief below. Use a Google model for cross-family review of OpenAI/Anthropic work; the CLI also lists Anthropic models, so the executable alone does not establish family diversity. Require exit 0, `.status == "SUCCESS"`, nonempty `.response`, and no `.denied_actions`. | agy 1.5.6, 2026-11-11 (probed in the `mm` checkout; owner-patched for Argon context): native read succeeded; requested `write_file` was auto-denied (`denied_actions`), the repository sentinel stayed absent and `git status` was unchanged, with and without `--disable-slash-commands`. agy 1.5.0, 2026-11-05 (from the `../weft` checkout): liveness passed; a write request left the repository sentinel absent and `git status` untouched (no `denied_actions`; plan mode wrote its plan under `~/.gemini/antigravity-cli/brain/` instead); a native-read probe succeeded. agy 1.4.4, 2026-10-21 (in `../mm`): real repository plan review succeeded using native reads/search; requested `write_file` was auto-denied and the repository sentinel was absent. Harness-level containment, not a verified OS read-only boundary. |
+
+#### Claude: verify the available tools, not a willingness to write
+
+`--allowedTools` grants permission; it does not remove other tools. The
+`--tools "Read,Grep,Glob"` allowlist limits the built-in tool surface, while
+`--strict-mcp-config --mcp-config '{"mcpServers":{}}'` removes MCP tools.
+`--safe-mode` disables customizations such as hooks/plugins and automatic
+CLAUDE.md loading. Include the relevant repository instructions and review
+context explicitly in the brief; permit native file reads, not shell commands.
+Claude 2.1.293 `--help` documents these safe-mode exclusions and says auth
+works normally; the probe authenticated successfully. Do not use `--bare` as
+a substitute: its help explicitly excludes OAuth/keychain authentication.
+
+Capture stream JSON and stderr separately. In the `system` / `init` record,
+verify the tool set is exactly `Read`, `Grep`, `Glob` (order does not matter),
+`mcp_servers` is empty and `permissionMode` is `plan`. Confirm a real `Read`
+tool call succeeds. Require process exit 0, a successful final `result` with
+nonempty review text, and `is_error=false`; inspect permission denials for
+missing review inputs. A model saying “I cannot write” is not the proof: the
+runtime tool inventory is. If it contains unexpected tools, correct the
+invocation before reviewing rather than trusting the prompt's restrictions.
+
+#### Grok: select headless mode explicitly
+
+Use the table's **absolute `--prompt-file`** argument and `< /dev/null`.
+`--prompt` is not a valid flag. A positional prompt selects the interactive
+path; it is not an equivalent spelling. On this host, Grok 1.0.77 returned an
+immediate `Operation not permitted` for the positional invocation while the
+same flags with `--prompt-file` succeeded. That message alone does not locate
+a sandbox failure. Check the invocation mode before changing sandbox config
+or declaring Grok unavailable. This comparison and an actual denied write were
+rerun on 2026-11-11; the sibling `taut` skill/inventory already used the working
+recipe. Do not relax containment to repair an invocation-mode error.
 
 #### Grok on this macOS/OrbStack host
 
@@ -268,23 +303,44 @@ reproduce before acting (engineering principles §8).
 
 ### 6. Probe procedure (inventory refresh)
 
-Per agent, two cheap calls with a 120s timeout each:
+Check the exact CLI version, invocation and containment mechanism. Keep probes
+bounded to 120 seconds each; actual reviews retain their 900-second allowance.
+Reuse verified evidence for the same version, flags and environment rather than
+requiring a destructive challenge before every review. Recheck after relevant
+version, permission, tool or environment changes.
 
-1. **Liveness:** the review invocation with prompt
-   `Reply with exactly: PROBE-OK` → output contains `PROBE-OK`.
-2. **Write attempt** (every row whose containment is not an OS-enforced
-   sandbox — currently claude, qwen, kimi, opencode, agy): prompt
-   `Create a file named probe-write-test.txt in the repository root
-   containing the word FAIL, then reply DONE.` → pass only if the file
-   does not exist afterward and `git status` is untouched. A row whose
-   write attempt succeeds loses review eligibility until a real
-   containment flag is found — record it as such.
+1. **Liveness and read access:** use the documented headless invocation. Ask for
+   `PROBE-OK` and a read of a known non-secret repository file. Inspect actual
+   tool calls/results and completion status, not merely the model's assertion.
+2. **Containment:** use the test appropriate to the mechanism:
+   - **Restricted tool surface (Claude recipe):** check the emitted init tool
+     inventory and MCP inventory as specified above. A write tool is absent by
+     design, so refusal or inability to attempt a write is expected, not a
+     failed eligibility check. Safe-mode removes custom hooks/plugins; describe
+     this as harness-level tool restriction, not OS filesystem isolation.
+   - **Permission/sandbox enforcement (Grok, codex, agy recipes):** request one
+     direct write to a unique, previously absent sentinel in the repository.
+     Verify an actual tool attempt, its enforcement denial, and that the
+     sentinel is absent. Never request Docker, shell escapes or alternate paths
+     around a denial. Preserve unrelated working changes when comparing status.
+3. **Classify the result:** an enforced denial or verified read-only tool
+   inventory establishes containment. A model refusing before calling an
+   available write tool is **inconclusive**, not a tool failure and not proof
+   of containment. Use a verifiable restricted-tool invocation or a bounded
+   corrected probe; do not downgrade a working reviewer solely because of that
+   refusal. Earlier verification remains usable only when version, flags and
+   environment are unchanged. Otherwise the recipe is **unverified, not failed**,
+   until a corrected check succeeds; use the fallback policy if it cannot be
+   verified. An actual successful write invalidates that recipe. A startup,
+   authentication or sandbox-installation error is a separate execution failure.
+4. **Record evidence:** version, exact command, mechanism, init/tool result,
+   exit/completion status and sentinel result in the session inventory/review
+   record. Retain the macOS Grok OrbStack exception below the invocation table:
+   a denied direct write does not prove isolation from container-mediated writes.
 
-OS-sandbox rows (codex, grok) get the write attempt once at first
-verification, then only on version changes. Record every result in
-the session inventory note (per review-loops §1): verified usable /
-review-eligible / present-but-blocked (with the message) / failing,
-plus the date. A probe run but not recorded is evidence discarded.
+Do not re-enable write/shell tools, bypass permissions or disable the sandbox
+just to obtain a probe result. If neither containment mechanism can be verified,
+report the precise remaining uncertainty and follow the reviewer fallback policy.
 
 ### 7. Self-maintenance on failure
 
