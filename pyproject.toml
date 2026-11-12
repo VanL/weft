@@ -34,14 +34,14 @@ dependencies = [
     "pydantic>=2.14.3",
     "rich>=15.0.0",
     "setproctitle>=1.3.8",
-    "simplebroker>=8.8.1",
+    "simplebroker>=8.8.2",
     "typer>=0.29.0",
     "typing-extensions>=4.16.0",
 ]
 
 [project.optional-dependencies]
 pg = [
-    "simplebroker-pg>=4.8.1",
+    "simplebroker-pg>=4.8.2",
 ]
 docker = [
     "weft-docker>=0.9.99",
@@ -59,14 +59,14 @@ microsandbox = [
     "weft-microsandbox>=0.5.29; platform_system != 'Windows'",
 ]
 all = [
-    "simplebroker-pg>=4.8.1",
+    "simplebroker-pg>=4.8.2",
     "weft-docker>=0.9.99",
     "weft-django>=0.9.59",
     "weft-macos-sandbox>=0.6.28",
     "weft-microsandbox>=0.5.29; platform_system != 'Windows'",
 ]
 dev = [
-    "simplebroker-pg>=4.8.1",
+    "simplebroker-pg>=4.8.2",
     "weft-docker>=0.9.99",
     "weft-macos-sandbox>=0.6.28",
     "weft-microsandbox>=0.5.29; platform_system != 'Windows'",

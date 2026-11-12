@@ -77,12 +77,24 @@ submission. `close()` releases that lease on the owning thread. Failed close
 retains cleanup ownership and blocks submission or re-entry until the same
 owner retries successfully. Sequential re-entry is allowed; active nesting and
 active-scope submission, re-entry, and close from a foreign thread are rejected.
-Preparation and observation retain their existing ownership contracts. A
-forked child first abandons the inherited handle through SimpleBroker's public
-child-safe `BrokerSession.close()` path, then uses child-owned bounded state
-unless explicitly re-entered in the child. Successful close is idempotent and
-returns the client to bounded behavior. Already returned `Task` and
-`PreparedSubmission` handles remain usable after close.
+Preparation and observation retain their existing ownership contracts.
+
+A forked child first abandons the inherited handle through SimpleBroker's
+public child-safe `BrokerSession.close()` path, then selects child-owned
+bounded state unless explicitly re-entered in the child. This resets Python
+ownership only; backend operations remain subject to SimpleBroker's process
+boundaries. Built-in SQLite use is unsupported if any SQLite connection was
+open, opening, or closing at fork. When SimpleBroker detects one of its managed
+lifetimes at a Python fork, later managed SQLite operations in that child raise
+`RuntimeError`. The refusal is process-wide: it covers other Weft roots and
+targets in that child and every descendant of it, and creating or re-entering a
+client cannot repair that process. Close all SQLite resources before fork, or
+use spawn/exec or a clean forkserver. The guard does not make inherited SQLite
+finalization or interpreter shutdown safe and cannot detect arbitrary raw
+SQLite connections. Weft propagates the refusal without reconnecting around it.
+Successful client close is idempotent and returns the client to bounded
+behavior. Already returned `Task` and `PreparedSubmission` handles remain
+usable after close subject to these backend process boundaries.
 
 `WeftClient.__exit__()` preserves an active body exception over ordinary close
 failure by attaching cleanup diagnostics; with no body exception the close
@@ -603,10 +615,12 @@ later recovery failures retain the accepted-TID annotation.
 
 `PreparedSubmission.submit()` asks its owning client to select the retained or
 bounded path. Within an active same-context scope it borrows that client's
-session. After scope exit or in a forked child it uses bounded ownership with
-its captured context and never borrows a fork-inherited session. Every client
-submission method, including `submit_command()`, uses this seam. A TaskSpec
-whose effective runtime root differs from the base client context uses bounded
+session. After scope exit or in a forked child it selects bounded ownership
+with its captured context and never borrows a fork-inherited session. That
+selection does not bypass the SQLite process boundary in [PY-1]; a refused
+child submission propagates the backend `RuntimeError`. Every client submission
+method, including `submit_command()`, uses this seam. A TaskSpec whose
+effective runtime root differs from the base client context uses bounded
 ownership; clients do not retain a map of alternate-root sessions.
 
 This also serves the Django on-commit adapter.
@@ -646,6 +660,8 @@ stdin access, and exactly one matching facade invocation per Typer callback.
 - [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
+
+- [SimpleBroker SQLite fork compatibility](../plans/2026-11-11-simplebroker-sqlite-fork-compatibility-plan.md) - narrows [PY-1] and [PY-3] child use to SimpleBroker's SQLite process boundary
 
 - retired: 2026-09-19-interactive-source-integration-plan — source 396c3b85; see docs/plans/README.md
 

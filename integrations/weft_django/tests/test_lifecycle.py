@@ -7,6 +7,7 @@ Spec: docs/specifications/13C-Using_Weft_With_Django.md [DJ-3.1], [DJ-13.2].
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -21,7 +22,8 @@ import pytest
 from asgiref.local import Local
 from django.dispatch import Signal
 
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers import client_fork_probe as fork_probe
+from tests.helpers.test_backend import active_test_backend, prepare_project_root
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
@@ -290,9 +292,17 @@ def test_signal_registration_uses_stable_dispatch_uids() -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+@pytest.mark.parametrize("parent_mode", fork_probe.PARENT_MODES)
 def test_real_fork_replaces_held_parent_lock_before_registry_access(
-    tmp_path: Path,
+    tmp_path: Path, parent_mode: str
 ) -> None:
+    """[DJ-13.2]: the child replaces the held registry lock in every mode.
+
+    Lookup always succeeds. The first submission is where built-in SQLite
+    refuses a child that inherited a live parent connection, and Weft lets
+    that refusal escape. After a request that finished before the fork, or on
+    a backend without that process boundary, the child submits durably.
+    """
     fixture_root = PACKAGE_ROOT / "tests" / "fixture_project"
     project_root = PACKAGE_ROOT.parents[1]
     env = dict(os.environ)
@@ -300,6 +310,7 @@ def test_real_fork_replaces_held_parent_lock_before_registry_access(
     if env.get("PYTHONPATH"):
         pythonpath.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    backend = active_test_backend()
 
     completed = subprocess.run(
         [
@@ -307,6 +318,7 @@ def test_real_fork_replaces_held_parent_lock_before_registry_access(
             "-m",
             "fixture_project.lifecycle_fork_probe",
             str(prepare_project_root(tmp_path / "registry-fork")),
+            parent_mode,
         ],
         cwd=project_root,
         env=env,
@@ -317,10 +329,32 @@ def test_real_fork_replaces_held_parent_lock_before_registry_access(
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert json.loads(completed.stdout) == {
-        "child_closed_inherited": True,
-        "child_replaced_lock": True,
-        "child_submitted": True,
-        "child_used_one_shot": True,
-        "parent_still_owned": True,
-    }
+    report = json.loads(completed.stdout)
+
+    # The probe and its forked child must use the broker this run imported.
+    if backend == "postgres":
+        importlib.import_module("simplebroker_pg")
+    assert report["parent_provenance"] == fork_probe.provenance()
+    assert report["child_provenance"] == fork_probe.provenance()
+
+    # Held-lock and inherited-session proof holds whether or not the backend
+    # then refuses the submission.
+    assert report["child_replaced_lock"] is True
+    assert report["child_closed_inherited"] is True
+    assert report["child_used_one_shot"] is True
+
+    parent_ids = [report["parent_first"], report["parent_second"]]
+    child_submission = report["child_submission"]
+    if backend == "sqlite" and parent_mode == "live":
+        assert child_submission["tid"] is None, report
+        assert child_submission["error_type"] == "RuntimeError", report
+        assert fork_probe.UNSAFE_FORK_MESSAGE in child_submission["error"], report
+        durable_ids = parent_ids
+    else:
+        assert child_submission["tid"], report
+        durable_ids = [*parent_ids, child_submission["tid"]]
+    # A fresh client read these after every process closed: exactly the
+    # acknowledged submissions are stored, and a refused child stored nothing.
+    assert sorted(report["stored_task_ids"]) == sorted(durable_ids)
+
+    assert report["parent_still_owned"] is (parent_mode == "live")

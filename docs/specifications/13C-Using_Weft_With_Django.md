@@ -1263,9 +1263,18 @@ Already prepared callbacks retain the old immutable client/context generation,
 while later helpers in the same request resolve the new generation. Every
 request, settings, and lookup entry point compares the module PID and replaces
 the inherited generation lock, counter, and `Local` before acquiring or
-touching inherited state. The child then closes only the fork-surviving current
-context's inherited session through the public SimpleBroker path and creates
-child-owned state; it never traverses vanished parent threads.
+touching inherited state.
+
+The child then closes only the fork-surviving current context's inherited
+session through the public SimpleBroker path and creates child-owned Python
+state; it never traverses vanished parent threads. This does not make inherited
+SQLite state safe. The [PY-1] SQLite process boundary applies to Django-facing
+submissions, including prepared on-commit callbacks; backend refusal propagates
+without a reconnect fallback. Close all SQLite resources before host-process
+fork, or use a fresh process image. Closing only the Weft client is insufficient
+when another SQLite owner, including Django's ORM, remains open. Django registry
+reset does not promise safe inherited native-resource finalization or normal
+child interpreter shutdown.
 
 _Implementation mapping_: `integrations/weft_django/weft_django/conf.py::get_explicit_context`,
 `integrations/weft_django/weft_django/conf.py::get_context_fallback_root`,
@@ -1447,8 +1456,9 @@ Use test modes by lane:
 - deferred payload capture: assert mutation after callback registration does
   not change submitted work
 - explicit-client lifecycle: prove lazy retained-session creation, bounded
-  per-submission operations, same-thread close, sequential re-entry, fork
-  replacement, cleanup failure, and bounded fallback after scope close
+  per-submission operations, same-thread close, sequential re-entry, safe
+  pre-fork close and unsafe SQLite fork refusal, cleanup failure, and bounded
+  fallback after scope close
 - request lifecycle: prove WSGI and production `ASGIHandler` synchronous views
   reuse and close one owner-local client; drive the real ASGI handler because
   Django's `AsyncClientHandler` does not reproduce production
@@ -1464,7 +1474,9 @@ Use test modes by lane:
   process-pool identity, balanced per-operation checkouts, broken-connection
   replacement, sibling-lease survival, and final cleanup
 - process inheritance: prove a child replaces inherited registry locks and
-  owner-local state before use without changing the parent's resources
+  owner-local state before use without changing the parent's resources; for
+  built-in SQLite prove refusal after a live parent handle crosses fork and
+  successful child submission when all SQLite resources closed before fork
 
 ## Rejected Alternatives [DJ-18]
 
@@ -1558,6 +1570,7 @@ Once the package is split into a sibling repo:
 - [Direct result observation implementation repair](../plans/2026-10-09-direct-result-observation-implementation-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md)
+- [SimpleBroker SQLite fork compatibility](../plans/2026-11-11-simplebroker-sqlite-fork-compatibility-plan.md) - narrows [DJ-13.2] and [DJ-17.3] to SimpleBroker's SQLite process boundary
 
 - retired: 2026-09-15-explicit-broker-session-lifetimes-plan — source 0ff8cfbf; see docs/plans/README.md
 

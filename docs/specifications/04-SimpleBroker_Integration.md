@@ -47,8 +47,8 @@ That keeps the runtime smaller and easier to reason about.
 Weft queue commands delegate to SimpleBroker rather than reimplementing queue
 semantics.
 
-Weft requires SimpleBroker 8.6.0 or newer. Installations using the optional
-PostgreSQL backend require `simplebroker-pg` 4.6.0 or newer. These coordinated
+Weft requires SimpleBroker 8.8.2 or newer. Installations using the optional
+PostgreSQL backend require `simplebroker-pg` 4.8.2 or newer. These coordinated
 floors provide backend API v9, ascending public-message-ID default selection,
 surrogate-free SQL schema v6, bounded dump watermarks, immutable
 invocation/handle configuration snapshots, typed queue result overloads,
@@ -179,6 +179,14 @@ operation before manager recovery or waits. SimpleBroker continues to own the
 process-shared backend core and PostgreSQL pool, per-operation checkout return,
 broken-connection replacement, fork-safe inherited-handle close, and final
 shutdown after the last lease closes.
+
+Child-safe inherited-handle close is Python ownership detachment, not repair of
+SQLite state inherited across fork. Built-in SQLite operations follow the
+process boundary in [PY-1]: a caller must close all SQLite resources before
+fork or use a fresh process image. Weft propagates SimpleBroker's detected-fork
+`RuntimeError` without replacing the runner to evade it. Weft's own task runtime
+continues to use spawn. This compatibility rule adds no SQLite restriction to
+PostgreSQL or Redis and does not extend their inherited-resource contracts.
 
 An entered client may retain one lazy, session-owned spawn-queue facade for
 its exact target/`Config`. Submissions borrow bounded `Queue.get_connection()`
@@ -923,6 +931,7 @@ connection-pooling designs are tracked in the companion doc:
 - [Direct result observation spec changes](../plans/2026-10-09-direct-result-observation-spec-plan.md)
 
 - [Client-owned submission session reuse](../plans/2026-09-25-client-owned-submission-session-plan.md) - reuses SimpleBroker's process-shared session machinery without retaining operation checkouts.
+- [SimpleBroker SQLite fork compatibility](../plans/2026-11-11-simplebroker-sqlite-fork-compatibility-plan.md) - records in [SB-0.4] that inherited-handle close does not repair SQLite state across fork and raises the [SB-0.1] floors to the release that enforces it
 
 - retired: `2026-09-17-watcher-reactor-restoration-plan` (source 0ff8cfbf; see `docs/plans/README.md`) - makes the retained `PollingStrategy` the one backend-neutral wake arbiter and defines notifications as hints validated against live watched-queue state.
 

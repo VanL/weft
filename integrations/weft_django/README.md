@@ -113,6 +113,14 @@ with get_client() as client:
 expose or borrow the private request client. Forked workers and settings changes
 discard inherited or stale request entries before admitting new work.
 
+That reset covers Python state only. With the built-in SQLite backend, a
+process forked while any SQLite connection was open cannot use SQLite:
+SimpleBroker raises `RuntimeError` on the child's first broker operation, and
+a new client does not change that. Close every SQLite connection before the
+host forks, including Django's own ORM connection when it uses SQLite, or start
+workers from a fresh process image (spawn or exec). A request that has finished
+has already closed its client. PostgreSQL is not affected.
+
 After upgrading, stray `BROKER_*` or default-valued broker settings no longer
 redirect Django's artifacts to CWD. If an installation used that former
 destination, pin `CONTEXT` to its existing root before upgrading. The integration

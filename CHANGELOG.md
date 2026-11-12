@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Weft requires SimpleBroker 8.8.2 and `simplebroker-pg` 4.8.2. With the
+  built-in SQLite backend, a process forked while any SimpleBroker SQLite
+  connection was open, opening or closing can no longer use SQLite: its broker
+  operations raise `RuntimeError`, and Weft lets that error escape instead of
+  reconnecting. Previously such a child could acknowledge submissions that
+  were then lost when the parent closed its connection. A forked child still
+  gets child-owned client and Django registry state, but that reset does not
+  make inherited SQLite state usable. Close every SQLite connection before
+  the caller forks, or start children from a fresh process image. Weft's own
+  task runtime already uses spawn and is unchanged, as are PostgreSQL-backed
+  projects.
+
 ## [0.9.124] - 2026-11-10
 
 ### Changed

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
 import os
@@ -18,8 +19,9 @@ import pytest
 
 import weft._exceptions as exception_types
 from simplebroker import BrokerSession
+from tests.helpers import client_fork_probe as fork_probe
 from tests.helpers.task_observation import write_task_event, write_task_observation
-from tests.helpers.test_backend import prepare_project_root
+from tests.helpers.test_backend import active_test_backend, prepare_project_root
 from tests.helpers.weft_harness import (
     DEFAULT_TASK_COMPLETION_TIMEOUT,
     WeftTestHarness,
@@ -755,11 +757,28 @@ def test_active_client_rejects_foreign_thread_without_losing_owner_session() -> 
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
-def test_client_fork_reset_uses_child_bounded_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("parent_mode", fork_probe.PARENT_MODES)
+def test_client_fork_reset_uses_child_bounded_state(
+    tmp_path: Path, parent_mode: str
+) -> None:
+    """[PY-1], [PY-3]: a forked child owns bounded Python state; SQLite decides use.
+
+    A child that inherited a live parent SQLite connection is refused by
+    SimpleBroker and Weft lets that refusal escape, for the bounded and the
+    re-entered route alike. Closing the client before the fork, or a backend
+    without that process boundary, leaves the child fully usable.
+    """
     root = prepare_project_root(tmp_path / "fork-root")
+    backend = active_test_backend()
 
     completed = subprocess.run(
-        [sys.executable, "-m", "tests.helpers.client_fork_probe", str(root)],
+        [
+            sys.executable,
+            "-m",
+            "tests.helpers.client_fork_probe",
+            str(root),
+            parent_mode,
+        ],
         cwd=Path(__file__).parents[2],
         capture_output=True,
         text=True,
@@ -769,13 +788,36 @@ def test_client_fork_reset_uses_child_bounded_state(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(completed.stdout)
-    assert report == {
-        "child_bounded_after_submit": True,
-        "child_closed_inherited": True,
-        "child_retained_fresh_session": True,
-        "parent_session_still_open": True,
-        "parent_session_still_reused": True,
-    }
+
+    # The probe and its forked child must use the broker this run imported.
+    if backend == "postgres":
+        importlib.import_module("simplebroker_pg")
+    assert report["parent_provenance"] == fork_probe.provenance()
+    assert report["child_provenance"] == fork_probe.provenance()
+
+    assert report["child_bounded_after_submit"] is True
+    assert report["child_closed_inherited"] is True
+    parent_ids = [report["parent_first"], report["parent_second"]]
+    child_routes = [report["child_bounded"], report["child_retained"]]
+    if backend == "sqlite" and parent_mode == "live":
+        for outcome in child_routes:
+            assert outcome["tid"] is None, report
+            assert outcome["error_type"] == "RuntimeError", report
+            assert fork_probe.UNSAFE_FORK_MESSAGE in outcome["error"], report
+        assert report["child_retained_fresh_session"] is False
+        durable_ids = parent_ids
+    else:
+        child_ids = [outcome["tid"] for outcome in child_routes]
+        assert all(child_ids), report
+        assert report["child_retained_fresh_session"] is True
+        durable_ids = parent_ids + child_ids
+    # A fresh client read these after every process closed: exactly the
+    # acknowledged submissions are stored, and a refused child stored nothing.
+    assert sorted(report["stored_task_ids"]) == sorted(durable_ids)
+
+    parent_kept_session = parent_mode == "live"
+    assert report["parent_session_still_open"] is parent_kept_session
+    assert report["parent_session_still_reused"] is parent_kept_session
 
 
 def test_client_close_is_idempotent_and_active_scope_can_reenter_sequentially(
