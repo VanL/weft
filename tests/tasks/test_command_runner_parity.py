@@ -764,7 +764,16 @@ def test_docker_runner_collects_metrics_and_classifies_memory_limit_violation(
         function_target=None,
         process_target="python3",
         agent=None,
-        args=["-c", "x=[]\nwhile True: x.append('x' * 1024 * 1024)"],
+        args=[
+            "-c",
+            (
+                "import time\n"
+                "x=[]\n"
+                "while True:\n"
+                "    x.append('x' * 1024 * 1024)\n"
+                "    time.sleep(0.01)"
+            ),
+        ],
         kwargs=None,
         env={},
         working_dir=None,
