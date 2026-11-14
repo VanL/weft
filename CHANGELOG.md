@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.126] - 2026-11-13
+
+Released with `weft-django` 0.9.61, `weft-docker` 0.9.101,
+`weft-macos-sandbox` 0.6.30 and `weft-microsandbox` 0.5.31; each extension
+requires `weft` 0.9.126 or newer.
 
 ### Changed
 
