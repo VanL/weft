@@ -3,7 +3,7 @@
 This directory holds implementation plans for behavior that is currently available in Weft or for repo tooling that still exists.
 Specs in `docs/specifications/` remain the source of truth for behavior.
 
-There are currently 74 plan files in this directory.
+There are currently 75 plan files in this directory.
 
 ## Curation Policy
 
@@ -30,6 +30,7 @@ There are currently 74 plan files in this directory.
 
 | File | Title | Status | Superseded by |
 | --- | --- | --- | --- |
+| [`2026-11-13-disposable-postgres-test-cleanup-plan.md`](./2026-11-13-disposable-postgres-test-cleanup-plan.md) | Disposable PostgreSQL Test Cleanup Ownership | `completed` | none |
 | [`2026-11-13-json-result-handoff-plan.md`](./2026-11-13-json-result-handoff-plan.md) | JSON Result Handoff with Child-Owned Conversion | `completed` | none |
 | [`2026-11-12-ci-verified-root-cause-fixes-plan.md`](./2026-11-12-ci-verified-root-cause-fixes-plan.md) | Verified CI Root-Cause Fixes | `completed` | none |
 | [`2026-11-11-simplebroker-sqlite-fork-compatibility-plan.md`](./2026-11-11-simplebroker-sqlite-fork-compatibility-plan.md) | SimpleBroker SQLite Fork Compatibility Preparation | `completed` | none |

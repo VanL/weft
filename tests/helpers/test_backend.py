@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_CONFIG_FILENAME = "broker.toml"
 POSTGRES_TEST_BACKEND = "postgres"
+DISPOSABLE_POSTGRES_TARGET_ENV = "WEFT_PG_TEST_DISPOSABLE_TARGET"
 _PREPARED_POSTGRES_ROOTS: set[tuple[str, str, str]] = set()
 
 
@@ -34,6 +35,18 @@ def postgres_test_dsn(env: Mapping[str, str] | None = None) -> str | None:
     if env and env.get("WEFT_PG_TEST_DSN"):
         return env["WEFT_PG_TEST_DSN"]
     return os.environ.get("WEFT_PG_TEST_DSN")
+
+
+def _disposable_postgres_target(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether container removal owns all test-schema cleanup."""
+
+    if env is not None:
+        return env.get(DISPOSABLE_POSTGRES_TARGET_ENV, "") == "1" and bool(
+            env.get("WEFT_PG_TEST_DSN")
+        )
+    return os.environ.get(DISPOSABLE_POSTGRES_TARGET_ENV, "") == "1" and bool(
+        os.environ.get("WEFT_PG_TEST_DSN")
+    )
 
 
 def _postgres_schema_name(root: Path) -> str:
@@ -203,8 +216,12 @@ def cleanup_prepared_roots(
     if not dsn:
         return
 
-    plugin = get_backend_plugin(POSTGRES_TEST_BACKEND)
     resolved_root = root.expanduser().resolve()
+    if _disposable_postgres_target(env):
+        _discard_prepared_root_keys(resolved_root)
+        return
+
+    plugin = get_backend_plugin(POSTGRES_TEST_BACKEND)
     cleaned_schemas: set[str] = set()
     for config_path in root.rglob(PROJECT_CONFIG_FILENAME):
         schema = _load_postgres_schema(config_path)
@@ -223,10 +240,14 @@ def cleanup_prepared_roots(
             continue
         cleaned_schemas.add(schema)
 
+    _discard_prepared_root_keys(resolved_root)
+
+
+def _discard_prepared_root_keys(root: Path) -> None:
+    """Forget process-local preparation records below *root*."""
+
     stale_keys = [
-        key
-        for key in _PREPARED_POSTGRES_ROOTS
-        if Path(key[0]).is_relative_to(resolved_root)
+        key for key in _PREPARED_POSTGRES_ROOTS if Path(key[0]).is_relative_to(root)
     ]
     for key in stale_keys:
         _PREPARED_POSTGRES_ROOTS.discard(key)
@@ -248,6 +269,10 @@ def cleanup_postgres_schema_for_root(
 
     resolved_root = root.expanduser().resolve()
     schema = postgres_schema_for_root(resolved_root)
+    if _disposable_postgres_target(env):
+        _PREPARED_POSTGRES_ROOTS.discard((str(resolved_root), dsn, schema))
+        return
+
     plugin = get_backend_plugin(POSTGRES_TEST_BACKEND)
     try:
         plugin.cleanup_target(

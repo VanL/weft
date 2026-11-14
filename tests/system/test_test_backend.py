@@ -55,7 +55,11 @@ def _write_postgres_config(root: Path, schema: str) -> Path:
 def test_cleanup_prepared_roots_logs_failure_and_continues(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An explicit unmarked env keeps cleanup despite an ambient marker."""
+
+    monkeypatch.setenv("WEFT_PG_TEST_DISPOSABLE_TARGET", "1")
     failed_root = tmp_path / "failed"
     successful_root = tmp_path / "successful"
     failed_root.mkdir()
@@ -114,6 +118,9 @@ def test_cleanup_postgres_schema_for_root_logs_private_failure(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An explicit unmarked env keeps per-root cleanup despite ambient disposal."""
+
+    monkeypatch.setenv("WEFT_PG_TEST_DISPOSABLE_TARGET", "1")
     project_root = tmp_path / "project"
     plugin = Mock()
     private_error = "cleanup failed for private target"
@@ -154,6 +161,79 @@ def test_cleanup_postgres_schema_for_root_logs_private_failure(
     assert str(project_root) not in caplog.text
     assert private_error not in caplog.text
     assert "postgresql://private.invalid/weft" not in caplog.text
+
+
+def test_disposable_postgres_cleanup_defers_schemas_to_container_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "projects"
+    project_root = root / "project"
+    project_root.mkdir(parents=True)
+    config_path = _write_postgres_config(project_root, "disposable_schema")
+    dsn = "postgresql://disposable.invalid/weft"
+    schema = test_backend_module.postgres_schema_for_root(project_root.resolve())
+    config_key = (str(project_root.resolve()), dsn, "disposable_schema")
+    root_key = (str(project_root.resolve()), dsn, schema)
+    unrelated_key = (str(tmp_path / "other"), dsn, "other_schema")
+    prepared_roots = {config_key, root_key, unrelated_key}
+    monkeypatch.setattr(
+        test_backend_module,
+        "_PREPARED_POSTGRES_ROOTS",
+        prepared_roots,
+    )
+    env = {
+        "BROKER_TEST_BACKEND": "postgres",
+        "WEFT_PG_TEST_DSN": dsn,
+        "WEFT_PG_TEST_DISPOSABLE_TARGET": "1",
+    }
+
+    with (
+        patch.object(Path, "rglob", return_value=[config_path]) as rglob,
+        patch(
+            "tests.helpers.test_backend.get_backend_plugin",
+            side_effect=AssertionError("disposable cleanup opened a connection"),
+        ) as get_plugin,
+    ):
+        cleanup_prepared_roots(root, env=env)
+
+    rglob.assert_not_called()
+    get_plugin.assert_not_called()
+    assert prepared_roots == {unrelated_key}
+
+    prepared_roots.add(root_key)
+    cleanup_postgres_schema_for_root(project_root, env=env)
+
+    assert prepared_roots == {unrelated_key}
+
+
+def test_disposable_marker_without_same_source_dsn_keeps_explicit_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    ambient_dsn = "postgresql://external.invalid/weft"
+    monkeypatch.setenv("WEFT_PG_TEST_DSN", ambient_dsn)
+    plugin = Mock()
+    env = {
+        "BROKER_TEST_BACKEND": "postgres",
+        "WEFT_PG_TEST_DISPOSABLE_TARGET": "1",
+    }
+
+    with patch(
+        "tests.helpers.test_backend.get_backend_plugin",
+        return_value=plugin,
+    ):
+        cleanup_postgres_schema_for_root(project_root, env=env)
+
+    plugin.cleanup_target.assert_called_once_with(
+        ambient_dsn,
+        backend_options={
+            "schema": test_backend_module.postgres_schema_for_root(
+                project_root.resolve()
+            )
+        },
+    )
 
 
 def test_prepare_project_root_supports_context_queue_roundtrip(tmp_path: Path) -> None:

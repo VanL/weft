@@ -22,6 +22,10 @@ requires `weft` 0.9.126 or newer.
   Old and new workers must not share a live handoff. Existing durable queue
   payloads need no migration; multiprocessing bootstrap and persistent request
   queues retain their current serialization.
+- PostgreSQL test runs now leave per-root schema destruction to the disposable
+  container owned by `bin/pytest-pg`. External or shared PostgreSQL targets
+  retain explicit schema cleanup. This removes redundant teardown connections
+  that could exhaust macOS loopback ephemeral addresses in the full suite.
 
 ## [0.9.125] - 2026-11-12
 

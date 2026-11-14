@@ -77,6 +77,9 @@ BACKEND_ENV_KEYS: Final[tuple[str, ...]] = (
 )
 """Backend selection variables owned by this wrapper during PG test runs."""
 
+DISPOSABLE_POSTGRES_TARGET_ENV: Final[str] = "WEFT_PG_TEST_DISPOSABLE_TARGET"
+"""Marks the wrapper-owned container whose removal owns schema cleanup."""
+
 WaitOutcome = Literal["exited", "timeout", "interrupted"]
 
 
@@ -301,6 +304,7 @@ def _build_test_env(*, dsn: str) -> dict[str, str]:
         env.pop(key, None)
     env["BROKER_TEST_BACKEND"] = "postgres"
     env["WEFT_PG_TEST_DSN"] = dsn
+    env[DISPOSABLE_POSTGRES_TARGET_ENV] = "1"
     env["BROKER_BACKEND"] = "postgres"
     env["BROKER_BACKEND_TARGET"] = passwordless_dsn
     env["WEFT_BACKEND"] = "postgres"

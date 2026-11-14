@@ -28,6 +28,10 @@ harnesses:
   and `tests/test_harness_registration.py` guards harness-registration plumbing.
 - The Postgres-backed check is `bin/pytest-pg --all` for backend-sensitive
   changes.
+- `bin/pytest-pg` owns a disposable PostgreSQL container. Per-root schemas stay
+  isolated by unique temporary paths during the run, and container removal
+  owns their database cleanup. Test runs against an external or shared target
+  retain explicit per-root schema cleanup.
 - The benchmark scripts in `tests/long_session_surface_benchmark.py` and
   `tests/multiqueue_polling_benchmark.py` are dev-only measurement tools, not
   part of the canonical test contract.
