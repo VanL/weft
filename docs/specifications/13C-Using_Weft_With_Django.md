@@ -958,6 +958,13 @@ The integration should reuse Weft core result semantics:
 - JSON-serializable values are returned as structured values
 - non-serializable values may degrade to string output per core behavior
 
+Host-backed registered tasks convert their return values to core JSON/text
+output in the Django-initialized child. The parent does not unpickle Django
+or application objects to publish results. A value that cannot be pickled
+can still succeed when core output conversion succeeds. Core string fallback
+is not a model serializer; return explicit data or durable identifiers when
+structured application results are required.
+
 Preferred persistence rule:
 
 - tasks should return small structured values or durable references
@@ -1597,3 +1604,7 @@ Once the package is split into a sibling repo:
   [10-CLI_Interface.md](10-CLI_Interface.md)
 
 Implementation plan: `2026-10-14-task-monitor-read-separation-and-simplification-plan` (retired — source 0ff8cfbf; see `docs/plans/README.md`).
+
+## Related Plans
+
+- [JSON result handoff](../plans/2026-11-13-json-result-handoff-plan.md) records child-owned result conversion and private JSON response transport ([DJ-10.2]).

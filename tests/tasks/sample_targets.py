@@ -7,7 +7,9 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, SupportsIndex
+
+from weft.core.agents.runtime import AgentExecutionResult
 
 
 def echo_payload(payload: str, *, suffix: str = "") -> str:
@@ -36,10 +38,64 @@ def abrupt_exit(code: int = 73) -> None:
     os._exit(code)
 
 
-def return_unpicklable() -> Callable[[], None]:
-    """Return a local callable that cannot cross a spawn transport."""
+def return_child_local_mapping() -> dict[str, str]:
+    """Return JSON-compatible data whose concrete class exists only in the child."""
 
-    return lambda: None
+    class LocalMapping(dict[str, str]):
+        pass
+
+    return LocalMapping(answer="child-local")
+
+
+def return_child_local_text(evidence_path: str) -> object:
+    """Record which process converts a child-only application value."""
+
+    class LocalValue:
+        def __str__(self) -> str:
+            with Path(evidence_path).open("a", encoding="utf-8") as evidence:
+                evidence.write(f"str:{os.getpid()}\n")
+            return "child-local-text"
+
+        def __reduce_ex__(self, _protocol: SupportsIndex) -> Any:
+            with Path(evidence_path).open("a", encoding="utf-8") as evidence:
+                evidence.write(f"pickle:{os.getpid()}\n")
+            raise TypeError("application result must not be pickled")
+
+    return LocalValue()
+
+
+def return_cyclic_result() -> list[Any]:
+    """Return a value whose public JSON conversion fails before any write."""
+
+    result: list[Any] = []
+    result.append(result)
+    return result
+
+
+def return_unprintable_result() -> object:
+    """Fail public string fallback with an exception that also rejects str()."""
+
+    class UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise ValueError("exception string failed")
+
+    class UnprintableResult:
+        def __str__(self) -> str:
+            raise UnprintableError()
+
+    return UnprintableResult()
+
+
+def return_agent_execution_result(outputs: list[Any]) -> AgentExecutionResult:
+    """A function may return the shared agent result with any output cardinality."""
+
+    return AgentExecutionResult(
+        runtime="fixture",
+        model="function-agent-result",
+        output_mode="messages",
+        outputs=tuple(outputs),
+        metadata={"source": "function"},
+    )
 
 
 def _raise_during_unpickle() -> None:
@@ -49,10 +105,13 @@ def _raise_during_unpickle() -> None:
 
 
 class _UnreadablePickledResult:
-    """Serialize successfully, then fail when reconstructed by the parent."""
+    """Reject pickle reconstruction while remaining printable."""
 
     def __reduce__(self) -> tuple[Callable[[], None], tuple[()]]:
         return _raise_during_unpickle, ()
+
+    def __str__(self) -> str:
+        return "unreadable-result-as-text"
 
 
 def return_unreadable_pickled_result() -> _UnreadablePickledResult:

@@ -410,9 +410,9 @@ class AgentSession:
         if not ready:
             return None
         payload = receive_terminal_payload(self._response_receiver)
-        if not isinstance(payload, Mapping):
+        if response_type(payload) is None:
             raise TerminalHandoffTransportError(
-                f"decoded session payload has invalid type {type(payload).__name__}"
+                "invalid session response fields or discriminants"
             )
         return payload
 

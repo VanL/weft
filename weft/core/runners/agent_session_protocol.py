@@ -15,6 +15,12 @@ from typing import Any
 
 from weft._constants import AGENT_SESSION_PROTOCOL_VERSION
 from weft.core.agents.runtime import AgentExecutionResult
+from weft.core.targets import (
+    PreparedTaskResult,
+    prepare_task_result,
+    prepared_result_from_payload,
+    prepared_result_to_payload,
+)
 
 
 def make_execute_request(work_item: Any) -> dict[str, Any]:
@@ -38,7 +44,7 @@ def parse_request_type(payload: Mapping[str, Any]) -> str | None:
     """Return the request type when the payload matches the private protocol."""
     version = payload.get("version")
     request_type = payload.get("type")
-    if version != AGENT_SESSION_PROTOCOL_VERSION:
+    if type(version) is not int or version != AGENT_SESSION_PROTOCOL_VERSION:
         return None
     if not isinstance(request_type, str) or not request_type:
         return None
@@ -66,14 +72,42 @@ def make_booted_response() -> dict[str, Any]:
 def response_type(payload: Mapping[str, Any]) -> str | None:
     """Return the response type when the payload matches the private protocol."""
 
-    if payload.get("version") != AGENT_SESSION_PROTOCOL_VERSION:
+    version = payload.get("version")
+    if type(version) is not int or version != AGENT_SESSION_PROTOCOL_VERSION:
         return None
     candidate = payload.get("type")
     if not isinstance(candidate, str) or not candidate:
         return None
     if candidate not in {"booted", "ready", "startup_error", "result"}:
         return None
+    required = {"version", "type"}
+    if candidate == "startup_error":
+        required.add("error")
+        if not isinstance(payload.get("error"), str) or not payload["error"]:
+            return None
+    elif candidate == "result":
+        required.update(("status", "error", "result"))
+        if not _valid_result_fields(payload):
+            return None
+    optional = {"diagnostics"} if candidate in {"startup_error", "result"} else set()
+    if not required <= set(payload) or set(payload) - required - optional:
+        return None
+    if "diagnostics" in payload and not isinstance(payload["diagnostics"], dict):
+        return None
     return candidate
+
+
+def _valid_result_fields(payload: Mapping[str, Any]) -> bool:
+    """Check the result discriminant before accepting its prepared record."""
+    status, error = payload.get("status"), payload.get("error")
+    if status == "ok":
+        return error is None and isinstance(payload.get("result"), dict)
+    return (
+        status == "error"
+        and payload.get("result") is None
+        and isinstance(error, str)
+        and bool(error)
+    )
 
 
 def is_booted_response(payload: Mapping[str, Any]) -> bool:
@@ -106,9 +140,7 @@ def startup_error_message(payload: Mapping[str, Any]) -> str | None:
     """Return the startup error string when *payload* is a startup error."""
     if response_type(payload) != "startup_error":
         return None
-    error = payload.get("error")
-    if not isinstance(error, str) or not error:
-        return "Agent session failed to start"
+    error: str = payload["error"]
     return error
 
 
@@ -124,19 +156,23 @@ def startup_error_diagnostics(payload: Mapping[str, Any]) -> dict[str, Any] | No
 def make_result_response(
     *,
     status: str,
-    result: AgentExecutionResult | None = None,
+    result: AgentExecutionResult | PreparedTaskResult | None = None,
     error: str | None = None,
     diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a private execution response payload."""
+    prepared = prepare_task_result(result) if status == "ok" else None
+    if prepared is not None and prepared.kind != "agent":
+        raise TypeError("agent session success requires a prepared agent result")
     payload: dict[str, Any] = {
         "version": AGENT_SESSION_PROTOCOL_VERSION,
         "type": "result",
         "status": status,
         "error": error,
+        "result": (
+            prepared_result_to_payload(prepared) if prepared is not None else None
+        ),
     }
-    if result is not None:
-        payload["result"] = result.to_private_payload()
     if diagnostics is not None:
         payload["diagnostics"] = dict(diagnostics)
     return payload
@@ -147,30 +183,19 @@ def parse_result_response(
 ) -> (
     tuple[
         str,
-        AgentExecutionResult | None,
+        PreparedTaskResult | None,
         str | None,
         dict[str, Any] | None,
     ]
     | None
 ):
     """Parse a private execution response payload."""
-    if (
-        payload.get("version") != AGENT_SESSION_PROTOCOL_VERSION
-        or payload.get("type") != "result"
-    ):
+    if response_type(payload) != "result":
         return None
 
-    status = payload.get("status")
-    if not isinstance(status, str) or not status:
-        return None
-
+    status = payload["status"]
     error = payload.get("error")
-    if error is not None and not isinstance(error, str):
-        return None
-
     diagnostics = payload.get("diagnostics")
-    if diagnostics is not None and not isinstance(diagnostics, Mapping):
-        return None
     normalized_diagnostics = (
         dict(diagnostics) if isinstance(diagnostics, Mapping) else None
     )
@@ -178,11 +203,12 @@ def parse_result_response(
     result_payload = payload.get("result")
     if result_payload is None:
         return status, None, error, normalized_diagnostics
-    if not isinstance(result_payload, Mapping):
-        return None
+    result = prepared_result_from_payload(result_payload)
+    if result.kind != "agent":
+        raise ValueError("agent session success requires a prepared agent result")
     return (
         status,
-        AgentExecutionResult.from_private_payload(result_payload),
+        result,
         error,
         normalized_diagnostics,
     )

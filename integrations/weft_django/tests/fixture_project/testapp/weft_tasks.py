@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
+from django.apps import apps
 from django.conf import settings
 
 from testapp.models import EventRecord
@@ -16,6 +21,22 @@ def echo_task(value: str) -> str:
 def fetch_record_value(record_id: int) -> str:
     record = EventRecord.objects.get(pk=record_id)
     return str(record.value)
+
+
+@weft_task(name="testapp.child_only_result", timeout=30.0)
+def child_only_result(evidence_path: str) -> object:
+    """Return an application value whose text conversion needs Django setup."""
+
+    class ChildResult:
+        def __str__(self) -> str:
+            model = apps.get_model("testapp", "EventRecord")
+            Path(evidence_path).write_text(
+                json.dumps({"pid": os.getpid(), "django_ready": apps.ready}),
+                encoding="utf-8",
+            )
+            return f"{model.__name__}:child-ready"
+
+    return ChildResult()
 
 
 @weft_task(name="testapp.echo_current_request_id", timeout=30.0)

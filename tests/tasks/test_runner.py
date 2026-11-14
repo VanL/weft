@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import multiprocessing
 import os
@@ -39,6 +40,8 @@ from weft._constants import (
     AGENT_SESSION_READY_TIMEOUT_SECONDS,
     DEFAULT_POLLING_INTERVAL,
 )
+from weft.core import terminal_handoff_transport as transport_module
+from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.resource_monitor import (
     BaseResourceMonitor,
     ResourceMetrics,
@@ -58,11 +61,13 @@ from weft.core.runners.agent_session_protocol import (
     parse_request_type,
 )
 from weft.core.runners.host import HostTaskRunner
+from weft.core.runners.outcome import make_outcome_payload, parse_outcome_payload
 from weft.core.runners.sessions import AgentSession
 from weft.core.runners.subprocess_runner import (
     open_supervised_process,
     run_monitored_subprocess,
 )
+from weft.core.targets import PreparedTaskResult, project_task_result
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import FrozenList, LimitsSection
 from weft.core.terminal_handoff import (
@@ -436,7 +441,8 @@ def test_task_runner_executes_function_successfully() -> None:
     outcome = runner.run({"payload": "hello"})
 
     assert outcome.ok
-    assert outcome.value == "hello!"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "hello!"
     assert outcome.error is None
 
 
@@ -1027,10 +1033,10 @@ def _agent_session_startup_error_worker(
         last_handshake="booted",
     )
     try:
-        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_booted_response)
         send_terminal_payload(
             response_sender,
-            make_startup_error_response(
+            lambda: make_startup_error_response(
                 "startup boom",
                 diagnostics=diagnostics,
             ),
@@ -1053,7 +1059,7 @@ def _agent_session_boot_then_hang_worker(
     response_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_booted_response)
         time.sleep(30.0)
     finally:
         response_sender.close()
@@ -1091,14 +1097,22 @@ def _agent_session_hold_then_reply_worker(
     """Reply ready, then answer each work item ``hold_seconds`` after taking it."""
 
     try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
+        send_terminal_payload(response_sender, make_booted_response)
+        send_terminal_payload(response_sender, make_ready_response)
         while True:
             request = request_queue.get()
             if parse_request_type(request) != "execute":
                 return
             time.sleep(hold_seconds)
-            send_terminal_payload(response_sender, make_result_response(status="ok"))
+            send_terminal_payload(
+                response_sender,
+                lambda: make_result_response(
+                    status="ok",
+                    result=AgentExecutionResult(
+                        runtime="fixture", model=None, output_mode="text", outputs=()
+                    ),
+                ),
+            )
     finally:
         response_sender.close()
 
@@ -1406,8 +1420,8 @@ def _agent_session_ready_then_hang_worker(
     response_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
+        send_terminal_payload(response_sender, make_booted_response)
+        send_terminal_payload(response_sender, make_ready_response)
         request_queue.get()
         time.sleep(30.0)
     finally:
@@ -1419,8 +1433,8 @@ def _agent_session_ready_then_exit_worker(
     response_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
+        send_terminal_payload(response_sender, make_booted_response)
+        send_terminal_payload(response_sender, make_ready_response)
         request_queue.get()
     finally:
         response_sender.close()
@@ -1430,8 +1444,8 @@ def _agent_session_ready_then_seal_and_hang_worker(
     request_queue: Any,
     response_sender: Connection,
 ) -> None:
-    send_terminal_payload(response_sender, make_booted_response())
-    send_terminal_payload(response_sender, make_ready_response())
+    send_terminal_payload(response_sender, make_booted_response)
+    send_terminal_payload(response_sender, make_ready_response)
     request_queue.get()
     response_sender.close()
     time.sleep(30.0)
@@ -1442,10 +1456,10 @@ def _agent_session_wrong_payload_worker(
     response_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
+        send_terminal_payload(response_sender, make_booted_response)
+        send_terminal_payload(response_sender, make_ready_response)
         request_queue.get()
-        send_terminal_payload(response_sender, 42)
+        response_sender.send_bytes(b"42")
     finally:
         response_sender.close()
 
@@ -1455,12 +1469,17 @@ def _agent_session_malformed_nested_result_worker(
     response_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(response_sender, make_booted_response())
-        send_terminal_payload(response_sender, make_ready_response())
+        send_terminal_payload(response_sender, make_booted_response)
+        send_terminal_payload(response_sender, make_ready_response)
         request_queue.get()
-        payload = make_result_response(status="ok")
-        payload["result"] = {"outputs": "not-a-list", "metadata": {}}
-        send_terminal_payload(response_sender, payload)
+        payload = make_ready_response()
+        payload.update(
+            type="result",
+            status="ok",
+            error=None,
+            result={"outputs": "not-a-list", "metadata": {}},
+        )
+        send_terminal_payload(response_sender, lambda: payload)
     finally:
         response_sender.close()
 
@@ -2911,11 +2930,13 @@ def test_task_runner_agent_session_continues_conversation() -> None:
         session.close()
 
     assert first.status == "ok"
-    assert first.value is not None
-    assert first.value.aggregate_public_output() == "text:hello"
+    assert isinstance(first.value, PreparedTaskResult)
+    assert project_task_result(first.value).aggregate_public_output() == "text:hello"
     assert second.status == "ok"
-    assert second.value is not None
-    assert second.value.aggregate_public_output() == "history:hello"
+    assert isinstance(second.value, PreparedTaskResult)
+    assert (
+        project_task_result(second.value).aggregate_public_output() == "history:hello"
+    )
 
 
 class _PrivateLimitsMonitor(BaseResourceMonitor):
@@ -3402,9 +3423,22 @@ def _build_function_host_runner(
     )
 
 
+class _RecordingTerminalSender:
+    """Observe production framing without replacing its encoder or error guard."""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+        self.closed = False
+
+    def send_bytes(self, frame: bytes) -> None:
+        self.frames.append(frame)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_spawned_worker_rejects_command_targets_without_running_them(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The spawned worker never executes command targets.
 
@@ -3416,19 +3450,7 @@ def test_spawned_worker_rejects_command_targets_without_running_them(
 
     sentinel = tmp_path / "command-ran"
 
-    class Sender:
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    sent: list[RunnerOutcome] = []
-    sender = Sender()
-    monkeypatch.setattr(
-        host_module,
-        "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(sent, payload, True),
-    )
+    sender = _RecordingTerminalSender()
 
     host_module._worker_entry(
         {
@@ -3442,8 +3464,8 @@ def test_spawned_worker_rejects_command_targets_without_running_them(
 
     assert sentinel.exists() is False
     assert sender.closed is True
-    assert len(sent) == 1
-    outcome = sent[0]
+    assert len(sender.frames) == 1
+    outcome = parse_outcome_payload(json.loads(sender.frames[0]))
     assert outcome.status == "error"
     assert outcome.value is None
     assert outcome.returncode is None
@@ -3454,29 +3476,23 @@ def test_spawned_worker_rejects_command_targets_without_running_them(
     assert outcome.diagnostics["target_type"] == "command"
 
 
+@pytest.mark.parametrize("transport_failure", [False, True])
 def test_function_worker_maps_arbitrary_execution_failure_to_terminal_outcome(
+    transport_failure: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class ExtensionFailure(Exception):
         pass
 
-    class Sender:
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
+    error_type = (
+        TerminalHandoffTransportError if transport_failure else ExtensionFailure
+    )
 
     def fail_execution(*_args: object, **_kwargs: object) -> None:
-        raise ExtensionFailure("extension detail")
+        raise error_type("extension detail")
 
-    sent: list[RunnerOutcome] = []
-    sender = Sender()
+    sender = _RecordingTerminalSender()
     monkeypatch.setattr(host_module, "execute_function_target", fail_execution)
-    monkeypatch.setattr(
-        host_module,
-        "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(sent, payload, True),
-    )
 
     host_module._worker_entry(
         {"type": "function", "function_target": "fixture:target"},
@@ -3485,16 +3501,16 @@ def test_function_worker_maps_arbitrary_execution_failure_to_terminal_outcome(
     )
 
     assert sender.closed is True
-    assert len(sent) == 1
-    outcome = sent[0]
+    assert len(sender.frames) == 1
+    outcome = parse_outcome_payload(json.loads(sender.frames[0]))
     assert outcome.status == "error"
     assert outcome.value is None
     assert outcome.returncode is None
     assert outcome.error is not None
-    assert "ExtensionFailure: extension detail" in outcome.error
+    assert f"{error_type.__name__}: extension detail" in outcome.error
     assert outcome.diagnostics is not None
     assert outcome.diagnostics["phase"] == "execute"
-    assert outcome.diagnostics["exception_type"] == "ExtensionFailure"
+    assert outcome.diagnostics["exception_type"] == error_type.__name__
 
 
 def test_function_worker_propagates_non_exception_failure_identity(
@@ -3509,15 +3525,250 @@ def test_function_worker_propagates_non_exception_failure_identity(
         raise fatal
 
     monkeypatch.setattr(host_module, "execute_function_target", fail_execution)
+    sender = _RecordingTerminalSender()
 
     with pytest.raises(FatalSignal) as caught:
         host_module._worker_entry(
             {"type": "function", "function_target": "fixture:target"},
             "payload",
-            object(),  # type: ignore[arg-type]
+            sender,  # type: ignore[arg-type]
         )
 
     assert caught.value is fatal
+    assert sender.closed is True
+    assert sender.frames == []
+
+
+def test_function_worker_prepares_output_inside_context_and_writes_after_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Application conversion sees task env/cwd; the frame leaves after restoration."""
+
+    env_name = "WEFT_TEST_RESULT_CONTEXT"
+    monkeypatch.setenv(env_name, "parent")
+    parent_cwd = Path.cwd()
+    observations: list[tuple[str, str, Path]] = []
+
+    class ContextValue:
+        def __str__(self) -> str:
+            observations.append(("convert", os.environ[env_name], Path.cwd()))
+            return "context-result"
+
+    class Sender(_RecordingTerminalSender):
+        def send_bytes(self, frame: bytes) -> None:
+            observations.append(("write", os.environ[env_name], Path.cwd()))
+            super().send_bytes(frame)
+
+    monkeypatch.setattr(
+        host_module, "execute_function_target", lambda *_a, **_k: ContextValue()
+    )
+    sender = Sender()
+
+    host_module._worker_entry(
+        {
+            "type": "function",
+            "function_target": "fixture:target",
+            "env": {env_name: "child"},
+            "working_dir": str(tmp_path),
+        },
+        None,
+        sender,  # type: ignore[arg-type]
+    )
+
+    assert observations == [
+        ("convert", "child", tmp_path),
+        ("write", "parent", parent_cwd),
+    ]
+    assert sender.closed is True
+    assert len(sender.frames) == 1
+    outcome = parse_outcome_payload(json.loads(sender.frames[0]))
+    assert outcome.status == "ok"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "context-result"
+
+
+@pytest.mark.parametrize("phase", ["entry", "exit"])
+def test_function_worker_context_failure_replaces_unsent_result(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime context failures retain execute classification and one sole write."""
+
+    @contextmanager
+    def failing_context(_spec_data: Mapping[str, Any]) -> Iterator[None]:
+        if phase == "entry":
+            raise RuntimeError("context entry failed")
+        yield
+        raise RuntimeError("context exit failed")
+
+    monkeypatch.setattr(host_module, "_worker_runtime_context", failing_context)
+    monkeypatch.setattr(
+        host_module, "execute_function_target", lambda *_a, **_k: "unsent success"
+    )
+    sender = _RecordingTerminalSender()
+
+    host_module._worker_entry(
+        {"type": "function", "function_target": "fixture:target"},
+        None,
+        sender,  # type: ignore[arg-type]
+    )
+
+    assert sender.closed is True
+    assert len(sender.frames) == 1
+    outcome = parse_outcome_payload(json.loads(sender.frames[0]))
+    assert outcome.status == "error"
+    assert outcome.value is None
+    assert outcome.error is not None
+    assert f"context {phase} failed" in outcome.error
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "execute"
+
+
+def test_function_worker_failed_fallback_closes_pipe_without_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed fallback encoder cannot re-enter execution handling or retry."""
+
+    cycle: list[Any] = []
+    cycle.append(cycle)
+    monkeypatch.setattr(host_module, "execute_function_target", lambda *_a, **_k: cycle)
+    real_dumps = json.dumps
+    fallback_attempts: list[str] = []
+
+    def fail_fallback(payload: Any, **kwargs: Any) -> str:
+        if isinstance(payload, dict) and payload.get("status") == "error":
+            fallback_attempts.append("encode")
+            raise ValueError("fallback encoding failed")
+        return real_dumps(payload, **kwargs)
+
+    monkeypatch.setattr(transport_module.json, "dumps", fail_fallback)
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        with pytest.raises(TerminalHandoffTransportError, match="fallback"):
+            host_module._worker_entry(
+                {"type": "function", "function_target": "fixture:target"},
+                None,
+                sender,
+            )
+
+        assert fallback_attempts == ["encode"]
+        assert sender.closed is True
+        assert receiver.poll(1.0)
+        with pytest.raises(EOFError):
+            receiver.recv_bytes()
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_function_worker_partial_write_never_sends_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once delivery starts, a write error closes the endpoint without a second frame."""
+
+    class BrokenSender(_RecordingTerminalSender):
+        def send_bytes(self, frame: bytes) -> None:
+            super().send_bytes(frame)
+            raise BrokenPipeError("partial delivery")
+
+    monkeypatch.setattr(
+        host_module, "execute_function_target", lambda *_a, **_k: "result"
+    )
+    sender = BrokenSender()
+
+    with pytest.raises(TerminalHandoffTransportError, match="delivery failed"):
+        host_module._worker_entry(
+            {"type": "function", "function_target": "fixture:target"},
+            None,
+            sender,  # type: ignore[arg-type]
+        )
+
+    assert sender.closed is True
+    assert len(sender.frames) == 1
+    outcome = parse_outcome_payload(json.loads(sender.frames[0]))
+    assert outcome.status == "ok"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "result"
+
+
+@pytest.mark.parametrize(
+    ("persistent", "invalid_identity", "error_fragment"),
+    [
+        pytest.param(
+            False, True, "runtime must be a nonempty string", id="one-shot-identity"
+        ),
+        pytest.param(
+            True, True, "runtime must be a nonempty string", id="session-identity"
+        ),
+        pytest.param(True, False, "agent", id="session-result-type"),
+    ],
+)
+def test_agent_worker_invalid_result_emits_serialization_error(
+    persistent: bool,
+    invalid_identity: bool,
+    error_fragment: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw adapter result defects fail child preparation before parent parsing."""
+
+    invalid_result: Any = (
+        AgentExecutionResult(
+            runtime="", model=None, output_mode="text", outputs=("usable output",)
+        )
+        if invalid_identity
+        else "text"
+    )
+
+    class Session:
+        closed = False
+
+        def execute(self, _work_item: object) -> Any:
+            return invalid_result
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = Session()
+    monkeypatch.setattr(
+        host_module, "execute_agent_target", lambda *_a, **_k: invalid_result
+    )
+    monkeypatch.setattr(
+        host_module, "start_agent_runtime_session", lambda *_a, **_k: session
+    )
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    request_queue = ctx.Queue()
+    spec_data = {"type": "agent", "agent": {"runtime": "llm", "model": TEST_MODEL_ID}}
+    try:
+        if persistent:
+            request_queue.put(make_execute_request("hello"))
+            request_queue.put(make_stop_request())
+            host_module._agent_session_worker_entry(spec_data, request_queue, sender)
+            assert session.closed is True
+        else:
+            host_module._worker_entry(spec_data, "hello", sender)
+
+        assert sender.closed is True
+        frames = [
+            json.loads(receiver.recv_bytes()) for _ in range(3 if persistent else 1)
+        ]
+        assert [frame["type"] for frame in frames] == (
+            ["booted", "ready", "result"] if persistent else ["outcome"]
+        )
+        response = frames[-1]
+        assert response["status"] == "error"
+        assert response["result"] is None
+        assert error_fragment in response["error"]
+        assert len(response["error"]) <= 550
+        assert response["diagnostics"]["phase"] == "result_serialization"
+        with pytest.raises(EOFError):
+            receiver.recv_bytes()
+    finally:
+        sender.close()
+        receiver.close()
+        request_queue.close()
+        request_queue.join_thread()
 
 
 @pytest.mark.timeout(30)
@@ -3537,7 +3788,8 @@ def test_function_host_start_callback_failures_are_logged_without_replacing_outc
         )
 
     assert outcome.status == "ok"
-    assert outcome.value == "payload"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "payload"
     callback_messages = [
         record.message for record in caplog.records if "callback" in record.message
     ]
@@ -3607,7 +3859,8 @@ def test_host_monitor_start_failure_attempts_stop_without_replacing_outcome(
         outcome = runner.run("payload")
 
     assert outcome.status == "ok"
-    assert outcome.value == "payload"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "payload"
     assert calls == ["start", "stop"]
     monitor_messages = [
         record.getMessage()
@@ -3774,7 +4027,8 @@ def test_host_monitor_poll_failures_preserve_cached_metrics_and_outcome(
     assert monitor.ready_observed, "monitored worker did not reach target entry"
     assert monitor.metrics_reads >= 3
     assert outcome.status == "ok"
-    assert outcome.value == "done"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "done"
     assert outcome.metrics is metrics
     assert "check_limits" in calls
     assert calls[-1] == "stop"
@@ -3960,7 +4214,7 @@ def _terminal_outcome_sender(
     outcome: RunnerOutcome,
 ) -> None:
     try:
-        send_terminal_payload(sender, outcome)
+        send_terminal_payload(sender, lambda: make_outcome_payload(outcome))
     finally:
         sender.close()
 
@@ -4091,8 +4345,9 @@ def test_host_windows_broken_pipe_is_channel_seal() -> None:
         receiver.close()
 
 
-def test_host_terminal_wrong_decoded_payload_type_is_transport_failure() -> None:
-    """A decoded non-RunnerOutcome payload cannot become terminal success."""
+@pytest.mark.parametrize("frame", [b"42", b'{"type":', b'{"type":"outcome"}'])
+def test_host_malformed_terminal_frame_is_transport_failure(frame: bytes) -> None:
+    """Invalid JSON, root types and incomplete envelopes fail the response channel."""
 
     class DeadProcess:
         pid = None
@@ -4107,7 +4362,7 @@ def test_host_terminal_wrong_decoded_payload_type_is_transport_failure() -> None
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
     try:
-        send_terminal_payload(sender, 42)
+        sender.send_bytes(frame)
         sender.close()
 
         outcome = _build_function_host_runner(
@@ -4126,10 +4381,6 @@ def test_host_terminal_wrong_decoded_payload_type_is_transport_failure() -> None
         )
         assert outcome.diagnostics is not None
         assert outcome.diagnostics["handoff_event"] == "transport_failed"
-        assert (
-            outcome.diagnostics["message"]
-            == "decoded terminal payload has invalid type int"
-        )
     finally:
         sender.close()
         receiver.close()
@@ -4591,7 +4842,8 @@ def test_real_pipe_exit_then_outcome_uses_production_handoff_driver() -> None:
 
         assert deferred_receiver.poll_calls >= 2
         assert outcome.status == "ok"
-        assert outcome.value == "hello"
+        assert isinstance(outcome.value, PreparedTaskResult)
+        assert project_task_result(outcome.value) == "hello"
     finally:
         receiver.close()
         if process.is_alive():
@@ -4605,7 +4857,7 @@ def _terminal_write_failure_sender(
     status_sender: Connection,
 ) -> None:
     try:
-        send_terminal_payload(sender, {"result": "unreachable"})
+        send_terminal_payload(sender, lambda: {"result": "unreachable"})
     except TerminalHandoffTransportError as exc:
         status_sender.send(str(exc))
     finally:
@@ -4708,15 +4960,63 @@ def test_host_runner_normalizes_nested_frozen_args_before_spawn() -> None:
     outcome = runner.run_with_hooks(None)
 
     assert outcome.status == "ok"
-    assert outcome.value == "[1, 2]"
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "[1, 2]"
 
 
-def test_host_runner_reports_prewrite_result_serialization_failure() -> None:
-    """An unpicklable return value produces one bounded public error outcome."""
+def test_host_runner_accepts_child_local_json_value() -> None:
+    """JSON-compatible results must not require importing the child's class."""
 
     runner = _build_function_host_runner(
         timeout=5.0,
-        function_target="tests.tasks.sample_targets:return_unpicklable",
+        function_target="tests.tasks.sample_targets:return_child_local_mapping",
+    )
+    outcome = runner.run_with_hooks(None)
+    assert outcome.status == "ok", outcome.error
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert outcome.value.kind == "value"
+    assert outcome.value.outputs[0].format == "json"
+    assert outcome.value.outputs[0].text == '{"answer": "child-local"}'
+    assert project_task_result(outcome.value) == {"answer": "child-local"}
+
+
+def test_host_runner_converts_child_local_value_only_in_worker(tmp_path: Path) -> None:
+    """Unpicklable application text is converted exactly once in the child."""
+
+    evidence = tmp_path / "conversion-pids"
+    worker_pids: list[int | None] = []
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target="tests.tasks.sample_targets:return_child_local_text",
+        args=[str(evidence)],
+    )
+
+    outcome = runner.run_with_hooks(None, on_worker_started=worker_pids.append)
+
+    assert outcome.status == "ok", outcome.error
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert project_task_result(outcome.value) == "child-local-text"
+    assert len(worker_pids) == 1
+    assert worker_pids[0] is not None
+    assert worker_pids[0] != os.getpid()
+    assert evidence.read_text(encoding="utf-8") == f"str:{worker_pids[0]}\n"
+
+
+@pytest.mark.parametrize(
+    ("target", "cause"),
+    [
+        ("return_cyclic_result", "Circular reference detected"),
+        ("return_unprintable_result", "UnprintableError"),
+    ],
+)
+def test_host_runner_reports_prewrite_result_serialization_failure(
+    target: str, cause: str
+) -> None:
+    """A failed public conversion has bounded diagnostics even when str(exc) fails."""
+
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target=f"tests.tasks.sample_targets:{target}",
     )
 
     outcome = runner.run_with_hooks(None)
@@ -4729,6 +5029,38 @@ def test_host_runner_reports_prewrite_result_serialization_failure() -> None:
     assert len(outcome.error) <= 550
     assert outcome.diagnostics is not None
     assert outcome.diagnostics["phase"] == "result_serialization"
+    assert cause in outcome.error
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expected_text"),
+    [
+        ([], []),
+        ([{"answer": 42}], ['{"answer": 42}']),
+        (["first", {"answer": 42}, None], ["first", '{"answer": 42}', "null"]),
+    ],
+)
+def test_function_host_preserves_agent_result_cardinality(
+    outputs: list[Any], expected_text: list[str]
+) -> None:
+    """Result type, not task target type, determines agent output cardinality."""
+
+    runner = _build_function_host_runner(
+        timeout=5.0,
+        function_target="tests.tasks.sample_targets:return_agent_execution_result",
+        args=[outputs],
+    )
+
+    outcome = runner.run_with_hooks(None)
+
+    assert outcome.status == "ok", outcome.error
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert outcome.value.kind == "agent"
+    assert [output.text for output in outcome.value.outputs] == expected_text
+    projected = project_task_result(outcome.value)
+    assert isinstance(projected, AgentExecutionResult)
+    assert projected.outputs == tuple(outputs)
+    assert projected.metadata == {"source": "function"}
 
 
 def test_host_runner_large_result_exceeds_pipe_buffer_without_deadlock() -> None:
@@ -4744,8 +5076,8 @@ def test_host_runner_large_result_exceeds_pipe_buffer_without_deadlock() -> None
     outcome = runner.run_with_hooks(None)
 
     assert outcome.status == "ok"
-    assert isinstance(outcome.value, str)
-    assert len(outcome.value) == size
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert outcome.value.outputs[0].text == "x" * size
 
 
 def test_function_timeout_reports_timeout_when_no_result_is_ready(
@@ -4762,6 +5094,63 @@ def test_function_timeout_reports_timeout_when_no_result_is_ready(
     outcome = runner.run_with_hooks(None)
 
     assert outcome.status == "timeout"
+
+
+def test_one_shot_cancel_beats_ready_success_in_same_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted cancel remains authoritative after a ready success is decoded."""
+
+    class Process:
+        pid = None
+        exitcode = 0
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    process = Process()
+    runner = _build_function_host_runner(timeout=5.0)
+    monkeypatch.setattr(
+        runner, "_stop_process", lambda _process: setattr(process, "alive", False)
+    )
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        send_terminal_payload(
+            sender,
+            lambda: make_outcome_payload(
+                RunnerOutcome(
+                    status="ok",
+                    value="ready success",
+                    error=None,
+                    stdout=None,
+                    stderr=None,
+                    returncode=0,
+                    duration=0.0,
+                )
+            ),
+        )
+        sender.close()
+
+        outcome = runner._run_one_shot_terminal_handoff(
+            process,  # type: ignore[arg-type]
+            receiver,
+            worker_pid=None,
+            runtime_handle=None,
+            cancel_requested=lambda: True,
+        )
+
+        assert process.alive is False
+        assert outcome.status == "cancelled"
+        assert outcome.value is None
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_one_shot_stop_effect_cannot_reset_absolute_drain_deadline(
@@ -5186,7 +5575,9 @@ def test_agent_worker_maps_work_item_failure_and_closes_session_and_ipc(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
+        lambda _sender, payload_factory, **_kwargs: record_and_return(
+            responses, payload_factory(), True
+        ),
     )
 
     host_module._agent_session_worker_entry(
@@ -5243,7 +5634,9 @@ def test_agent_worker_maps_post_ready_boundary_failure_to_result_and_closes_reso
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
+        lambda _sender, payload_factory, **_kwargs: record_and_return(
+            responses, payload_factory(), True
+        ),
     )
 
     host_module._agent_session_worker_entry(
@@ -5305,7 +5698,9 @@ def test_agent_worker_propagates_non_exception_work_item_failure_identity_and_cl
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
+        lambda _sender, payload_factory, **_kwargs: record_and_return(
+            responses, payload_factory(), True
+        ),
     )
 
     with pytest.raises(FatalSignal) as caught:
@@ -5349,7 +5744,9 @@ def test_agent_worker_maps_startup_failure_and_closes_ipc(
     monkeypatch.setattr(
         host_module,
         "send_terminal_payload",
-        lambda _sender, payload, **_kwargs: record_and_return(responses, payload, True),
+        lambda _sender, payload_factory, **_kwargs: record_and_return(
+            responses, payload_factory(), True
+        ),
     )
 
     host_module._agent_session_worker_entry(

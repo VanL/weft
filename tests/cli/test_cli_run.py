@@ -788,14 +788,9 @@ def _assert_no_terminal_handoff_details(text: str) -> None:
             "Worker exited before returning a result (exit code 73)",
         ),
         (
-            "tests.tasks.sample_targets:return_unpicklable",
+            "tests.tasks.sample_targets:return_cyclic_result",
             None,
             "Task returned a value that Weft could not serialize: ",
-        ),
-        (
-            "tests.tasks.sample_targets:return_unreadable_pickled_result",
-            None,
-            "Worker result channel failed before a result was received",
         ),
     ),
 )
@@ -840,6 +835,32 @@ def test_cli_run_terminal_handoff_failure_categories(
     else:
         assert err == f"Error executing task: {expected}"
     _assert_no_terminal_handoff_details(err)
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+def test_cli_run_result_conversion_ignores_application_pickle_hooks(
+    workdir: Path,
+    weft_harness: WeftTestHarness,
+    json_output: bool,
+) -> None:
+    """A result with a failing reconstruction hook still publishes its text."""
+    cli_args = [
+        "run",
+        "--function",
+        "tests.tasks.sample_targets:return_unreadable_pickled_result",
+    ]
+    if json_output:
+        cli_args.append("--json")
+    rc, out, err = run_cli(*cli_args, cwd=workdir, harness=weft_harness)
+
+    assert rc == 0, (out, err)
+    assert err == ""
+    if json_output:
+        payload = json.loads(out)
+        assert payload["status"] == "completed"
+        assert payload["result"] == "unreadable-result-as-text"
+    else:
+        assert out == "unreadable-result-as-text"
 
 
 @pytest.mark.parametrize("json_output", (False, True))

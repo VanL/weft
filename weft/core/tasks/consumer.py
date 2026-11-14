@@ -33,10 +33,15 @@ from weft._constants import (
     VALID_RUNNER_OUTCOME_STATUSES,
     WORK_ENVELOPE_START,
 )
-from weft.core.agents.runtime import AgentExecutionResult
 from weft.core.control_messages import parse_control_request
 from weft.core.runner_diagnostics import runner_diagnostics
-from weft.core.targets import decode_work_message, serialize_result
+from weft.core.targets import (
+    PreparedTaskResult,
+    decode_work_message,
+    prepare_task_result,
+    project_task_result,
+    serialize_result,
+)
 from weft.core.taskspec import ReservedPolicy, TaskSpec
 from weft.ext import AgentSessionProtocol, RunnerHandle
 from weft.helpers import resolve_broker_max_message_size
@@ -328,19 +333,27 @@ class Consumer(BaseTask, InteractiveTaskMixin):
     ) -> Any:
         self._register_outcome_runtime(outcome)
         metrics_payload = self._extract_metrics(outcome)
-        agent_execution = self._build_agent_execution_payload(outcome.value)
         self._ensure_outcome_ok(
             outcome,
             timestamp,
             metrics_payload,
             live_command_streaming=live_command_streaming,
         )
+        agent_execution = None
+        committed_value: Any = outcome.stdout or ""
         if live_command_streaming:
             result_bytes = self._serialized_result_bytes(outcome.stdout or "")
         elif self.taskspec.spec.type == "command":
             result_bytes = self._publish_command_output(outcome.stdout or "")
         else:
-            result_bytes = self._emit_result(outcome.value)
+            prepared = prepare_task_result(outcome.value)
+            agent_execution = prepared.agent_execution
+            # Projection must precede durable success, and queue work never
+            # needs to parse public output text. Spec: [MF-2], [CC-3.5].
+            committed_value = (
+                project_task_result(prepared) if self._direct_work_waiting else None
+            )
+            result_bytes = self._emit_result(prepared)
         self._finalize_message(
             timestamp,
             result_bytes,
@@ -348,11 +361,7 @@ class Consumer(BaseTask, InteractiveTaskMixin):
             agent_execution=agent_execution,
             initial_transition=initial_transition,
         )
-        return (
-            (outcome.stdout or "")
-            if self.taskspec.spec.type == "command"
-            else outcome.value
-        )
+        return committed_value
 
     def _register_outcome_runtime(self, outcome: RunnerOutcome) -> None:
         """Publish the outcome's runtime authority before any result is written.
@@ -951,13 +960,9 @@ class Consumer(BaseTask, InteractiveTaskMixin):
         if self._stop_event:
             self._stop_event.set()
 
-    def _emit_result(self, result: Any) -> int:
-        if isinstance(result, AgentExecutionResult):
-            total_bytes = 0
-            for output in result.outputs:
-                total_bytes += self._emit_single_output(output)
-            return total_bytes
-        return self._emit_single_output(result)
+    def _emit_result(self, result: PreparedTaskResult) -> int:
+        """Publish exact prepared text through the existing output owner [MF-2]."""
+        return sum(self._emit_single_output(output.text) for output in result.outputs)
 
     def _prepare_output(
         self, result: Any, *, spill: bool = True
@@ -1044,37 +1049,6 @@ class Consumer(BaseTask, InteractiveTaskMixin):
                 net_connections=metrics.connections,
             )
         return metrics_payload
-
-    @staticmethod
-    def _build_agent_execution_payload(result: Any) -> dict[str, Any] | None:
-        if not isinstance(result, AgentExecutionResult):
-            return None
-        payload = {
-            "runtime": result.runtime,
-            "model": result.model,
-            "output_mode": result.output_mode,
-            "status": result.status,
-            "metadata": result.metadata,
-            "usage": result.usage,
-            "tool_trace": list(result.tool_trace),
-            "artifacts": list(result.artifacts),
-        }
-        try:
-            serialized = json.loads(json.dumps(payload, default=str))
-            if isinstance(serialized, dict):
-                return serialized
-        except (
-            TypeError,
-            ValueError,
-            OverflowError,
-        ):  # pragma: no cover - non-serializable agent payload
-            logger.debug("Failed to serialize agent execution payload", exc_info=True)
-        return {
-            "runtime": result.runtime,
-            "model": result.model,
-            "output_mode": result.output_mode,
-            "status": result.status,
-        }
 
     def _raise_already_terminal(self, exc: BaseException) -> NoReturn:
         """Raise after minimal cleanup when state is already terminal."""

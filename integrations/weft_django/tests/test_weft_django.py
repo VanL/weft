@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from collections.abc import Iterator
@@ -1520,6 +1521,70 @@ def test_default_django_enqueue_and_observation_use_base_dir(
             assert task.task.context is not None
             assert task.task.context.root == harness.context.root
         assert not (tmp_path / ".weft").exists()
+
+
+def test_registered_task_converts_result_without_django_in_parent(
+    tmp_path: Path,
+) -> None:
+    """An isolated Consumer parent never initializes the application registry."""
+    evidence_path = tmp_path / "child-conversion.json"
+    script = textwrap.dedent(
+        """
+        import json
+        import os
+        import sys
+        from django.apps import apps
+        from tests.helpers.weft_harness import WeftTestHarness
+        from weft.core.tasks import Consumer
+        from weft.core.taskspec import TaskSpec
+
+        if __name__ == "__main__":
+            before = apps.ready
+            with WeftTestHarness() as harness:
+                spec = TaskSpec.model_validate({
+                    "tid": "1234567890123456789",
+                    "name": "child-django-conversion",
+                    "spec": {
+                        "type": "function",
+                        "function_target": "weft_django.worker:run_registered_task",
+                        "timeout": 30.0,
+                        "enable_process_title": False,
+                        "weft_context": str(harness.context.root),
+                    },
+                })
+                consumer = Consumer(harness.context.broker_target, spec,
+                                    config=harness.context.config)
+                try:
+                    value = consumer.run_work_item({
+                        "task_name": "testapp.child_only_result",
+                        "call": {"args": [sys.argv[1]]},
+                    })
+                    summary = {"value": value, "status": spec.state.status,
+                               "error": spec.state.error, "parent_pid": os.getpid(),
+                               "ready_before": before, "ready_after": apps.ready}
+                    print(json.dumps(summary))
+                finally:
+                    consumer.cleanup()
+        """
+    )
+    parent = subprocess.run(
+        [sys.executable, "-c", script, str(evidence_path)],
+        env=dict(os.environ),
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert parent.returncode == 0, parent.stderr
+    summary = json.loads(parent.stdout)
+    assert summary["ready_before"] is False
+    assert summary["ready_after"] is False
+    assert summary["status"] == "completed", summary["error"]
+    assert summary["value"] == "EventRecord:child-ready"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["django_ready"] is True
+    assert evidence["pid"] != summary["parent_pid"]
 
 
 def test_bootstrap_and_export_ignore_hostile_runtime_configuration(

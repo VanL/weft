@@ -27,7 +27,7 @@ from weft._constants import (
     WEFT_GLOBAL_LOG_QUEUE,
 )
 from weft.core.agents.provider_cli.registry import get_provider_cli_provider
-from weft.core.agents.runtime import AgentExecutionResult
+from weft.core.targets import project_task_result
 from weft.core.tasks import Consumer
 from weft.core.tasks.runner import TaskRunner
 from weft.core.taskspec import (
@@ -38,6 +38,7 @@ from weft.core.taskspec import (
     StateSection,
     TaskSpec,
 )
+from weft.ext import RunnerOutcome, SessionExecutionResult
 
 _MODEL_PROVIDERS = frozenset({"agy", "claude_code", "codex", "opencode", "qwen"})
 _LIVE_PROVIDER_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -89,27 +90,6 @@ def _drive_live_provider_until_output(task: Consumer, outbox: Queue) -> None:
             f"Live provider task {task.taskspec.state.status}: "
             f"{task.taskspec.state.error or 'no error detail'}"
         )
-
-
-def test_consumer_agent_execution_payload_falls_back_on_circular_metadata() -> None:
-    metadata: dict[str, object] = {}
-    metadata["self"] = metadata
-    result = AgentExecutionResult(
-        runtime="llm",
-        model="test-model",
-        output_mode="text",
-        outputs=("hello",),
-        metadata=metadata,
-    )
-
-    payload = Consumer._build_agent_execution_payload(result)
-
-    assert payload == {
-        "runtime": "llm",
-        "model": "test-model",
-        "output_mode": "text",
-        "status": "completed",
-    }
 
 
 @pytest.fixture
@@ -298,7 +278,7 @@ def test_task_runner_executes_agent_successfully() -> None:
 
     assert outcome.ok
     assert outcome.value is not None
-    assert outcome.value.aggregate_public_output() == "text:hello"
+    assert project_task_result(outcome.value).aggregate_public_output() == "text:hello"
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)
@@ -319,7 +299,7 @@ def test_task_runner_executes_provider_cli_agent_successfully(
 
     assert outcome.ok
     assert outcome.value is not None
-    payload = json.loads(outcome.value.aggregate_public_output())
+    payload = json.loads(project_task_result(outcome.value).aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["cwd"] == str(tmp_path)
     assert payload["env_value"] == "fixture-env"
@@ -358,7 +338,7 @@ def test_task_runner_executes_provider_cli_agent_with_structured_tool_profile(
 
     assert outcome.ok
     assert outcome.value is not None
-    payload = json.loads(outcome.value.aggregate_public_output())
+    payload = json.loads(project_task_result(outcome.value).aggregate_public_output())
     if provider_name == "codex":
         assert payload["options"]["sandbox"] == "read-only"
     elif provider_name == "claude_code":
@@ -401,7 +381,7 @@ def test_task_runner_executes_explicit_bounded_provider_cli_agent_successfully(
 
     assert outcome.ok
     assert outcome.value is not None
-    payload = json.loads(outcome.value.aggregate_public_output())
+    payload = json.loads(project_task_result(outcome.value).aggregate_public_output())
     assert payload["provider"] == provider_name
     assert payload["options"][expected_option] == expected_value
     if provider_name == "agy":
@@ -686,6 +666,149 @@ def test_consumer_agent_messages_output_writes_json_messages(
     result = json.loads(raw_result)
     assert result == {"role": "assistant", "content": "text:hello"}
     assert task.taskspec.state.status == "completed"
+
+
+@pytest.mark.parametrize("mode", ("one_shot", "per_message", "per_task"))
+@pytest.mark.parametrize("circular_metadata", (False, True))
+def test_consumer_agent_converts_unpicklable_results_in_child(
+    broker_env: BrokerEnv,
+    queue_factory: QueueFactory,
+    unique_tid: str,
+    tmp_path: Path,
+    mode: str,
+    circular_metadata: bool,
+) -> None:
+    """Public JSON/usage survive a real spawn without application unpickling."""
+    db_path, make_queue = broker_env
+    task = Consumer(
+        db_path,
+        make_agent_taskspec(
+            unique_tid,
+            persistent=mode != "one_shot",
+            env={"WEFT_HANDOFF_LABEL": "child-context"},
+            working_dir=str(tmp_path),
+            agent_overrides={
+                "model": "weft-test-result-handoff-model",
+                "output_mode": "json",
+                "conversation_scope": "per_task"
+                if mode == "per_task"
+                else "per_message",
+            },
+        ),
+    )
+    inbox = make_queue(f"T{unique_tid}.inbox")
+    outbox = make_queue(f"T{unique_tid}.{QUEUE_OUTBOX_SUFFIX}")
+    reserved = make_queue(f"T{unique_tid}.{QUEUE_RESERVED_SUFFIX}")
+    log_queue = queue_factory(WEFT_GLOBAL_LOG_QUEUE, persistent=False)
+    try:
+        first = "circular-metadata" if circular_metadata else "first"
+        turns = (first,) if mode == "one_shot" else (first, "second")
+        for index, turn in enumerate(turns):
+            inbox.write(turn)
+            _drive_consumer_until(
+                task,
+                lambda: (
+                    outbox.peek_one() is not None
+                    or task.taskspec.state.status in _LIVE_PROVIDER_FAILURE_STATES
+                ),
+            )
+            assert task.taskspec.state.status == (
+                "completed" if mode == "one_shot" else "running"
+            ), task.taskspec.state.error
+            expected_history = f'["{first}"]' if mode == "per_task" and index else "[]"
+            assert outbox.read_one() == (
+                f'{{"task": "{turn}", "history": {expected_history}}}'
+            )
+            assert outbox.peek_one() is None
+            assert reserved.peek_one() is None
+
+        events = [
+            json.loads(message)
+            for message, _ts in (
+                log_queue.peek_many(limit=100, with_timestamps=True) or []
+            )
+        ]
+        completion_event = (
+            "work_completed" if mode == "one_shot" else "work_item_completed"
+        )
+        completed = [
+            event["agent_execution"]
+            for event in events
+            if event.get("tid") == unique_tid and event.get("event") == completion_event
+        ]
+        assert len(completed) == len(turns)
+        worker_pids = []
+        for index, execution in enumerate(completed):
+            if circular_metadata and index == 0:
+                assert execution == {
+                    "runtime": "llm",
+                    "model": "weft-test-result-handoff-model",
+                    "output_mode": "json",
+                    "status": "completed",
+                }
+                continue
+            pid = execution["usage"]["details"]["worker_pid"]
+            assert pid != os.getpid()
+            worker_pids.append(pid)
+            assert execution == {
+                "runtime": "llm",
+                "model": "weft-test-result-handoff-model",
+                "output_mode": "json",
+                "status": "completed",
+                "metadata": {},
+                "usage": {
+                    "input_tokens": 13,
+                    "output_tokens": 5,
+                    "details": {
+                        "worker_pid": pid,
+                        "label": f"{pid}|{tmp_path}|child-context",
+                    },
+                },
+                "tool_trace": [],
+                "artifacts": [],
+            }
+        if mode == "per_task" and not circular_metadata:
+            assert worker_pids[0] == worker_pids[1]
+    finally:
+        task.cleanup()
+
+
+@pytest.mark.parametrize("persistent", (False, True))
+def test_agent_fatal_result_conversion_is_bounded_and_closes_session(
+    tmp_path: Path,
+    persistent: bool,
+) -> None:
+    """Cyclic public output fails once and cannot leave a reusable session."""
+    runner = make_agent_runner(
+        env={"WEFT_HANDOFF_LABEL": "child-context"},
+        working_dir=str(tmp_path),
+        agent_overrides={
+            "model": "weft-test-result-handoff-model",
+            "output_mode": "json",
+            "conversation_scope": "per_task",
+        },
+    )
+    outcome: RunnerOutcome | SessionExecutionResult
+    if persistent:
+        session = runner.start_agent_session()
+        try:
+            outcome = session.execute("fatal-output")
+            with pytest.raises(RuntimeError, match="Agent session is closed"):
+                session.execute("second")
+        finally:
+            session.close()
+    else:
+        outcome = runner.run("fatal-output")
+
+    assert outcome.status == "error"
+    assert outcome.error is not None
+    assert outcome.error.startswith(
+        "Task returned a value that Weft could not serialize:"
+    )
+    assert "Circular reference detected" in outcome.error
+    assert outcome.diagnostics is not None
+    assert outcome.diagnostics["phase"] == "result_serialization"
+    assert outcome.value is None
 
 
 @pytest.mark.parametrize("provider_name", PROVIDER_FIXTURE_NAMES)

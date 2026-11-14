@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from collections.abc import Callable, Iterator, Mapping
-from typing import Any
+from typing import Any, SupportsIndex
 
 import llm
 from llm.models import Model, Prompt, Response, ToolCall
@@ -142,11 +143,63 @@ class SpillPairModel(Model):
             yield "a" * (2 * 1024 * 1024)
 
 
+class _UnpicklablePayload(dict[str, Any]):
+    """A valid public JSON value with no pickle representation."""
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        raise TypeError("agent fixture values must not be pickled")
+
+
+class _ChildUsageLabel:
+    """Usage conversion must run in the model's child runtime context."""
+
+    def __init__(self) -> None:
+        self.pid = os.getpid()
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        raise TypeError("agent fixture metadata must not be pickled")
+
+    def __str__(self) -> str:
+        if os.getpid() != self.pid:
+            raise RuntimeError("usage conversion escaped the child")
+        return f"{self.pid}|{os.getcwd()}|{os.environ['WEFT_HANDOFF_LABEL']}"
+
+
+class ResultHandoffModel(Model):
+    """Real model responses exercise output and optional-metadata conversion."""
+
+    model_id = "weft-test-result-handoff-model"
+
+    def execute(
+        self,
+        prompt: Prompt,
+        stream: bool,
+        response: Response,
+        conversation: Any,
+    ) -> Iterator[str]:
+        del stream
+        history = [prior.prompt.prompt for prior in conversation.responses]
+        details: dict[str, Any] = {
+            "worker_pid": os.getpid(),
+            "label": _ChildUsageLabel(),
+        }
+        if prompt.prompt == "circular-metadata":
+            details["cycle"] = details
+        response.set_usage(input=13, output=5, details=details)
+        payload = _UnpicklablePayload(task=prompt.prompt, history=history)
+        if prompt.prompt == "fatal-output":
+            payload["cycle"] = payload
+        response.response_json = payload
+        # JSON mode takes response_json directly; the text is independently valid.
+        yield "response available"
+
+
 @llm.hookimpl
 def register_models(register: Callable[[Model], None]) -> None:
     """Register deterministic test models through llm's real hook surface."""
     register(DeterministicAgentModel())
     register(SpillPairModel())
+    register(ResultHandoffModel())
 
 
 def register_test_model_plugin() -> None:

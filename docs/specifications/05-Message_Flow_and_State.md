@@ -154,6 +154,17 @@ Current rules:
   that survive a failed application, or a failed success-path
   acknowledgement delete, are left in `T{tid}.reserved` for the explicit
   recovery path below
+- Function result conversion preserves strings as text. For other values it
+  uses Python JSON encoding with its existing defaults, falling back to
+  whole-value string conversion only on TypeError. Failure of that conversion
+  is a work failure. Agent outputs use the same policy independently for each
+  output item. Host children perform this conversion before response handoff;
+  the Consumer publishes the prepared representation without re-encoding its
+  value. This preserves output text, including whitespace, JSON-looking string
+  values, and the current JSON encoder's nonfinite-number representation.
+  JSON output is carried as text inside the strict private JSON frame.
+  Existing encoding, size/spill, stream, and lifecycle ordering rules continue
+  to govern publication. Successful conversion does not require picklability.
 - Captured command stdout is text, preserved without stripping or JSON interpretation. A non-live-streaming successful command publishes exactly one `command_output` envelope, including for empty stdout: `{"type": "command_output", "result": <text or large_output reference>}`. Its exact keys are `type` and `result`; inline `result` is a string and spill references follow [MF-2.1]. The shared decoder marks this as command stdout without inventing a return code or changing ordinary completion eligibility. A command that exits nonzero publishes one existing `failed_output` envelope, including for empty stdout: `{"type": "failed_output", "return_code": N, "error": <string>, "result": <text or large_output reference>}`. Its existing strict shape and nonzero integer return-code validation remain. A failed row is task-owned outcome evidence: it settles failed with its error and return code even before the separate terminal broadcast, and never proves process death. Both variants use the same size/spill preparation and preserve whitespace and newline characters. Measure the actual UTF-8 encoded envelope against the resolved broker maximum before its single write attempt; oversized inline framing forces the existing spill path before writing. No guessed reserve, post-write retry or silent diagnostic truncation is introduced. Failure-path stdout publication errors are logged without replacing the original terminal command failure; success-path publication errors retain existing failure behavior. Malformed reserved transport fails readers and is unavailable evidence to background observation/retirement. Live-streaming commands do not publish a second copy of their stdout. Shared decoding carries `command_stdout` independently of failure metadata through collectors, events, CLI and client adapters. Neither origin nor EOF proves task completion or process death. Pipeline edges reject failed transport before handoff or override; successful transport is moved unchanged and unwrapped by the shared work-message decoder at the downstream inbox boundary. Any top-level object with type `command_output` or `failed_output` is reserved in an outbox. The inbox decoder unwraps only an exactly valid success wrapper through the shared structural validator; malformed or nonmatching inbox objects remain ordinary input data and cannot introduce a new pre-work exception. Existing `failed_output` records remain readable under their current contract. Edge refusal does not wait for a stage-terminal event.
 - a successful work outcome uses only success acknowledgement for its
   input; deferred STOP/KILL completes task termination without applying
@@ -187,6 +198,8 @@ peek/checkpoint example and is not part of ordinary Weft task delivery.
 _Implementation mapping_: `weft/core/tasks/consumer.py`,
 `weft/core/tasks/base.py`, `weft/core/outbox.py::decode_stream_text`,
 `tests/tasks/test_task_execution.py`.
+`weft/core/targets.py` owns shared public-result preparation;
+`weft/core/runners/host.py` prepares host results in the child before handoff.
 `Consumer._prepare_output` and `Consumer._emit_failed_command_output` own shared
 serialization/spilling and failure-envelope publication. Shared interpretation
 belongs to `weft/core/outbox.py::process_outbox_message`; result collectors,
@@ -2292,6 +2305,8 @@ A coordinated upgrade quiesces old producers and runtimes before migration. The 
 _Implementation mapping_: `weft/commands/_spawn_submission.py::LegacyChildMigration`, `weft/commands/_spawn_submission.py::prepare_legacy_child_migration`, `weft/commands/_spawn_submission.py::LegacyChildMigrationManager`, `tests/commands/test_family_migration.py`.
 
 ## Related Plans
+
+- [JSON result handoff](../plans/2026-11-13-json-result-handoff-plan.md) records child-owned result conversion and private JSON response transport ([MF-2]).
 
 - [Extension PEP 561 Typing, Release Gate Parity, and Specification Synchronization Plan](../plans/2026-11-10-extension-typing-and-spec-sync-plan.md) reconciles `jsonl_then_delete` raw-row deletion and non-probing `TaskMonitor` snapshot-presence protection with [OBS.13.3] and [OBS.13.7].
 - [Deep-Dive Reachable Bug Remediation — Core Runtime](../plans/2026-11-10-deep-dive-reachable-bug-remediation-plan.md) includes `weft.state.services` in pre-spawn accepted-submission result/event waits and re-runs Manager recovery when a `queued` request loses `ready` Manager availability ([WT-2a.14], [MF-5]).

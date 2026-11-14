@@ -73,9 +73,9 @@ def leaking_session_producer(
     supervision measures the drain, not interpreter start-up.
     """
 
-    send_terminal_payload(response_sender, make_booted_response())
+    send_terminal_payload(response_sender, make_booted_response)
     _leak_sender_to_grandchild(response_sender, pidfile)
-    send_terminal_payload(response_sender, make_ready_response())
+    send_terminal_payload(response_sender, make_ready_response)
     request_queue.get()
     os._exit(0)
 

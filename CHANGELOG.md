@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Host function and agent workers convert results to public JSON/text output in
+  the child and send private response frames as JSON. Results that cannot be
+  pickled can now succeed when core output conversion succeeds, including
+  Django-backed return values whose conversion needs the initialized child.
+  Public output text, agent output order, and lifecycle guarantees are preserved.
+- Private core runner results may now be prepared records. Direct
+  `Consumer.run_work_item()` callers receive plain JSON values or text, or a
+  Weft-owned `AgentExecutionResult` containing those values; arbitrary application
+  types and object identity are no longer preserved across the host handoff.
+- This private response protocol change requires a coordinated restart: drain
+  running contexts and persistent agent sessions before replacing Weft in place.
+  Old and new workers must not share a live handoff. Existing durable queue
+  payloads need no migration; multiprocessing bootstrap and persistent request
+  queues retain their current serialization.
+
 ## [0.9.125] - 2026-11-12
 
 Released with `weft-django` 0.9.60, `weft-docker` 0.9.100,

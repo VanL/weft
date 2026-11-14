@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -255,10 +254,7 @@ def test_execute_agent_target_returns_internal_execution_result(
         "metadata": {"request_id": "abc-123"},
         "tools": ["echo_payload"],
     }
-    assert (
-        json.loads(json.dumps(result.to_private_payload()))
-        == result.to_private_payload()
-    )
+    assert result.metadata == {"request_id": "abc-123"}
 
 
 def _write_bundle_llm_files(

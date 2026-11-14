@@ -397,6 +397,12 @@ The public outbox boundary is intentionally simple:
 - write JSON objects/arrays for structured output
 - write one outbox message per public output item
 
+Host execution prepares each public output in its child, preserving order
+and zero/one/many output cardinality. The parent publishes exact prepared
+text through Consumer's normal output path. It does not stringify or
+reconstruct application output objects. No private prepared-result tag is
+written to a public queue.
+
 Weft does **not** wrap these in a public `agent_result` envelope.
 
 Example public outbox payloads:
@@ -414,8 +420,10 @@ text:hello
 _Implementation mapping:_ `weft/core/agents/runtime.py` --
 `AgentExecutionResult.aggregate_public_output` produces the caller-facing
 result shape. `weft/core/agents/backends/llm.py` --
-`LLMBackend._extract_outputs` maps output modes to public payloads. Consumer
-writes these directly to the outbox queue.
+`LLMBackend._extract_outputs` maps output modes to public payloads.
+`weft/core/targets.py` prepares public outputs and direct-caller projections;
+`weft/core/runners/host.py` prepares host results in the child. Consumer writes
+the exact prepared text through its normal output path.
 
 ### Work Item Boundaries [AR-4.1]
 
@@ -458,12 +466,29 @@ The adapter may return internal execution metadata such as:
 Those details are internal to Weft's execution machinery unless a future public
 feature explicitly exposes them.
 
+Agent execution metadata is separate from public outputs. Its snapshot
+includes runtime, model, output_mode, status, metadata, usage, tool_trace,
+and artifacts, using JSON conversion with string fallback for unsupported
+values. Required runtime/output_mode/status are nonempty strings and model
+is a string or null, checked in child preparation with a bounded
+result_serialization error on failure. TypeError, ValueError, or OverflowError
+in the optional snapshot reduces it to runtime, model, output_mode, and
+status, without failing usable public output. Host children prepare the snapshot;
+non-host plugin results use the same conversion policy in Consumer, with
+failures following its existing publication-failure path. The bounded
+result_serialization response applies to host children. The wire carries
+snapshot JSON as text, preserving the existing metadata number policy inside
+strict JSON framing.
+
 _Implementation mapping:_ `weft/core/agents/runtime.py` --
 `AgentRuntimeAdapter` (Protocol for one-shot `.execute`),
 `AgentRuntimeSession` (Protocol for persistent `.execute` + `.close`),
 `AgentExecutionResult` (internal result dataclass carrying outputs, usage,
 tool_trace, artifacts), `execute_agent_target` (normalize + resolve tools +
 dispatch), `start_agent_runtime_session` (persistent session factory).
+`weft/core/targets.py` owns shared metadata snapshot preparation and required
+identity validation; `weft/core/runners/host.py` invokes preparation in the child,
+and `weft/core/tasks/consumer.py` applies it to raw non-host plugin results.
 Tool resolution: `weft/core/agents/tools.py` (`resolve_agent_tools`,
 `ResolvedAgentTool`). The resolver rejects duplicate configured tool names
 before applying `allow`/`deny` overrides.
@@ -490,8 +515,14 @@ not become ready before the readiness budget expired. This diagnostic evidence
 may be surfaced through task failure output or task-log metadata, but it is not
 public lifecycle truth.
 
-That parent/subprocess link uses a private JSON protocol. It is allowed to be
-explicit and versioned because it is **not** part of the public queue surface.
+The parent/subprocess link uses versioned private request and response
+envelopes. Response frames are UTF-8 JSON, including booted, ready,
+startup_error, successful result, execution error, and result conversion
+error. Request delivery remains on its existing multiprocessing queue.
+Session result responses carry the same prepared agent outputs and metadata
+as one-shot host agents, not arbitrary Python objects. The current version
+is the sole accepted version; startup, work-item, and session cleanup
+guarantees are unchanged. These envelopes are not public queue protocols.
 
 Public callers do not send or receive:
 
@@ -528,7 +559,10 @@ Versioned via
 `_shutdown_agent_session`), `weft/core/tasks/runner.py`
 (`start_agent_session`). Terminal work-item selection and private framing live
 in `weft/core/terminal_handoff.py` and
-`weft/core/terminal_handoff_transport.py`; the host child endpoint lives in
+`weft/core/terminal_handoff_transport.py`; the latter encodes JSON before its
+single frame-write attempt. `weft/core/targets.py` supplies the shared prepared
+agent result, and `weft/core/runners/agent_session_protocol.py` validates its
+response representation. The host child endpoint lives in
 `weft/core/runners/host.py`.
 
 ## Current Backends [AR-7]
@@ -891,6 +925,8 @@ This slice does not attempt to:
   `extensions/weft_microsandbox/weft_microsandbox/plugin.py`
 
 ## Related Plans
+
+- [JSON result handoff](../plans/2026-11-13-json-result-handoff-plan.md) records child-owned result conversion and private JSON response transport ([AR-4]-[AR-6]).
 
 - [`docs/plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md`](../plans/2026-11-10-agent-pipeline-and-extension-bug-remediation-plan.md)
 - retired: `2026-10-27-runtime-and-test-repair-plan` (source 0ff8cfbf; see `docs/plans/README.md`) describes command-lifecycle ownership, pending-index reclamation, and test-sensitivity repair design.

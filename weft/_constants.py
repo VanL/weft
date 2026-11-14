@@ -2149,7 +2149,7 @@ SUBMIT_OVERRIDE_NAMES: Final[frozenset[str]] = frozenset(
 TASKSPEC_BUNDLE_ROOT_FIELD: Final[str] = "_weft_bundle_root"
 """Transport-only key carrying a resolved TaskSpec bundle root path."""
 
-AGENT_SESSION_PROTOCOL_VERSION: Final[int] = 1
+AGENT_SESSION_PROTOCOL_VERSION: Final[int] = 2
 """Private multiprocessing protocol version for agent-session subprocesses."""
 
 WINDOWS_CMD_SHIM_SUFFIXES: Final[frozenset[str]] = frozenset({".bat", ".cmd"})

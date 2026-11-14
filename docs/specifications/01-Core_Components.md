@@ -35,6 +35,8 @@ See also:
 
 ## Related Plans
 
+- [JSON result handoff](../plans/2026-11-13-json-result-handoff-plan.md) records child-owned result conversion and private JSON response transport ([CC-3.5]).
+
 - [Task broker traffic](../plans/2026-11-08-task-broker-traffic-plan.md) coalesces a Consumer's snapshot edges per owner step and carries live activity on same-step lifecycle rows ([CC-2.2]).
 - [Manager Idle Clock Ignores Service Supervision; Adopted Services Keep Live Proof](../plans/2026-11-09-manager-idle-clock-and-adopted-service-proof-plan.md) has every task launched with a managed service key re-stamp its own service-owner row on its own clock through `BaseTask.next_wait_timeout` ([CC-2], [CC-2.2.1]).
 - retired: `2026-11-02-task-monitor-heartbeat-clock-plan` (source 0ff8cfbf; see `docs/plans/README.md`) removes the TaskMonitor heartbeat registration; its cycle deadline is its only clock ([CC-2.3]). Heartbeat registrations become rows on `weft.state.heartbeats`, each with its own lease; the heartbeat runs as a standing internal service of the canonical Manager and is the only reader and deleter of that queue, and the Manager neither reads nor deletes it ([CC-2.3]).
@@ -1296,9 +1298,9 @@ A terminal classification requires one of: a valid terminal payload; a
 receiver-visible channel seal; an explicit transport failure; or expiration
 of the named internal drain deadline. The drain deadline is a bounded safety
 net for a leaked or failed private channel, not a delay used to guess whether
-a normal result will become visible. A receiver decode/unpickle failure or a
-decoded object of the wrong terminal payload type is `transport_failed`; it is
-never `outcome_received`.
+a normal result will become visible. A receiver JSON decode failure, invalid
+private response shape, or invalid nested prepared result is `transport_failed`;
+it is never `outcome_received`.
 
 The transition and precedence contract is:
 
@@ -1339,6 +1341,43 @@ The built-in host implementation uses a private response transport that can
 provide ordered payload delivery and receiver-visible seal/EOF. This is not a
 public queue or runner-plugin protocol.
 
+Host function, one-shot agent, and persistent agent responses use UTF-8 JSON
+frames over the existing private Connection. The sender emits a standard
+JSON object, rejecting nonfinite outer numbers during encoding. Receivers
+validate response discriminants and required field types and reconstruct only
+Weft-owned outcome/prepared-result records; they never unpickle or import
+application classes to restore a result. Multiprocessing process bootstrap
+and persistent request queues are separate from this response contract.
+
+The child prepares public output text and optional agent execution metadata
+before writing a response and while its task runtime context is active.
+Preparation and complete JSON encoding share one pre-write error guard.
+One-shot workers prepare the frame inside their runtime context and write
+it after successful context exit; context entry/exit failures retain execution
+failure classification and replace any unsent frame before the sole write.
+Preparation or JSON-encoding errors may produce one fixed error response with
+bounded result_serialization diagnostics. After any frame write begins, no fallback
+frame is attempted. On a failed fallback or write, the caller closes the
+channel through its existing cleanup owner; bounded transport-failure rules
+still apply. A persistent session ends after a result conversion failure. Execution
+exceptions retain their execution failure classification.
+
+A host success carries a private prepared result: an ordered sequence of
+tagged text/JSON output strings plus an optional agent execution snapshot.
+Function values have one output, including JSON null; agent results have
+zero or more outputs. The result is not a public envelope. The Consumer
+publishes prepared text through the existing output path without decoding
+and re-encoding it, and alone owns spilling, stream delivery, reservation
+disposition, and lifecycle publication. Non-host plugin values remain
+supported through the same preparation policy at the Consumer boundary.
+
+Direct core runner values may be private prepared records. Private
+Consumer.run_work_item return projection contains plain JSON values or text,
+or a Weft-owned AgentExecutionResult containing those values; arbitrary
+application types and object identity are not preserved. Projection runs
+only for a waiting direct caller and before publication. Queue-driven
+publication does not parse or re-encode prepared output text.
+
 Before spawning that worker, the host adapter recursively copies immutable
 TaskSpec execution containers into ordinary built-in containers. A nested
 immutable list or mapping must not fail during spawn bootstrap before the
@@ -1346,13 +1385,18 @@ worker entrypoint can publish a terminal outcome.
 
 _Implementation mapping_: `weft/core/terminal_handoff.py` owns the pure reducer,
 same-turn selectors, and edge-consumption driver;
-`weft/core/terminal_handoff_transport.py` owns synchronous private framing and
+`weft/core/terminal_handoff_transport.py` owns synchronous private JSON framing and
 sentinel-multiplexed readiness (`wait_terminal_payload`);
+`weft/core/targets.py` owns result preparation and direct-caller projection;
+`weft/core/runners/outcome.py` and
+`weft/core/runners/agent_session_protocol.py` validate private outcome and session
+response envelopes;
 `weft/core/runners/host.py` (`HostTaskRunner._run_one_shot_terminal_handoff`,
 `HostTaskRunner._terminal_handoff_wait_seconds`) and
 `weft/core/runners/sessions.py` (`AgentSession.execute`,
 `AgentSession._terminal_handoff_wait_seconds`) acquire observations, apply
-effects, and own cleanup. (Plan:
+effects, and own cleanup. `weft/core/tasks/consumer.py` owns prepared-output
+publication, spilling, reservation disposition, and lifecycle publication. (Plan:
 `docs/plans/2026-11-06-status-result-and-runtime-remediation-plan.md`)
 
 ## Related Plans

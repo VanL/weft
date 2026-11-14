@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
+import pickle
 import sys
 import time
 from multiprocessing.connection import Connection
@@ -20,10 +22,18 @@ from tests.helpers.leaked_sender import (
     silent_leaking_producer,
     wait_for_pidfile,
 )
+from weft._constants import AGENT_SESSION_PROTOCOL_VERSION
+from weft.core.runners.agent_session_protocol import (
+    parse_result_response,
+    response_type,
+)
 from weft.core.runners.host import HostTaskRunner
+from weft.core.runners.outcome import parse_outcome_payload
+from weft.core.targets import PreparedTaskResult
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
     poll_terminal_payload,
+    prepare_terminal_payload,
     receive_terminal_payload,
     send_terminal_payload,
     wait_terminal_payload,
@@ -37,7 +47,7 @@ def test_terminal_transport_round_trips_one_frame() -> None:
 
     receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
     try:
-        assert send_terminal_payload(sender, {"result": [1, 2]}) is True
+        assert send_terminal_payload(sender, lambda: {"result": [1, 2]}) is True
         sender.close()
         assert receive_terminal_payload(receiver) == {"result": [1, 2]}
         assert poll_terminal_payload(receiver, 1.0)
@@ -55,7 +65,7 @@ def test_terminal_transport_serialization_fallback_is_the_only_frame() -> None:
     try:
         original_sent = send_terminal_payload(
             sender,
-            lambda: None,
+            lambda: {"result": object()},
             serialization_failure_factory=lambda failure: {
                 "error": failure.cause,
             },
@@ -65,7 +75,7 @@ def test_terminal_transport_serialization_fallback_is_the_only_frame() -> None:
         assert original_sent is False
         payload = receive_terminal_payload(receiver)
         assert isinstance(payload, dict)
-        assert "lambda" in payload["error"]
+        assert "not JSON serializable" in payload["error"]
         assert poll_terminal_payload(receiver, 1.0)
         with pytest.raises(EOFError):
             receive_terminal_payload(receiver)
@@ -96,7 +106,7 @@ def test_terminal_transport_write_failure_does_not_retry() -> None:
     with pytest.raises(TerminalHandoffTransportError, match="delivery failed"):
         send_terminal_payload(
             sender,  # type: ignore[arg-type]  # partial connection double injects a write failure
-            {"result": "ok"},
+            lambda: {"result": "ok"},
             serialization_failure_factory=_unexpected_fallback,
         )
 
@@ -109,7 +119,7 @@ def test_terminal_transport_rejects_malformed_frame() -> None:
 
     receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
     try:
-        sender.send_bytes(b"not-a-pickle")
+        sender.send_bytes(b"not-json")
         sender.close()
         with pytest.raises(TerminalHandoffTransportError, match="decode failed"):
             receive_terminal_payload(receiver)
@@ -134,6 +144,179 @@ def test_terminal_transport_normalizes_windows_broken_pipe_to_eof() -> None:
     assert poll_terminal_payload(receiver) is True  # type: ignore[arg-type]
     with pytest.raises(EOFError):
         receive_terminal_payload(receiver)  # type: ignore[arg-type]
+
+
+def test_terminal_transport_uses_independent_json_wire_examples() -> None:
+    """Literal bytes fix interoperability independently of matching codecs."""
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        send_terminal_payload(sender, lambda: {"result": "\u2603\ud800"})
+        assert receiver.recv_bytes() == b'{"result": "\\u2603\\ud800"}'
+        sender.send_bytes(b'{"result": [null, true, 42]}')
+        assert receive_terminal_payload(receiver) == {"result": [None, True, 42]}
+    finally:
+        receiver.close()
+        sender.close()
+
+
+@pytest.mark.parametrize("frame", [b"\xff", b"{", b"[]", b"42", b"null"])
+def test_terminal_transport_rejects_non_object_or_invalid_json(frame: bytes) -> None:
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        sender.send_bytes(frame)
+        with pytest.raises(TerminalHandoffTransportError, match="decode failed"):
+            receive_terminal_payload(receiver)
+    finally:
+        receiver.close()
+        sender.close()
+
+
+def test_terminal_transport_never_executes_pickle_reconstruction(
+    tmp_path: Path,
+) -> None:
+    """Receiving an old pickle cannot run its reconstruction callable."""
+    marker = tmp_path / "unpickled"
+
+    class Reconstruction:
+        def __reduce__(self) -> tuple[Any, tuple[Path]]:
+            return Path.touch, (marker,)
+
+    receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+    try:
+        sender.send_bytes(pickle.dumps(Reconstruction()))
+        with pytest.raises(TerminalHandoffTransportError, match="decode failed"):
+            receive_terminal_payload(receiver)
+        assert not marker.exists()
+    finally:
+        receiver.close()
+        sender.close()
+
+
+def test_terminal_preparation_bounds_an_unprintable_conversion_error() -> None:
+    class UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise ValueError("cannot format")
+
+    calls = 0
+
+    def convert() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise UnprintableError
+
+    frame, original = prepare_terminal_payload(
+        convert, serialization_failure_factory=lambda failure: {"error": failure.cause}
+    )
+    assert calls == 1
+    assert original is False
+    assert json.loads(frame) == {"error": "UnprintableError"}
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_terminal_sender_rejects_nonfinite_outer_numbers(value: float) -> None:
+    with pytest.raises(TerminalHandoffTransportError, match="serialization failed"):
+        prepare_terminal_payload(lambda: {"duration": value})
+
+
+def _literal_outcome() -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(
+        '{"type":"outcome","status":"ok","result":{"kind":"value",'
+        '"outputs":[{"format":"json","text":"{\\"1\\": 1, \\"1\\": 2}"}],'
+        '"agent_execution_json":null},"error":null,"stdout":null,"stderr":null,'
+        '"returncode":0,"duration":0.25,"diagnostics":null}'
+    )
+    return payload
+
+
+def test_outcome_parser_preserves_opaque_output_text() -> None:
+    """The queue path must not lose duplicate keys by parsing inner text."""
+    outcome = parse_outcome_payload(_literal_outcome())
+    assert isinstance(outcome.value, PreparedTaskResult)
+    assert outcome.value.outputs[0].text == '{"1": 1, "1": 2}'
+    assert outcome.duration == 0.25
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", "result"),
+        ("extra", None),
+        ("status", "completed"),
+        ("error", "contradictory"),
+        ("result", None),
+        ("stdout", []),
+        ("stderr", 0),
+        ("returncode", True),
+        ("duration", True),
+        ("duration", -1),
+        ("duration", float("nan")),
+        ("duration", float("inf")),
+        ("duration", "1"),
+        ("diagnostics", []),
+    ],
+)
+def test_outcome_parser_rejects_malformed_fields(field: str, value: Any) -> None:
+    payload = _literal_outcome()
+    payload[field] = value
+    with pytest.raises((TypeError, ValueError)):
+        parse_outcome_payload(payload)
+
+
+def test_outcome_parser_rejects_missing_field_and_error_with_result() -> None:
+    payload = _literal_outcome()
+    del payload["duration"]
+    with pytest.raises(ValueError):
+        parse_outcome_payload(payload)
+    payload = _literal_outcome()
+    payload.update(status="error", error="failed")
+    with pytest.raises(ValueError):
+        parse_outcome_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": True, "type": "ready"},
+        {"version": 1, "type": "ready"},
+        {"version": AGENT_SESSION_PROTOCOL_VERSION, "type": "ready", "extra": 1},
+        {
+            "version": AGENT_SESSION_PROTOCOL_VERSION,
+            "type": "startup_error",
+            "error": "",
+        },
+        {
+            "version": AGENT_SESSION_PROTOCOL_VERSION,
+            "type": "result",
+            "status": "ok",
+            "result": None,
+            "error": None,
+        },
+        {
+            "version": AGENT_SESSION_PROTOCOL_VERSION,
+            "type": "result",
+            "status": "error",
+            "result": None,
+            "error": None,
+        },
+    ],
+)
+def test_session_protocol_rejects_invalid_response_fields(
+    payload: dict[str, Any],
+) -> None:
+    assert response_type(payload) is None
+    assert parse_result_response(payload) is None
+
+
+def test_session_protocol_requires_agent_result() -> None:
+    payload = {
+        "version": AGENT_SESSION_PROTOCOL_VERSION,
+        "type": "result",
+        "status": "ok",
+        "error": None,
+        "result": _literal_outcome()["result"],
+    }
+    with pytest.raises(ValueError, match="prepared agent"):
+        parse_result_response(payload)
 
 
 def test_wait_terminal_payload_returns_on_producer_sentinel(tmp_path: Path) -> None:

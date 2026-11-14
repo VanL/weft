@@ -33,6 +33,7 @@ from weft.core.runtime_identity import (
     install_runtime_identity,
     runtime_identity_for_task,
 )
+from weft.core.targets import PreparedTaskResult, project_task_result
 from weft.core.task_state import task_state_queue_name
 from weft.core.tasks import Consumer
 
@@ -195,8 +196,8 @@ def test_agent_workers_receive_runtime_identity(
         outcome = runner.run("identity")
         assert outcome.status == "ok", outcome.error
         value = outcome.value
-    assert value is not None
-    assert json.loads(value.aggregate_public_output()) == {
+    assert isinstance(value, PreparedTaskResult)
+    assert json.loads(project_task_result(value).aggregate_public_output()) == {
         "tid": tid,
         "context": identity.context,
         "root_tid": tid,

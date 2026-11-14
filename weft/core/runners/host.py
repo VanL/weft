@@ -22,7 +22,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from functools import lru_cache
+from functools import lru_cache, partial
 from io import TextIOWrapper
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -54,7 +54,11 @@ from weft.core.runners.agent_session_protocol import (
     make_startup_error_response,
     parse_request_type,
 )
-from weft.core.runners.outcome import RunnerOutcome
+from weft.core.runners.outcome import (
+    RunnerOutcome,
+    make_outcome_payload,
+    parse_outcome_payload,
+)
 from weft.core.runners.sessions import AgentSession, CommandSession
 from weft.core.runners.subprocess_runner import (
     cleanup_after_execution_failure,
@@ -80,7 +84,9 @@ from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
     TerminalPayloadSerializationFailure,
     poll_terminal_payload,
+    prepare_terminal_payload,
     receive_terminal_payload,
+    send_prepared_terminal_payload,
     send_terminal_payload,
     wait_terminal_payload,
 )
@@ -144,6 +150,32 @@ def _current_container_runtime() -> ContainerRuntimeDetection | None:
     return detect_container_runtime()
 
 
+def _execute_worker_target(spec_data: Mapping[str, Any], work_item: Any) -> Any:
+    """Dispatch bounded work under the caller-owned runtime context [CC-3.5]."""
+    if spec_data["type"] == "function":
+        return execute_function_target(
+            spec_data["function_target"],
+            work_item,
+            args=spec_data.get("args"),
+            kwargs=spec_data.get("kwargs"),
+            bundle_root=cast(str | None, spec_data.get("bundle_root")),
+        )
+    elif spec_data["type"] == "agent":
+        agent = AgentSection.model_validate(spec_data["agent"])
+        register_builtin_agent_runtimes()
+        return execute_agent_target(
+            agent,
+            work_item,
+            tid=spec_data.get("tid"),
+            bundle_root=cast(str | None, spec_data.get("bundle_root")),
+        )
+    else:
+        # Commands use the monitored subprocess runner [RM-5].
+        raise ValueError(
+            f"Host worker cannot execute target type {spec_data.get('type')!r}"
+        )
+
+
 def _worker_entry(
     spec_data: Mapping[str, Any],
     work_item: Any,
@@ -159,100 +191,86 @@ def _worker_entry(
     Spec: [RM-5] (command tasks run through the subprocess runner).
     """
     start = time.monotonic()
-    status = "ok"
-    value = None
-    error = None
-    stdout = None
-    stderr = None
-    returncode: int | None = 0
-    diagnostics: dict[str, Any] | None
 
-    try:
-        _install_worker_runtime_identity(runtime_identity)
-        with _worker_runtime_context(spec_data):
-            if spec_data["type"] == "function":
-                value = execute_function_target(
-                    spec_data["function_target"],
-                    work_item,
-                    args=spec_data.get("args"),
-                    kwargs=spec_data.get("kwargs"),
-                    bundle_root=cast(str | None, spec_data.get("bundle_root")),
-                )
-            elif spec_data["type"] == "agent":
-                agent = AgentSection.model_validate(spec_data["agent"])
-                register_builtin_agent_runtimes()
-                value = execute_agent_target(
-                    agent,
-                    work_item,
-                    tid=spec_data.get("tid"),
-                    bundle_root=cast(str | None, spec_data.get("bundle_root")),
-                )
-            else:
-                # Command tasks never reach the spawned worker: run_with_hooks
-                # routes type == "command" to _run_command_with_hooks, which owns
-                # streaming, timeout enforcement, and process-tree teardown
-                # [RM-5]. Anything else is a target type TaskSpec forbids
-                # [TS-1]. Fail loudly instead of starting an unmonitored
-                # subprocess.
-                raise ValueError(
-                    f"Host worker cannot execute target type {spec_data.get('type')!r}"
-                )
-    except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-342] exception
+    def execution_failure(exc: Exception) -> RunnerOutcome:
         traceback_text = traceback.format_exc()
-        status = "error"
-        error = traceback_text
-        returncode = None
-        diagnostics = runner_diagnostics(
-            phase="execute",
-            runner="host",
-            target_type=str(spec_data.get("type") or "unknown"),
-            message=str(exc),
-            exception_type=type(exc).__name__,
-            traceback_text=traceback_text,
-        )
-    else:
-        diagnostics = None
-
-    end = time.monotonic()
-    outcome = RunnerOutcome(
-        status=status,
-        value=value,
-        error=error,
-        stdout=stdout,
-        stderr=stderr,
-        returncode=returncode,
-        duration=end - start,
-        diagnostics=diagnostics,
-    )
-
-    def _serialization_failure(
-        failure: TerminalPayloadSerializationFailure,
-    ) -> RunnerOutcome:
-        message = (
-            f"Task returned a value that Weft could not serialize: {failure.cause}"
-        )
         return RunnerOutcome(
             status="error",
             value=None,
-            error=message,
-            stdout=stdout,
-            stderr=stderr,
+            error=traceback_text,
+            stdout=None,
+            stderr=None,
             returncode=None,
-            duration=end - start,
+            duration=time.monotonic() - start,
             diagnostics=runner_diagnostics(
-                phase="result_serialization",
+                phase="execute",
                 runner="host",
                 target_type=str(spec_data.get("type") or "unknown"),
-                message=message,
+                message=str(exc),
+                exception_type=type(exc).__name__,
+                traceback_text=traceback_text,
             ),
         )
 
-    try:
-        send_terminal_payload(
-            result_sender,
-            outcome,
-            serialization_failure_factory=_serialization_failure,
+    def prepare_frame(outcome: RunnerOutcome) -> bytes:
+        def serialization_failure(
+            failure: TerminalPayloadSerializationFailure,
+        ) -> dict[str, Any]:
+            message = (
+                f"Task returned a value that Weft could not serialize: {failure.cause}"
+            )
+            return make_outcome_payload(
+                RunnerOutcome(
+                    status="error",
+                    value=None,
+                    error=message,
+                    stdout=outcome.stdout,
+                    stderr=outcome.stderr,
+                    returncode=None,
+                    duration=outcome.duration,
+                    diagnostics=runner_diagnostics(
+                        phase="result_serialization",
+                        runner="host",
+                        target_type=str(spec_data.get("type") or "unknown"),
+                        message=message,
+                    ),
+                )
+            )
+
+        frame, _original = prepare_terminal_payload(
+            lambda: make_outcome_payload(outcome),
+            serialization_failure_factory=serialization_failure,
         )
+        return frame
+
+    try:
+        try:
+            _install_worker_runtime_identity(runtime_identity)
+            with _worker_runtime_context(spec_data):
+                try:
+                    value = _execute_worker_target(spec_data, work_item)
+                except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-342] exception
+                    outcome = execution_failure(exc)
+                else:
+                    outcome = RunnerOutcome(
+                        status="ok",
+                        value=value,
+                        error=None,
+                        stdout=None,
+                        stderr=None,
+                        returncode=0,
+                        duration=time.monotonic() - start,
+                    )
+                # Conversion must see the task's env/cwd, while duration stays
+                # execution-only. Nothing is written before context restoration.
+                frame = prepare_frame(outcome)
+        except TerminalHandoffTransportError:
+            raise
+        except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-342] exception
+            # An entry/exit failure replaces any prepared but unsent success.
+            frame = prepare_frame(execution_failure(exc))
+        # A write failure must never enter an execution-error handler and retry.
+        send_prepared_terminal_payload(result_sender, frame)
     finally:
         result_sender.close()
 
@@ -304,7 +322,7 @@ def _agent_session_worker_entry(
     ready_sent = False
     try:
         _install_worker_runtime_identity(runtime_identity)
-        send_terminal_payload(response_sender, make_booted_response())
+        send_terminal_payload(response_sender, make_booted_response)
         with _worker_runtime_context(spec_data):
             agent = AgentSection.model_validate(spec_data["agent"])
             register_builtin_agent_runtimes()
@@ -313,7 +331,7 @@ def _agent_session_worker_entry(
                 tid=spec_data.get("tid"),
                 bundle_root=cast(str | None, spec_data.get("bundle_root")),
             )
-            send_terminal_payload(response_sender, make_ready_response())
+            send_terminal_payload(response_sender, make_ready_response)
             ready_sent = True
 
             while True:
@@ -332,31 +350,38 @@ def _agent_session_worker_entry(
                     result = session.execute(normalized)
                 except Exception as exc:  # noqa: BLE001 approved [TS-3.1] [RUFF-SUP-356] exception
                     traceback_text = traceback.format_exc()
+                    response = make_result_response(
+                        status="error",
+                        error=traceback_text,
+                        diagnostics=runner_diagnostics(
+                            phase="execute",
+                            runner="host",
+                            target_type="agent",
+                            message=str(exc),
+                            exception_type=type(exc).__name__,
+                            traceback_text=traceback_text,
+                        ),
+                    )
                     send_terminal_payload(
                         response_sender,
-                        make_result_response(
-                            status="error",
-                            error=traceback_text,
-                            diagnostics=runner_diagnostics(
-                                phase="execute",
-                                runner="host",
-                                target_type="agent",
-                                message=str(exc),
-                                exception_type=type(exc).__name__,
-                                traceback_text=traceback_text,
-                            ),
-                        ),
+                        partial(dict, response),
                     )
                     break
 
                 original_sent = send_terminal_payload(
                     response_sender,
-                    make_result_response(status="ok", result=result),
+                    partial(make_result_response, status="ok", result=result),
                     serialization_failure_factory=lambda failure: make_result_response(
                         status="error",
                         error=(
                             "Task returned a value that Weft could not "
                             f"serialize: {failure.cause}"
+                        ),
+                        diagnostics=runner_diagnostics(
+                            phase="result_serialization",
+                            runner="host",
+                            target_type="agent",
+                            message=failure.cause,
                         ),
                     ),
                 )
@@ -389,7 +414,7 @@ def _agent_session_worker_entry(
             )
             send_terminal_payload(
                 response_sender,
-                response,
+                lambda: response,
             )
     finally:
         if session is not None:
@@ -648,18 +673,17 @@ class HostTaskRunner:
                                 detail=str(exc),
                             )
                         else:
-                            if isinstance(payload, RunnerOutcome):
-                                observations["outcome_received"] = TerminalHandoffEvent(
-                                    kind="outcome_received",
-                                    outcome=payload,
-                                )
-                            else:
+                            try:
+                                parsed_outcome = parse_outcome_payload(payload)
+                            except (TypeError, ValueError) as exc:
                                 observations["transport_failed"] = TerminalHandoffEvent(
                                     kind="transport_failed",
-                                    detail=(
-                                        "decoded terminal payload has invalid type "
-                                        f"{type(payload).__name__}"
-                                    ),
+                                    detail=str(exc),
+                                )
+                            else:
+                                observations["outcome_received"] = TerminalHandoffEvent(
+                                    kind="outcome_received",
+                                    outcome=parsed_outcome,
                                 )
 
                 elapsed = now - start_time

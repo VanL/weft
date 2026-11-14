@@ -20,7 +20,9 @@ from tests.taskspec import fixtures
 from weft._constants import WEFT_GLOBAL_LOG_QUEUE
 from weft.commands.result import await_task_result
 from weft.core.runners import host as host_module
+from weft.core.targets import PreparedTaskResult
 from weft.core.tasks import Consumer
+from weft.core.tasks import consumer as consumer_module
 from weft.core.tasks.base import TaskReactorLifecycle
 from weft.core.tasks.runner import RunnerOutcome
 from weft.core.taskspec import (
@@ -47,6 +49,76 @@ def _terminal_events(db_path: BrokerTarget, tid: str) -> list[str]:
         return events
     finally:
         queue.close()
+
+
+def test_consumer_projects_only_for_direct_callers(
+    broker_env: BrokerEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queue publication must not parse prepared output text [MF-2]."""
+    db_path, make_queue = broker_env
+    original_projection = consumer_module.project_task_result
+    allow_projection = True
+    projected: list[Any] = []
+
+    def require_direct_caller(result: PreparedTaskResult) -> Any:
+        if not allow_projection:
+            raise AssertionError("queue publication invoked direct-call projection")
+        value = original_projection(result)
+        projected.append(value)
+        return value
+
+    monkeypatch.setattr(consumer_module, "project_task_result", require_direct_caller)
+    # The first real Consumer proves this observer is wired to projection. The
+    # second must publish and finish with that same hook forbidden.
+    for direct in (True, False):
+        allow_projection = direct
+        tid = str(time.time_ns())
+        spec = TaskSpec(
+            tid=tid,
+            name="prepared-projection",
+            spec=SpecSection(
+                type="function",
+                function_target="builtins:tuple",
+                args=[[1, 2]],
+                cleanup_on_exit=False,
+            ),
+            io=IOSection(
+                inputs={"inbox": f"T{tid}.inbox"},
+                outputs={"outbox": f"T{tid}.outbox"},
+                control={"ctrl_in": f"T{tid}.ctrl_in", "ctrl_out": f"T{tid}.ctrl_out"},
+            ),
+            state=StateSection(),
+        )
+        task = Consumer(db_path, spec)
+        try:
+            if direct:
+                value = task.run_work_item({})
+                assert value == [1, 2]
+                assert type(value) is list
+                assert projected == [[1, 2]]
+            else:
+                with make_queue(spec.io.inputs["inbox"]) as inbox:
+                    inbox.write("{}")
+
+                def read_status(task: Consumer = task) -> str:
+                    return task.taskspec.state.status
+
+                with task.drive_scope():
+                    drive_until(
+                        read_status,
+                        lambda status: status in ("completed", "failed"),
+                        step=task.process_once,
+                        wait=task.wait_for_activity,
+                        timeout=10.0,
+                    )
+            assert task.taskspec.state.status == "completed"
+            with make_queue(spec.io.outputs["outbox"]) as outbox:
+                assert list(outbox.peek_generator()) == ["[1, 2]"]
+            with make_queue(f"T{tid}.reserved") as reserved:
+                assert not reserved.has_pending()
+        finally:
+            task.cleanup()
 
 
 @pytest.mark.parametrize(
