@@ -77,6 +77,8 @@ from weft.core.terminal_handoff import (
 )
 from weft.core.terminal_handoff_transport import (
     TerminalHandoffTransportError,
+    poll_terminal_payload,
+    receive_terminal_payload,
     send_terminal_payload,
 )
 from weft.ext import RunnerCapabilities, RunnerHandle
@@ -3654,9 +3656,9 @@ def test_function_worker_failed_fallback_closes_pipe_without_frame(
 
         assert fallback_attempts == ["encode"]
         assert sender.closed is True
-        assert receiver.poll(1.0)
+        assert poll_terminal_payload(receiver, 1.0)
         with pytest.raises(EOFError):
-            receiver.recv_bytes()
+            receive_terminal_payload(receiver)
     finally:
         sender.close()
         receiver.close()
